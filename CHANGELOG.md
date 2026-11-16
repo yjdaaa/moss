@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 补齐仓库静态规范检查、Git 提交钩子与统一验证脚本（2026-11-16）
+
+- **现象**：部分实现约束（如禁用原生 `window.confirm`/`alert`、`.ps1` 纯 ASCII、`[lints] workspace = true`、`test-memory-secret-store` 仅限 dev、禁止整文件 `#![allow(clippy::...)]`、提示词字数预算与提交信息格式）仅写在文档里靠人工记忆核对，且根工作区、`apps/moss-voice-local` 与前端缺乏统一的改动感知验证入口。
+- **根因与修复**：`frontend/eslint.config.js` 对 `src/`（排除 `appDialog.js`）增加 `no-restricted-globals` 与 `no-restricted-properties`，禁止直接调用 `confirm`/`alert`；`scripts/check-crate-layers.mjs` 在解析 `Cargo.toml` 时追加校验 `[lints] workspace = true` 与 `test-memory-secret-store` 仅限 `[dev-dependencies]`（含单双引号及 `[features]` 段检查）；新增 `scripts/check-repo-hygiene.mjs` 检查 `.ps1` 纯 ASCII、Rust 整文件 `#![allow(clippy::...)]`（含 `build.rs`/跨行/多 lint）、`.env`/`.runtime`/私钥跟踪策略、本机真实路径（含 Windows 转义路径）与高置信度凭据串、`docs/integration/xiaozhi-prompts/latest.md` 字符预算（2000/200）及 `<类型>: <中文结论>` 提交标题，并在 `--staged` 模式直接读取 Git 暂存区 blob；新增 `scripts/verify.mjs` 统一按改动路径调度分层/规范检查、仅针对改动 `.rs` 的 `rustfmt`、clippy/test、`apps/moss-voice-local`、前端 lint/test/build 与并发构建进程检测（支持 `--quick`/`--full`/`--e2e`/`--fmt-write`/`--install-hooks`/`--dry-run`/`--force`，Windows `.cmd` 自动经 `cmd.exe` 执行）；新增受管 `.githooks/{pre-commit,commit-msg}` 并在本机启用 `core.hooksPath = .githooks`；精简 `AGENTS.md`、`REVIEW.md` 与 `docs/developer/{standards,safety}.md` 并同步各处 `safety.md` 章节引用；顺带同步 `scripts/tests/speaker-calibration.test.mjs` 对当前 `PROTOCOL_VERSION = 7` 的断言。未改变运行时逻辑、接口契约与安全门禁。
+- **验证**：`node scripts/verify.mjs --quick` 通过（含 `check-crate-layers.mjs`、`check-repo-hygiene.mjs`、`scripts/tests/*.test.mjs` 全部 31 项、`frontend` ESLint 0 error）；模拟 CI 从 `frontend/` 目录运行 `npm run lint && npm test && node --test ../scripts/tests/*.test.mjs`（前端 300 项、脚本 31 项全过）；ESLint 原生 `window.confirm` 拦截实测、`--staged` 读取 Git 索引实测与 `commit-msg` 钩子正反实测通过；未重编桌面正式程序（未改动 Rust 与前端运行时源码）。
+- **关联**：`frontend/eslint.config.js`、`scripts/check-crate-layers.mjs`、`scripts/check-repo-hygiene.mjs`、`scripts/verify.mjs`、`scripts/tests/{crate-layers,repo-hygiene,verify,speaker-calibration}.test.mjs`、`.githooks/{pre-commit,commit-msg}`、`AGENTS.md`、`REVIEW.md`、`docs/developer/{standards,safety,api-contracts,db-schema}.md`、`docs/integration/{agent-sandbox-docker-security,moss-native-voice-implementation}.md`。
+
 ### 图片转换方式对齐 LightBurn Image Mode：新增 Jarvis / Stucki / 有序抖动、网点、素描、灰度变功率、反相、点宽补偿与直通（2026-11-16）
 
 - **现象**：图片只有自动 / Floyd–Steinberg 抖动 / 阈值三种处理，没有 LightBurn 对照片推荐的 Jarvis，也没有网点、素描、二极管常用的灰度变功率；石板、玻璃这类刻痕发白的材料无法反相；光斑比像素宽时每段线都偏长，没有点宽补偿；已在别的软件处理好的图片也会被重采样一次。

@@ -29,12 +29,13 @@
 | `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端；`prototypes/` 已定稿的静态设计原型（演示数据，不参与构建） |
 | `tests/golden/` | 黄金样本；`mcp_tools.json` 被 `laser-mcp` 编译期嵌入 |
 | `tests/fixtures/` | 字体（编译期嵌入）与示例图片 |
-| `scripts/` | 根目录放日常入口：启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版、crate 分层检查；另有图标与架构图生成、合成音频夹具生成、上游 xiaozhi-server 配置离线核验等少量开发工具 |
+| `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成、上游 xiaozhi-server 配置离线核验等开发工具 |
 | `scripts/voice-helper/` | 带语音 helper 的专用安装包构建、包内容核查、原生依赖许可审计与源码收集（NV18） |
 | `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
 | `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |
 | `scripts/voice-bench/` | 整条语音链路实测的说话片段生成与结果汇总（配合 `moss-voice-server` 的 `real_local_chain_matrix`） |
-| `scripts/tests/` | 脚本自身的单测，CI 以 `node --test scripts/tests/*.test.mjs` 运行 |
+| `scripts/tests/` | 脚本单测，CI 以 `node --test scripts/tests/*.test.mjs` 运行 |
+| `.githooks/` | 受管本地 Git 钩子（`pre-commit`、`commit-msg`），通过 `node scripts/verify.mjs --install-hooks` 启用 |
 
 分层与依赖方向见 [架构总览](architecture.md) §2，由 `scripts/check-crate-layers.mjs` 把关；新增 crate 先在该脚本的 `LAYERS` 登记层级。脚本与文档按用途命名，任务代号（NVxx）只写在正文里。只有多个 crate 确实复用时才下沉到 `laser-core` 或 `laser-contracts`。
 
@@ -49,13 +50,13 @@
 - 数据库迁移加在 `RuntimeDb::migrate`，事务内执行、可重跑，使用实际下一可用版本号。
 - 新增 Tauri 命令：在 `apps/desktop/src-tauri/build.rs` 的 `AppManifest::commands` 登记，并加入对应 capability（通用命令在 `default.json`，主窗口专属特权命令在 `voice-*.json` 并固定精确后端来源）；敏感语音命令同步 `frontend/tests/voicePrivacyAcl.test.mjs`。漏登记会在运行时被 ACL 拒绝，曾导致启动失败和黑屏。
 - 会创建窗口的 Tauri 命令必须写成 `async fn`：Windows 上在同步命令里建窗口会让主线程死锁（新窗口白屏、程序无响应），`moss-desktop` 的 `window_creating_commands_are_async` 会检查。
-- 前端确认一律 `await showConfirm(...)`（`appDialog.js`），不要直接用 `window.confirm` / `window.alert`：桌面端 Tauri 对话框插件把它们换成了返回 Promise 的异步函数，直接当布尔值会在用户回答前就判成“确认”。新页面入口要挂 `<AppDialogHost />`。
-- PowerShell 脚本保持纯 ASCII：Windows PowerShell 5.1 按系统代码页读取无 BOM 文件，中文会导致解析失败。
+- 前端确认一律 `await showConfirm(...)`（`appDialog.js`），新页面入口挂 `<AppDialogHost />`；直接调用 `confirm`/`alert`、`window.confirm`/`alert` 会被 `frontend/eslint.config.js` 拦截（桌面端原生确认框返回 Promise，直接判布尔值会跳过确认）。
+- `.ps1` 纯 ASCII（兼容 PowerShell 5.1）、禁整文件 `#![allow(clippy::...)]`、敏感路径与提示词字数上限由 `scripts/check-repo-hygiene.mjs` 检查；`[lints] workspace = true` 与 `test-memory-secret-store` 仅限 `[dev-dependencies]` 由 `scripts/check-crate-layers.mjs` 检查。
 - 桌面热重载（`scripts/dev-desktop.ps1`）：仅 debug 构建读取 `MOSS_DEV_UI_ORIGIN`（固定白名单 `http://127.0.0.1:5177` / `5173`）让主窗口连接 Vite 热更新；release 构建恒忽略该变量。
 - 平台差异显式分支，不支持时返回明确原因。
 - 工具名、HTTP 路由、错误码、响应字段和用户可见文案都是契约：改动前更新 [Web API 契约](api-contracts.md) 与测试断言。
 - Web 服务默认只绑回环；非回环依赖配对鉴权。
-- 格式与静态检查（2026-11-07 用户同意加门禁）：Rust 用 `rustfmt` 默认规则（仓库不放 `rustfmt.toml`），提交前 `cargo fmt --all`；`cargo clippy --workspace --all-targets -- -D warnings` 必须零警告。只有复杂类型、枚举体积几项结构提示在根 `Cargo.toml` `[workspace.lints.clippy]` 放行，参数个数上限 10 写在 `clippy.toml`；新增 crate 要在自己的 `Cargo.toml` 写 `[lints] workspace = true`。确需例外时用带 `reason` 的 `#[expect(...)]`，不要整文件 `allow`。前端 `npm run lint`（`frontend/eslint.config.js`）零 error：Hooks 只能在组件顶层调用；需要“关闭即重置”的弹窗写成外层判断 `visible`、内层组件放 Hooks，不要在 Hooks 前 `return null`。`react-hooks/exhaustive-deps` 暂为 warning，逐步清理。
+- 格式与静态检查（2026-11-07 加门禁）：Rust 用 `rustfmt` 默认规则（无 `rustfmt.toml`），`cargo clippy --workspace --all-targets -- -D warnings` 零警告（结构提示放行项见根 `Cargo.toml`，参数上限 10 见 `clippy.toml`，局部例外用带 `reason` 的 `#[expect(...)]`）。前端 `npm run lint` 零 error：Hooks 只能在组件顶层调用，“关闭即重置”的弹窗写外层判断 `visible`、内层组件放 Hooks；`react-hooks/exhaustive-deps` 暂为 warning，逐步清理。
 - 纯格式化的大提交记入 `.git-blame-ignore-revs`，本机执行一次 `git config blame.ignoreRevsFile .git-blame-ignore-revs`。
 - 测试里按源码文本断言时，正则要容忍 rustfmt 可能加的空白（如 `,\s*`），不要依赖紧凑写法。
 
@@ -71,7 +72,5 @@
 - [ ] 改动符合目录职责，没有跨层直连设备或数据库。
 - [ ] 工具增删已同步 `ToolCatalog`、分发分支、`tool_risk`、`mcp_tools.json` 与 `jev.rs` 粗筛归组（不按单工具平铺 `noul`）。
 - [ ] 外部效果使用 mock / `FakeGrbl`，未连接真实设备。
-- [ ] 测试不读写系统凭据库：会经过 `laser-runtime` 家居令牌封存的 crate，须在 `[dev-dependencies]` 里给 `laser-runtime` 开 `test-memory-secret-store`（macOS 上改用进程内主密钥，不碰登录钥匙串；该 feature 不得出现在正式依赖中，2026-11-05）。
-- [ ] 未提交 `.env`、运行目录、构建产物或个人配置。
-- [ ] `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cd frontend; npm run lint` 通过。
-- [ ] 已按 `AGENTS.md` 运行验证，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。
+- [ ] 会经过 `laser-runtime` 家居令牌封存的测试只在 `[dev-dependencies]` 开启 `test-memory-secret-store`（macOS 上改用进程内主密钥，不碰登录钥匙串）。
+- [ ] `node scripts/verify.mjs`（涵盖分层、规范、格式化、clippy、eslint 与受影响测试）及必要桌面快更/E2E 已通过，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。

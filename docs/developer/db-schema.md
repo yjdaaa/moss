@@ -288,7 +288,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | started_at / finished_at | REAL / REAL NULL | Unix 秒 |
 | error_code | TEXT NULL | 短错误码 |
 
-插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。自 2026-10-15 起真实 CLI 执行器在严格模式且用户开启后可用（见 [安全入口](safety.md) §4.18）；2026-10-25 起支持 Windows 与 macOS / Linux，其他平台仍拒绝运行（`agent_sandbox_unavailable`）。
+插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。自 2026-10-15 起真实 CLI 执行器在严格模式且用户开启后可用（见 [安全入口](safety.md) §4.2）；2026-10-25 起支持 Windows 与 macOS / Linux，其他平台仍拒绝运行（`agent_sandbox_unavailable`）。
 
 ### 3.16 `context_memories` / `context_extraction_runs`（schema v10，NV19-02）
 

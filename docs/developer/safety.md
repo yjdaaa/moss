@@ -6,7 +6,7 @@
 
 - MCP 工具由 `laser_tools::ToolCatalog` 登记、`laser_mcp::dispatch_tool_call_with` 分发；小智连接由 `laser_host::HostApplication::spawn_mcp_bridge` 在 `MCP_ENDPOINT` 有效时启动。桌面端与 `moss-host serve` 走同一条路径。
 - 目录共 20 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
-- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在语音中心“隐私与家居”同意后开启、每个动作逐次桌面批准，见 §4.17。
+- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在语音中心“隐私与家居”同意后开启、每个动作逐次桌面批准，见 §4.4。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file` 与 `send_command` 一律拒绝并引导走 workflow 或 `laser_safe_action_tool`。
 - `ai_laser_gcode_tool`、`generate_text_image_gcode_tool`、`generate_text_laser_task_tool` 只接受 `text` 素材，都转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
 - 设备传输只有串口与 Telnet。没有 HTTP `/command`、`[ESP800]` 或 WebSocket 设备通道。
@@ -72,52 +72,35 @@
 - `jobs` 表已建但运行时无写入方（`auth_pairings` 等 7 张废弃表已在 schema v18 删除）；进度只在内存中的作业注册表与 workflow / calibration 记录的 `send_result` 里。
 - S1-09 Android 实际来源（`http://tauri.localhost`）必须经安装设备核验，不得用 APK 构建通过冒充实机来源验收。
 
-### 4.1 语音授权与停止修补（2026-10-10）
+### 4.1 语音授权与停止修补
 
-设备 token 校验后还需注册当前 device/client/session。撤销使所有旧会话标记永久失效，会话循环检查后关闭连接；重新允许只能建立新会话。工具执行入口再次检查，尚未消费的该设备审批同事务过期，预检或排队期间失效的语音发送不启动加工。已经执行的指令不因撤销自动撤回，桌面停止能力始终保留。
+设备 token 校验后还需注册当前 `device/client/session`。撤销使所有旧会话标记永久失效，会话循环检查后关闭连接；重新允许只能建立新会话。工具执行入口再次检查，尚未消费的该设备审批同事务过期，预检或排队期间失效的语音发送不启动加工。已经执行的指令不因撤销自动撤回，桌面停止能力始终保留。
 
-停止快捷通道只接受最终识别的完整短句，不因中间词“停止”抢先执行；仍在大模型前处理。无活动任务时需已明确配置的目标与现有 confirmed 契约，多任务未指定目标不随机选择；状态查询失败不等于任务失败，也不等于停机。界面持续重试并保留急停，请求写入成功只显示“已发送，停止未确认”。
+停止快捷通道只接受最终识别的完整短句，不因中间词“停止”抢先执行；仍在大模型前处理。无活动任务时需已明确配置的目标与现有 `confirmed` 契约，多任务未指定目标不随机选择；状态查询失败不等于任务失败，也不等于停机。界面持续重试并保留急停，请求写入成功只显示“已发送，停止未确认”。
 
 本地判停在独立工作线程运行，事件循环不等待 IPC；队列和并发线程有界，排队到响应超时关闭异常会话，旧录音轮次的结果丢弃。不能宣称被阻塞的模型计算一定已被强制终止，也不能以软件通过代替实体急停或实机性能验收。
 
-### 4.2～4.8 NV13 沙箱边界与离线测试夹具约束（生产规则见 §4.18）
+### 4.2 本机 Agent（NV13）与离线沙箱边界
 
-- **进程树隔离边界（Windows Job Object / Unix 独立进程组）**：原版 `codex-cli` 的普通只读模式无法阻止读取工作区外文件或连接本地回环端口；Windows Job Object（`windows_process.rs`）与 Unix/macOS 独立进程组（`unix_process.rs`：`process_group(0)` / `setpgid(0, 0)` + 下发任务 `stdin` 前二次授权复核 + `kill(-pgid, SIGKILL)` + `ESRCH` 回收）仅约束进程树生命周期、时长与输出上限，**不限制用户文件读取、网络或 CLI 自身登录账号**。禁止为绕过限制而自动启用提权沙箱或修改 OS ACL。
-- **Docker 与 `model_proxy` 离线夹具（未接入生产）**：`scripts/agent-sandbox/test-container-isolation.ps1`、`moss-agent/src/docker_plan.rs` 与 `moss-agent::model_proxy`（`transport`、`egress`、`tls_client`）仅作离线安全测试夹具，不暴露生产端口、不接入生产 Agent 执行。测试容器必须保持 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8`、非 root 与唯一只读合成工作区挂载；严禁加 `--privileged`、`CAP_SYS_ADMIN`、`seccomp=unconfined`，严禁向容器挂载 MOSS 目录、Windows 用户主目录、Docker socket 或真实长期密钥。详见 [`docs/integration/agent-sandbox-docker-security.md`](../integration/agent-sandbox-docker-security.md)。
+- **开启与审批条件**：生产使用 `production_runner()`。① 用户在语音中心“扩展 → Claude Code / Codex”打开开关并填写专用工作目录（CLI 路径可手动填写或留空由 `detect_cli` 自动读取本机原生二进制，拒绝 `.cmd`/`.js`/`.sh`/`#!` 脚本；迁移后旧路径不存在时由 `resolve_with_detector` 重新适配，不合法文件仍严格拒绝）；② 只在严格模式（`MOSS_FUSION_STRICT`）下暴露工具，未开启时 `agent_codex` / `agent_claude_code` 不出现在工具列表里且服务端拒绝；③ 每次运行须在桌面审批卡单独批准，审批前不启动子进程，摘要绑定 provider、工作目录、实际规范化 CLI 路径与版本、配置 revision 与任务，批准时重算，不一致即拒绝。
+- **进程树隔离边界与剩余风险**：Windows 进程树受 Job Object 约束（挂起创建 → 加入 kill-on-close Job → 恢复），macOS / Linux 受独立进程组约束（`process_group(0)` / `setpgid(0, 0)` + `stdin` 下发前二次授权复核 + 环境变量白名单 `CLI_ENV_KEYS` + 结束/取消/超时时 `kill(-pgid, SIGKILL)` 轮询 `ESRCH` 整组回收），禁止自动启用提权沙箱或修改 OS ACL。**剩余风险**：CLI 自身与 OS 进程组均不限制读取工作目录外文件或网络，工作目录必须是可公开给模型看的目录，不得在文档或界面声称已实现机密文件隔离。
+- **Docker 与 `model_proxy` 离线夹具（未接入生产）**：`scripts/agent-sandbox/test-container-isolation.ps1`、`moss-agent/src/docker_plan.rs` 与 `moss-agent::model_proxy` 仅作离线安全测试夹具。测试容器须保持 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8`、非 root 与唯一只读合成工作区挂载；严禁加 `--privileged`、`CAP_SYS_ADMIN`、`seccomp=unconfined`，严禁挂载 MOSS 目录、用户主目录、Docker socket 或真实长期密钥。详见 [本机 Agent Docker 隔离](../integration/agent-sandbox-docker-security.md)。
 
-### 4.9 NV14 本地音乐选择、播放和撤销隔离（2026-10-11，软件完成 / 设备待验收）
+### 4.3 本地音乐（NV14）隔离边界
 
-音乐默认关闭且无目录，不自动扫描任何个人文件。只在用户显式启用并保存本地目录后，由桌面主窗口主进程验证 8 层、10,000 曲目/5,000 目录/50,000 项限额和本地安全根，跳过敏感子目录（含 Windows `AppData`、macOS `Library`/`.Trash`/`.ssh` 等），拒绝 UNC、链接/Windows reparse、敏感系统根（含 Windows 系统卷根与 macOS `/System`、`/Library`、`~/Library`、`/Applications`、`/Volumes` 顶层挂载根；macOS 仅豁免系统卷根 firmlink `/var`、`/tmp`，任何用户软链组件一律拒绝）；受信索引生成 `track_id`，重名候选仅显示非路径索引 ID 与编号（不明确选择就不播放），模型不能提供任意路径/URL 或用音乐混合其他工具。读取前按打开文件实际句柄（Windows `GetFinalPathNameByHandleW`、macOS `O_NOFOLLOW` + `fcntl(F_GETPATH)`、Linux `/proc/self/fd`）、size/mtime 重新检查。音频经 Symphonia 逐包转 24 kHz PCM，队列≤20×100ms、会话泵≤1秒；打断/新轮次/断线/撤销使用 generation、取消及发送前许可复核，歌曲不进入 LLM 历史。`voice_music_status`/`save`/`pick_directory` 只给桌面 `main` 窗口，选择文件夹只在显式点击后弹框且不自动扫描。
+音乐默认关闭且无目录，不自动扫描任何个人文件。只在用户显式启用并保存本地目录后，由桌面主窗口主进程按 8 层、10,000 曲目 / 5,000 目录 / 50,000 项限额扫描安全根，跳过敏感子目录（Windows `AppData`、macOS `Library`/`.Trash`/`.ssh` 等），拒绝 UNC、软链/reparse、敏感系统根（含 Windows 系统卷根与 macOS `/System`、`/Library`、`~/Library`、`/Applications`、`/Volumes` 顶层挂载根，仅豁免系统卷根 firmlink `/var`、`/tmp`）。受信索引生成 `track_id`，重名候选仅显示非路径索引 ID 与编号（不明确选择不播放），模型不得提供路径/URL 或与其他工具混用。读取前按打开文件实际句柄（`GetFinalPathNameByHandleW`、`O_NOFOLLOW` + `fcntl(F_GETPATH)`、`/proc/self/fd`）与 size/mtime 复检；`voice_music_status`/`save`/`pick_directory` 只授予桌面 `main` 窗口且不自动扫描。
 
-### 4.10～4.15 NV15 家居控制、备份迁移与日志脱敏安全门禁（生产开启规则见 §4.17）
+### 4.4 家居控制（NV15）、凭据备份脱敏与声纹识别（NV16）
 
-- **schema 校验与状态裁剪**：`moss-home::voice_home` 校验 HA 状态与服务 schema；未经用户逐实体选择、当前服务不存在、状态 `unknown`/`unavailable`、模型输入篡改增加属性、危险高风险域自动放行策略一律拒绝。对外可用状态仅保留最少的温度/亮度/单位数字，任意 PIN、密码、token 及嵌套属性全部丢弃。
-- **网络出口与单次提交闭环**：只读 GET 与控制 POST 共享 `moss_voice::home_readonly::pinned_client`（DNS/IP 私网检查、一次性固定解析、HTTPS 校验、无代理、不跟随重定向）。HomeControl 将 endpoint、凭据 revision、实体策略 revision、设备许可、动作、目标、参数摘要绑定到专用持久事务审批，要求审计成功才可操作。每个审批消费后**至多一次 POST**；敏感 token/config 改动、取消与唯一 POST 发送边界共享同一 `send_fence` 并用 `BEGIN IMMEDIATE` CAS 串行化，最终状态与审计同事务入库。收到与否不明确、HTTP 错误、提交后撤销，或目标状态回读（最多 3 次只读 GET，总预算 3 秒、单次上限 900ms）期间设备许可被撤销，**即使旧 GET 返回匹配状态也不得写入 `Completed`**，一律持久记为 `result_unknown` 且绝不自动重发。
-- **可移植备份与跨账户系统凭据封存保护**：Windows 用当前用户 DPAPI（`dpapi-user-v1:`），macOS 用当前登录钥匙串随机主密钥（`Security.framework`，`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）派生的 Encrypt-then-HMAC-SHA256 信封（`keychain-user-v1:`）。仅允许从经来源校验的本机主窗口语音中心（n26/n67，`require_private_settings_window`）导出/导入固定受限 `moss-home-profile-v1` 白名单（仅含不带 origin、媒体库 ID、许可或已启用标志的实体清单），禁止打包 SQLite/WAL/SHM 或迁移原始 `dpapi-user-v1:` / `keychain-user-v1:` 密文（`home_backup_audit` 对两类前缀均标记为不可分享的加密凭据材料）。恢复须二次确认，先原子撤销本机旧 HA token、voice read/control grants 和待审批 HomeControl 并将所有实体置为禁用，重新输入令牌并再次审批后才可运行。遇到其他系统或账户的密文时仅允许受限启动以执行确认撤销迁移（单调版本号原子清除旧密文），任何读取凭据、HA 请求或控制批准均拒绝。已发送的外部控制无法撤回；疑似泄漏须去 HA 服务端轮换/撤销 token。
-- **NV15-1 历史备份审计与日志脱敏**：用户在语音中心“隐私与家居 → 家居”点击按钮后由 Rust 原生文件选择器选择单个本地普通非链接文件（拒绝前端传路径、`..`、reparse 组件、网络路径及 >64MiB），只读分块检查标记，仅输出固定类别/字节数/禁止分享标志，不输出路径或原文。`moss_voice::redact::redact_line` 与 `RotatingLog::tail` 对常见凭据字段和 Bearer/Basic 头做重脱敏，但不替代完整 DLP；不得将旧日志、SQLite/WAL、原始诊断转储或备份判定为可安全分享。
+- **家居开启与审批（NV15）**：`HttpsHomeTransport::submit_once` 生产发送条件全部由用户在语音中心“隐私与家居 → 家居”完成（HTTPS 地址、令牌、勾选白名单实体、明确同意语音控制，`GRANT` 绑定白名单与凭据版本，改任一项失效）。语音只能生成审批，每个动作须在“家居审批”逐次核对批准（通用审批接口按设计拒绝 HomeControl，只能走 `voice_home_approval_approve`）；未用真实 Home Assistant 验收。
+- **Schema 校验与单次提交闭环**：`moss-home::voice_home` 校验 HA 状态与服务 schema，拒绝未勾选实体、`unknown`/`unavailable`、模型篡改增加属性及高风险域自动放行；对外状态仅保留最少数值，丢弃 PIN/密码/token 与嵌套属性。只读 GET 与控制 POST 共用 `moss_voice::home_readonly::pinned_client`（私网 IP 检查、一次性固定解析、HTTPS、无代理、不跟随重定向）。每个审批绑定 endpoint、凭据与策略 revision、设备许可、动作与参数摘要，消费后**至多一次 POST**；敏感改动、取消与 POST 共享 `send_fence` 及 `BEGIN IMMEDIATE` CAS 串行化，最终状态与审计同事务入库。回读（最多 3 次 GET，总预算 3 秒、单次上限 900ms）期间超时、HTTP 错误、收到与否不明或设备许可撤销时，**一律持久记为 `result_unknown` 且绝不自动重发**。
+- **凭据封存、导出限制与日志审计**：Windows 用当前用户 DPAPI（`dpapi-user-v1:`），macOS 用登录钥匙串主密钥派生 Encrypt-then-HMAC-SHA256 信封（`keychain-user-v1:`）。仅允许从经 `require_private_settings_window` 校验的主窗口导出/导入固定白名单 `moss-home-profile-v1`（不含 origin、媒体库 ID、许可或启用标志），禁止打包 SQLite/WAL/SHM 或迁移原始密文（`home_backup_audit` 对两类前缀标记不可分享）。恢复须二次确认并先原子撤销旧 token、grants 与待审批并将实体置为禁用；遇到跨账户密文仅允许受限启动撤销迁移。历史备份审计由 Rust 原生文件框选单个本地非链接普通文件（≤64MiB），只输出类别/字节数/禁分享标志；`moss_voice::redact::redact_line` 与 `RotatingLog::tail` 做重脱敏，不替代完整 DLP。
+- **声纹识别（NV16）**：至少两人各录三段测试音，`person_context::calibrate` 以跨人最高分 + 0.05（下限 0.5、上限 0.95）为阈值，要求测试集零误认且本人命中 ≥2/3；结果存于 `app_secrets`（`voice.speaker.calibration`），名单变化即失效；未标定返回 `Unknown`，`may_authorize_action` 恒 `false`。**声纹仅作候选身份提示，永远不能授权加工、家居或任何设备动作**。
 
-### 4.12 NV18 语音 sidecar 构建资源安全（2026-10-11）
+### 4.5 主窗口特权命令、本地敏感 ACL 与固件 OTA（NV17）
 
-`build-windows-installer.ps1` 入口已转到独立 `voice-helper/build-sidecar-installer.ps1`；按次只生成新 GUID 资源目录，禁止递归删除或覆盖用户已有 `bundle-resources/voice-local`。对应 helper/源码/COPYING/初步 notices 已构建进入 NSIS；`voice-helper/verify-installer-in-docker.ps1` 以禁网只读非 root Docker 列出真实安装包并验证上述条目，清理自身检查镜像。**还未满足 sherpa-onnx/espeak-ng 及静态依赖的完整许可证/对应源码审计；不得因此对外分发**。安装/升级/卸载、数据迁移和真实 helper 启动均需明确授权的安全环境验收；构建过程不得运行安装器或连接真实硬件。
-
-### 4.13 语音中心插件/私人记忆的 Tauri ACL 本地页面隔离（2026-10-11，2026-10-18 n26 更新）
-
-桌面主窗口继续导航到本机 `http://127.0.0.1:<端口>/`，该页面对 Tauri 来说属于 remote origin。n26（2026-10-18 用户决定）起，插件密钥状态与私人记忆可在主语音页就地展开：授权写在独立的 `capabilities/voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`），命令开头用 `require_private_settings_window` 校验「经 `window_is_trusted_main` 确认的主窗口精确来源」，其他窗口标签、host、端口、路径一律拒绝。n67（2026-11-07 用户决定）取消了独立的 `voice-private` 打包窗口：固件 `voice_firmware_{status,import,manage}` 与唤醒词 `voice_wakeword_{status,import_base,manage}` 也并入 `voice-private-main.json`，在语音中心操作；导入仍只由原生文件框选择，推送仍逐台确认。不得把这些权限加入 default `windows:["*"]`，也不得转交普通浏览器或小智设备。代价已知并接受：主窗口页面的漏洞同样能读到上面这些数据，也能发起固件 / 唤醒词推送请求（推送前的逐台确认框仍需用户点击）。详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 的 n26 节。安装后真实 Windows WebView2 的授权链仍需实际页面验证。
-
-### 4.16 主窗口特权命令固定到本进程后端地址（2026-10-13）
-
-主窗口导航到 `http://127.0.0.1:<端口>/` 后是 remote 来源，capability 的 `remote` 只能写 `http://127.0.0.1:*`，静态配置挡不住其他本机端口的页面。凡能取得桌面会话、改写配置或密钥、启停进程的命令（`get_desktop_session`、语音中心与内置语音的改写类命令、视觉/音乐/Agent 命令、第三方 MCP 管理、n26 起的私人记忆/插件/声纹/家居/长期记忆命令及 n67 并入的固件/唤醒词命令），必须在函数开头校验 `main` 标签与精确来源，失败即拒绝；新增此类命令照此处理，并加入 `main_window_commands_pin_backend_origin`（或 `require_private_settings_window`）的清单。只给主窗口用的 capability 必须声明回环 `remote`，否则 Tauri 只对本地打包页授权、主窗口调用全部被拒。
-
-### 4.17 家居控制与声纹识别改为用户开启（2026-10-14 用户决定）
-
-- **家居控制（NV15）**：`HttpsHomeTransport::submit_once` 在生产中按 §4.10～4.15 门禁真实发送。开启条件全部由用户在语音中心“隐私与家居 → 家居”完成：HTTPS 地址、令牌、勾选白名单实体、明确同意语音控制（GRANT 绑定当前白名单与凭据版本，改任一项即失效）。语音只能生成审批；每个动作都要在“隐私与家居 → 家居 → 家居审批”里核对后批准，全局审批卡只提醒并跳到那里（通用审批接口按设计拒绝 HomeControl，只能走 `voice_home_approval_approve`）。至多一次 POST，结果未知不重发，批准前重新读取并核对状态与白名单。未用真实 Home Assistant 验收，界面提示先用无害设备试用。
-- **声纹识别（NV16）**：用户登记至少两人后，每人另录三段测试音，`person_context::calibrate` 以“认成别人”的最高分加 0.05 为阈值（下限 0.5、上限 0.95），自检要求测试集内零误认、本人认对不少于三分之二；结果存于 `app_secrets`（`voice.speaker.calibration`），只对标定时的登记名单（编号与版本）有效，名单变化即失效。未标定时返回 `Unknown`，`may_authorize_action` 恒 `false`。只拿已登记的人互比，测不到陌生人；这是候选身份提示，**永远不能授权加工、家居或任何设备动作**，按人记忆仍需另行明确开启。
-
-### 4.18 本机 Agent 与固件 OTA 改为用户开启（2026-10-15 用户决定；2026-10-25 开通 macOS/Unix 并支持自动读取 CLI）
-
-- **本机 Agent（NV13）**：生产使用 `production_runner()`（遵循 §4.2～4.8 的不提权、不改 OS ACL、不把真实账号或长期密钥用于自动测试约束）。开启与执行条件全部显式：① 用户在语音中心“扩展 → Claude Code / Codex”打开开关并填写专用工作目录；CLI 路径可手动填写，也可**留空自动读取本机已安装的原生可执行文件**（`detect_cli` 仅扫描 PATH 与常见安装目录如 `~/.local/bin`、Homebrew `/opt/homebrew/bin`、`fnm`、`nvm`、`npm`、`pnpm`、`@openai/codex-<platform>/vendor/...` 与 `~/.local/share/claude/versions/<ver>`，只认真实原生二进制并拒绝 `.cmd`/`.js`/`.sh`/`#!` 脚本；当配置文件迁移到新电脑或升级版本导致旧路径不存在时，`resolve_with_detector` 自动适配当前设备的原生 CLI，而本机存在的不合法文件仍严格拒绝）；② 只在严格模式（语音中心顶部开关；值写在运行目录 `.env` 的 `MOSS_FUSION_STRICT`）下才提供工具，未开启时 `agent_codex` / `agent_claude_code` 不出现在工具列表里，服务端也拒绝；③ 每次运行都要在桌面审批卡单独批准一次，批准前不启动任何子进程；摘要绑定 provider、工作目录、**实际解析出的规范化 CLI 路径与版本**、配置 revision 与任务，批准时重算，不一致即拒绝；④ 批准后在后台线程运行，Windows 进程树受 Job Object 约束（挂起创建 → 加入 kill-on-close Job → 恢复），macOS / Linux 进程树受独立进程组约束（`process_group(0)` / `setpgid(0, 0)` + 下发任务 `stdin` 前二次授权复核 + 环境变量白名单 `CLI_ENV_KEYS` + 结束/取消/超时时 `kill(-pgid, SIGKILL)` 整组清理并轮询 `ESRCH`），运行中可在 Agent 卡停止，取消/超时/撤销设备授权/配置变化都会结束整棵进程树并写短错误码。
-  **已告知用户并接受的剩余风险**：CLI 自身的沙箱挡不住“读取工作目录以外的文件”，Windows Job Object 与 Unix 进程组也不限制文件读取与网络。因此工作目录必须是可公开给模型看的目录，界面文案已写明；不得在任何文档或界面里声称已实现机密文件隔离。
-- **固件 OTA（NV17）**：OTA 回包只在设备已允许**且**存在用户确认过的推送时才带 `firmware{version,url}`（`ServerConfig::firmware` 为 `None` 时一律不下发，严禁据模型自报 `device-id` 推送或下载）。导入与推送只在经 `require_private_settings_window` 校验的本机主窗口语音中心由用户操作（2026-11-07 n67 取消独立安全窗口）：只接受 ESP32 **应用**镜像（`0xE9` 头、偏移 32 的 `0xABCD5432`、1～5 段数字版本，单件 ≤16MiB、总计 ≤256MiB），文件落运行目录 `firmware/<sha256>.bin`，推送逐台确认、只对已允许设备、要求候选版本比设备上报版本新，有效期 24 小时。下载路由 `/xiaozhi/firmware/{token}.bin` 只认 32 位十六进制一次性令牌，并要求下载方地址等于这台设备最近一次 OTA 请求的地址，发送前重新读文件核对 SHA-256；取消或到期立即失效；重放、篡改、路径穿越、未允许设备一律 404。**下载完成不等于刷写成功**，只有设备之后上报的版本等于推送版本才记为“已升级”。真实刷写需另行授权，并具备串口重刷兜底。
+- **主窗口精确来源固定与敏感 ACL**：主窗口导航到本机 `http://127.0.0.1:<端口>/`，capability 中仅静态配置 `remote:["http://127.0.0.1:*"]` 挡不住其他本机端口页面。因此三类特权命令均须在 Rust 入口校验精确来源：① `get_desktop_session`、常规语音启停/配置、导出与托盘命令由 `default.json` 授权并在函数内校验 `require_main_window` 或 `require_trusted_app_window`；② 本机 Agent、第三方 MCP、本地音乐、视觉扩展命令各自在 `capabilities/voice-{agent,mcp,music,vision}.json`（`windows:["main"]` + 回环 `remote`）授权并校验 `require_main_window`；③ 私人记忆、插件凭据、声纹、家居、长期记忆、固件、唤醒词与 USB 配网命令集中在 `capabilities/voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`），开头用 `require_private_settings_window` / `window_is_trusted_main` 校验，严禁放入 `default.json`（`windows:["*"]`）。新增主窗口特权命令须同步加入 `apps/desktop/src-tauri/src/lib.rs` 的 `main_window_commands_pin_backend_origin`（或 `require_private_settings_window` / `frontend/tests/voicePrivacyAcl.test.mjs`）检查清单；安装后 Windows WebView2 授权链仍需真实页面核验。
+- **固件 OTA（NV17）与语音 sidecar（NV18）**：OTA 回包只在设备已允许且存在用户逐台确认的推送时才带 `firmware{version,url}`（`ServerConfig::firmware` 为 `None` 时不下发，严禁按模型自报 `device-id` 推送）。导入与推送仅在主窗口语音中心由用户操作：只接受 ESP32 应用镜像（`0xE9` 头、偏移 32 的 `0xABCD5432`、1～5 段数字版本，单件 ≤16MiB、总计 ≤256MiB），落盘 `firmware/<sha256>.bin`，要求候选版本高于设备上报版本，有效期 24 小时。下载 `/xiaozhi/firmware/{token}.bin` 只认 32 位十六进制一次性令牌并核对请求来源 IP 与设备最近一次 OTA 请求一致，发送前重算 SHA-256；重放、篡改、路径穿越、未允许设备一律 404。**下载完成不等于刷写成功**，只有设备随后上报目标版本才记为“已升级”；真实刷写需另行授权并具备串口重刷兜底。语音 sidecar 专用安装包（`scripts/voice-helper/`）因 `sherpa-onnx`/`espeak-ng` 完整许可与对应源码审计未闭环（且已暂停排期），**不得对外分发**；详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 与 [`docs/developer/voice-helper-license-audit.md`](voice-helper-license-audit.md)。
 
 ## 5. 测试要求
 
@@ -125,5 +108,5 @@
 
 ## 6. 文档和提示词同步
 
-- 改工具名、参数、注册开关、默认连接方式或确认规则时，同步 [`docs/integration/xiaozhi-prompts/latest.md`](../integration/xiaozhi-prompts/latest.md) 并新增日期快照；控制台正文 ≤2000、知识库 ≤200 字符（空格与换行计入）。
+- 改工具名、参数、注册开关、默认连接方式或确认规则时，同步 [`docs/integration/xiaozhi-prompts/latest.md`](../integration/xiaozhi-prompts/latest.md) 并新增日期快照；控制台正文 ≤2000、知识库 ≤200 字符（由 `scripts/check-repo-hygiene.mjs` 自动核验）。
 - 改路由、字段、错误码时同步 [Web API 契约](api-contracts.md)；改表结构时同步 [数据库结构](db-schema.md)；功能可见变化同步 [功能字典](feature-glossary.md)。

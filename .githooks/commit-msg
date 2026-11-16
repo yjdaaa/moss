@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec node "$REPO_ROOT/scripts/check-repo-hygiene.mjs" --commit-msg "$1"

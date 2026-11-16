@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+node scripts/check-crate-layers.mjs
+node scripts/check-repo-hygiene.mjs --staged
+
+git diff --cached --name-only -z --diff-filter=ACMR -- '*.rs' | node -e '
+  const fs = require("node:fs");
+  const { execFileSync } = require("node:child_process");
+  const files = fs.readFileSync(0, "utf8")
+    .split("\0")
+    .filter((f) => f && !f.startsWith("apps/desktop/src-tauri/gen/"));
+  if (files.length > 0) {
+    execFileSync("rustfmt", ["--edition", "2024", "--check", ...files], { stdio: "inherit" });
+  }
+'
+
+git diff --cached --name-only -z --diff-filter=ACMR -- 'frontend/src' 'frontend/tests' | node -e '
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { execFileSync } = require("node:child_process");
+  const files = fs.readFileSync(0, "utf8")
+    .split("\0")
+    .filter((f) => /\.(js|jsx|mjs)$/.test(f))
+    .map((f) => f.slice("frontend/".length));
+  if (files.length > 0) {
+    const eslintBin = path.join("frontend", "node_modules", "eslint", "bin", "eslint.js");
+    if (!fs.existsSync(eslintBin)) {
+      console.error("缺少 frontend/node_modules/eslint，请先在 frontend/ 执行 npm ci");
+      process.exit(1);
+    }
+    execFileSync(process.execPath, [path.resolve(eslintBin), ...files], {
+      cwd: "frontend",
+      stdio: "inherit",
+    });
+  }
+'

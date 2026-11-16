@@ -47,3 +47,41 @@ test("允许向下、同域与测试依赖跨域", () => {
   assert.equal(edgeViolation("laser-host", "moss-voice", false), null);
   assert.equal(edgeViolation("moss-voice-server", "laser-api", true), null);
 });
+
+test("校验 [lints] workspace = true 与 test-memory-secret-store 仅限 dev-dependencies", () => {
+  const valid = parseManifest(
+    `[package]
+name = "laser-host"
+[dependencies]
+laser-runtime = { path = "../laser-runtime" }
+[dev-dependencies]
+laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
+[features]
+default = []
+test-memory-secret-store = []
+[lints]
+workspace = true
+`,
+    known,
+  );
+  assert.equal(valid.lintsWorkspace, true);
+  assert.equal(valid.normalSecretTestFeature, false);
+
+  const missingLints = parseManifest(`[package]\nname = "laser-host"\n`, known);
+  assert.equal(missingLints.lintsWorkspace, false);
+
+  const pkgLints = parseManifest(`[package]\nname = "laser-host"\nlints.workspace = true\n`, known);
+  assert.equal(pkgLints.lintsWorkspace, true);
+
+  for (const bad of [
+    `[dependencies]\nlaser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }\n`,
+    `[dependencies]\nlaser-runtime = { path = "../laser-runtime", features = ['test-memory-secret-store'] }\n`,
+    `[dependencies]\nlaser-runtime = {\n  path = "../laser-runtime",\n  features = ["test-memory-secret-store"]\n}\n`,
+    `[target.'cfg(windows)'.dependencies]\nlaser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }\n`,
+    `[dependencies.laser-runtime]\nfeatures = ["test-memory-secret-store"]\n`,
+    `[features]\ndefault = ["laser-runtime/test-memory-secret-store"]\n`,
+  ]) {
+    const parsed = parseManifest(`[package]\nname = "laser-host"\n[lints]\nworkspace = true\n${bad}`, known);
+    assert.equal(parsed.normalSecretTestFeature, true, `应拦截正式依赖启用测试特性：\n${bad}`);
+  }
+});

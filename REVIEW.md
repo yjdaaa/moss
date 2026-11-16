@@ -6,7 +6,7 @@
 
 1. **首行先给结论**：第一行写明实质性问题总数；无实质缺陷直接输出 `无问题（no issues）`，不凑建议。
 2. **精确定位与归类**：每条必须给出真实 `文件路径:行号`（严禁猜测），标注 `[Important]`（本次必须处理）或 `[Pre-existing]`（存量老问题），并点明**漏洞类别**，修复时连坐横扫同批同类文件。
-3. **过滤噪音与收敛**：忽略格式、import 顺序与主观命名偏好（归 `rustfmt` / `clippy` / `eslint`）；第 2 轮起只审增量补丁 diff，满 3 轮未清零立即停手交人工拍板。
+3. **过滤噪音与收敛**：排版、`rules-of-hooks`、原生 `confirm`/`alert`、crate 分层、`Cargo.toml` lints/测试特性、`.ps1` ASCII 与本机路径/密钥扫描已由 `node scripts/verify.mjs --quick` 拦截，审查直接忽略风格偏好并聚焦状态机、并发、安全边界与契约同步；第 2 轮起只审增量补丁 diff，满 3 轮未清零立即停手交人工拍板。
 
 ## 2. 一票否决红线（触犯必标 `[Important]`）
 
@@ -25,8 +25,7 @@
 
 - **工具注册五件套**：增删改工具须同步 `ToolCatalog`、`dispatch_tool_call_with`、`tool_risk`、`tests/golden/mcp_tools.json` 与 `jev.rs` 粗筛归组（严禁单工具平铺 `noul`）。
 - **类型与分层边界**：`laser-core`、`laser-device`、`laser-tools` 严禁依赖 `serde_json` 或直连数据库/设备。
-- **前端与跨平台坑**：确认框一律 `await showConfirm(...)`（禁用 `window.confirm` / `alert`）；React Hooks 禁在早退 `return` 后调用；`.ps1` 脚本保持纯 ASCII；涉及凭据封存的测试只在 `[dev-dependencies]` 开 `test-memory-secret-store`。
-- **契约与文档同步**：改路由、错误码、默认行为或小智提示词时，同批同步 `docs/` 与测试断言。
+- **契约与文档同步**：改路由、错误码、默认行为或小智提示词时，同批同步 `docs/` 与测试断言；弹窗页面入口确保挂载 `<AppDialogHost />`。
 
 ## 5. 忽略路径
 

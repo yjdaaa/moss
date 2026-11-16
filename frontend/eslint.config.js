@@ -33,4 +33,22 @@ export default [
       "no-control-regex": "off",
     },
   },
+  {
+    files: ["src/**/*.{js,jsx}"],
+    ignores: ["src/appDialog.js"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        { name: "confirm", message: "请使用 appDialog.js 的 await showConfirm(...)；桌面端原生 confirm 返回 Promise。" },
+        { name: "alert", message: "请使用 appDialog.js 的 showAlert(...)。" },
+      ],
+      "no-restricted-properties": [
+        "error",
+        { object: "window", property: "confirm", message: "请使用 appDialog.js 的 await showConfirm(...)；桌面端 window.confirm 返回 Promise。" },
+        { object: "window", property: "alert", message: "请使用 appDialog.js 的 showAlert(...)。" },
+        { object: "globalThis", property: "confirm", message: "请使用 appDialog.js 的 await showConfirm(...)。" },
+        { object: "globalThis", property: "alert", message: "请使用 appDialog.js 的 showAlert(...)。" },
+      ],
+    },
+  },
 ];

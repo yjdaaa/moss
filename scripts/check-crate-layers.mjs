@@ -48,10 +48,12 @@ export function workspaceManifests(root = REPO_ROOT) {
   return [...members, ...EXTRA_MANIFESTS];
 }
 
-/** 解析单个 Cargo.toml：包名，以及仓库内 crate 的正式依赖 / 仅测试依赖。 */
+/** 解析单个 Cargo.toml：包名、仓库内 crate 的正式/测试依赖，以及工作区 lints 与测试特性合规性。 */
 export function parseManifest(text, known) {
   let section = "";
   let name = null;
+  let lintsWorkspace = false;
+  let normalSecretTestFeature = false;
   const normal = new Set();
   const dev = new Set();
   for (const raw of text.split(/\r?\n/)) {
@@ -68,14 +70,28 @@ export function parseManifest(text, known) {
     if (section === "package") {
       const n = line.match(/^name\s*=\s*"([^"]+)"/);
       if (n) name = n[1];
+      if (/^lints\.workspace\s*=\s*true$/.test(line)) lintsWorkspace = true;
       continue;
+    }
+    if (section === "lints") {
+      if (/^workspace\s*=\s*true$/.test(line)) lintsWorkspace = true;
+      continue;
+    }
+    if (section === "features") {
+      if (!/^\s*test-memory-secret-store\s*=/.test(line) && /['"][^'"]*test-memory-secret-store['"]/.test(line)) {
+        normalSecretTestFeature = true;
+      }
+      continue;
+    }
+    if (/(?:^|\.)(dependencies|build-dependencies)(?:\.[A-Za-z0-9_-]+)?$/.test(section)) {
+      if (/['"]test-memory-secret-store['"]/.test(line)) normalSecretTestFeature = true;
     }
     const kind = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)$/);
     if (!kind) continue;
     const dep = line.match(/^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)?\s*=/);
     if (dep && known.has(dep[1])) (kind[1] === "dev-dependencies" ? dev : normal).add(dep[1]);
   }
-  return { name, normal: [...normal], dev: [...dev] };
+  return { name, normal: [...normal], dev: [...dev], lintsWorkspace, normalSecretTestFeature };
 }
 
 /** 判定一条依赖边是否合规；返回违规原因，合规返回 null。 */
@@ -108,6 +124,16 @@ export function checkLayers(root = REPO_ROOT, layers = LAYERS) {
     if (!layers[parsed.name]) {
       violations.push({ manifest: rel, from: parsed.name, reason: `${parsed.name} 未登记分层` });
       continue;
+    }
+    if (!parsed.lintsWorkspace) {
+      violations.push({ manifest: rel, from: parsed.name, reason: "缺少 [lints] workspace = true" });
+    }
+    if (parsed.normalSecretTestFeature) {
+      violations.push({
+        manifest: rel,
+        from: parsed.name,
+        reason: "正式依赖不得启用 test-memory-secret-store（仅限 [dev-dependencies]）",
+      });
     }
     for (const [list, devOnly] of [[parsed.normal, false], [parsed.dev, true]]) {
       for (const to of list) {

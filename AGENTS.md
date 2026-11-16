@@ -36,13 +36,14 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 ## 开发约束
 
 - 激光 MCP 工具在 `laser_tools::ToolCatalog` 登记，由 `laser_mcp::dispatch_tool_call_with` 分发；启动编排在 `laser-host`。
-- crate 依赖只向下、激光域与语音域互不依赖（分层表见 [`architecture.md`](docs/developer/architecture.md) §2），新增 crate 先在 `scripts/check-crate-layers.mjs` 登记；脚本与文档按用途命名，任务代号只写正文。
+- crate 依赖只向下、激光域与语音域互不依赖（分层表见 [`architecture.md`](docs/developer/architecture.md) §2），由 `scripts/check-crate-layers.mjs` 把关；新增 crate 先在该脚本登记并保持 `[lints] workspace = true`；脚本与文档按用途命名，任务代号只写正文。
+- `.ps1` ASCII、禁整文件 `#![allow(clippy::...)]`、本机路径/凭据扫描、`.env` 防误提、提示词字数上限与提交信息格式由 `scripts/check-repo-hygiene.mjs` 检查；可通过 `node scripts/verify.mjs --install-hooks` 启用 `.githooks/` 在本地提交前拦截。
 - 改变契约、默认值、工具注册、提示词或用户可见行为时，同一次改动内同步实现、测试和 `docs/`。
 - 用户在对话中确认的设计决定，写入对应技术书的修订记录并注明日期，后续以此为准。
 
 ## 验证
 
-命令均从仓库根目录出发，各自独立执行。
+日常本地验证统一运行 `node scripts/verify.mjs`（默认按当前改动自动覆盖受影响工作区、并发进程检查与 `apps/moss-voice-local`；常用选项：`--quick` 仅静态/格式/lint、`--full` 全量工作区与前端、`--e2e` 追加 E2E、`--fmt-write` 仅格式化改动 `.rs`）。各命令也可从仓库根目录独立执行：
 
 | 时机 | 必须执行 |
 | --- | --- |
