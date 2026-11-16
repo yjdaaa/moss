@@ -173,7 +173,24 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                         "cross_hatch": {"type": "boolean", "default": false, "description": "再转 90° 扫一遍，更实更深"},
                         "bidirectional": {"type": "boolean", "default": true, "description": "来回都出光；false 只单向出光（更齐、更慢）"},
                         "overscan_mm": {"type": ["number", "string"], "description": "每行两头关光多走的距离 mm；省略或 auto 按速度自动算，0 关闭"},
-                        "scan_offset_mm": {"type": "number", "default": 0, "description": "双向扫描错位补偿 mm（-2 ~ 2）"}
+                        "scan_offset_mm": {"type": "number", "default": 0, "description": "双向扫描错位补偿 mm（-2 ~ 2）"},
+                        "scan_offset_table": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "maxItems": 32, "description": "按速度的错位补偿表 [[速度 mm/min, 偏移 mm], …]，按加工速度插值，给了就覆盖 scan_offset_mm"}
+                    }
+                });
+                // 2026-11-16 外框切割质量（对齐 LightBurn Cut 设置），只用于 laser_mode=cut，默认全关
+                props["cut_options"] = serde_json::json!({
+                    "type": "object",
+                    "description": "外框切割设置（只用于切割，一般不用传）",
+                    "properties": {
+                        "kerf_mm": {"type": "number", "default": 0, "description": "切缝补偿 mm（-2 ~ 2）：正值往外、负值往里，孔自动反向，零件保持尺寸"},
+                        "tab_count": {"type": "integer", "default": 0, "description": "每个闭合图形的桥位个数（防零件掉落），与 tab_spacing_mm 二选一"},
+                        "tab_spacing_mm": {"type": "number", "description": "每隔多少 mm 放一个桥位"},
+                        "tab_width_mm": {"type": "number", "default": 0.5, "description": "桥位宽度 mm"},
+                        "tabs_skip_inner": {"type": "boolean", "default": true, "description": "内部图形（孔）不加桥位"},
+                        "lead_in_mm": {"type": "number", "default": 0, "description": "引入线长度 mm（从废料一侧切入）"},
+                        "lead_out_mm": {"type": "number", "default": 0, "description": "引出线长度 mm"},
+                        "lead_angle_deg": {"type": "number", "default": 90, "description": "引线角度（1 ~ 90，90 垂直）"},
+                        "overcut_mm": {"type": "number", "default": 0, "description": "回到起点后多切的距离 mm"}
                     }
                 });
                 props["path_options"] = serde_json::json!({

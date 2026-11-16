@@ -1,21 +1,122 @@
 import React from "react";
-import { FILL_GROUPING_OPTIONS, fillSettingsSummary, normalizeFillSettings } from "../fillOptions.js";
+import {
+  FILL_GROUPING_OPTIONS,
+  MAX_SCAN_OFFSET_ROWS,
+  TAB_MODE_OPTIONS,
+  fillSettingsSummary,
+  normalizeFillSettings,
+} from "../fillOptions.js";
 
 /**
  * 填充与走刀设置（2026-11-16，对齐 LightBurn）：默认折叠，一行摘要；
- * `withFill=false` 时只显示走刀选项（描边 / 切割没有扫描填充）。
+ * `withFill=false` 时只显示走刀选项（描边 / 切割没有扫描填充）；
+ * `withCut=true`（工作台文字“外框切割”）时多一段切割设置：切缝补偿、桥位、引入 / 引出线、过切（默认全关）。
  */
-export default function FillOptionsPanel({ idPrefix, settings, onChange, withFill = true }) {
+export default function FillOptionsPanel({ idPrefix, settings, onChange, withFill = true, withCut = false }) {
   const s = normalizeFillSettings(settings);
   const set = (key, value) => onChange({ ...s, [key]: value });
   const id = (name) => `${idPrefix}-${name}`;
+  const title = withCut
+    ? (withFill ? "切割、填充与走刀设置" : "切割与走刀设置")
+    : (withFill ? "填充与走刀设置" : "走刀设置");
+  const setRow = (index, key, value) =>
+    set("scanOffsetTable", s.scanOffsetTable.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
+  const numberInput = (key, name, { min, max, step, title: hint }) => (
+    <input
+      id={id(name)}
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      value={s[key]}
+      onChange={(e) => set(key, e.target.value)}
+      title={hint}
+    />
+  );
   return (
     <details className="fill-options" id={id("fill-options")}>
       <summary>
-        <span className="fill-options-title">{withFill ? "填充与走刀设置" : "走刀设置"}</span>
-        <span className="fill-options-summary">{fillSettingsSummary(s, { withFill })}</span>
+        <span className="fill-options-title">{title}</span>
+        <span className="fill-options-summary">{fillSettingsSummary(s, { withFill, withCut })}</span>
       </summary>
       <div className="fill-options-body">
+        {withCut ? (
+          <>
+            <div className="fill-options-wide fill-options-section">切割设置（对齐 LightBurn，全部为 0 时与以前完全相同）</div>
+            <label>
+              <span>切缝补偿（mm，正值外扩 / 负值内缩）</span>
+              {numberInput("kerfMm", "cut-kerf", {
+                min: -2,
+                max: 2,
+                step: 0.01,
+                title: "一般填切缝宽度的一半；孔会反向补偿，切下来的零件保持设计尺寸",
+              })}
+            </label>
+            <label>
+              <span>桥位（防零件掉落）</span>
+              <select id={id("cut-tab-mode")} value={s.tabMode} onChange={(e) => set("tabMode", e.target.value)}>
+                {TAB_MODE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+            {s.tabMode === "count" ? (
+              <label>
+                <span>每个图形几个桥位</span>
+                {numberInput("tabCount", "cut-tab-count", { min: 1, max: 100, step: 1 })}
+              </label>
+            ) : null}
+            {s.tabMode === "spacing" ? (
+              <label>
+                <span>桥位间距（mm）</span>
+                {numberInput("tabSpacingMm", "cut-tab-spacing", { min: 1, max: 1000, step: 1 })}
+              </label>
+            ) : null}
+            {s.tabMode !== "off" ? (
+              <>
+                <label>
+                  <span>桥位宽度（mm）</span>
+                  {numberInput("tabWidthMm", "cut-tab-width", { min: 0.05, max: 10, step: 0.05 })}
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    id={id("cut-tab-skip-inner")}
+                    type="checkbox"
+                    checked={s.tabsSkipInner}
+                    onChange={(e) => set("tabsSkipInner", e.target.checked)}
+                  />
+                  <span>内部图形（孔）不加桥位</span>
+                </label>
+              </>
+            ) : null}
+            <label>
+              <span>引入线（mm，0 关闭）</span>
+              {numberInput("leadInMm", "cut-lead-in", {
+                min: 0,
+                max: 10,
+                step: 0.1,
+                title: "从废料一侧切进起刀点，起刀的烧痕留在废料上",
+              })}
+            </label>
+            <label>
+              <span>引出线（mm，0 关闭）</span>
+              {numberInput("leadOutMm", "cut-lead-out", { min: 0, max: 10, step: 0.1 })}
+            </label>
+            <label>
+              <span>引线角度（°，90 垂直）</span>
+              {numberInput("leadAngleDeg", "cut-lead-angle", { min: 1, max: 90, step: 1 })}
+            </label>
+            <label>
+              <span>过切（mm，回到起点后多切）</span>
+              {numberInput("overcutMm", "cut-overcut", {
+                min: 0,
+                max: 10,
+                step: 0.1,
+                title: "起点处没切透时多切一段把口子接上；跨过桥位时照样关光",
+              })}
+            </label>
+          </>
+        ) : null}
         {withFill ? (
           <>
             <label className="fill-options-wide">
@@ -48,9 +149,52 @@ export default function FillOptionsPanel({ idPrefix, settings, onChange, withFil
                 step={0.01}
                 value={s.scanOffsetMm}
                 onChange={(e) => set("scanOffsetMm", e.target.value)}
-                title="来回两行出光对不齐时，填量出的错位距离（只在双向扫描时生效）"
+                title="来回两行出光对不齐时，填量出的错位距离（只在双向扫描时生效）；下面填了按速度的偏移表时以表为准"
               />
             </label>
+            <div className="fill-options-wide fill-offset-table" id={id("fill-offset-table")}>
+              <span>按速度的扫描偏移表（可选，按加工速度插值，填了就覆盖上面的固定偏移）</span>
+              {s.scanOffsetTable.map((row, index) => (
+                <div className="fill-offset-row" key={index}>
+                  <input
+                    type="number"
+                    min={1}
+                    step={100}
+                    placeholder="速度 mm/min"
+                    aria-label={`第 ${index + 1} 行速度`}
+                    value={row.speed}
+                    onChange={(e) => setRow(index, "speed", e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min={-2}
+                    max={2}
+                    step={0.01}
+                    placeholder="偏移 mm"
+                    aria-label={`第 ${index + 1} 行偏移`}
+                    value={row.offset}
+                    onChange={(e) => setRow(index, "offset", e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => set("scanOffsetTable", s.scanOffsetTable.filter((_, i) => i !== index))}
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+              {s.scanOffsetTable.length < MAX_SCAN_OFFSET_ROWS ? (
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  id={id("fill-offset-add")}
+                  onClick={() => set("scanOffsetTable", [...s.scanOffsetTable, { speed: "", offset: "" }])}
+                >
+                  添加一行
+                </button>
+              ) : null}
+            </div>
             <label className="checkbox-row">
               <input
                 id={id("fill-bidirectional")}

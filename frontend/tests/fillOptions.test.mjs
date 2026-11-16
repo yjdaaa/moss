@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_FILL_SETTINGS,
+  cutOptionsPayload,
+  cutResultNote,
+  offsetTablePayload,
   FILL_SETTINGS_KEY,
   fillResultNote,
   fillSettingsPayload,
@@ -129,4 +132,91 @@ test("工时说明写明按多大加速度估算、来自哪里", () => {
   );
   assert.equal(timeEstimateNote({ estimated_seconds: 3 }), "");
   assert.equal(timeEstimateNote(null), "");
+});
+
+test("按速度的扫描偏移表：排序、去掉空行、校验，填了才提交并覆盖固定偏移", () => {
+  const rows = [{ speed: "3000", offset: "0.3" }, { speed: "", offset: "" }, { speed: "1000", offset: "0.1" }];
+  assert.deepEqual(offsetTablePayload(rows), { value: [[1000, 0.1], [3000, 0.3]] });
+  assert.deepEqual(offsetTablePayload([]), { value: null });
+  const payload = fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, scanOffsetTable: rows });
+  assert.deepEqual(payload.fill_options.scan_offset_table, [[1000, 0.1], [3000, 0.3]]);
+  assert.equal(fillSettingsPayload(DEFAULT_FILL_SETTINGS).fill_options.scan_offset_table, undefined, "空表不提交");
+  assert.match(offsetTablePayload([{ speed: "1000", offset: "5" }]).error, /偏移/);
+  assert.match(offsetTablePayload([{ speed: "", offset: "0.1" }]).error, /速度/);
+  assert.match(offsetTablePayload([{ speed: "1000", offset: "0.1" }, { speed: "1000", offset: "0.2" }]).error, /重复/);
+  assert.match(fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, scanOffsetTable: [{ speed: "x", offset: "0" }] }).error, /速度/);
+  // 存储往返、坏数据收成空表，最多 32 行
+  assert.deepEqual(normalizeFillSettings({ scanOffsetTable: "bad" }).scanOffsetTable, []);
+  assert.equal(normalizeFillSettings({ scanOffsetTable: Array.from({ length: 40 }, () => ({ speed: "1", offset: "0" })) }).scanOffsetTable.length, 32);
+  // 改表让填充预览过期，摘要提示按速度表
+  const withTable = { ...DEFAULT_FILL_SETTINGS, scanOffsetTable: rows };
+  assert.notEqual(fillSettingsSignature(DEFAULT_FILL_SETTINGS), fillSettingsSignature(withTable));
+  assert.match(fillSettingsSummary(withTable), /偏移按速度表/);
+  assert.equal(
+    fillResultNote({ grouping: "all", bidirectional: true, overscan_mm: 0, scan_offset_mm: 0.2, scan_offset_source: "table" }),
+    "一次填完，双向，无过扫描，扫描偏移 0.200 mm（按速度表）",
+  );
+});
+
+test("切割设置：默认全关，外框切割才提交 cut_options，桥位按个数或间距二选一", () => {
+  assert.deepEqual(cutOptionsPayload(DEFAULT_FILL_SETTINGS), {
+    value: { kerf_mm: 0, lead_in_mm: 0, lead_out_mm: 0, lead_angle_deg: 90, overcut_mm: 0 },
+  });
+  // 描边 / 雕刻不带切割设置
+  assert.equal(fillSettingsPayload(DEFAULT_FILL_SETTINGS, { withFill: false }).cut_options, undefined);
+  const cut = fillSettingsPayload(
+    { ...DEFAULT_FILL_SETTINGS, kerfMm: "0.1", tabMode: "count", tabCount: "3", tabWidthMm: "0.4", leadInMm: "1", overcutMm: "0.5" },
+    { withFill: false, withCut: true },
+  );
+  assert.deepEqual(cut, {
+    path_options: { prefer_corners: true, remove_overlaps: true },
+    cut_options: {
+      kerf_mm: 0.1, lead_in_mm: 1, lead_out_mm: 0, lead_angle_deg: 90, overcut_mm: 0.5,
+      tab_count: 3, tab_width_mm: 0.4, tabs_skip_inner: true,
+    },
+  });
+  const spaced = cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, tabMode: "spacing", tabSpacingMm: "40", tabsSkipInner: false });
+  assert.equal(spaced.value.tab_spacing_mm, 40);
+  assert.equal(spaced.value.tab_count, undefined);
+  assert.equal(spaced.value.tabs_skip_inner, false);
+
+  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, kerfMm: "3" }).error, /切缝/);
+  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, tabMode: "count", tabCount: "2.5" }).error, /整数/);
+  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, tabMode: "spacing", tabSpacingMm: "0.5" }).error, /间距/);
+  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, leadAngleDeg: "0" }).error, /角度/);
+  assert.match(fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, overcutMm: "20" }, { withFill: false, withCut: true }).error, /过切/);
+  assert.equal(normalizeFillSettings({ tabMode: "zigzag" }).tabMode, "off");
+
+  // 切割设置只让外框切割的预览过期
+  const changed = { ...DEFAULT_FILL_SETTINGS, kerfMm: "0.1" };
+  assert.equal(
+    fillSettingsSignature(DEFAULT_FILL_SETTINGS, { withFill: false }),
+    fillSettingsSignature(changed, { withFill: false }),
+  );
+  assert.notEqual(
+    fillSettingsSignature(DEFAULT_FILL_SETTINGS, { withFill: false, withCut: true }),
+    fillSettingsSignature(changed, { withFill: false, withCut: true }),
+  );
+  assert.equal(fillSettingsSignature(DEFAULT_FILL_SETTINGS), fillSettingsSignature(changed), "填充预览不看切割设置");
+  assert.equal(
+    fillSettingsSummary({ ...changed, tabMode: "count", tabCount: "4", leadInMm: "1" }, { withFill: false, withCut: true }),
+    "切缝外扩 0.1 mm · 桥位 4 个 · 引入 1 mm",
+  );
+});
+
+test("切割结果说明：回显的补偿、桥位、引线与后端提示", () => {
+  assert.equal(cutResultNote(null), "");
+  assert.equal(cutResultNote({ active: false }), "");
+  assert.equal(
+    cutResultNote({
+      active: true, kerf_mm: -0.1,
+      report: { tabs: 4, lead_ins: 2, lead_outs: 0, overcut_mm: 1 },
+      note: "1 条引线会碰到别的轮廓或落到零件一侧，已省略",
+    }),
+    "切缝内缩 0.10 mm，桥位 4 个，引线 2 条，过切共 1.0 mm，1 条引线会碰到别的轮廓或落到零件一侧，已省略",
+  );
+  assert.equal(
+    fillResultNote(null, 1, { active: true, kerf_mm: 0.1, report: {} }),
+    "切缝外扩 0.10 mm；去掉 1 条重复线",
+  );
 });

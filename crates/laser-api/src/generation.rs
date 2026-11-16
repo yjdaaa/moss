@@ -111,6 +111,11 @@ pub(crate) fn generate_text_artifacts(
     );
     // 填充扫描设置（2026-11-16 对齐 LightBurn）：过扫描默认按速度自动算
     let fill = parse_fill_options(object, params.feed, motion.overscan_accel())?;
+    // 切割质量（2026-11-16 对齐 LightBurn）：只用于外框切割，默认全关
+    let cut = parse_cut_options(object)?;
+    if !is_cut && cut.is_active() {
+        return Err("cut_options（切缝补偿、桥位、引线、过切）只用于外框切割（laser_mode=cut），雕刻任务请去掉".into());
+    }
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
@@ -139,6 +144,7 @@ pub(crate) fn generate_text_artifacts(
             inside_first: is_cut,
             ..parse_path_options(object)?
         },
+        cut,
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
     // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
@@ -209,7 +215,8 @@ pub(crate) fn generate_text_artifacts(
         "frame_hull_mm": frame_hull_json(&gcode),
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
-        "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, fill.auto)),
+        "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, &fill)),
+        "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref())),
         "removed_duplicates": artifacts.removed_duplicates,
         "time_estimate": time_estimate_json(&estimate, &motion)
     }).as_object().cloned().unwrap_or_default())
@@ -241,6 +248,15 @@ pub(crate) fn generate_draw_artifacts(
         return Err("thickness_mm 必须是大于 0 的数字".into());
     }
 
+    // 画板只生成雕刻任务（laser_mode 恒为 engrave），没有切割设置（2026-11-16）
+    if !matches!(
+        object.get("cut_options"),
+        None | Some(serde_json::Value::Null)
+    ) {
+        return Err(
+            "画板生成的是雕刻任务，不支持 cut_options（切割设置只用于工作台文字的外框切割）".into(),
+        );
+    }
     let requested_mode = object
         .get("mode")
         .and_then(|v| v.as_str())
@@ -442,7 +458,7 @@ pub(crate) fn generate_draw_artifacts(
                         spacing: fill_spacing,
                         ..fill.options
                     },
-                    fill.auto,
+                    &fill,
                 )
             }),
             planned.removed_duplicates,
@@ -840,16 +856,19 @@ pub(crate) fn frame_hull_json(gcode: &str) -> serde_json::Value {
     })
 }
 
-/// 请求里的 `fill_options` 解析结果；`auto` 表示过扫描按速度与加速度自动算。
+/// 请求里的 `fill_options` 解析结果；`auto` 表示过扫描按速度与加速度自动算；
+/// `offset_table` 为排好序的“速度 → 偏移”表（给了表时 `options.scan_offset_mm` 是在加工速度处插值的结果）。
 struct ParsedFill {
     options: laser_core::vector_plan::FillOptions,
     auto: bool,
+    offset_table: Option<Vec<(f64, f64)>>,
 }
 
 /// 解析 `fill_options`（2026-11-16，对齐 LightBurn Fill 模式；全部可省略）：
 /// `grouping`（all 默认 / individual）、`angle_deg`（0 横扫）、`cross_hatch`、`bidirectional`（默认 true）、
 /// `overscan_mm`（省略或 "auto" 按 v²/2a 自动；0 关闭；上限 20）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、
-/// `scan_offset_mm`（双向扫描错位补偿，±2）。线距与填充规则由调用方按刻法填。
+/// `scan_offset_mm`（双向扫描错位补偿，±2）、`scan_offset_table`（`[[速度 mm/min, 偏移 mm], …]`，≤32 行，
+/// 按加工速度线性插值、两端取端点值，给了就覆盖 `scan_offset_mm`）。线距与填充规则由调用方按刻法填。
 fn parse_fill_options(
     object: &serde_json::Map<String, serde_json::Value>,
     feed_mm_per_min: f64,
@@ -907,10 +926,16 @@ fn parse_fill_options(
     if !(-360.0..=360.0).contains(&angle) {
         return Err("fill_options.angle_deg 须在 -360 ~ 360 度".into());
     }
-    let offset = number("scan_offset_mm")?.unwrap_or(0.0);
-    if offset.abs() > 2.0 {
+    let fixed_offset = number("scan_offset_mm")?.unwrap_or(0.0);
+    if fixed_offset.abs() > 2.0 {
         return Err("fill_options.scan_offset_mm 须在 -2 ~ 2 mm".into());
     }
+    let offset_table = parse_scan_offset_table(fill.get("scan_offset_table"))?;
+    let offset = match &offset_table {
+        Some(table) => laser_core::vector_plan::scan_offset_at(table, feed_mm_per_min)
+            .map_err(|e| format!("fill_options.scan_offset_table：{e}"))?,
+        None => fixed_offset,
+    };
     Ok(ParsedFill {
         options: FillOptions {
             grouping: FillGrouping::parse(fill.get("grouping").and_then(|v| v.as_str()))?,
@@ -922,6 +947,188 @@ fn parse_fill_options(
             ..FillOptions::new(0.1, FillRule::NonZero)
         },
         auto,
+        offset_table,
+    })
+}
+
+/// `fill_options.scan_offset_table`：`[[速度 mm/min, 偏移 mm], …]`，省略、null 或空数组表示不用表。
+fn parse_scan_offset_table(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<Vec<(f64, f64)>>, String> {
+    use laser_core::vector_plan::{MAX_SCAN_OFFSET_MM, MAX_SCAN_OFFSET_ROWS};
+    let rows = match value {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(rows)) if rows.is_empty() => return Ok(None),
+        Some(serde_json::Value::Array(rows)) => rows,
+        Some(_) => {
+            return Err("fill_options.scan_offset_table 必须是 [[速度, 偏移], …] 数组".into());
+        }
+    };
+    if rows.len() > MAX_SCAN_OFFSET_ROWS {
+        return Err(format!(
+            "fill_options.scan_offset_table 最多 {MAX_SCAN_OFFSET_ROWS} 行"
+        ));
+    }
+    let mut table = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let pair = row
+            .as_array()
+            .filter(|pair| pair.len() == 2)
+            .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)));
+        match pair {
+            Some((speed, offset))
+                if speed.is_finite()
+                    && speed > 0.0
+                    && speed <= 1_000_000.0
+                    && offset.is_finite()
+                    && offset.abs() <= MAX_SCAN_OFFSET_MM =>
+            {
+                table.push((speed, offset));
+            }
+            _ => {
+                return Err(format!(
+                    "fill_options.scan_offset_table 第 {} 行须为 [速度 mm/min（大于 0）, 偏移 mm（-2 ~ 2）]",
+                    index + 1
+                ));
+            }
+        }
+    }
+    table.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if table.windows(2).any(|w| w[1].0 == w[0].0) {
+        return Err("fill_options.scan_offset_table 里有重复的速度".into());
+    }
+    Ok(Some(table))
+}
+
+/// 解析 `cut_options`（2026-11-16，对齐 LightBurn Line 模式 / Cut 设置；全部可省略，默认全关）：
+/// `kerf_mm`（切缝补偿，正值往外、负值往里，±2）、`tab_count`（每个闭合图形几个桥位，0 ~ 100）或
+/// `tab_spacing_mm`（每隔多少 mm 一个，1 ~ 1000，二选一）、`tab_width_mm`（默认 0.5，0.05 ~ 10）、
+/// `tabs_skip_inner`（默认 true，内部图形不加桥位）、`lead_in_mm` / `lead_out_mm`（0 ~ 10）、
+/// `lead_angle_deg`（1 ~ 90，默认 90 垂直）、`overcut_mm`（0 ~ 10）。
+fn parse_cut_options(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<laser_core::cut::CutOptions, String> {
+    use laser_core::cut::{
+        CutOptions, MAX_KERF_MM, MAX_LEAD_MM, MAX_OVERCUT_MM, MAX_TAB_COUNT, MAX_TAB_SPACING_MM,
+        MAX_TAB_WIDTH_MM, MIN_TAB_SPACING_MM, MIN_TAB_WIDTH_MM, TabMode,
+    };
+    let empty = serde_json::Map::new();
+    let cut = match object.get("cut_options") {
+        None | Some(serde_json::Value::Null) => &empty,
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("cut_options 必须是对象".into()),
+    };
+    let number = |key: &str, lo: f64, hi: f64| -> Result<Option<f64>, String> {
+        match cut.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|t| t.trim().parse().ok()))
+                .filter(|v: &f64| v.is_finite() && (lo..=hi).contains(v))
+                .map(Some)
+                .ok_or_else(|| format!("cut_options.{key} 须在 {lo} ~ {hi} 之间")),
+        }
+    };
+    let defaults = CutOptions::default();
+    let tab_count = number("tab_count", 0.0, f64::from(MAX_TAB_COUNT))?;
+    if tab_count.is_some_and(|n| n.fract() != 0.0) {
+        return Err("cut_options.tab_count 必须是整数".into());
+    }
+    let tab_spacing = number("tab_spacing_mm", 0.0, MAX_TAB_SPACING_MM)?;
+    let tabs = match (
+        tab_count.filter(|n| *n > 0.0),
+        tab_spacing.filter(|s| *s > 0.0),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err("cut_options.tab_count 与 tab_spacing_mm 只能填一个".into());
+        }
+        (Some(n), None) => TabMode::Count(n as u32),
+        (None, Some(spacing)) if spacing < MIN_TAB_SPACING_MM => {
+            return Err(format!(
+                "cut_options.tab_spacing_mm 须在 {MIN_TAB_SPACING_MM} ~ {MAX_TAB_SPACING_MM} 之间"
+            ));
+        }
+        (None, Some(spacing)) => TabMode::Spacing(spacing),
+        (None, None) => TabMode::Off,
+    };
+    let skip_inner = match cut.get("tabs_skip_inner") {
+        None | Some(serde_json::Value::Null) => defaults.tabs_skip_inner,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("cut_options.tabs_skip_inner 必须是 true / false".into()),
+    };
+    let options = CutOptions {
+        kerf_mm: number("kerf_mm", -MAX_KERF_MM, MAX_KERF_MM)?.unwrap_or(0.0),
+        tabs,
+        tab_width_mm: number("tab_width_mm", MIN_TAB_WIDTH_MM, MAX_TAB_WIDTH_MM)?
+            .unwrap_or(defaults.tab_width_mm),
+        tabs_skip_inner: skip_inner,
+        lead_in_mm: number("lead_in_mm", 0.0, MAX_LEAD_MM)?.unwrap_or(0.0),
+        lead_out_mm: number("lead_out_mm", 0.0, MAX_LEAD_MM)?.unwrap_or(0.0),
+        lead_angle_deg: number("lead_angle_deg", 1.0, 90.0)?.unwrap_or(defaults.lead_angle_deg),
+        overcut_mm: number("overcut_mm", 0.0, MAX_OVERCUT_MM)?.unwrap_or(0.0),
+    };
+    options.validate().map_err(|e| e.to_string())?;
+    Ok(options)
+}
+
+/// 结果里回显实际使用的切割设置与统计（`note` 提示图形消失 / 相连、放不下桥位、省略的引线）。
+fn cut_options_json(
+    options: &laser_core::cut::CutOptions,
+    report: Option<&laser_core::cut::CutReport>,
+) -> serde_json::Value {
+    use laser_core::cut::TabMode;
+    let (tab_mode, tab_count, tab_spacing) = match options.tabs {
+        TabMode::Off => ("off", None, None),
+        TabMode::Count(n) => ("count", Some(n), None),
+        TabMode::Spacing(s) => ("spacing", None, Some(s)),
+    };
+    let report = report.cloned().unwrap_or_default();
+    let mut notes = Vec::new();
+    if let Some((before, after)) = report.kerf_contours
+        && after != before
+    {
+        notes.push(format!(
+            "切缝补偿后轮廓数从 {before} 变为 {after}（有图形消失或相连），请检查预览"
+        ));
+    }
+    if report.contours_without_tabs > 0 {
+        notes.push(format!(
+            "{} 个图形太小，放不下桥位",
+            report.contours_without_tabs
+        ));
+    }
+    if report.leads_skipped > 0 {
+        notes.push(format!(
+            "{} 条引线会碰到别的轮廓或落到零件一侧，已省略",
+            report.leads_skipped
+        ));
+    }
+    serde_json::json!({
+        "active": options.is_active(),
+        "kerf_mm": options.kerf_mm,
+        "tab_mode": tab_mode,
+        "tab_count": tab_count,
+        "tab_spacing_mm": tab_spacing,
+        "tab_width_mm": options.tab_width_mm,
+        "tabs_skip_inner": options.tabs_skip_inner,
+        "lead_in_mm": options.lead_in_mm,
+        "lead_out_mm": options.lead_out_mm,
+        "lead_angle_deg": options.lead_angle_deg,
+        "overcut_mm": options.overcut_mm,
+        "report": {
+            "contours": report.contours,
+            "kerf_contours_before": report.kerf_contours.map(|(before, _)| before),
+            "kerf_contours_after": report.kerf_contours.map(|(_, after)| after),
+            "tabs": report.tabs,
+            "tab_gap_mm": report.tab_gap_mm,
+            "contours_without_tabs": report.contours_without_tabs,
+            "lead_ins": report.lead_ins,
+            "lead_outs": report.lead_outs,
+            "leads_skipped": report.leads_skipped,
+            "overcut_mm": report.overcut_mm,
+        },
+        "note": notes.join("；"),
     })
 }
 
@@ -953,8 +1160,14 @@ fn parse_path_options(
 /// 结果里回显实际使用的填充设置。
 fn fill_options_json(
     options: &laser_core::vector_plan::FillOptions,
-    overscan_auto: bool,
+    parsed: &ParsedFill,
 ) -> serde_json::Value {
+    let table = parsed.offset_table.as_ref().map(|rows| {
+        rows.iter()
+            .map(|&(speed, offset)| [speed, offset])
+            .collect::<Vec<_>>()
+    });
+    let overscan_auto = parsed.auto;
     serde_json::json!({
         "spacing_mm": options.spacing,
         "grouping": options.grouping.as_str(),
@@ -964,6 +1177,8 @@ fn fill_options_json(
         "overscan_mm": options.overscan_mm,
         "overscan_auto": overscan_auto,
         "scan_offset_mm": options.scan_offset_mm,
+        "scan_offset_source": if table.is_some() { "table" } else { "fixed" },
+        "scan_offset_table": table,
     })
 }
 

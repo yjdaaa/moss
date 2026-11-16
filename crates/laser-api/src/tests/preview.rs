@@ -1016,6 +1016,212 @@ fn text_fill_options_follow_lightburn_and_are_echoed() {
     }
 }
 
+/// 2026-11-16：外框切割对齐 LightBurn Cut 设置：`cut_options`（切缝补偿、桥位、引线、过切）默认全关，
+/// 生效时回显实际设置与统计；雕刻任务与画板拒绝 `cut_options`，非法值返回中文错误。
+#[test]
+fn text_cut_options_follow_lightburn_and_are_echoed() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let base = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"text": "AB", "font_path": font, "material": "椴木",
+            "thickness_mm": 3, "font_size_mm": 10, "laser_mode": "cut", "engraving_mode": "cut"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/text-task/generate", &body)
+    };
+    let gcode_of = |response: &serde_json::Value| {
+        std::fs::read_to_string(
+            temp.path().join(
+                response["result"]["artifacts"]["gcode_file"]
+                    .as_str()
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+    };
+    let coasts = |gcode: &str| {
+        gcode
+            .lines()
+            .filter(|l| l.starts_with("G1 ") && l.contains(" S0"))
+            .count()
+    };
+
+    // 默认全关：回显 active=false，刀路里没有关光滑行
+    let plain = base(serde_json::json!({}));
+    assert_eq!(plain["success"], true, "{plain}");
+    let echo = &plain["result"]["artifacts"]["cut_options"];
+    assert_eq!(echo["active"], false, "{echo}");
+    assert_eq!(echo["kerf_mm"], 0.0);
+    assert_eq!(echo["tab_mode"], "off");
+    assert_eq!(coasts(&gcode_of(&plain)), 0);
+    let plain_again = base(serde_json::json!({"cut_options": {}}));
+    assert_eq!(
+        gcode_of(&plain),
+        gcode_of(&plain_again),
+        "空 cut_options 与不传完全相同"
+    );
+
+    // 切缝补偿 + 桥位 + 引入线 + 过切
+    let tuned = base(serde_json::json!({"cut_options": {
+        "kerf_mm": 0.1, "tab_count": 2, "tab_width_mm": 0.4,
+        "lead_in_mm": 1, "lead_angle_deg": 90, "overcut_mm": 0.5
+    }}));
+    assert_eq!(tuned["success"], true, "{tuned}");
+    let echo = &tuned["result"]["artifacts"]["cut_options"];
+    assert_eq!(echo["active"], true, "{echo}");
+    assert_eq!(echo["kerf_mm"], 0.1);
+    assert_eq!(echo["tab_mode"], "count");
+    assert_eq!(echo["tab_count"], 2);
+    assert_eq!(echo["tabs_skip_inner"], true);
+    let report = &echo["report"];
+    assert!(
+        report["kerf_contours_after"].as_u64().unwrap() >= 2,
+        "{report}"
+    );
+    // 只有外框加桥位（A、B 各一个外框，内孔跳过）
+    assert_eq!(report["tabs"], 4, "{report}");
+    assert!(report["lead_ins"].as_u64().unwrap() >= 1, "{report}");
+    assert!(report["overcut_mm"].as_f64().unwrap() > 0.0);
+    assert!(coasts(&gcode_of(&tuned)) >= 4, "桥位是 G1 S0 关光滑行");
+
+    // 按间距放桥位、不跳过内部图形
+    let spaced = base(serde_json::json!({"cut_options": {
+        "tab_spacing_mm": 20, "tabs_skip_inner": false
+    }}));
+    assert_eq!(spaced["success"], true, "{spaced}");
+    let echo = &spaced["result"]["artifacts"]["cut_options"];
+    assert_eq!(echo["tab_mode"], "spacing");
+    assert_eq!(echo["tab_spacing_mm"], 20.0);
+    // 每个轮廓（含内孔）至少一个
+    assert!(
+        echo["report"]["tabs"].as_u64().unwrap() >= echo["report"]["contours"].as_u64().unwrap(),
+        "{echo}"
+    );
+
+    // 雕刻任务（非切割）不接受切割设置；切割但没有设置时照常
+    let engrave = base(
+        serde_json::json!({"laser_mode": "engrave", "engraving_mode": "outline",
+        "cut_options": {"kerf_mm": 0.1}}),
+    );
+    assert_eq!(engrave["success"], false, "{engrave}");
+    assert!(
+        engrave["error"].to_string().contains("外框切割")
+            || engrave.to_string().contains("外框切割"),
+        "{engrave}"
+    );
+    let engrave_plain =
+        base(serde_json::json!({"laser_mode": "engrave", "engraving_mode": "outline"}));
+    assert!(engrave_plain["result"]["artifacts"]["cut_options"].is_null());
+
+    for bad in [
+        serde_json::json!({"cut_options": "tight"}),
+        serde_json::json!({"cut_options": {"kerf_mm": 3}}),
+        serde_json::json!({"cut_options": {"kerf_mm": "abc"}}),
+        serde_json::json!({"cut_options": {"tab_count": 2.5}}),
+        serde_json::json!({"cut_options": {"tab_count": 200}}),
+        serde_json::json!({"cut_options": {"tab_count": 2, "tab_spacing_mm": 10}}),
+        serde_json::json!({"cut_options": {"tab_spacing_mm": 0.5}}),
+        serde_json::json!({"cut_options": {"tab_count": 2, "tab_width_mm": 20}}),
+        serde_json::json!({"cut_options": {"tabs_skip_inner": "yes"}}),
+        serde_json::json!({"cut_options": {"lead_in_mm": 11}}),
+        serde_json::json!({"cut_options": {"lead_in_mm": 1, "lead_angle_deg": 0}}),
+        serde_json::json!({"cut_options": {"overcut_mm": -1}}),
+        // 内缩 2 mm 后 3 mm 字的笔画全部消失
+        serde_json::json!({"font_size_mm": 3, "cut_options": {"kerf_mm": -2}}),
+    ] {
+        let response = base(bad.clone());
+        assert_eq!(response["success"], false, "{bad} → {response}");
+    }
+}
+
+/// 2026-11-16：画板只生成雕刻任务，不接受切割设置。
+#[test]
+fn draw_rejects_cut_options() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let body = serde_json::json!({"image_data_url": draw_test_png(), "material": "椴木",
+        "thickness_mm": 3.0, "mode": "raster", "cut_options": {"kerf_mm": 0.1}});
+    let response = post_json(&service, "/api/draw/preview", &body);
+    assert_eq!(response["success"], false, "{response}");
+    assert!(response.to_string().contains("cut_options"), "{response}");
+}
+
+/// 2026-11-16：双向扫描偏移按“速度 → 偏移”表（LightBurn Scanning Offset Adjustment）在加工速度处插值。
+#[test]
+fn scan_offset_table_is_interpolated_at_the_job_speed_and_echoed() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let base = |fill: serde_json::Value| {
+        let body = serde_json::json!({"text": "AB", "font_path": font, "material": "椴木",
+            "thickness_mm": 3, "font_size_mm": 10, "text_fill": "fill",
+            "manual_params": {"feed_rate": 2000}, "fill_options": fill});
+        post_json(&service, "/api/text-task/generate", &body)
+    };
+    // 乱序给表：排好序回显，2000 mm/min 处插值 0.1 + (0.3 − 0.1) × 0.5 = 0.2，覆盖固定偏移
+    let table = base(serde_json::json!({"scan_offset_mm": 0.05,
+        "scan_offset_table": [[3000, 0.3], [1000, 0.1]]}));
+    assert_eq!(table["success"], true, "{table}");
+    let fill = &table["result"]["artifacts"]["fill_options"];
+    assert!(
+        (fill["scan_offset_mm"].as_f64().unwrap() - 0.2).abs() < 1e-9,
+        "{fill}"
+    );
+    assert_eq!(fill["scan_offset_source"], "table");
+    assert_eq!(
+        fill["scan_offset_table"],
+        serde_json::json!([[1000.0, 0.1], [3000.0, 0.3]])
+    );
+    // 速度超出表的范围取端点值
+    let clamped = base(serde_json::json!({"scan_offset_table": [[500, 0.02], [1500, 0.08]]}));
+    assert_eq!(
+        clamped["result"]["artifacts"]["fill_options"]["scan_offset_mm"],
+        0.08
+    );
+    // 不给表：固定偏移
+    let fixed = base(serde_json::json!({"scan_offset_mm": 0.05}));
+    let fill = &fixed["result"]["artifacts"]["fill_options"];
+    assert_eq!(fill["scan_offset_source"], "fixed");
+    assert_eq!(fill["scan_offset_mm"], 0.05);
+    assert!(fill["scan_offset_table"].is_null());
+
+    let mut too_many = Vec::new();
+    for i in 0..33 {
+        too_many.push(serde_json::json!([1000 + i * 10, 0.1]));
+    }
+    for bad in [
+        serde_json::json!({"scan_offset_table": "fast"}),
+        serde_json::json!({"scan_offset_table": [[1000, 3]]}),
+        serde_json::json!({"scan_offset_table": [[0, 0.1]]}),
+        serde_json::json!({"scan_offset_table": [[1000]]}),
+        serde_json::json!({"scan_offset_table": [[1000, 0.1], [1000, 0.2]]}),
+        serde_json::json!({"scan_offset_table": too_many}),
+    ] {
+        let response = base(bad.clone());
+        assert_eq!(response["success"], false, "{bad} → {response}");
+    }
+}
+
 /// 2026-11-16：工时按机器加速度估算（`machine_motion` 与握手 `machine_limits` 同键名），
 /// 自动过扫描也跟着机器加速度走。
 #[test]

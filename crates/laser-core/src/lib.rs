@@ -1,3 +1,4 @@
+pub mod cut;
 pub mod engine;
 pub mod fill;
 pub mod font;

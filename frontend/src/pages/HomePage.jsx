@@ -133,6 +133,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     writeFillSettings(next);
   };
   const textUsesFill = resolveTextStyle(textStyle).textFill !== "outline";
+  // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
+  const textIsCut = resolveTextStyle(textStyle).laserMode === "cut";
   // 握手读到的机器加速度 / 最大速度：工时估算与自动过扫描用（2026-11-16）
   const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
@@ -198,7 +200,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     textStyle,
     textOrigin,
     // 自动过扫描随机器加速度变，读到新的加速度后填充文字的旧预览也算过期
-    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill })
+    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill, withCut: textIsCut })
       + (textUsesFill ? JSON.stringify(motionPayload) : ""),
     uploadedImagePath,
     imageWidthMm,
@@ -593,9 +595,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           return;
         }
         const spec = resolveTextStyle(textStyle);
-        const fillPayload = fillSettingsPayload(fillSettings, { withFill: spec.textFill !== "outline" });
+        const fillPayload = fillSettingsPayload(fillSettings, {
+          withFill: spec.textFill !== "outline",
+          withCut: spec.laserMode === "cut",
+        });
         if (fillPayload.error) {
-          showAlert(fillPayload.error, { title: "填充设置不对", tone: "warning" });
+          showAlert(fillPayload.error, { title: spec.laserMode === "cut" ? "切割或走刀设置不对" : "填充设置不对", tone: "warning" });
           setBusy(false);
           return;
         }
@@ -707,7 +712,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         }
         setTimeEstimate(artifacts.time_estimate || null);
         setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
-        setFillNote(fillResultNote(artifacts.fill_options, artifacts.removed_duplicates));
+        setFillNote(fillResultNote(artifacts.fill_options, artifacts.removed_duplicates, artifacts.cut_options));
         if (artifacts.width_mm && artifacts.height_mm) {
           // 2026-11-06：文字默认以激光头对准中心为起点、图片以左下角为起点，开刻前提示放哪
           setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
@@ -1343,6 +1348,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                   settings={fillSettings}
                   onChange={updateFillSettings}
                   withFill={textUsesFill}
+                  withCut={textIsCut}
                 />
               </div>
             )}

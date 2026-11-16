@@ -445,3 +445,8 @@ button.conn-pill:hover {
 .registration-panel .registration-point { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .registration-panel .registration-jog select { width: auto; }
 .registration-panel .registration-result { margin: 0; padding-left: 18px; }
+/* 2026-11-16 切割设置分节与按速度的扫描偏移表 */
+.fill-options-body .fill-options-section { font-size: 11px; font-weight: 600; color: var(--ob-ink-2); }
+.fill-offset-table { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--ob-ink-2); }
+.fill-offset-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.fill-offset-table > button { align-self: flex-start; }

@@ -9,7 +9,9 @@
 //!     出光结束后才减速，避免线头线尾烧深（GRBL / FluidNC 不会自动做，DSP 控制器才在硬件里做）；
 //!   - 分组 [`FillGrouping`]：`AllAtOnce`（默认，同 LightBurn“一次填完所有形状”）每行横穿所有图形，
 //!     图形之间关光匀速滑过；`Individually`（同“逐个形状填充”）按区块一块块扫完，少走空白；
-//!   - 双向扫描偏移 `scan_offset_mm`：双向时来回两行出光错位的补偿（每行逆着自己的行进方向挪一半）。
+//!   - 双向扫描偏移 `scan_offset_mm`：双向时来回两行出光错位的补偿（每行逆着自己的行进方向挪一半）；
+//!     错位随速度变化时可给“速度 → 偏移”表 [`scan_offset_at`]（同 LightBurn Scanning Offset Adjustment，
+//!     按加工速度线性插值、两端取端点值）。
 //! - **路线规划** [`plan`] / [`plan_layers`]：把轮廓（闭合，可从任一顶点起刀）、开放线段（可正反走）与
 //!   扫描区块（可从首行或末行开始）排成空走最短的顺序：最近邻贪心 + 2-opt，最后按新顺序重挑起刀点。
 //!   选项对齐 LightBurn 优化设置：内部形状先切 `inside_first`（硬约束，不会被“减少空程”打乱）、
@@ -49,6 +51,40 @@ pub fn auto_overscan_mm(feed_mm_per_min: f64, acceleration_mm_s2: f64) -> f64 {
     let v = feed_mm_per_min.max(0.0) / 60.0;
     let d = v * v / (2.0 * accel);
     ((d * 10.0).ceil() / 10.0).clamp(MIN_AUTO_OVERSCAN_MM, MAX_OVERSCAN_MM)
+}
+
+/// 速度 → 偏移表最多几行。
+pub const MAX_SCAN_OFFSET_ROWS: usize = 32;
+/// 扫描偏移上限（mm）。
+pub const MAX_SCAN_OFFSET_MM: f64 = 2.0;
+
+/// 按“速度（mm/min）→ 双向扫描偏移（mm）”表在 `feed_mm_per_min` 处线性插值（2026-11-16，对齐 LightBurn
+/// Scanning Offset Adjustment）：速度须严格递增（1 ~ 32 行），偏移 ±2 mm；低于首行或高于末行取端点值。
+pub fn scan_offset_at(table: &[(f64, f64)], feed_mm_per_min: f64) -> Result<f64, SafetyError> {
+    if table.is_empty() || table.len() > MAX_SCAN_OFFSET_ROWS {
+        return Err(SafetyError("扫描偏移表须有 1 ~ 32 行"));
+    }
+    let valid_rows = table.iter().all(|&(speed, offset)| {
+        speed.is_finite() && speed > 0.0 && offset.is_finite() && offset.abs() <= MAX_SCAN_OFFSET_MM
+    });
+    if !valid_rows || table.windows(2).any(|w| w[1].0 <= w[0].0) {
+        return Err(SafetyError(
+            "扫描偏移表的速度须为正数且从小到大不重复，偏移须在 -2 ~ 2 mm",
+        ));
+    }
+    if !feed_mm_per_min.is_finite() {
+        return Err(SafetyError("加工速度无效"));
+    }
+    let (first, last) = (table[0], table[table.len() - 1]);
+    if feed_mm_per_min <= first.0 {
+        return Ok(first.1);
+    }
+    if feed_mm_per_min >= last.0 {
+        return Ok(last.1);
+    }
+    let k = table.partition_point(|row| row.0 <= feed_mm_per_min);
+    let ((s0, o0), (s1, o1)) = (table[k - 1], table[k]);
+    Ok(o0 + (o1 - o0) * (feed_mm_per_min - s0) / (s1 - s0))
 }
 
 /// 填充时怎么判断“在图形里面”。
@@ -624,7 +660,7 @@ impl Prepared {
     }
 }
 
-fn point_in_polygon(p: Point, polygon: &[Point]) -> bool {
+pub(crate) fn point_in_polygon(p: Point, polygon: &[Point]) -> bool {
     let mut inside = false;
     for pair in polygon.windows(2) {
         let (a, b) = (pair[0], pair[1]);
@@ -1170,6 +1206,25 @@ mod tests {
         }
         assert!(matches!(planned.steps[2], Step::Travel(_)));
         assert!(matches!(planned.steps[3], Step::Burn(_)));
+    }
+
+    #[test]
+    fn scan_offset_table_interpolates_at_the_job_speed() {
+        let table = [(1000.0, 0.05), (3000.0, 0.15), (6000.0, 0.3)];
+        assert!((scan_offset_at(&table, 2000.0).unwrap() - 0.1).abs() < 1e-12);
+        assert!((scan_offset_at(&table, 4500.0).unwrap() - 0.225).abs() < 1e-12);
+        assert_eq!(scan_offset_at(&table, 3000.0).unwrap(), 0.15);
+        // 两端取端点值
+        assert_eq!(scan_offset_at(&table, 500.0).unwrap(), 0.05);
+        assert_eq!(scan_offset_at(&table, 9000.0).unwrap(), 0.3);
+        assert_eq!(scan_offset_at(&[(1500.0, -0.1)], 99.0).unwrap(), -0.1);
+        // 无效表
+        assert!(scan_offset_at(&[], 1000.0).is_err());
+        assert!(scan_offset_at(&[(2000.0, 0.1), (1000.0, 0.2)], 1500.0).is_err());
+        assert!(scan_offset_at(&[(1000.0, 0.1), (1000.0, 0.2)], 1500.0).is_err());
+        assert!(scan_offset_at(&[(1000.0, 3.0)], 1500.0).is_err());
+        assert!(scan_offset_at(&[(0.0, 0.1)], 1500.0).is_err());
+        assert!(scan_offset_at(&vec![(1.0, 0.0); 33], 1.0).is_err());
     }
 
     #[test]

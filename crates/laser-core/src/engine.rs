@@ -9,8 +9,10 @@
 //! - 起点 [`TextOrigin`]：任务以开始时激光头所在位置为参照。`Center`（默认，用户决定）= 激光头对准
 //!   木牌 / 图案中心；`LowerLeft` = 对准木牌左下角（没给木牌时为文字左下角）。实现上只改开头的
 //!   `G92`（声明激光头在图案坐标中的位置），刀路本身不变；结束时激光头关光回到起点。
+//! - 切割质量 [`TextTaskSpec::cut`]（2026-11-16，对齐 LightBurn）：切缝补偿在规划前改轮廓，桥位、
+//!   引入 / 引出线、过切在规划（及其出光长度自检）之后改写闭合轮廓，见 [`crate::cut`]；默认全关。
 
-use crate::{font, gcode, vector_plan};
+use crate::{cut, font, gcode, vector_plan};
 use image::RgbaImage;
 use laser_contracts::geometry::{PathOptimizationStats, Paths};
 
@@ -105,6 +107,8 @@ pub struct TextTaskSpec<'a> {
     pub scan: vector_plan::FillOptions,
     /// 走刀顺序选项；切割时 `inside_first` 须为 true（外框先切断，里面的孔会移位）
     pub plan: vector_plan::PlanOptions,
+    /// 切割质量设置（切缝补偿、桥位、引线、过切），默认全关；只在切割时由调用方填写
+    pub cut: cut::CutOptions,
 }
 
 /// 排线填充的线距是实心填充的几倍（线条可见、更快）。
@@ -139,6 +143,8 @@ pub struct TextTaskArtifacts {
     pub fill_options: Option<vector_plan::FillOptions>,
     /// 去掉的重复轮廓条数
     pub removed_duplicates: usize,
+    /// 切割质量设置生效时的统计（全关时为 `None`）
+    pub cut_report: Option<cut::CutReport>,
 }
 
 pub struct TextTaskEngine;
@@ -229,6 +235,14 @@ impl TextTaskEngine {
         } else {
             (0.0, 0.0)
         };
+        // 切缝外扩与引线同样会越出笔画，各方向都要留出来
+        spec.cut.validate().map_err(|e| e.to_string())?;
+        let cut_reach = if spec.cut.is_active() {
+            spec.cut.extension_mm()
+        } else {
+            0.0
+        };
+        let (over_x, over_y) = (over_x.max(cut_reach), over_y.max(cut_reach));
         let margin_x = spec.margin_mm.max(over_x);
         let margin_y = spec.margin_mm.max(over_y);
         let avail_w = board_w.map(|b| b - 2.0 * margin_x);
@@ -298,11 +312,24 @@ impl TextTaskEngine {
         // 矢量规划（2026-11-16 用户决定：文字一律转矢量再规划路线；同日对齐 LightBurn：先扫描填充、再描轮廓）。
         // 笔画坐标 y 向下，激光头在 (start_x, height - start_y)；扫描角度按机器视角逆时针，y 向下时取反
         let head = (start_x, height - start_y);
-        let contours: Vec<vector_plan::Unit> = paths
-            .iter()
-            .cloned()
-            .map(vector_plan::Unit::Closed)
-            .collect();
+        // 切缝补偿：规划前把轮廓整体外扩 / 内缩（孔反向），规划自检的是补偿后的轮廓
+        let mut kerf_contours = None;
+        let contours: Vec<vector_plan::Unit> = if spec.cut.kerf_mm != 0.0 {
+            let offset =
+                cut::offset_contours(&paths, spec.cut.kerf_mm).map_err(|e| e.to_string())?;
+            kerf_contours = Some((offset.before, offset.after));
+            offset
+                .contours
+                .into_iter()
+                .map(vector_plan::Unit::Closed)
+                .collect()
+        } else {
+            paths
+                .iter()
+                .cloned()
+                .map(vector_plan::Unit::Closed)
+                .collect()
+        };
         let fill_options = fills.then(|| vector_plan::FillOptions {
             spacing: if spec.fill == TextFill::Fill {
                 spec.pixel_size_mm
@@ -326,8 +353,27 @@ impl TextTaskEngine {
                 vec![fill, contours]
             }
         };
-        let planned =
+        let mut planned =
             vector_plan::plan_layers(layers, head, &spec.plan).map_err(|e| e.to_string())?;
+        // 桥位、引线、过切：在规划（含出光长度自检）之后改写闭合轮廓，后处理另有自检
+        let cut_report = if spec.cut.is_active() {
+            let mut report = if spec.cut.needs_post_processing() {
+                let (steps, report) =
+                    cut::apply_cut_options(&planned.steps, &spec.cut).map_err(|e| e.to_string())?;
+                planned.paths = vector_plan::burn_paths(&steps);
+                planned.steps = steps;
+                report
+            } else {
+                cut::CutReport::default()
+            };
+            report.kerf_contours = kerf_contours;
+            if report.contours == 0 {
+                report.contours = kerf_contours.map_or(0, |(_, after)| after);
+            }
+            Some(report)
+        } else {
+            None
+        };
         let options = gcode::WriterOptions {
             width_mm: width.max(1e-3),
             height_mm: height.max(1e-3),
@@ -362,6 +408,7 @@ impl TextTaskEngine {
             frame,
             fill_options,
             removed_duplicates: planned.removed_duplicates,
+            cut_report,
         })
     }
 }
@@ -398,6 +445,7 @@ mod tests {
                 ..vector_plan::FillOptions::new(0.1, vector_plan::FillRule::NonZero)
             },
             plan: vector_plan::PlanOptions::default(),
+            cut: cut::CutOptions::default(),
         }
     }
 
@@ -614,6 +662,78 @@ mod tests {
                 .starts_with("nearest_neighbor")
         );
         assert!(job.gcode.contains(" S420"));
+    }
+
+    #[test]
+    fn cut_options_offset_tab_and_lead_the_text_contours() {
+        let cut_plan = vector_plan::PlanOptions {
+            inside_first: true,
+            ..vector_plan::PlanOptions::default()
+        };
+        let plain = TextTaskEngine::generate(&TextTaskSpec {
+            plan: cut_plan,
+            ..spec("A")
+        })
+        .unwrap();
+        assert!(plain.cut_report.is_none(), "默认全关，输出不变");
+        let kerf = TextTaskEngine::generate(&TextTaskSpec {
+            plan: cut_plan,
+            cut: cut::CutOptions {
+                kerf_mm: 0.2,
+                ..cut::CutOptions::default()
+            },
+            ..spec("A")
+        })
+        .unwrap();
+        let report = kerf.cut_report.clone().unwrap();
+        assert_eq!(report.kerf_contours, Some((2, 2)), "{report:?}");
+        // 外框往外 0.2 mm：刀路范围每边大 0.2
+        let (ep, ek) = (extents(&plain.gcode), extents(&kerf.gcode));
+        assert!(
+            ((ek.max_x - ek.min_x) - (ep.max_x - ep.min_x) - 0.4).abs() < 0.01,
+            "{ep:?} {ek:?}"
+        );
+        assert!(((ek.max_y - ek.min_y) - (ep.max_y - ep.min_y) - 0.4).abs() < 0.01);
+
+        let tabbed = TextTaskEngine::generate(&TextTaskSpec {
+            plan: cut_plan,
+            origin: TextOrigin::LowerLeft,
+            cut: cut::CutOptions {
+                tabs: cut::TabMode::Count(3),
+                tab_width_mm: 0.5,
+                lead_in_mm: 1.0,
+                overcut_mm: 0.5,
+                ..cut::CutOptions::default()
+            },
+            ..spec("A")
+        })
+        .unwrap();
+        let report = tabbed.cut_report.clone().unwrap();
+        assert_eq!(report.contours, 2);
+        assert_eq!(report.tabs, 3, "默认跳过内部图形（A 的内孔）：{report:?}");
+        assert!(
+            tabbed
+                .gcode
+                .lines()
+                .filter(|l| l.starts_with("G1 ") && l.contains(" S0"))
+                .count()
+                >= 3,
+            "桥位是 G1 S0"
+        );
+        // 左下角起点留出了引线的距离：刀路不往负方向越界
+        let e = extents(&tabbed.gcode);
+        assert!(e.min_x >= -1e-6 && e.min_y >= -1e-6, "{e:?}");
+
+        let too_small = TextTaskEngine::generate(&TextTaskSpec {
+            plan: cut_plan,
+            cut: cut::CutOptions {
+                kerf_mm: -2.0,
+                ..cut::CutOptions::default()
+            },
+            font_size_mm: 3.0,
+            ..spec("A")
+        });
+        assert!(too_small.is_err(), "全部内缩没了要报错");
     }
 
     #[test]
