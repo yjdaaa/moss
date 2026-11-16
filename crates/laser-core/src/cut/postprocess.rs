@@ -312,7 +312,6 @@ pub fn apply_cut_options(
     let before = burn_length(&burn_paths(steps));
     let after = burn_length(&burn_paths(&out));
     if (after - (before + added)).abs() > 1e-6 * (before + added).max(1.0) {
-        eprintln!("DEBUG before={before} after={after} added={added} out={out:?}");
         return Err(SafetyError(
             "切割后处理的出光长度与预期不符，拒绝生成 G-code",
         ));
