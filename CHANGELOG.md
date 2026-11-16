@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 新增质量预设“快速 / 均衡 / 精细”，语音工具开放材料测试参数，G-code 预览画出圆弧（2026-11-16）
+
+- **现象**：填充与图片的细项（分组、双向、交叉排线、转换方式等）一字排开，新手不知道怎么选；语音说“做一次线距测试”时工具清单里没有 `test_type` / 测试轴，说“用 Jarvis 刻这张照片”也没有引导；上传的 G-code 预览只连 G2/G3 的端点，圆被画成一个点或一条弦，尺寸也算错，且不写 G 的模态行、G91 / G20 都被忽略。
+- **根因与修复**：新增 `frontend/src/qualityPresets.js` 与 `QualityPresetBar`：填充预设快速 = 逐块 + 双向、均衡 = 一次填完 + 双向（原默认）、精细 = 单向 + 交叉排线；图片预设快速 = 自动 + 行间距 ×1.5、均衡 = 自动 + ×1（原默认）、精细 = Jarvis + ×0.8；预设只填字段，与预设不一致显示“自定义”，细项收进“高级设置”（`FillOptionsPanel` 标题、工作台 `#wb-image-advanced`）。后端图片预览新增可选 `line_interval_scale`（0.5～3，与 `pixel_size_mm` 二选一，给了才回显），默认请求与产物不变。`laser_mcp` 两种工具清单的 `run_calibration_grid_tool` 都列出 `test_type`、`x_axis` / `y_axis`、线距与遍数区间、`labels`（`calibration_test_props`），完整清单 `laser_workflow_tool` 另列 `image_mode` / `line_interval_scale`，精简清单说明、内置语音 `LASER_TOOL_GUIDE` 与小智提示词引导照片在工作台上传后选择；分发层原样转发。`laser_core::gcode::preview_toolpath` 取代上传 G-code 预览里的 `parse_moves` 循环：跟踪模态、G90/G91、G20/G21、G92，XY 平面 G2/G3（I/J、R 含负值、顺逆时针、整圆）按 0.02 mm 弦高拆折线，单弧 ≤360 段、整份 ≤400 000 点，超出或无效只画连线；两点对位的新刀路同样受益。只影响预览图与 `width_mm` / `height_mm`，发送门禁与范围复核不变；无破坏性变更。
+- **验证**：`laser-core` 新增 4 项（四分之一弧 I/J 与顺时针 270°、整圆 + 英制相对坐标 + 模态行、R 正负与无效半径、点数预算与超大半径 / G18 退回连线）；`laser-api` 新增 1 项（整圆 G-code 预览尺寸 20 mm 且圆心留空）并扩展图片模式用例（倍数生效与回显、越界与二选一 400）；`laser-mcp` 新增 1 项（枚举与 `TONE_MODES` / `TestAxis` 一致、精简清单不列图片参数、字段原样转发）；前端新增 `qualityPresets.test.mjs` 3 项并更新面板用例。未做实机出光与 E2E。
+- **关联**：`frontend/src/{qualityPresets,workbenchParams}.js`、`frontend/src/components/{QualityPresetBar,FillOptionsPanel}.jsx`、`frontend/src/pages/HomePage.jsx`、`crates/laser-core/src/gcode.rs`（`preview_toolpath`、`tessellate_arc`）、`crates/laser-api/src/generation.rs`（`line_interval_scale`）、`crates/laser-mcp/src/lib.rs`（`calibration_test_props`、`image_mode_schema`）、`tests/golden/mcp_tools_compact.json`、`crates/moss-voice-server/src/conversation.rs`（`LASER_TOOL_GUIDE`）。
 ### 补齐仓库静态规范检查、Git 提交钩子与统一验证脚本（2026-11-16）
 
 - **现象**：部分实现约束（如禁用原生 `window.confirm`/`alert`、`.ps1` 纯 ASCII、`[lints] workspace = true`、`test-memory-secret-store` 仅限 dev、禁止整文件 `#![allow(clippy::...)]`、提示词字数预算与提交信息格式）仅写在文档里靠人工记忆核对，且根工作区、`apps/moss-voice-local` 与前端缺乏统一的改动感知验证入口。

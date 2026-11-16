@@ -38,7 +38,9 @@ test("填充与走刀设置面板：切割设置只在外框切割时出现，�
       withFill: true,
       settings: { ...DEFAULT_FILL_SETTINGS, scanOffsetTable: [{ speed: "1000", offset: "0.1" }] },
     });
-    assert.match(fill, /^<details[^>]*>.*填充与走刀设置/s);
+    // 2026-11-16（r41）：有填充时先显示质量预设，细项折叠在“高级设置”里
+    assert.match(fill, /^<div class="quality-presets" id="wb-fill-preset".*<details[^>]*>.*高级设置 · 填充与走刀设置/s);
+    assert.doesNotMatch(cut, /quality-presets/, "只描轮廓 / 切割没有填充项，不显示预设");
     assert.match(fill, /id="wb-fill-offset-table"/);
     assert.match(fill, /value="1000"/);
     assert.match(fill, /id="wb-fill-offset-add"/);

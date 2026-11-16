@@ -1288,6 +1288,9 @@ pub(crate) fn draw_target_size_mm(
     Ok((target_w, target_h, auto_fitted))
 }
 
+/// 图片预览 `line_interval_scale`（行间距 = 材料推荐线距 × 倍数）的取值范围，前端质量预设用 1.5 / 1 / 0.8。
+const IMAGE_INTERVAL_SCALE_RANGE: (f64, f64) = (0.5, 3.0);
+
 /// 图片预览里对齐 LightBurn Image Mode 的可选字段（2026-11-16，技术书 r38）。
 /// 值域在这里先校验；与像素间距相关的（网点网格、点宽补偿）在得到实际行间距后再查。
 struct ImageModeExtras {
@@ -1494,8 +1497,29 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         };
         // 2026-11-16（技术书 r38）对齐 LightBurn Image Mode 的可选项，全部缺省时与旧行为一致
         let extras = ImageModeExtras::parse(object, &optional_number)?;
+        // 2026-11-16（技术书 r41）质量预设“快速 / 均衡 / 精细”：行间距 = 材料推荐线距 × line_interval_scale
+        let interval_scale = optional_number("line_interval_scale")?;
+        let base_pixel_mm = match (optional_number("pixel_size_mm")?, interval_scale) {
+            (Some(_), Some(_)) => {
+                return Err("pixel_size_mm 与 line_interval_scale 只能给一个".into());
+            }
+            (Some(pixel), None) => pixel,
+            (None, Some(scale))
+                if (IMAGE_INTERVAL_SCALE_RANGE.0..=IMAGE_INTERVAL_SCALE_RANGE.1)
+                    .contains(&scale) =>
+            {
+                material_pixel * scale
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "line_interval_scale（行间距倍数）须在 {} ~ {} 之间",
+                    IMAGE_INTERVAL_SCALE_RANGE.0, IMAGE_INTERVAL_SCALE_RANGE.1
+                ));
+            }
+            (None, None) => material_pixel,
+        };
         let raster_options = laser_core::image_job::ImageRasterOptions {
-            pixel_size_mm: optional_number("pixel_size_mm")?.unwrap_or(material_pixel),
+            pixel_size_mm: base_pixel_mm,
             width_mm: optional_number("width_mm")?,
             height_mm: optional_number("height_mm")?,
             work_area_width_mm: optional_number("work_area_width_mm")?
@@ -1605,6 +1629,9 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             serde_json::Value::String(source_name),
         );
         res.insert("pixel_size_mm".into(), serde_json::json!(pixel_size_mm));
+        if let Some(scale) = interval_scale {
+            res.insert("line_interval_scale".into(), serde_json::json!(scale));
+        }
         res.insert(
             "image_mode".into(),
             serde_json::json!(prepared.mode.as_str()),
@@ -1690,52 +1717,12 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         hasher.update(&gcode_bytes);
         let fingerprint = hex::encode(hasher.finalize());
 
-        let moves = laser_core::gcode::parse_moves(&gcode_str);
         let estimate = laser_core::gcode::estimate_time_with(&gcode_str, &motion.profile);
 
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        let mut paths: Vec<Vec<laser_contracts::geometry::Point>> = Vec::new();
-        let mut current_path: Vec<laser_contracts::geometry::Point> = Vec::new();
-        let mut cur_pos = (0.0, 0.0);
-
-        for m in moves {
-            if let Some(x) = m.x {
-                cur_pos.0 = x;
-            }
-            if let Some(y) = m.y {
-                cur_pos.1 = y;
-            }
-            if cur_pos.0.is_finite() && cur_pos.1.is_finite() {
-                min_x = min_x.min(cur_pos.0);
-                max_x = max_x.max(cur_pos.0);
-                min_y = min_y.min(cur_pos.1);
-                max_y = max_y.max(cur_pos.1);
-            }
-            if m.rapid {
-                if current_path.len() > 1 {
-                    paths.push(std::mem::take(&mut current_path));
-                } else {
-                    current_path.clear();
-                }
-                current_path.push(cur_pos);
-            } else {
-                current_path.push(cur_pos);
-            }
-        }
-        if current_path.len() > 1 {
-            paths.push(current_path);
-        }
-
-        if !min_x.is_finite() {
-            min_x = 0.0;
-            max_x = 50.0;
-            min_y = 0.0;
-            max_y = 50.0;
-        }
+        // 2026-11-16（技术书 r41）：G2/G3 圆弧按弦高容差拆成折线画出，并跟踪 G90/G91、G20/G21、G92 与模态移动
+        let toolpath = laser_core::gcode::preview_toolpath(&gcode_str);
+        let mut paths = toolpath.paths;
+        let (min_x, min_y, max_x, max_y) = toolpath.bounds.unwrap_or((0.0, 0.0, 50.0, 50.0));
 
         let width_mm = (max_x - min_x).max(1.0);
         let height_mm = (max_y - min_y).max(1.0);

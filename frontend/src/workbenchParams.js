@@ -1,6 +1,9 @@
 // n73（2026-11-08 用户决定）：工作台“这次自定义功率和速度”。只影响这一次生成的刀路，不写回材料库；
 // 范围与后端 `manual_params` 校验一致（功率 1~100%、速度 100~6000 mm/min、遍数 1~5）。
 // 2026-11-11 增补：文字刻法映射（对齐后端 `text_fill`）、图片尺寸/算法校验、左侧参数改动后的预览过期判定与开刻前确认文案。
+// 2026-11-16（技术书 r41）：图片行间距倍数（质量预设“快速 / 均衡 / 精细”用，见 qualityPresets.js）。
+
+import { intervalScaleValue } from "./qualityPresets.js";
 
 export const MANUAL_LIMITS = {
   power: { min: 1, max: 100 },
@@ -45,7 +48,24 @@ export const DEFAULT_IMAGE_EXTRAS = {
   halftoneCellMm: "",
   halftoneAngleDeg: "",
   grayMinPowerPercent: "",
+  // 行间距 = 材料推荐线距 × 倍数；留空 = 1（均衡）
+  intervalScale: "",
 };
+
+/** 行间距倍数范围，与后端 `line_interval_scale` 一致。 */
+export const IMAGE_INTERVAL_SCALE_LIMITS = { min: 0.5, max: 3 };
+
+/** 图片“高级设置”折叠时的一行摘要：转换方式、行间距倍数与打开的开关。 */
+export function imageAdvancedSummary(imageMode, extras = {}) {
+  const label = IMAGE_MODE_OPTIONS.find((opt) => opt.value === normalizeImageMode(imageMode))?.label || "自动识别";
+  const parts = [label.replace(/（.*）$/, "")];
+  const scale = intervalScaleValue(extras.intervalScale);
+  if (extras.passThrough) parts.push("直通");
+  else parts.push(`行间距 ×${Number.isFinite(scale) ? scale : "?"}`);
+  if (extras.negative) parts.push("反相");
+  if (String(extras.dotWidthMm ?? "").trim() && Number(extras.dotWidthMm) > 0) parts.push(`点宽 ${extras.dotWidthMm} mm`);
+  return parts.join(" · ");
+}
 
 /** 当前转换方式需要显示哪些专属输入。 */
 export function imageModeFields(imageMode) {
@@ -72,6 +92,12 @@ function imageExtrasPayload(imageMode, extras = {}) {
   };
   if (extras.negative) payload.negative = true;
   if (extras.passThrough) payload.pass_through = true;
+  // 行间距倍数：为 1 时不提交（与以前的请求完全相同）；直通模式按原图像素出行，不用倍数
+  const scale = intervalScaleValue(extras.intervalScale);
+  if (!Number.isFinite(scale) || scale < IMAGE_INTERVAL_SCALE_LIMITS.min || scale > IMAGE_INTERVAL_SCALE_LIMITS.max) {
+    return { error: "行间距倍数要在 0.5 ~ 3 之间（留空为 1）" };
+  }
+  if (scale !== 1 && !extras.passThrough) payload.line_interval_scale = Math.round(scale * 1000) / 1000;
   const dot = parse(extras.dotWidthMm, (v) => v >= 0 && v < 1, "点宽补偿要是 0 ~ 1 mm 的数字，且须小于行间距（留空不补偿）");
   if (dot.error) return { error: dot.error };
   if (!dot.empty && dot.value > 0) payload.dot_width_mm = dot.value;
@@ -263,6 +289,7 @@ function imageExtrasSignature(imageMode, extras = {}) {
     extras.negative ? "neg" : "",
     extras.passThrough ? "pass" : "",
     text(extras.dotWidthMm),
+    `x${intervalScaleValue(extras.intervalScale)}`,
     fields.halftone ? `${text(extras.halftoneCellMm)}@${text(extras.halftoneAngleDeg)}` : "",
     fields.grayscale ? text(extras.grayMinPowerPercent) : "",
   ].join("|");

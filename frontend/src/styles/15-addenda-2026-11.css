@@ -450,3 +450,7 @@ button.conn-pill:hover {
 .fill-offset-table { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--ob-ink-2); }
 .fill-offset-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; }
 .fill-offset-table > button { align-self: flex-start; }
+/* 2026-11-16（r41）质量预设“快速 / 均衡 / 精细”：复用 ob-chip，排在折叠的“高级设置”前 */
+.quality-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; min-width: 0; }
+.quality-presets-label { font-size: 12px; font-weight: 600; color: var(--ob-ink-2); }
+.quality-presets .quality-preset-custom { cursor: default; }

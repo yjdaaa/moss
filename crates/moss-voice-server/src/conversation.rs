@@ -297,7 +297,9 @@ pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
 问进度用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
 边刻边调快慢或功率，用 laser_safe_action_tool 的 feed_ 或 power_ 动作。查某种材料的参数用 material_params_tool 的 get。\
 刻完用户说太焦、太浅、切不透，用 refine_laser_params_from_feedback_tool 给建议，用户同意后用 regenerate_text_laser_task_tool 采用并重新预览。\
-不知道参数就用 run_calibration_grid_tool 刻测试矩阵，用户说第几格最好再用 select_calibration_cell_tool 保存。\
+不知道参数就用 run_calibration_grid_tool 刻测试矩阵，用户说第几格最好再用 select_calibration_cell_tool 保存；\
+说线距测试就带 test_type=interval，想测遍数或线距就改 x_axis / y_axis。\
+照片、图片语音拿不到文件，请用户在电脑工作台上传，转换方式（如 Jarvis）和快速 / 均衡 / 精细在那里选。\
 用户没说串口号或 IP 就不要填；工具报错说缺连接时，再问用户。";
 
 fn arg_flag_true(arguments: &Value, key: &str) -> bool {

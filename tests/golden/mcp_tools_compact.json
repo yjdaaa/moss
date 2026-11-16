@@ -90,7 +90,7 @@
     },
     {
       "name": "laser_workflow_tool",
-      "description": "刻字任务从预览到加工的全过程（只支持文字，图片请用户在电脑上传）。preview：按文字、材料、厚度生成刀路预览并弹到电脑屏幕，不让机器动；功率、速度、遍数默认按材料库推荐；用户明确说了就放进 manual_params，预览里会如实显示。confirm_send：用户核对预览后明确说确认，再带 preview 返回的 workflow_id 和 confirmed=true 开始加工。status 查进度（不带 workflow_id 看最近的任务）；recent 列最近任务；cancel 取消正在发送的任务；resume 从中断的地方继续刻（同样要用户确认）。",
+      "description": "刻字任务从预览到加工的全过程（只支持文字；照片、图片说不出文件，请用户在电脑工作台上传，在“转换方式”里选 Jarvis 等抖动或快速 / 均衡 / 精细）。preview：按文字、材料、厚度生成刀路预览并弹到电脑屏幕，不让机器动；功率、速度、遍数默认按材料库推荐；用户明确说了就放进 manual_params，预览里会如实显示。confirm_send：用户核对预览后明确说确认，再带 preview 返回的 workflow_id 和 confirmed=true 开始加工。status 查进度（不带 workflow_id 看最近的任务）；recent 列最近任务；cancel 取消正在发送的任务；resume 从中断的地方继续刻（同样要用户确认）。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -371,7 +371,7 @@
     },
     {
       "name": "run_calibration_grid_tool",
-      "description": "不知道某种材料用多少功率和速度时，刻一块测试矩阵（不同功率×速度的小方格）。第一次只生成矩阵、不动机器，返回 calibration_id；用户确认放好材料后，再带 calibration_id 和 confirmed=true 开始刻。刻完让用户看哪一格最好，再用 select_calibration_cell_tool。",
+      "description": "不知道某种材料用多少功率和速度时，刻一块测试矩阵（默认功率×速度的小方格，可用 x_axis / y_axis 换成线距、遍数）；用户说“线距测试”就用 test_type=interval。第一次只生成矩阵、不动机器，返回 calibration_id；用户确认放好材料后，再带 calibration_id 和 confirmed=true 开始刻。刻完让用户看哪一格最好，再用 select_calibration_cell_tool。",
       "inputSchema": {
         "type": "object",
         "properties": {

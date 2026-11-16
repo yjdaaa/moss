@@ -14,5 +14,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # 接入点身份显示（NV8）：解码 token 中 JWT 的载荷部分（只读字段，不校验签名）
 base64 = "0.22"
 
+[dev-dependencies]
+# 测试核对工具 schema 里的枚举与 laser-core 的取值一致
+laser-core = { path = "../laser-core" }
+
 [lints]
 workspace = true

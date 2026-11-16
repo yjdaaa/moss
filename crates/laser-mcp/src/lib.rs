@@ -119,6 +119,69 @@ pub use laser_contracts::{ALWAYS_ENABLED_TOOLS, tool_can_be_disabled};
 /// 附加接入点的数量上限（另有一个主接入点 `mcp_endpoint`）。
 pub const MAX_EXTRA_ENDPOINTS: usize = 4;
 
+/// 图片转换方式（与 `laser_core::image_job::TONE_MODES` 一致，测试核对）。
+const IMAGE_MODES: [&str; 11] = [
+    "auto",
+    "dither",
+    "threshold",
+    "ordered",
+    "atkinson",
+    "jarvis",
+    "stucki",
+    "newsprint",
+    "halftone",
+    "sketch",
+    "grayscale",
+];
+
+fn image_mode_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string", "enum": IMAGE_MODES, "default": "auto",
+        "description": "source_type=image：转换方式。auto 自动识别照片 / 线稿；jarvis 照片推荐；threshold 黑白线条；halftone 网点；grayscale 灰度变功率（二极管）"
+    })
+}
+
+/// 材料测试（`/api/material-lab/preview`）对齐 LightBurn 的字段：完整清单与精简清单共用，说明保持简短。
+fn calibration_test_props() -> Vec<(&'static str, serde_json::Value)> {
+    let axis = |default: &str, label: &str| {
+        serde_json::json!({
+            "type": "string", "enum": ["power", "speed", "interval", "passes"], "default": default,
+            "description": format!("{label}：power 功率 / speed 速度 / interval 线距（只用于填充雕刻）/ passes 遍数；两轴须不同")
+        })
+    };
+    vec![
+        (
+            "test_type",
+            serde_json::json!({
+                "type": "string", "enum": ["matrix", "interval"], "default": "matrix",
+                "description": "matrix 参数网格（默认）；interval 线距测试：一排不同线距的填充小方块（用户说“线距测试”）"
+            }),
+        ),
+        ("x_axis", axis("power", "matrix 的列参数")),
+        ("y_axis", axis("speed", "matrix 的行参数")),
+        (
+            "interval_min_mm",
+            serde_json::json!({"type": "number", "default": 0.08, "description": "线距区间下限 mm"}),
+        ),
+        (
+            "interval_max_mm",
+            serde_json::json!({"type": "number", "default": 0.16, "description": "线距区间上限 mm"}),
+        ),
+        (
+            "passes_min",
+            serde_json::json!({"type": "integer", "description": "遍数区间下限（轴为 passes 时）"}),
+        ),
+        (
+            "passes_max",
+            serde_json::json!({"type": "integer", "description": "遍数区间上限"}),
+        ),
+        (
+            "labels",
+            serde_json::json!({"type": "boolean", "default": true, "description": "在矩阵旁刻行列参数标注"}),
+        ),
+    ]
+}
+
 pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
     let mut raw: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/golden/mcp_tools.json"))
@@ -218,6 +281,22 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                 props["safe_margin_mm"] = serde_json::json!({
                     "type": "number", "default": 2, "description": "文字放进木牌时四周留边 mm"
                 });
+                if tool["name"] == "laser_workflow_tool" {
+                    // 2026-11-16（技术书 r41）图片转换方式与行间距倍数；图片只能是已上传到 MOSS 的文件
+                    let props = &mut tool["inputSchema"]["properties"];
+                    props["image_mode"] = image_mode_schema();
+                    props["line_interval_scale"] = serde_json::json!({
+                        "type": "number", "minimum": 0.5, "maximum": 3,
+                        "description": "source_type=image：行间距 = 材料推荐线距 × 倍数；1.5 快速、1 均衡（默认）、0.8 精细"
+                    });
+                }
+            }
+            "run_calibration_grid_tool" => {
+                // 2026-11-16（技术书 r41）材料测试对齐 LightBurn 的测试类型、轴与区间
+                let props = &mut tool["inputSchema"]["properties"];
+                for (key, value) in calibration_test_props() {
+                    props[key] = value;
+                }
             }
             _ => {}
         }
@@ -267,6 +346,13 @@ pub fn compact_tools_list_json(developer_mode: bool) -> serde_json::Value {
         serde_json::from_str(include_str!("../../../tests/golden/mcp_tools_compact.json"))
             .expect("golden mcp_tools_compact.json must parse");
     let mut tools = compact["tools"].as_array().cloned().unwrap_or_default();
+    for tool in &mut tools {
+        if tool["name"] == "run_calibration_grid_tool" {
+            for (key, value) in calibration_test_props() {
+                tool["inputSchema"]["properties"][key] = value;
+            }
+        }
+    }
     if let Some(full) = tools_list_json(developer_mode)["tools"].as_array() {
         tools.extend(
             full.iter()
@@ -2190,6 +2276,118 @@ mod tests {
             Some(&backend),
         );
         assert_eq!(backend.calls()[0].2["connection_mode"], "serial");
+    }
+
+    #[test]
+    fn image_and_material_test_options_are_listed_and_forwarded() {
+        // 2026-11-16（技术书 r41）：图片转换方式只在完整清单（图片要已上传的文件）；材料测试字段两种清单都有
+        let full = tools_list_json(false);
+        let find = |list: &serde_json::Value, name: &str| {
+            list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        let workflow = find(&full, "laser_workflow_tool");
+        let modes: Vec<&str> = workflow["inputSchema"]["properties"]["image_mode"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(modes, laser_core::image_job::TONE_MODES);
+        assert_eq!(
+            workflow["inputSchema"]["properties"]["line_interval_scale"]["maximum"],
+            3
+        );
+        let compact = compact_tools_list_json(false);
+        let compact_workflow = find(&compact, "laser_workflow_tool");
+        assert!(
+            compact_workflow["inputSchema"]["properties"]
+                .get("image_mode")
+                .is_none(),
+            "精简清单不加图片参数（语音无法引用图片）"
+        );
+        assert!(
+            compact_workflow["description"]
+                .as_str()
+                .unwrap()
+                .contains("工作台上传")
+        );
+        for list in [&full, &compact] {
+            let grid = find(list, "run_calibration_grid_tool");
+            let props = &grid["inputSchema"]["properties"];
+            assert_eq!(
+                props["test_type"]["enum"],
+                serde_json::json!(["matrix", "interval"])
+            );
+            for axis in ["x_axis", "y_axis"] {
+                for value in props[axis]["enum"].as_array().unwrap() {
+                    assert!(
+                        laser_core::material::TestAxis::parse(value.as_str().unwrap()).is_some(),
+                        "{axis}={value}"
+                    );
+                }
+            }
+            for key in [
+                "interval_min_mm",
+                "interval_max_mm",
+                "passes_min",
+                "passes_max",
+                "labels",
+            ] {
+                assert!(props[key]["description"].is_string(), "缺 {key}");
+            }
+        }
+        assert!(
+            find(&compact, "run_calibration_grid_tool")["description"]
+                .as_str()
+                .unwrap()
+                .contains("test_type=interval")
+        );
+
+        // 分发层原样转发这些字段
+        let backend = FakeBackend::new(vec![
+            (
+                200,
+                serde_json::json!({"success": true, "result": {"calibration_id": "cal-2", "status": "prepared"}}),
+            ),
+            (
+                200,
+                serde_json::json!({"success": true, "result": {"workflow_id": "wf-img", "status": "preview_ready"}}),
+            ),
+        ]);
+        let grid = dispatch_tool_call_with(
+            "run_calibration_grid_tool",
+            &serde_json::json!({
+                "material": "椴木", "thickness_mm": 3, "test_type": "interval",
+                "interval_min_mm": 0.06, "interval_max_mm": 0.2, "columns": 8, "labels": false
+            }),
+            false,
+            Some(&backend),
+        );
+        assert!(grid.success, "{grid:?}");
+        let image = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({
+                "action": "preview", "source_type": "image", "image_file": "photo.png",
+                "material": "椴木", "thickness_mm": 3, "image_mode": "jarvis", "line_interval_scale": 0.8
+            }),
+            false,
+            Some(&backend),
+        );
+        assert!(image.success, "{image:?}");
+        let calls = backend.calls();
+        assert_eq!(calls[0].1, "/api/material-lab/preview");
+        assert_eq!(calls[0].2["test_type"], "interval");
+        assert_eq!(calls[0].2["interval_max_mm"], 0.2);
+        assert_eq!(calls[0].2["labels"], false);
+        assert_eq!(calls[1].1, "/api/workflow");
+        assert_eq!(calls[1].2["image_mode"], "jarvis");
+        assert_eq!(calls[1].2["line_interval_scale"], 0.8);
     }
 
     #[test]

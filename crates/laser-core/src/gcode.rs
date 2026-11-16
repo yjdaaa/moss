@@ -1145,6 +1145,234 @@ pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
     Ok(moved.then_some(extents))
 }
 
+/// 预览把圆弧拆成折线时的弦高容差（mm）：弧线看起来是光滑的，又不会为大圆生成过多点。
+pub const PREVIEW_ARC_TOLERANCE_MM: f64 = 0.02;
+/// 单段圆弧最多拆成多少段（整圆也够画圆滑；防止超大半径的弧拖慢预览）。
+pub const MAX_PREVIEW_ARC_SEGMENTS: usize = 360;
+/// 整份文件里圆弧拆出的点数上限；超过后余下的圆弧只画首尾连线，预览工作量有界。
+pub const MAX_PREVIEW_ARC_POINTS: usize = 400_000;
+
+/// G-code 文件预览用的轨迹（2026-11-16，技术书 r41）：`paths` 为每段连续非快速移动（从上一个位置开始的折线），
+/// G2/G3 圆弧已拆成折线；`bounds` 为所有移动终点与圆弧拆分点的范围 `(min_x, min_y, max_x, max_y)`，没有移动时为 `None`。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PreviewToolpath {
+    pub paths: Vec<Vec<laser_contracts::geometry::Point>>,
+    pub bounds: Option<(f64, f64, f64, f64)>,
+    /// 因超出 [`MAX_PREVIEW_ARC_POINTS`] 或参数无效而只画了首尾连线的圆弧个数。
+    pub arcs_simplified: usize,
+}
+
+/// 圆弧拆成折线（不含起点、含终点）。`ccw=true` 为 G3；`r` 为 `R` 写法的半径（负值取大于 180° 的弧），
+/// 否则 `ij` 为圆心相对起点的偏移。半径无效或拆分预算用完时返回 `None`，由调用方画首尾连线。
+fn tessellate_arc(
+    start: (f64, f64),
+    end: (f64, f64),
+    ccw: bool,
+    r: Option<f64>,
+    ij: (f64, f64),
+    budget: &mut usize,
+) -> Option<Vec<(f64, f64)>> {
+    let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+    let same_point = dx.abs() < 1e-9 && dy.abs() < 1e-9;
+    let center = match r {
+        Some(r) => {
+            // R 写法与 GRBL 一致：R>0 取小于 180° 的弧，R<0 取大于 180° 的弧；起终点重合无法定圆
+            let chord = dx.hypot(dy);
+            if same_point || !r.is_finite() || r == 0.0 || chord > 2.0 * r.abs() + 1e-6 {
+                return None;
+            }
+            let h = (4.0 * r * r - chord * chord).max(0.0).sqrt() / chord;
+            let mut h = -h;
+            if ccw {
+                h = -h;
+            }
+            if r < 0.0 {
+                h = -h;
+            }
+            (start.0 + 0.5 * (dx - dy * h), start.1 + 0.5 * (dy + dx * h))
+        }
+        None => (start.0 + ij.0, start.1 + ij.1),
+    };
+    let radius = (start.0 - center.0).hypot(start.1 - center.1);
+    if !radius.is_finite() || radius < 1e-9 || radius > 1e7 {
+        return None;
+    }
+    let a0 = (start.1 - center.1).atan2(start.0 - center.0);
+    let a1 = (end.1 - center.1).atan2(end.0 - center.0);
+    let sweep = if same_point {
+        TAU
+    } else if ccw {
+        (a1 - a0).rem_euclid(TAU)
+    } else {
+        (a0 - a1).rem_euclid(TAU)
+    };
+    // 每段转角不超过 10°，且弦高不超过容差
+    let max_step = if radius > PREVIEW_ARC_TOLERANCE_MM {
+        (2.0 * (1.0 - PREVIEW_ARC_TOLERANCE_MM / radius).acos()).min(10f64.to_radians())
+    } else {
+        10f64.to_radians()
+    };
+    let segments = ((sweep / max_step).ceil() as usize).clamp(1, MAX_PREVIEW_ARC_SEGMENTS);
+    if segments > *budget {
+        return None;
+    }
+    *budget -= segments;
+    let direction = if ccw { 1.0 } else { -1.0 };
+    let mut points = Vec::with_capacity(segments);
+    for step in 1..segments {
+        let angle = a0 + direction * sweep * step as f64 / segments as f64;
+        points.push((
+            center.0 + radius * angle.cos(),
+            center.1 + radius * angle.sin(),
+        ));
+    }
+    points.push(end);
+    Some(points)
+}
+
+/// 解析 G-code 文件得到预览轨迹（上传的 G-code 与两点对位生成的新刀路都用它出预览图）：
+/// 跟踪模态 G0/G1/G2/G3、G90/G91、G20/G21、`G92`（只改原点不移动），G2/G3 在 XY 平面（G17）按
+/// [`PREVIEW_ARC_TOLERANCE_MM`] 拆成折线，`I/J`、`R`（含负值）、顺 / 逆时针与整圆都支持；G18/G19 平面的圆弧、
+/// 无效半径或超出点数预算时只画首尾连线。只用于画图，不做安全判断（范围复核仍用 [`motion_extents`]）。
+pub fn preview_toolpath(text: &str) -> PreviewToolpath {
+    let (mut px, mut py) = (0.0_f64, 0.0_f64);
+    let (mut ox, mut oy) = (0.0_f64, 0.0_f64);
+    let mut absolute = true;
+    let mut unit = 1.0;
+    let mut motion = 0;
+    let mut xy_plane = true;
+    let mut budget = MAX_PREVIEW_ARC_POINTS;
+    let mut out = PreviewToolpath::default();
+    let mut current: Vec<(f64, f64)> = Vec::new();
+    let mut bounds = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    let mut include = |x: f64, y: f64| {
+        bounds.0 = bounds.0.min(x);
+        bounds.1 = bounds.1.min(y);
+        bounds.2 = bounds.2.max(x);
+        bounds.3 = bounds.3.max(y);
+    };
+    for line in text.lines() {
+        let ws = words(line);
+        if ws.is_empty() {
+            continue;
+        }
+        let has = |code: f64| ws.iter().any(|&(l, v)| l == 'G' && (v - code).abs() < 1e-9);
+        let word = |letter: char| ws.iter().rev().find(|(l, _)| *l == letter).map(|(_, v)| *v);
+        if has(20.0) {
+            unit = 25.4;
+        }
+        if has(21.0) {
+            unit = 1.0;
+        }
+        if has(90.0) {
+            absolute = true;
+        }
+        if has(91.0) {
+            absolute = false;
+        }
+        if has(17.0) {
+            xy_plane = true;
+        }
+        if has(18.0) || has(19.0) {
+            xy_plane = false;
+        }
+        let (x, y) = (word('X'), word('Y'));
+        if has(92.0) {
+            if let Some(v) = x {
+                ox = px - v * unit;
+            }
+            if let Some(v) = y {
+                oy = py - v * unit;
+            }
+            if x.is_none() && y.is_none() {
+                ox = px;
+                oy = py;
+            }
+            continue;
+        }
+        for &(letter, value) in &ws {
+            if letter == 'G' {
+                for code in [0, 1, 2, 3] {
+                    if (value - f64::from(code)).abs() < 1e-9 {
+                        motion = code;
+                    }
+                }
+            }
+        }
+        // 机床坐标 / 回参考点之类的行无法知道终点：预览里跳过（发送前的范围复核会拒绝这类文件）
+        if [53.0, 28.0, 30.0, 10.0].iter().any(|code| has(*code)) {
+            continue;
+        }
+        if x.is_none() && y.is_none() {
+            continue;
+        }
+        let target = |current: f64, origin: f64, value: Option<f64>| match value {
+            None => current,
+            Some(v) if absolute => origin + v * unit,
+            Some(v) => current + v * unit,
+        };
+        let (tx, ty) = (target(px, ox, x), target(py, oy, y));
+        if !(tx.is_finite() && ty.is_finite()) {
+            continue;
+        }
+        if motion == 0 {
+            if current.len() > 1 {
+                out.paths.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            current.push((tx, ty));
+            include(tx, ty);
+        } else {
+            if current.is_empty() {
+                current.push((px, py));
+                include(px, py);
+            }
+            let arc = if (motion == 2 || motion == 3) && xy_plane {
+                let r = word('R').map(|r| r * unit);
+                let ij = (
+                    word('I').unwrap_or(0.0) * unit,
+                    word('J').unwrap_or(0.0) * unit,
+                );
+                let points = tessellate_arc((px, py), (tx, ty), motion == 3, r, ij, &mut budget);
+                if points.is_none() {
+                    out.arcs_simplified += 1;
+                }
+                points
+            } else {
+                if motion == 2 || motion == 3 {
+                    out.arcs_simplified += 1;
+                }
+                None
+            };
+            match arc {
+                Some(points) => {
+                    for &(x, y) in &points {
+                        include(x, y);
+                    }
+                    current.extend(points);
+                }
+                None => {
+                    include(tx, ty);
+                    current.push((tx, ty));
+                }
+            }
+        }
+        px = tx;
+        py = ty;
+    }
+    if current.len() > 1 {
+        out.paths.push(current);
+    }
+    out.bounds = bounds.0.is_finite().then_some(bounds);
+    out
+}
+
 pub fn write_move(m: &Move) -> String {
     let mut line = if m.rapid { "G0" } else { "G1" }.to_owned();
     if let Some(x) = m.x {
@@ -1854,6 +2082,110 @@ mod tests {
         let outside = vec![vec![(-1e15, -1e15), (-1e12, -2e12)]];
         let blank = preview_outline(&outside, 50, 50, 10.0, 10.0).unwrap();
         assert!(blank.pixels().all(|p| p.0[0] == 255));
+    }
+
+    fn all_on_circle(points: &[(f64, f64)], center: (f64, f64), radius: f64) -> bool {
+        points
+            .iter()
+            .all(|p| ((p.0 - center.0).hypot(p.1 - center.1) - radius).abs() < 1e-6)
+    }
+
+    #[test]
+    fn preview_toolpath_tessellates_quarter_arc_with_ij() {
+        let tp = preview_toolpath("G21 G90\nG0 X10 Y0\nM4 S500\nG3 X0 Y10 I-10 J0 F600\nM5");
+        assert_eq!(tp.arcs_simplified, 0);
+        assert_eq!(tp.paths.len(), 1);
+        let path = &tp.paths[0];
+        assert_eq!(path[0], (10.0, 0.0));
+        assert_eq!(*path.last().unwrap(), (0.0, 10.0));
+        assert!(
+            path.len() > 9,
+            "四分之一圆至少按 10° 一段拆：{}",
+            path.len()
+        );
+        assert!(all_on_circle(path, (0.0, 0.0), 10.0));
+        // 逆时针：所有点都在第一象限
+        assert!(path.iter().all(|p| p.0 >= -1e-9 && p.1 >= -1e-9));
+        let (min_x, min_y, max_x, max_y) = tp.bounds.unwrap();
+        assert!(min_x.abs() < 1e-9 && min_y.abs() < 1e-9);
+        assert!((max_x - 10.0).abs() < 1e-9 && (max_y - 10.0).abs() < 1e-9);
+        // 顺时针同一对端点走另外 270°
+        let cw = preview_toolpath("G0 X10 Y0\nG2 X0 Y10 I-10 J0");
+        let (min_x, min_y, ..) = cw.bounds.unwrap();
+        assert!((min_x + 10.0).abs() < 0.05 && (min_y + 10.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn preview_toolpath_draws_full_circle_and_respects_units_and_relative_moves() {
+        let tp = preview_toolpath("G0 X10 Y0\nG2 X10 Y0 I-10 J0");
+        let path = &tp.paths[0];
+        assert!(all_on_circle(path, (0.0, 0.0), 10.0));
+        assert_eq!(*path.last().unwrap(), (10.0, 0.0));
+        let (min_x, min_y, max_x, max_y) = tp.bounds.unwrap();
+        for (value, expected) in [(min_x, -10.0), (min_y, -10.0), (max_x, 10.0), (max_y, 10.0)] {
+            assert!((value - expected).abs() < 0.05, "{value} vs {expected}");
+        }
+        // 英制 + 相对坐标：G91 下终点相对当前点，I/J 也按英寸换算
+        let inch = preview_toolpath("G20 G91\nG0 X1\nG3 X-1 Y1 I-1 J0");
+        let path = &inch.paths[0];
+        assert!(all_on_circle(path, (0.0, 0.0), 25.4));
+        let last = *path.last().unwrap();
+        assert!(last.0.abs() < 1e-9 && (last.1 - 25.4).abs() < 1e-9);
+        // 不写 G 的模态行也照常连线
+        let modal = preview_toolpath("G1 X5 Y0\nX5 Y5\nX0 Y5");
+        assert_eq!(
+            modal.paths[0],
+            vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        );
+    }
+
+    #[test]
+    fn preview_toolpath_r_form_picks_short_or_long_arc() {
+        let r = 50f64.sqrt();
+        // G2 从 (0,0) 到 (10,0)：R>0 圆心在弦右侧 (5,-5)，走上方 90°；R<0 圆心 (5,5)，绕上方走 270°
+        let short = preview_toolpath(&format!("G1 X0 Y0\nG2 X10 Y0 R{r}"));
+        assert!(all_on_circle(&short.paths[0], (5.0, -5.0), r));
+        let (_, min_y, _, max_y) = short.bounds.unwrap();
+        assert!(min_y.abs() < 1e-9 && (max_y - (r - 5.0)).abs() < 0.05);
+        let long = preview_toolpath(&format!("G1 X0 Y0\nG2 X10 Y0 R-{r}"));
+        assert!(all_on_circle(&long.paths[0], (5.0, 5.0), r));
+        let (_, min_y, _, max_y) = long.bounds.unwrap();
+        assert!(min_y.abs() < 1e-9 && (max_y - (5.0 + r)).abs() < 0.05);
+        assert!(
+            long.paths[0].iter().all(|p| p.1 >= -1e-9),
+            "长弧不经过圆心下方"
+        );
+        assert!(long.paths[0].len() > short.paths[0].len());
+        // G3 + R>0：圆心在弦左侧 (5,5)，走下方 90°
+        let ccw = preview_toolpath(&format!("G1 X0 Y0\nG3 X10 Y0 R{r}"));
+        assert!(all_on_circle(&ccw.paths[0], (5.0, 5.0), r));
+        assert!(ccw.paths[0].iter().all(|p| p.1 <= 1e-9));
+        // 半径不够跨过弦、起终点重合的 R 圆弧无法定圆：只画首尾连线
+        let invalid = preview_toolpath("G0 X0 Y0\nG2 X10 Y0 R2\nG2 X10 Y0 R3");
+        assert_eq!(invalid.arcs_simplified, 2);
+        assert_eq!(invalid.paths[0], vec![(0.0, 0.0), (10.0, 0.0), (10.0, 0.0)]);
+    }
+
+    #[test]
+    fn preview_toolpath_bounds_arc_work() {
+        // 每个大圆都按单段上限拆分，超出整份文件的点数预算后只画首尾连线
+        let mut text = String::from("G0 X1000000 Y0\n");
+        for _ in 0..2000 {
+            text.push_str("G2 X1000000 Y0 I-1000000 J0\n");
+        }
+        // 超大半径与非 XY 平面的圆弧同样退回连线
+        text.push_str("G2 X0 Y0 I-1e9 J0\nG18\nG2 X5 Y0 I1 J0\n");
+        let started = std::time::Instant::now();
+        let tp = preview_toolpath(&text);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let points: usize = tp.paths.iter().map(Vec::len).sum();
+        assert!(points <= MAX_PREVIEW_ARC_POINTS + 2010, "点数 {points}");
+        let tessellated = MAX_PREVIEW_ARC_POINTS / MAX_PREVIEW_ARC_SEGMENTS;
+        assert_eq!(tp.arcs_simplified, 2000 - tessellated + 2);
+        // 拆分结果仍可按画布裁剪出图
+        let rgba =
+            preview_outline_rgba_with_options(&tp.paths, 200, 200, 10.0, 10.0, false).unwrap();
+        assert_eq!(rgba.dimensions(), (200, 200));
     }
 
     #[test]

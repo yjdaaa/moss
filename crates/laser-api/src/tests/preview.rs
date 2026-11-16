@@ -121,6 +121,62 @@ fn gcode_source_preview_is_rendered_upright_without_false_closing_lines() {
     assert_eq!(diag_hits, 0, "开放折线不应出现伪闭合斜线");
 }
 
+/// 2026-11-16（技术书 r41）：上传的 G-code 里 G2/G3 圆弧在预览里按圆弧画出，尺寸按弧上的点计算。
+#[test]
+fn gcode_source_preview_draws_arcs() {
+    let temp = tempfile::tempdir().unwrap();
+    let uploads = temp.path().join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    // 半径 10 的整圆（I/J 写法），只写了起终点 (10,0)
+    std::fs::write(
+        uploads.join("circle.gcode"),
+        "G21\nG90\nM4 S0\nG0 X10 Y0\nG2 X10 Y0 I-10 J0 S300 F1000\nM5\n",
+    )
+    .unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_upload_root(uploads.clone())
+    .with_generated_root(temp.path().join("gen"))
+    .with_preview_roots(vec![uploads.clone(), temp.path().join("gen")]);
+    let value = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview", "source_type": "gcode", "gcode_file": "circle.gcode",
+            "material": "椴木", "thickness_mm": 3
+        }),
+    );
+    assert_eq!(value["success"], true, "{value}");
+    let artifacts = &value["result"]["artifacts"];
+    for key in ["width_mm", "height_mm"] {
+        let size = artifacts[key].as_f64().unwrap();
+        assert!(
+            (size - 20.0).abs() < 0.1,
+            "{key} = {size}（旧实现只看端点得到 1）"
+        );
+    }
+    let img = image::open(
+        temp.path()
+            .join("gen")
+            .join(artifacts["image_file"].as_str().unwrap()),
+    )
+    .unwrap()
+    .to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    let lit = |x: u32, y: u32| img.get_pixel(x, y).0[3] > 0;
+    // 圆心空着，上下左右四个方向的圆周都有线
+    assert!(!lit(w / 2, h / 2));
+    let column_hits = (0..h).filter(|&y| lit(w / 2, y)).count();
+    let row_hits = (0..w).filter(|&x| lit(x, h / 2)).count();
+    assert!(
+        column_hits >= 2 && row_hits >= 2,
+        "{column_hits} / {row_hits}"
+    );
+    assert!((0..h / 2).any(|y| lit(w / 2, y)) && (h / 2..h).any(|y| lit(w / 2, y)));
+}
+
 #[test]
 fn draw_preview_generates_real_gcode_and_confirm_send_succeeds() {
     let temp = tempfile::tempdir().unwrap();
@@ -742,6 +798,25 @@ fn image_preview_supports_lightburn_image_modes() {
     assert_eq!(through["success"], true, "{through}");
     assert_eq!(through["result"]["artifacts"]["pass_through"], true);
     assert_eq!(through["result"]["artifacts"]["pixel_size_mm"], 0.25);
+    // 质量预设（r41）：行间距 = 材料推荐线距 × line_interval_scale，并回显倍数；不给时不回显
+    assert!(
+        plain["result"]["artifacts"]
+            .get("line_interval_scale")
+            .is_none()
+    );
+    let base_pixel = plain["result"]["artifacts"]["pixel_size_mm"]
+        .as_f64()
+        .unwrap();
+    let fast = preview(serde_json::json!({ "line_interval_scale": 1.5 }));
+    assert_eq!(fast["success"], true, "{fast}");
+    assert_eq!(fast["result"]["artifacts"]["line_interval_scale"], 1.5);
+    let fast_pixel = fast["result"]["artifacts"]["pixel_size_mm"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (fast_pixel - base_pixel * 1.5).abs() < 1e-9,
+        "{base_pixel} → {fast_pixel}"
+    );
     for mode in ["stucki", "atkinson", "ordered", "newsprint", "sketch"] {
         let res = preview(serde_json::json!({ "image_mode": mode }));
         assert_eq!(res["success"], true, "{mode}: {res}");
@@ -776,6 +851,14 @@ fn image_preview_supports_lightburn_image_modes() {
         (
             serde_json::json!({"pass_through": true, "width_mm": 5}),
             "直通模式",
+        ),
+        (
+            serde_json::json!({"line_interval_scale": 5}),
+            "line_interval_scale",
+        ),
+        (
+            serde_json::json!({"line_interval_scale": 1, "pixel_size_mm": 0.1}),
+            "只能给一个",
         ),
     ] {
         let res = preview(extra.clone());

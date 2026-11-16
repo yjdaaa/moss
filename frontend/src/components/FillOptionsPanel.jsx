@@ -6,13 +6,15 @@ import {
   fillSettingsSummary,
   normalizeFillSettings,
 } from "../fillOptions.js";
+import { FILL_PRESET_HINTS, applyFillPreset, detectFillPreset } from "../qualityPresets.js";
+import QualityPresetBar from "./QualityPresetBar.jsx";
 
 /**
  * 填充与走刀设置（2026-11-16，对齐 LightBurn）：默认折叠，一行摘要；
  * `withFill=false` 时只显示走刀选项（描边 / 切割没有扫描填充）；
  * `withCut=true`（工作台文字“外框切割”）时多一段切割设置：切缝补偿、桥位、引入 / 引出线、过切（默认全关）。
  */
-export default function FillOptionsPanel({ idPrefix, settings, onChange, withFill = true, withCut = false }) {
+function FillOptionsDetails({ idPrefix, settings, onChange, withFill = true, withCut = false }) {
   const s = normalizeFillSettings(settings);
   const set = (key, value) => onChange({ ...s, [key]: value });
   const id = (name) => `${idPrefix}-${name}`;
@@ -36,7 +38,7 @@ export default function FillOptionsPanel({ idPrefix, settings, onChange, withFil
   return (
     <details className="fill-options" id={id("fill-options")}>
       <summary>
-        <span className="fill-options-title">{title}</span>
+        <span className="fill-options-title">{withFill ? `高级设置 · ${title}` : title}</span>
         <span className="fill-options-summary">{fillSettingsSummary(s, { withFill, withCut })}</span>
       </summary>
       <div className="fill-options-body">
@@ -273,5 +275,26 @@ export default function FillOptionsPanel({ idPrefix, settings, onChange, withFil
         </label>
       </div>
     </details>
+  );
+}
+
+/**
+ * 有扫描填充时先显示质量预设“快速 / 均衡 / 精细”（2026-11-16，技术书 r41），细项收在下面折叠的“高级设置”里；
+ * 只描轮廓 / 切割没有填充项，不显示预设。
+ */
+export default function FillOptionsPanel(props) {
+  const { idPrefix, settings, onChange, withFill = true } = props;
+  if (!withFill) return <FillOptionsDetails {...props} />;
+  const s = normalizeFillSettings(settings);
+  return (
+    <>
+      <QualityPresetBar
+        id={`${idPrefix}-fill-preset`}
+        value={detectFillPreset(s)}
+        hints={FILL_PRESET_HINTS}
+        onSelect={(key) => onChange(applyFillPreset(s, key))}
+      />
+      <FillOptionsDetails {...props} />
+    </>
   );
 }
