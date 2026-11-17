@@ -77,16 +77,20 @@ pub(crate) fn generate_draw_artifacts(
     if selection.is_some() && requested_mode != "vector" {
         return Err("只刻选中的图形需要“矢量”生成策略".into());
     }
+    // 矢量刻法（r46）：按画布颜色（默认）/ 轮廓 / 填充
+    let vector_style =
+        crate::sketch::VectorStyle::parse(object.get("vector_style").and_then(|v| v.as_str()))?;
     let (sketch, layout_sketch) = if requested_mode == "vector" {
         match object.get("scene_json") {
             Some(scene) => {
                 let font = &laser_core::font::find_system_font_for_text;
-                let full = crate::sketch::sketch_from_scene(scene, font)?;
+                let full = crate::sketch::sketch_from_scene(scene, font, vector_style)?;
                 match &selection {
                     Some(ids) => {
                         let picked = crate::sketch::sketch_from_scene(
                             &crate::sketch::select_elements(scene, ids),
                             font,
+                            vector_style,
                         )?;
                         if picked.has_image {
                             return Err("选中的图形里有插入的图片，矢量刻不了；请取消选中图片或改用光栅刻整幅".into());
@@ -123,8 +127,12 @@ pub(crate) fn generate_draw_artifacts(
     } else {
         requested_mode
     };
-    // 矢量走线与轮廓描边用同一档材料参数
-    let recommend_mode = if mode == "vector" { "outline" } else { mode };
+    // 矢量走线与轮廓描边用同一档材料参数；矢量“填充”刻法用填充（光栅）参数，同工作台文字实心填充（r46）
+    let recommend_mode = match mode {
+        "vector" if vector_style == crate::sketch::VectorStyle::Fill => "raster",
+        "vector" => "outline",
+        other => other,
+    };
 
     let data_part = if let Some((_, b64)) = image_data_url.split_once(',') {
         b64
@@ -495,6 +503,12 @@ pub(crate) fn generate_draw_artifacts(
             extras,
             scan,
             *gray_power,
+        );
+    }
+    if mode == "vector" {
+        res_map.insert(
+            "vector_style".into(),
+            serde_json::json!(vector_style.as_str()),
         );
     }
     res_map.insert(

@@ -13,6 +13,50 @@
 use laser_contracts::geometry::Point;
 use serde_json::Value;
 
+/// 矢量模式的刻法（2026-11-17 用户决定，技术书 r46：“轮廓和填充可以选择”）。
+/// 只影响闭合图形（矩形、菱形、椭圆、首尾相接的直线）与文字；手绘笔画、开放直线与箭头始终刻一笔。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum VectorStyle {
+    /// 按画布颜色（默认，原行为）：设了背景色的图形填满，线条颜色可见的描边；文字填满并描边
+    #[default]
+    Canvas,
+    /// 轮廓：闭合图形与文字只描边（只设了背景色、没有线条颜色的图形也描边）
+    Outline,
+    /// 填充：闭合图形与文字都填满并描边
+    Fill,
+}
+
+impl VectorStyle {
+    pub(crate) fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None | Some("canvas") => Ok(Self::Canvas),
+            Some("outline") => Ok(Self::Outline),
+            Some("fill") => Ok(Self::Fill),
+            Some(other) => Err(format!(
+                "vector_style 只能是 canvas / outline / fill，收到 {other}"
+            )),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Canvas => "canvas",
+            Self::Outline => "outline",
+            Self::Fill => "fill",
+        }
+    }
+
+    /// 闭合图形要不要填满、要不要描边（`stroke` / `fill`：线条颜色、背景色是否可见）。
+    fn closed_shape(self, stroke: bool, fill: bool) -> (bool, bool) {
+        let visible = stroke || fill;
+        match self {
+            Self::Canvas => (fill, stroke),
+            Self::Outline => (false, visible),
+            Self::Fill => (visible, visible),
+        }
+    }
+}
+
 /// 场景转出的矢量几何（画板坐标）。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct SketchGeometry {
@@ -174,6 +218,7 @@ pub(crate) fn select_elements(scene: &Value, ids: &std::collections::HashSet<Str
 pub(crate) fn sketch_from_scene(
     scene: &Value,
     font_for: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    style: VectorStyle,
 ) -> Result<SketchGeometry, String> {
     let elements = scene
         .get("elements")
@@ -225,10 +270,16 @@ pub(crate) fn sketch_from_scene(
                 let center = bbox_center(&points);
                 let points = rotate(points, center, angle);
                 let closed = kind != "freedraw" && closed_polyline(&points);
-                if closed && fill {
+                // 首尾相接的直线是闭合图形，按刻法决定填满 / 描边；其余只看线条颜色
+                let (fill_it, stroke_it) = if closed {
+                    style.closed_shape(stroke, fill)
+                } else {
+                    (false, stroke)
+                };
+                if fill_it {
                     out.filled_shapes.push(points.clone());
                 }
-                if stroke {
+                if stroke_it {
                     if kind == "arrow" {
                         let length = element
                             .get("strokeWidth")
@@ -295,10 +346,11 @@ pub(crate) fn sketch_from_scene(
                     }
                 };
                 let shape = rotate(shape, (x0 + w / 2.0, y0 + h / 2.0), angle);
-                if fill {
+                let (fill_it, stroke_it) = style.closed_shape(stroke, fill);
+                if fill_it {
                     out.filled_shapes.push(shape.clone());
                 }
-                if stroke {
+                if stroke_it {
                     out.closed.push(shape);
                 }
             }
@@ -355,7 +407,10 @@ pub(crate) fn sketch_from_scene(
                     })
                     .collect();
                 out.closed.extend(glyphs.iter().cloned());
-                out.filled_text.push(glyphs);
+                // 轮廓刻法时文字只描边
+                if style != VectorStyle::Outline {
+                    out.filled_text.push(glyphs);
+                }
             }
             "image" => out.has_image = true,
             // 框架、嵌入网页等不是要刻的图形
@@ -382,7 +437,7 @@ mod tests {
             {"type": "ellipse", "x": 30, "y": 0, "width": 10, "height": 10, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "strokeWidth": 1},
             {"type": "rectangle", "x": 0, "y": 0, "width": 5, "height": 5, "isDeleted": true, "strokeColor": "#000"},
         ]});
-        let sketch = sketch_from_scene(&scene, &no_font).unwrap();
+        let sketch = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
         assert_eq!(
             sketch.open,
             vec![vec![(10.0, 10.0), (15.0, 12.0), (20.0, 10.0)]]
@@ -398,7 +453,7 @@ mod tests {
             {"type": "arrow", "x": 0, "y": 0, "points": [[0, 0], [100, 0]], "strokeColor": "#000", "strokeWidth": 1, "endArrowhead": "arrow", "startArrowhead": null},
             {"type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 10, "angle": std::f64::consts::FRAC_PI_2, "strokeColor": "#000", "backgroundColor": "transparent"},
         ]);
-        let sketch = sketch_from_scene(&scene, &no_font).unwrap();
+        let sketch = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
         assert_eq!(sketch.open.len(), 3, "箭杆 + 两笔箭头");
         // 正方形绕中心转 90° 后仍占同一范围
         let (min_x, min_y, max_x, max_y) = SketchGeometry {
@@ -422,7 +477,8 @@ mod tests {
             {"type": "text", "x": 0, "y": 0, "width": 40, "height": 20, "text": "AB", "fontSize": 20,
              "strokeColor": "#1e1e1e", "strokeWidth": 1},
         ]);
-        let sketch = sketch_from_scene(&scene, &|_| Some(font.clone())).unwrap();
+        let sketch =
+            sketch_from_scene(&scene, &|_| Some(font.clone()), VectorStyle::Canvas).unwrap();
         assert!(!sketch.closed.is_empty());
         for ring in &sketch.closed {
             assert_eq!(ring.first(), ring.last(), "焊接输出闭合轮廓");
@@ -431,15 +487,66 @@ mod tests {
         assert_eq!(sketch.filled_text[0], sketch.closed);
     }
 
+    /// r46：刻法选择——轮廓只描边（只设背景色的图形也描边、文字不填），填充把闭合图形与文字都填满，
+    /// 开放线条始终刻一笔；按画布颜色保持原行为。
+    #[test]
+    fn vector_style_switches_closed_shapes_between_outline_and_fill() {
+        let scene = json!([
+            {"type": "rectangle", "x": 0, "y": 0, "width": 20, "height": 10, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "strokeWidth": 1},
+            {"type": "ellipse", "x": 30, "y": 0, "width": 10, "height": 10, "strokeColor": "transparent", "backgroundColor": "#ffc9c9"},
+            {"type": "line", "x": 0, "y": 20, "points": [[0, 0], [10, 0]], "strokeColor": "#000", "strokeWidth": 1},
+            {"type": "line", "x": 0, "y": 30, "points": [[0, 0], [10, 0], [5, 8], [0, 0]], "strokeColor": "#000", "strokeWidth": 1},
+        ]);
+        let canvas = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
+        assert_eq!(
+            (
+                canvas.filled_shapes.len(),
+                canvas.closed.len(),
+                canvas.open.len()
+            ),
+            (1, 2, 1)
+        );
+        let outline = sketch_from_scene(&scene, &no_font, VectorStyle::Outline).unwrap();
+        assert_eq!(
+            (
+                outline.filled_shapes.len(),
+                outline.closed.len(),
+                outline.open.len()
+            ),
+            (0, 3, 1)
+        );
+        let fill = sketch_from_scene(&scene, &no_font, VectorStyle::Fill).unwrap();
+        assert_eq!(
+            (fill.filled_shapes.len(), fill.closed.len(), fill.open.len()),
+            (3, 3, 1)
+        );
+
+        let font = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        ));
+        let text = json!([{"type": "text", "x": 0, "y": 0, "width": 40, "height": 20, "text": "AB",
+            "fontSize": 20, "strokeColor": "#1e1e1e", "strokeWidth": 1}]);
+        let with_font = |style| sketch_from_scene(&text, &|_| Some(font.clone()), style).unwrap();
+        assert!(
+            with_font(VectorStyle::Outline).filled_text.is_empty(),
+            "轮廓：文字只描边"
+        );
+        assert_eq!(with_font(VectorStyle::Fill).filled_text.len(), 1);
+        assert_eq!(with_font(VectorStyle::Canvas).filled_text.len(), 1);
+        assert!(VectorStyle::parse(Some("hatch")).is_err());
+        assert_eq!(VectorStyle::parse(None).unwrap(), VectorStyle::Canvas);
+    }
+
     #[test]
     fn images_are_flagged_and_invisible_strokes_skipped() {
         let scene = json!({"elements": [
             {"type": "image", "x": 0, "y": 0, "width": 10, "height": 10},
             {"type": "line", "x": 0, "y": 0, "points": [[0, 0], [5, 5]], "strokeColor": "transparent"},
         ]});
-        let sketch = sketch_from_scene(&scene, &no_font).unwrap();
+        let sketch = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
         assert!(sketch.has_image);
         assert!(sketch.is_empty());
-        assert!(sketch_from_scene(&json!({"nothing": 1}), &no_font).is_err());
+        assert!(sketch_from_scene(&json!({"nothing": 1}), &no_font, VectorStyle::Canvas).is_err());
     }
 }

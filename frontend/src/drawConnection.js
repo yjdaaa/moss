@@ -9,9 +9,30 @@ import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
 
 /** 转图片方式（雕刻路线为“转图片”时）。 */
 export const DRAW_IMAGE_STRATEGIES = Object.freeze([
-  { value: "raster", label: "光栅扫描（逐行扫描填满，默认）" },
-  { value: "outline", label: "轮廓描边（描出深色边缘）" },
+  { value: "outline", label: "轮廓（描出深色边缘）" },
+  { value: "raster", label: "填充（逐行扫描，默认）" },
 ]);
+
+/**
+ * 矢量刻法（2026-11-17 用户决定，技术书 r46：“轮廓和填充可以选择”）：只影响闭合图形与文字，
+ * 手绘、开放直线与箭头始终刻一笔。
+ */
+export const DRAW_VECTOR_STYLES = Object.freeze([
+  { value: "outline", label: "轮廓（闭合图形与文字只描边，默认）" },
+  { value: "fill", label: "填充（闭合图形与文字都填满）" },
+]);
+
+/** 没存过或值无效时按轮廓（与工作台文字默认只描轮廓一致）。 */
+export function normalizeDrawVectorStyle(style) {
+  return DRAW_VECTOR_STYLES.some((opt) => opt.value === style) ? style : "outline";
+}
+
+/** 查材料推荐用哪一档：光栅扫描与矢量“填充”用填充（raster）参数，其余用描边（outline）参数。 */
+export function drawRecommendEngravingMode(mode, vectorStyle) {
+  if (mode === "raster") return "raster";
+  if (mode === "vector" && normalizeDrawVectorStyle(vectorStyle) === "fill") return "raster";
+  return "outline";
+}
 
 /** 没存过或值无效时按光栅扫描。 */
 export function normalizeDrawImageStrategy(strategy) {
@@ -149,6 +170,8 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
     height_mm: read("laserLab.height_mm") || "",
     // 转图片方式；旧版本的“生成策略”（laserLab.mode）存了轮廓描边的迁移成轮廓描边，其余按光栅扫描
     image_strategy: normalizeDrawImageStrategy(read("laserLab.image_strategy") ?? read("laserLab.mode")),
+    // 矢量刻法（r46）：按画布颜色 / 轮廓 / 填充
+    vector_style: normalizeDrawVectorStyle(read("laserLab.vector_style")),
     image_mode: normalizeImageMode(read("laserLab.image_mode")),
     // 行间距倍数（质量预设用）；留空 = 1
     line_interval_scale: read("laserLab.line_interval_scale") || "",
@@ -209,6 +232,7 @@ export function drawGenerationSignature(form, custom = {}, route = "vector") {
     height_mm: String(form?.height_mm ?? "").trim(),
     route: normalizeEngraveRoute(route),
     mode,
+    vector_style: mode === "vector" ? normalizeDrawVectorStyle(form?.vector_style) : "",
     simplify: mode === "outline" ? String(form?.vector_simplify_factor ?? "3").trim() : "",
     image: mode === "raster"
       ? `${normalizeImageMode(form?.image_mode)}x${intervalScaleValue(form?.line_interval_scale)}`

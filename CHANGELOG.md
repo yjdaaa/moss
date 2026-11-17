@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 刻法按模式只列能用的选项：画板矢量 / 转图片都可选轮廓或填充，工作台转图片只剩实心，扫描设置可改（2026-11-17）
+
+- **现象**：画板矢量模式没有刻法选择，描边还是填满只能逐个元素改背景色；工作台文字转图片时把用不了的描边、排线标“（仅矢量）”置灰，外框切割还摆着；转图片的照片、画板光栅用到了扫描设置（双向、扫描偏移、过扫描）却没有地方改，工作台文字转图片时又摆着分组、角度、交叉排线等用不上的项（用户 2026-11-17“我选矢量后一个刻法显示轮廓和填充……就像语音中心的 moss 内置服务只显示他有的功能……你看看别的界面或者功能有没有这种情况了吧”）。
+- **根因与修复**：后端 `sketch_from_scene` 新增 `VectorStyle`（`canvas` 按画布颜色、`outline` 闭合图形与文字只描边、`fill` 都填满并描边，手绘 / 开放直线 / 箭头始终一笔），`/api/draw/preview` 新增 `vector_style`，`fill` 取材料库填充参数并回显。前端统一成“刻法”且只列当前路线能用的：画板矢量“轮廓（默认）/ 填充”（`#draw-vector-style`，存 `laserLab.vector_style`，轮廓时只显示走刀选项），画板转图片“轮廓（描深色边缘）/ 填充（逐行扫描）”；工作台文字转图片时刻法只有“实心扫描”（`textStyleAvailable` 只放行实心，外框切割也按实心、要切割切回矢量），不再置灰；`FillOptionsPanel` 新增 `scanOnly`（只含双向、扫描偏移与速度表、过扫描），用于工作台文字转图片、工作台照片（新显示 `#wb-img-fill-options`）与画板转图片填充（取代“切到矢量可改”的说明）。其他界面排查：材料实验室已按模式过滤测试类型与轴，设备卡的“请选择…”是占位提示，未改。**行为变更**：画板矢量默认刻法由“按画布颜色”改为轮廓（设了背景色的图形不再自动填满，选“填充”即可）；工作台转图片时选外框切割不再改走矢量，而是按实心扫描。技术书 r46。
+- **验证**：`laser-api` 新增 2 项（三种刻法的描边 / 填充分配与文字、接口回显与参数档位）；前端更新路线与画板用例（只列能用的刻法、不置灰、扫描设置只含三项、轮廓时不显示填充设置），`npm test` 332 项、lint 0/0、e2e 38 项通过。界面未在真实浏览器里手动点按；未实机雕刻。
+- **关联**：`crates/laser-api/src/sketch.rs`（`VectorStyle`）、`crates/laser-api/src/generation/draw.rs`、`frontend/src/{engraveRoute,drawConnection}.js`、`frontend/src/components/FillOptionsPanel.jsx`（`scanOnly`）、`frontend/src/components/workbench/{WorkbenchTextTool,WorkbenchImageTool}.jsx`、`frontend/src/components/draw/DrawMaterialCard.jsx`、`frontend/src/pages/{DrawPage,HomePage}.jsx`。
+
 ### 前端清零 lint 警告：effect 只按原有触发条件运行，运行时读最新值（2026-11-17）
 
 - **现象**：前端 lint 剩 15 条 `react-hooks/exhaustive-deps` 警告（AI 预览、审批卡、反馈面板、设置弹窗、Agent 卡片、Jev / Colab / 本地模型分组、3D 孪生舞台、孪生页）；这些 effect 故意只依赖少数值（换审批才重载、换刀路才重建），直接补依赖会反复请求或重建 3D 场景，不补则闭包里可能是旧值。

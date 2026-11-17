@@ -81,7 +81,9 @@ import {
   drawGenerationSignature,
   drawInkExportMode,
   drawRasterImagePayload,
+  drawRecommendEngravingMode,
   drawRequestMode,
+  normalizeDrawVectorStyle,
   drawSizeValue,
   drawTargetLabel,
   drawTargetMissingText,
@@ -101,6 +103,7 @@ const CONFIG_KEYS = [
   "width_mm",
   "height_mm",
   "image_strategy",
+  "vector_style",
   "image_mode",
   "line_interval_scale",
   "connection_mode",
@@ -240,7 +243,7 @@ export function DrawPage({ onNavigate }) {
       material: mat,
       thickness_mm: thick,
       laser_mode: "engrave",
-      engraving_mode: drawMode === "raster" ? "raster" : "outline",
+      engraving_mode: drawRecommendEngravingMode(drawMode, form.vector_style),
     });
     getJson(`/api/ui/material-recommendation?${query.toString()}`).then((res) => {
       if (cancelled) return;
@@ -271,7 +274,7 @@ export function DrawPage({ onNavigate }) {
     return () => {
       cancelled = true;
     };
-  }, [form.material, form.thickness_mm, drawMode, recRefreshTick]);
+  }, [form.material, form.thickness_mm, drawMode, form.vector_style, recRefreshTick]);
 
   // r40：把当前填充设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
   const saveFillToMaterial = async () => {
@@ -721,6 +724,7 @@ export function DrawPage({ onNavigate }) {
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
         mode: modeSnapshot,
+        ...(modeSnapshot === "vector" ? { vector_style: normalizeDrawVectorStyle(form.vector_style) } : {}),
         ...imagePayload,
         ...fillPayload,
         ...motionPayload,

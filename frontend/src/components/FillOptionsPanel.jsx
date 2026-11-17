@@ -5,6 +5,7 @@ import {
   TAB_MODE_OPTIONS,
   fillSettingsSummary,
   normalizeFillSettings,
+  offsetTablePayload,
 } from "../fillOptions.js";
 import { FILL_PRESET_HINTS, applyFillPreset, detectFillPreset } from "../qualityPresets.js";
 import QualityPresetBar from "./QualityPresetBar.jsx";
@@ -13,6 +14,8 @@ import QualityPresetBar from "./QualityPresetBar.jsx";
  * 填充与走刀设置（2026-11-16，对齐 LightBurn）：默认折叠，一行摘要；
  * `withFill=false` 时只显示走刀选项（描边 / 切割没有扫描填充）；
  * `withCut=true`（工作台文字“外框切割”）时多一段切割设置：切缝补偿、桥位、引入 / 引出线、过切（默认全关）。
+ * `scanOnly=true`（2026-11-17 r46，转图片逐行扫描：工作台照片、画板光栅、文字转图片）时只显示位图扫描用得上的
+ * 双向扫描、扫描偏移（含速度表）与过扫描，不显示分组、角度、交叉排线、走刀选项与质量预设。
  * r40：`materialHint` 非空时显示“来自材料库”提示；给了 `onSaveToMaterial` 时显示“保存到材料库”按钮
  * （扫描角度、过扫描、切割设置等随材料保存，扫描偏移与加速度仍只存本机）。
  */
@@ -22,6 +25,7 @@ function FillOptionsDetails({
   onChange,
   withFill = true,
   withCut = false,
+  scanOnly = false,
   materialHint = "",
   materialEntryLabel = "",
   onSaveToMaterial = null,
@@ -29,9 +33,16 @@ function FillOptionsDetails({
   const s = normalizeFillSettings(settings);
   const set = (key, value) => onChange({ ...s, [key]: value });
   const id = (name) => `${idPrefix}-${name}`;
-  const title = withCut
-    ? (withFill ? "切割、填充与走刀设置" : "切割与走刀设置")
-    : (withFill ? "填充与走刀设置" : "走刀设置");
+  const title = scanOnly
+    ? "扫描设置"
+    : withCut
+      ? (withFill ? "切割、填充与走刀设置" : "切割与走刀设置")
+      : (withFill ? "填充与走刀设置" : "走刀设置");
+  const scanSummary = [
+    s.bidirectional ? "双向" : "单向",
+    s.overscanAuto ? "过扫描自动" : `过扫描 ${s.overscanMm || 0} mm`,
+    ...(offsetTablePayload(s.scanOffsetTable).value ? ["偏移按速度表"] : Number(s.scanOffsetMm) ? [`偏移 ${s.scanOffsetMm} mm`] : []),
+  ].join(" · ");
   const setRow = (index, key, value) =>
     set("scanOffsetTable", s.scanOffsetTable.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
   const numberInput = (key, name, { min, max, step, title: hint }) => (
@@ -49,9 +60,9 @@ function FillOptionsDetails({
   return (
     <details className="fill-options" id={id("fill-options")}>
       <summary>
-        <span className="fill-options-title">{withFill ? `高级设置 · ${title}` : title}</span>
+        <span className="fill-options-title">{withFill || scanOnly ? `高级设置 · ${title}` : title}</span>
         <span className="fill-options-summary">
-          {fillSettingsSummary(s, { withFill, withCut })}
+          {scanOnly ? scanSummary : fillSettingsSummary(s, { withFill, withCut })}
           {materialHint ? " · 来自材料库" : ""}
         </span>
       </summary>
@@ -72,7 +83,7 @@ function FillOptionsDetails({
             ) : null}
           </div>
         ) : null}
-        {withCut ? (
+        {withCut && !scanOnly ? (
           <>
             <div className="fill-options-wide fill-options-section">切割设置（对齐 LightBurn，全部为 0 时与以前完全相同）</div>
             <label>
@@ -149,8 +160,9 @@ function FillOptionsDetails({
             </label>
           </>
         ) : null}
-        {withFill ? (
+        {withFill || scanOnly ? (
           <>
+            {scanOnly ? null : (
             <label className="fill-options-wide">
               <span>填充分组</span>
               <select id={id("fill-grouping")} value={s.grouping} onChange={(e) => set("grouping", e.target.value)}>
@@ -159,6 +171,8 @@ function FillOptionsDetails({
                 ))}
               </select>
             </label>
+            )}
+            {scanOnly ? null : (
             <label>
               <span>扫描角度（°，0 横扫 / 90 竖扫）</span>
               <input
@@ -171,6 +185,7 @@ function FillOptionsDetails({
                 onChange={(e) => set("angleDeg", e.target.value)}
               />
             </label>
+            )}
             <label>
               <span>双向扫描偏移（mm）</span>
               <input
@@ -236,6 +251,7 @@ function FillOptionsDetails({
               />
               <span>双向扫描（关掉后只单向出光，更齐但更慢）</span>
             </label>
+            {scanOnly ? null : (
             <label className="checkbox-row">
               <input
                 id={id("fill-cross")}
@@ -245,6 +261,7 @@ function FillOptionsDetails({
               />
               <span>交叉排线（再转 90° 扫一遍，更实更深）</span>
             </label>
+            )}
             <label className="checkbox-row">
               <input
                 id={id("fill-overscan-auto")}
@@ -285,6 +302,8 @@ function FillOptionsDetails({
             )}
           </>
         ) : null}
+        {scanOnly ? null : (
+        <>
         <label className="checkbox-row">
           <input
             id={id("path-corners")}
@@ -303,6 +322,8 @@ function FillOptionsDetails({
           />
           <span>重复的线只刻一遍</span>
         </label>
+        </>
+        )}
       </div>
     </details>
   );
@@ -313,8 +334,8 @@ function FillOptionsDetails({
  * 只描轮廓 / 切割没有填充项，不显示预设。
  */
 export default function FillOptionsPanel(props) {
-  const { idPrefix, settings, onChange, withFill = true } = props;
-  if (!withFill) return <FillOptionsDetails {...props} />;
+  const { idPrefix, settings, onChange, withFill = true, scanOnly = false } = props;
+  if (!withFill || scanOnly) return <FillOptionsDetails {...props} />;
   const s = normalizeFillSettings(settings);
   return (
     <>

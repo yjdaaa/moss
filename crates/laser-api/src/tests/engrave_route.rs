@@ -219,3 +219,62 @@ fn draw_board_follows_the_switch_and_images_use_the_workbench_engine() {
         );
     }
 }
+
+/// r46：画板矢量刻法——轮廓不生成填充、填充把闭合图形填满并取光栅参数，回显 `vector_style`。
+#[test]
+fn draw_vector_style_chooses_outline_or_fill() {
+    let temp = tempfile::tempdir().unwrap();
+    // 内置库里椴木的光栅与描边参数相同：把光栅功率单独调低，才能看出用的是哪一档
+    let mut library = laser_contracts::builtin_material_library();
+    for modes in library
+        .materials
+        .get_mut("椴木")
+        .unwrap()
+        .thicknesses
+        .values_mut()
+    {
+        if let Some(raster) = modes.engrave.as_mut().and_then(|e| e.raster.as_mut()) {
+            raster.laser_max_power = 300;
+        }
+    }
+    let gen_dir = temp.path().join("gen");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let service = ApiService::new(test_loopback_settings(), library)
+        .with_generated_root(gen_dir.clone())
+        .with_preview_roots(vec![gen_dir]);
+    let scene = serde_json::json!({"elements": [
+        {"type": "rectangle", "x": 0, "y": 0, "width": 200, "height": 100, "strokeColor": "#1e1e1e",
+         "backgroundColor": "transparent", "strokeWidth": 2},
+    ]});
+    let draw = |style: &str| {
+        post_json(
+            &service,
+            "/api/draw/preview",
+            &serde_json::json!({"image_data_url": super::preview::draw_test_png(), "material": "椴木",
+                "thickness_mm": 3.0, "width_mm": 40, "mode": "vector", "scene_json": scene,
+                "vector_style": style}),
+        )
+    };
+    let outline = draw("outline");
+    let artifacts = &outline["result"]["artifacts"];
+    assert_eq!(artifacts["vector_style"], "outline", "{outline}");
+    assert!(artifacts["fill_options"].is_null(), "轮廓不填");
+    let fill = draw("fill");
+    let artifacts = &fill["result"]["artifacts"];
+    assert_eq!(artifacts["vector_style"], "fill", "{fill}");
+    assert!(
+        artifacts["fill_options"].is_object(),
+        "没设背景色的矩形也填满"
+    );
+    assert_ne!(
+        artifacts["actual_params"], outline["result"]["artifacts"]["actual_params"],
+        "填充用光栅参数，轮廓用描边参数"
+    );
+    let canvas = draw("");
+    assert_eq!(canvas["result"]["artifacts"]["vector_style"], "canvas");
+    assert!(
+        canvas["result"]["artifacts"]["fill_options"].is_null(),
+        "按画布颜色：没背景色不填"
+    );
+    assert_eq!(draw("hatch")["success"], false);
+}

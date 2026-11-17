@@ -1,7 +1,12 @@
 import React from "react";
 import { RefreshCw } from "lucide-react";
 import { isRemoteMode } from "../../authSession.js";
-import { DRAW_IMAGE_STRATEGIES, normalizeDrawImageStrategy } from "../../drawConnection.js";
+import {
+  DRAW_IMAGE_STRATEGIES,
+  DRAW_VECTOR_STYLES,
+  normalizeDrawImageStrategy,
+  normalizeDrawVectorStyle,
+} from "../../drawConnection.js";
 import { materialLayerHint } from "../../fillOptions.js";
 import { CUSTOM_OPTION_LABEL, CUSTOM_OPTION_VALUE, findMaterialOption } from "../../materialSelectState.js";
 import { IMAGE_PRESET_HINTS, detectImagePreset } from "../../qualityPresets.js";
@@ -163,9 +168,47 @@ export function DrawMaterialCard({
         readOnly={engraveRouteReadOnly}
       />
 
-      {drawMode !== "vector" ? (
+      {/* 刻法（r46）：按雕刻路线只列能用的——矢量：轮廓 / 填充；转图片：轮廓（描深色边缘）/ 填充（逐行扫描） */}
+      {drawMode === "vector" ? (
+        <>
+          <label title="只影响闭合图形（矩形、菱形、椭圆、首尾相接的线）与文字；手绘、直线和箭头始终刻一笔">
+            刻法
+            <select
+              id="draw-vector-style"
+              value={normalizeDrawVectorStyle(form.vector_style)}
+              onChange={(event) => updateForm("vector_style", event.target.value)}
+            >
+              {DRAW_VECTOR_STYLES.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
+          <label
+            className="checkbox-row draw-label"
+            title="只刻画布上选中的图形，位置保持在整幅画里的位置（补刻、重刻某一部分时能对上）"
+          >
+            <input
+              type="checkbox"
+              id="draw-selected-only"
+              checked={selectedOnly}
+              onChange={(event) => setSelectedOnly(event.target.checked)}
+            />
+            只刻选中的图形（位置与整幅一致）
+            {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
+          </label>
+          <FillOptionsPanel
+            idPrefix="draw"
+            settings={fillSettings}
+            onChange={updateFillSettings}
+            withFill={normalizeDrawVectorStyle(form.vector_style) === "fill"}
+            materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
+            materialEntryLabel={materialLayer?.label || ""}
+            onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
+          />
+        </>
+      ) : (
         <label>
-          转图片方式
+          刻法
           <select
             id="draw-image-strategy"
             value={normalizeDrawImageStrategy(form.image_strategy)}
@@ -176,7 +219,7 @@ export function DrawMaterialCard({
             ))}
           </select>
         </label>
-      ) : null}
+      )}
 
       {drawMode === "raster" ? (
         <>
@@ -198,35 +241,7 @@ export function DrawMaterialCard({
               ))}
             </select>
           </label>
-          <div className="wb-params-hint" id="draw-image-scan-hint">
-            与工作台图片同一套转换；过扫描、双向扫描与扫描偏移沿用填充设置（切到矢量可改）
-          </div>
-        </>
-      ) : null}
-
-      {drawMode === "vector" ? (
-        <>
-          <label
-            className="checkbox-row draw-label"
-            title="只刻画布上选中的图形，位置保持在整幅画里的位置（补刻、重刻某一部分时能对上）"
-          >
-            <input
-              type="checkbox"
-              id="draw-selected-only"
-              checked={selectedOnly}
-              onChange={(event) => setSelectedOnly(event.target.checked)}
-            />
-            只刻选中的图形（位置与整幅一致）
-            {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
-          </label>
-          <FillOptionsPanel
-            idPrefix="draw"
-            settings={fillSettings}
-            onChange={updateFillSettings}
-            materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
-            materialEntryLabel={materialLayer?.label || ""}
-            onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
-          />
+          <FillOptionsPanel idPrefix="draw-scan" settings={fillSettings} onChange={updateFillSettings} scanOnly />
         </>
       ) : null}
 

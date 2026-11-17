@@ -48,7 +48,7 @@ test("雕刻路线保存：成功按后端回显；局域网 403 与其他失败
   assert.match(engraveRouteSaveOutcome({ ok: false, error: "网络断开" }, "vector").error, /网络断开/);
 });
 
-test("转图片时文字刻法：描边 / 排线不可选、按实心；外框切割照样可选（始终走矢量）", () => {
+test("转图片时文字刻法只有实心：描边 / 排线 / 外框切割都不列出、按实心（r46 只显示能用的）", () => {
   for (const style of ["outline", "fill", "hatch", "cut"]) {
     assert.equal(textStyleAvailable(style, "vector"), true);
     assert.equal(effectiveTextStyle(style, "vector"), style);
@@ -56,10 +56,10 @@ test("转图片时文字刻法：描边 / 排线不可选、按实心；外框�
   assert.equal(textStyleAvailable("outline", "image"), false);
   assert.equal(textStyleAvailable("hatch", "image"), false);
   assert.equal(textStyleAvailable("fill", "image"), true);
-  assert.equal(textStyleAvailable("cut", "image"), true);
+  assert.equal(textStyleAvailable("cut", "image"), false);
   assert.equal(effectiveTextStyle("outline", "image"), "fill");
   assert.equal(effectiveTextStyle("hatch", "image"), "fill");
-  assert.equal(effectiveTextStyle("cut", "image"), "cut");
+  assert.equal(effectiveTextStyle("cut", "image"), "fill");
 });
 
 test("工作台签名：切换雕刻路线让文字预览过期；图片签名带扫描设置、与路线无关", () => {
@@ -155,11 +155,14 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.doesNotMatch(wbVector, /仅矢量/);
     assert.doesNotMatch(wbVector, /wb-text-route-note/);
     const wbImage = textTool({ engraveRoute: "image", textStyle: "fill", textUsesFill: true });
-    assert.match(wbImage, /<option value="outline" disabled="">轮廓描边（仅矢量）<\/option>/);
-    assert.match(wbImage, /<option value="hatch" disabled="">排线填充（线距更宽、更快）（仅矢量）<\/option>/);
-    assert.match(wbImage, /<option value="fill" selected="">/);
-    assert.match(wbImage, /<option value="cut">外框切割<\/option>/);
-    assert.match(wbImage, /id="wb-text-route-note"[^>]*>转图片时文字一律实心；外框切割仍可选，并始终走矢量/);
+    // r46：只列能用的——转图片时只有实心扫描，描边 / 排线 / 切割不出现（不是置灰）
+    assert.doesNotMatch(wbImage, /value="outline"|value="hatch"|value="cut"|仅矢量|disabled=""/);
+    assert.match(wbImage, /<option value="fill" selected="">实心扫描（转图片逐行扫描）<\/option>/);
+    assert.match(wbImage, /id="wb-text-route-note"[^>]*>转图片：文字渲染成黑白图逐行扫描/);
+    // 转图片时只显示扫描设置，不显示分组 / 角度 / 交叉排线 / 走刀
+    assert.match(wbImage, /id="wb-fill-offset"/);
+    assert.doesNotMatch(wbImage, /wb-fill-grouping|wb-fill-angle|wb-fill-cross|wb-path-corners|wb-fill-preset/);
+    assert.match(wbVector, /<option value="cut">外框切割<\/option>/, "矢量时四种刻法都在");
 
     const { DrawMaterialCard } = await server.ssrLoadModule("/src/components/draw/DrawMaterialCard.jsx");
     const card = (form, drawMode, route) => renderToStaticMarkup(React.createElement(DrawMaterialCard, {
@@ -191,14 +194,26 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     const drawVector = card({}, "vector", "vector");
     assert.match(drawVector, /id="draw-engrave-route"/);
     assert.match(drawVector, /id="draw-selected-only"/, "矢量时照旧可以只刻选中的图形");
-    assert.match(drawVector, /id="draw-fill-preset"/, "矢量时照旧显示填充设置");
     assert.doesNotMatch(drawVector, /生成策略/, "旧的生成策略下拉已去掉");
     assert.doesNotMatch(drawVector, /draw-image-strategy|draw-image-mode/);
+    // r46：矢量刻法只有轮廓 / 填充（默认轮廓）；轮廓时不显示填充设置，只有走刀
+    assert.match(drawVector, /id="draw-vector-style"/);
+    assert.match(drawVector, /<option value="outline" selected="">轮廓/);
+    assert.match(drawVector, /<option value="fill">填充/);
+    assert.doesNotMatch(drawVector, /按画布颜色/);
+    assert.doesNotMatch(drawVector, /draw-fill-grouping/);
+    const drawVectorFill = card({ vector_style: "fill" }, "vector", "vector");
+    assert.match(drawVectorFill, /id="draw-fill-preset"/, "填充时显示填充设置");
 
     const drawRaster = card({ image_mode: "jarvis", line_interval_scale: "0.8" }, "raster", "image");
     assert.match(drawRaster, /id="draw-image-strategy"/);
+    assert.doesNotMatch(drawRaster, /draw-vector-style/);
     assert.doesNotMatch(drawRaster, /<option value="vector"/, "转图片方式里没有矢量");
-    assert.match(drawRaster, /<option value="raster" selected="">光栅扫描/);
+    assert.match(drawRaster, /<option value="raster" selected="">填充（逐行扫描/);
+    assert.match(drawRaster, /<option value="outline">轮廓（描出深色边缘）/);
+    // 转图片填充时显示扫描设置（双向、偏移、过扫描），不显示矢量的分组 / 角度
+    assert.match(drawRaster, /id="draw-scan-fill-offset"/);
+    assert.doesNotMatch(drawRaster, /draw-scan-fill-grouping|draw-scan-fill-angle/);
     assert.match(drawRaster, /id="draw-image-mode"/);
     assert.match(drawRaster, /<option value="jarvis" selected="">/);
     assert.match(drawRaster, /aria-checked="true" id="draw-image-preset-fine"/, "Jarvis ×0.8 对应精细预设");
@@ -206,7 +221,8 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.doesNotMatch(drawRaster, /draw-fill-preset/);
 
     const drawOutline = card({ image_strategy: "outline" }, "outline", "image");
-    assert.match(drawOutline, /<option value="outline" selected="">轮廓描边/);
+    assert.match(drawOutline, /<option value="outline" selected="">轮廓（描出深色边缘）/);
+    assert.doesNotMatch(drawOutline, /draw-scan-fill-offset/, "描深色边缘不扫描");
     assert.match(drawOutline, /轮廓平滑度/);
     assert.doesNotMatch(drawOutline, /draw-image-mode|draw-image-preset/);
   } finally {

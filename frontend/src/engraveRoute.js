@@ -1,7 +1,8 @@
 // 雕刻路线全局开关（2026-11-17 用户决定，技术书 r45）：矢量还是转图片。
 // 只有一个值，存在后端（`GET / POST /api/engrave-route`）；工作台、创作画板上的两个开关是同一个值的两处入口，
 // 语音 / AI 生成的文字任务也按它走，不会两边不同步。局域网（手机连电脑）只读。
-// 转图片时文字一律实心、渲染成位图逐行扫描（描边、排线只在矢量下可选），外框切割始终走矢量。
+// 转图片时文字一律实心、渲染成位图逐行扫描；界面只列当前路线能用的刻法（2026-11-17 r46 用户决定：
+// “只显示他有的功能”）——矢量：轮廓描边 / 实心填充 / 排线填充 / 外框切割；转图片：只有实心扫描。
 // 这里只放纯逻辑（归一化、响应解析、文字刻法联动）；读写与页面同步在 useEngraveRoute.js。
 
 export const ENGRAVE_ROUTES = Object.freeze(["vector", "image"]);
@@ -19,7 +20,10 @@ export const ENGRAVE_ROUTE_SHARED_HINT = "工作台、创作画板与语音共�
 export const ENGRAVE_ROUTE_READONLY_HINT = "连接电脑时只能查看雕刻路线，请在电脑上的 MOSS 里切换";
 
 /** 转图片时文字刻法的说明（工作台刻法下方）。 */
-export const IMAGE_ROUTE_TEXT_NOTE = "转图片时文字一律实心；外框切割仍可选，并始终走矢量";
+export const IMAGE_ROUTE_TEXT_NOTE = "转图片：文字渲染成黑白图逐行扫描；要描边、排线或外框切割请切回矢量";
+
+/** 转图片时“实心填充”在下拉里的名字。 */
+export const IMAGE_ROUTE_FILL_LABEL = "实心扫描（转图片逐行扫描）";
 
 /** 没设置过或值无效时按矢量。 */
 export function normalizeEngraveRoute(value) {
@@ -51,15 +55,14 @@ export function engraveRouteSaveOutcome(res, previous) {
   return { route: fallback, error: `雕刻路线没有保存：${reason}` };
 }
 
-/** 文字刻法在当前路线下能不能选：转图片时只剩实心填充与外框切割。 */
+/** 文字刻法在当前路线下能不能用：转图片时只有实心（扫描），其余不列出。 */
 export function textStyleAvailable(style, route) {
   if (normalizeEngraveRoute(route) !== "image") return true;
-  return style === "fill" || style === "cut";
+  return style === "fill";
 }
 
 /**
- * 实际生效的文字刻法：转图片时描边 / 排线按实心（用户原来的选择照样记着，切回矢量即恢复）；
- * 外框切割始终走矢量，保持不变。
+ * 实际生效的文字刻法：转图片时一律实心（用户原来的选择照样记着，切回矢量即恢复）。
  */
 export function effectiveTextStyle(style, route) {
   return textStyleAvailable(style, route) ? style : "fill";

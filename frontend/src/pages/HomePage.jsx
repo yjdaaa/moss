@@ -1301,6 +1301,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                 setImageWidthMm={setImageWidthMm}
                 imageHeightMm={imageHeightMm}
                 setImageHeightMm={setImageHeightMm}
+                fillSettings={fillSettings}
+                updateFillSettings={updateFillSettings}
               />
             )}
 

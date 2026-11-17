@@ -207,3 +207,34 @@ test("只刻选中的图形：取 Excalidraw 选区里为 true 的 id，排序�
   assert.deepEqual(selectedElementIds({}), []);
   assert.deepEqual(selectedElementIds(null), []);
 });
+
+test("矢量刻法（r46）：只有轮廓 / 填充、默认轮廓，进签名，填充查光栅参数", async () => {
+  const {
+    DRAW_VECTOR_STYLES,
+    drawGenerationSignature,
+    drawRecommendEngravingMode,
+    normalizeDrawVectorStyle,
+    readDrawDefaultForm,
+  } = await import("../src/drawConnection.js");
+  assert.deepEqual(DRAW_VECTOR_STYLES.map((o) => o.value), ["outline", "fill"]);
+  assert.equal(normalizeDrawVectorStyle(undefined), "outline");
+  assert.equal(normalizeDrawVectorStyle("canvas"), "outline");
+  assert.equal(normalizeDrawVectorStyle("hatch"), "outline");
+  const store = (entries) => ({ getItem: (k) => (k in entries ? entries[k] : null) });
+  assert.equal(readDrawDefaultForm(store({})).vector_style, "outline");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.vector_style": "fill" })).vector_style, "fill");
+  const form = { material: "椴木", thickness_mm: "3", vector_style: "outline" };
+  assert.notEqual(
+    drawGenerationSignature(form, {}, "vector"),
+    drawGenerationSignature({ ...form, vector_style: "fill" }, {}, "vector"),
+  );
+  // 转图片时刻法不影响签名
+  assert.equal(
+    drawGenerationSignature(form, {}, "image"),
+    drawGenerationSignature({ ...form, vector_style: "fill" }, {}, "image"),
+  );
+  assert.equal(drawRecommendEngravingMode("vector", "fill"), "raster");
+  assert.equal(drawRecommendEngravingMode("vector", "outline"), "outline");
+  assert.equal(drawRecommendEngravingMode("raster", "outline"), "raster");
+  assert.equal(drawRecommendEngravingMode("outline", "fill"), "outline");
+});
