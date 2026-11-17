@@ -11,6 +11,8 @@ import {
   fillSettingsSignature,
   fillSettingsSummary,
   normalizeFillSettings,
+  rasterScanPayload,
+  rasterScanSignature,
   readFillSettings,
   writeFillSettings,
   MACHINE_MOTION_KEY,
@@ -83,12 +85,16 @@ test("改填充设置让工作台文字与画板矢量预览过期；只描轮�
     fillSettingsSignature(changed, { withFill: false }),
     "描边不受填充选项影响",
   );
-  const form = { material: "椴木", thickness_mm: "3", mode: "vector" };
-  const drawSig = (fill) => drawGenerationSignature(form, { enabled: false, fill: fillSettingsSignature(fill) });
+  const form = { material: "椴木", thickness_mm: "3" };
+  const drawSig = (fill) => drawGenerationSignature(form, { enabled: false, fill: fillSettingsSignature(fill) }, "vector");
   assert.notEqual(drawSig(DEFAULT_FILL_SETTINGS), drawSig(changed));
-  // 光栅模式不用矢量填充设置
-  const rasterSig = (fill) => drawGenerationSignature({ ...form, mode: "raster" }, { enabled: false, fill: fillSettingsSignature(fill) });
+  // 转图片（光栅扫描）不用矢量填充设置：页面只给扫描子集的签名（2026-11-17 r45）
+  const rasterSig = (fill) => drawGenerationSignature({ ...form, image_strategy: "raster" }, { enabled: false, fill: rasterScanSignature(fill) }, "image");
   assert.equal(rasterSig(DEFAULT_FILL_SETTINGS), rasterSig(changed));
+  assert.notEqual(rasterSig(DEFAULT_FILL_SETTINGS), rasterSig({ ...DEFAULT_FILL_SETTINGS, bidirectional: false }), "双向扫描影响位图刀路");
+  // 轮廓描边不看填充 / 扫描设置
+  const outlineSig = (fill) => drawGenerationSignature({ ...form, image_strategy: "outline" }, { enabled: false, fill }, "image");
+  assert.equal(outlineSig(fillSettingsSignature(DEFAULT_FILL_SETTINGS)), outlineSig(fillSettingsSignature(changed)));
 });
 
 test("预览结果说明：实际过扫描与去重条数", () => {
@@ -219,4 +225,40 @@ test("切割结果说明：回显的补偿、桥位、引线与后端提示", ()
     fillResultNote(null, 1, { active: true, kerf_mm: 0.1, report: {} }),
     "切缝外扩 0.10 mm；去掉 1 条重复线",
   );
+});
+
+// 2026-11-17（技术书 r45）：工作台图片与画板转图片同样按速度自动过扫描、套用双向扫描偏移表
+test("位图扫描子集：只带过扫描 / 双向 / 扫描偏移（含速度表）/ 加速度，不带矢量填充项", () => {
+  assert.deepEqual(rasterScanPayload(DEFAULT_FILL_SETTINGS), {
+    fill_options: { bidirectional: true, scan_offset_mm: 0, overscan_mm: "auto" },
+  });
+  const tuned = rasterScanPayload({
+    ...DEFAULT_FILL_SETTINGS,
+    grouping: "individual",
+    angleDeg: "45",
+    crossHatch: true,
+    bidirectional: false,
+    scanOffsetMm: "0.08",
+    scanOffsetTable: [{ speed: "3000", offset: "0.3" }, { speed: "1000", offset: "0.1" }],
+    accelerationMmS2: "2500",
+  });
+  assert.deepEqual(tuned, {
+    fill_options: {
+      bidirectional: false,
+      scan_offset_mm: 0.08,
+      scan_offset_table: [[1000, 0.1], [3000, 0.3]],
+      overscan_mm: "auto",
+      acceleration_mm_s2: 2500,
+    },
+  });
+  assert.equal(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "1.5" }).fill_options.overscan_mm, 1.5);
+  assert.match(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, scanOffsetMm: "3" }).error, /偏移/);
+  assert.match(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "30" }).error, /过扫描/);
+  assert.match(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, angleDeg: "abc" }).fill_options.overscan_mm, /auto/, "扫描角度不影响位图");
+
+  const base = rasterScanSignature(DEFAULT_FILL_SETTINGS);
+  assert.equal(rasterScanSignature({ ...DEFAULT_FILL_SETTINGS, angleDeg: "90", crossHatch: true, kerfMm: "0.2" }), base, "矢量填充与切割项不进位图签名");
+  assert.notEqual(rasterScanSignature({ ...DEFAULT_FILL_SETTINGS, bidirectional: false }), base);
+  assert.notEqual(rasterScanSignature({ ...DEFAULT_FILL_SETTINGS, scanOffsetTable: [{ speed: "1000", offset: "0.1" }] }), base);
+  assert.notEqual(rasterScanSignature({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false }), base);
 });

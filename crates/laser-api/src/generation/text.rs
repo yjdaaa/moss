@@ -7,6 +7,8 @@ pub(crate) fn generate_text_artifacts(
     object: &serde_json::Map<String, serde_json::Value>,
     generated_root: Option<&std::path::Path>,
     library: &laser_contracts::MaterialLibrary,
+    // 全局雕刻路线（r45）：请求没写 `engrave_route` 时按它
+    default_route: crate::engrave_route::EngraveRoute,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
     let motion = parse_machine_motion(object)?;
@@ -69,7 +71,18 @@ pub(crate) fn generate_text_artifacts(
     if is_cut && shapes.iter().any(|shape| shape.fill) {
         return Err("切割时图形不能填满，请去掉 fill".into());
     }
-    let solid_fill = (!text.is_empty() && text_fill == laser_core::engine::TextFill::Fill)
+    // 雕刻路线（2026-11-17 技术书 r45）：转图片时文字一律实心、整件取光栅参数；外框切割始终走矢量
+    let requested_route = crate::engrave_route::EngraveRoute::from_request(object, default_route)?;
+    let image = requested_route == crate::engrave_route::EngraveRoute::Image && !is_cut;
+    let route_note = if requested_route == crate::engrave_route::EngraveRoute::Image && is_cut {
+        Some("外框切割只能走矢量，本次按矢量生成")
+    } else if image && !text.is_empty() && text_fill != laser_core::engine::TextFill::Fill {
+        Some("转图片时文字一律实心扫描（描边、排线只在矢量下可选）")
+    } else {
+        None
+    };
+    let solid_fill = image
+        || (!text.is_empty() && text_fill == laser_core::engine::TextFill::Fill)
         || shapes.iter().any(|shape| shape.fill);
     let (rec_laser_mode, rec_engraving_mode) = if is_cut {
         ("cut", None)
@@ -187,6 +200,7 @@ pub(crate) fn generate_text_artifacts(
         border,
         text_box,
         weld: parse_bool(object.get("text_weld"), true),
+        image,
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
     // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
@@ -260,6 +274,9 @@ pub(crate) fn generate_text_artifacts(
         "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, &fill)),
         "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref(), &cut_from_material)),
         "removed_duplicates": artifacts.removed_duplicates,
+        "engrave_route": if image { "image" } else { "vector" },
+        "route_note": route_note,
+        "raster": artifacts.raster.map(|r| serde_json::json!({"grid_width": r.grid_width, "grid_height": r.grid_height, "pixel_size_mm": r.pixel_size_mm})),
         "shapes": super::shapes::shapes_json(&shapes),
         "shape_count": artifacts.shapes,
         "border": border.as_ref().map(super::shapes::border_json),

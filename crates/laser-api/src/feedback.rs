@@ -678,9 +678,12 @@ impl ApiService {
         input.insert("feedback_params".into(), params.json());
         let effective_library = self.effective_material_library()?;
         let mut artifacts = match workflow["source_type"].as_str() {
-            Some("text") => {
-                generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?
-            }
+            Some("text") => generate_text_artifacts(
+                &input,
+                self.generated_root.as_deref(),
+                &effective_library,
+                self.engrave_route(),
+            )?,
             Some("draw") => {
                 let file = workflow["artifacts"]["source_image_file"]
                     .as_str()
@@ -702,7 +705,12 @@ impl ApiService {
                         input.insert(key.into(), workflow["artifacts"][key].clone());
                     }
                 }
-                generate_draw_artifacts(&input, Some(root), &effective_library)?
+                generate_draw_artifacts(
+                    &input,
+                    Some(root),
+                    &effective_library,
+                    self.engrave_route(),
+                )?
             }
             Some("image") => {
                 // 图片任务的预览是抖动后的黑白网格，优先用另存的原图按原抖动/阈值与像素间距重新处理

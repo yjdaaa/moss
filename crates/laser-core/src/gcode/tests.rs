@@ -95,6 +95,7 @@ fn raster_writer_supports_scanline_and_segment() {
         safety_note: Some("test".into()),
         power_scale: None,
         dot_width_mm: 0.0,
+        scan_offset_mm: 0.0,
     };
     let gcode = write_raster(&plan, 10, 2, &options).unwrap();
     assert!(gcode.contains("; Raster mode: black/white dithered scan"));
@@ -332,6 +333,7 @@ fn raster_writer_omits_redundant_m5_and_inherits_modal_feed_rate() {
         safety_note: None,
         power_scale: Some(1000),
         dot_width_mm: 0.0,
+        scan_offset_mm: 0.0,
     };
     let gcode = write_raster(&plan, 4, 2, &options).unwrap();
     // 验证：中间各行换向处不含 M5，整个 G-code 仅在结束时出现一次 M5
@@ -381,6 +383,7 @@ fn raster_options_for_tests() -> RasterWriterOptions {
         safety_note: None,
         power_scale: Some(1000),
         dot_width_mm: 0.0,
+        scan_offset_mm: 0.0,
     }
 }
 
@@ -397,6 +400,7 @@ fn dot_width_correction_shortens_each_run_and_rejects_width_not_below_interval()
         1,
         &RasterWriterOptions {
             dot_width_mm: 0.04,
+            scan_offset_mm: 0.0,
             ..raster_options_for_tests()
         },
     )
@@ -420,6 +424,7 @@ fn dot_width_correction_shortens_each_run_and_rejects_width_not_below_interval()
         1,
         &RasterWriterOptions {
             dot_width_mm: 0.04,
+            scan_offset_mm: 0.0,
             ..raster_options_for_tests()
         },
     )
@@ -428,6 +433,7 @@ fn dot_width_correction_shortens_each_run_and_rejects_width_not_below_interval()
     for bad in [0.1, 0.2, -0.01, f64::NAN] {
         let options = RasterWriterOptions {
             dot_width_mm: bad,
+            scan_offset_mm: 0.0,
             ..raster_options_for_tests()
         };
         assert!(write_raster(&plan, 7, 1, &options).is_err(), "{bad}");
@@ -483,6 +489,7 @@ fn grayscale_writer_varies_power_per_run_and_stays_in_bounds() {
         &table,
         &RasterWriterOptions {
             dot_width_mm: 0.02,
+            scan_offset_mm: 0.0,
             ..raster_options_for_tests()
         },
     )
@@ -517,6 +524,7 @@ fn write_raster_vertical_and_nan_options_never_panic() {
         safety_note: None,
         power_scale: Some(1000),
         dot_width_mm: 0.0,
+        scan_offset_mm: 0.0,
     };
     let gcode = write_raster(&plan, 2, 4, &options).unwrap();
     assert!(gcode.contains("G0 X0.000 Y"), "{gcode}");
@@ -676,4 +684,41 @@ fn steps_write_travel_coast_and_burn_with_flipped_y() {
         ]
     );
     assert!(write_steps(&[Step::Burn((f64::NAN, 0.0))], &options).is_err());
+}
+
+/// 2026-11-17（技术书 r45）：位图双向扫描偏移——蛇形扫描时正向行往回、反向行往前各挪一半；
+/// 一半超过过扫描时拒绝。
+#[test]
+fn raster_scan_offset_shifts_alternate_rows_against_travel() {
+    let bitmap = vec![vec![0_u8, 0, 0, 0], vec![0, 0, 0, 0]];
+    let plan =
+        crate::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline").unwrap();
+    let options = |offset: f64| RasterWriterOptions {
+        pixel_size_mm: 1.0,
+        overscan_mm: 1.0,
+        work_area_width_mm: 10.0,
+        work_area_height_mm: 10.0,
+        power: 500,
+        feed_rate: 1000,
+        laser_mode: "M4",
+        snake_scan: true,
+        material: None,
+        safety_note: None,
+        power_scale: None,
+        dot_width_mm: 0.0,
+        scan_offset_mm: offset,
+    };
+    let burns = |gcode: &str| -> Vec<String> {
+        gcode
+            .lines()
+            .filter(|l| l.starts_with("G1 ") && l.contains(" S500"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let plain = burns(&write_raster(&plan, 4, 2, &options(0.0)).unwrap());
+    let shifted = burns(&write_raster(&plan, 4, 2, &options(0.4)).unwrap());
+    // 正向行终点 5.000 → 4.800，反向行终点 1.000 → 1.200
+    assert_eq!(plain, ["G1 X5.000 S500", "G1 X1.000 S500"]);
+    assert_eq!(shifted, ["G1 X4.800 S500", "G1 X1.200 S500"]);
+    assert!(write_raster(&plan, 4, 2, &options(2.2)).is_err());
 }

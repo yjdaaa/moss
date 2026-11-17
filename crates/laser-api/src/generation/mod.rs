@@ -10,7 +10,7 @@ mod text;
 
 pub(crate) use draw::generate_draw_artifacts;
 pub(crate) use image_upload::generate_image_or_gcode_artifacts;
-use options::{cut_options_json, fill_options_json, parse_path_options};
+use options::{MachineMotion, ParsedFill, cut_options_json, fill_options_json, parse_path_options};
 pub(crate) use options::{
     frame_hull_json, merge_layer_options, parse_cut_options, parse_fill_options,
     parse_machine_motion, time_estimate_json,

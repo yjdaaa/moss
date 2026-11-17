@@ -473,3 +473,8 @@ button.conn-pill:hover {
 .lab-wizard-summary, .lab-wizard-status { font-size: 11px; color: var(--ink-dim); }
 .lab-wizard-actions, .lab-wizard-measure { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 6px; }
 .lab-wizard-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; min-width: 0; flex: 1 1 160px; }
+/* 2026-11-17（r45）雕刻路线开关“矢量 / 转图片”：复用质量预设的 ob-chip 排法，工作台与创作画板各一处 */
+.engrave-route { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.engrave-route .quality-presets { margin-top: 6px; }
+.engrave-route .ob-chip:disabled { opacity: 0.55; cursor: not-allowed; }
+.engrave-route-hint { font-size: 11px; line-height: 1.5; color: var(--ob-ink-2); overflow-wrap: anywhere; }

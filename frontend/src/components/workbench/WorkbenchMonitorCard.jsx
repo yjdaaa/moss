@@ -21,6 +21,7 @@ export function WorkbenchMonitorCard({
   gcodeText,
   timeEstimate,
   fitNote,
+  routeNote,
   fillNote,
   busy,
   framingBusy,
@@ -137,6 +138,9 @@ export function WorkbenchMonitorCard({
           )}
           {fitNote && (
             <div className="wb-origin-note" id="wb-fit-note">{fitNote}</div>
+          )}
+          {routeNote && (
+            <div className="wb-origin-note" id="wb-route-note">{routeNote}</div>
           )}
           {fillNote && (
             <div className="wb-origin-note" id="wb-fill-note">刀路：{fillNote}</div>

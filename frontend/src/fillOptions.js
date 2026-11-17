@@ -4,6 +4,7 @@
 // 同日补充（对齐 LightBurn）：双向扫描偏移可按“速度 → 偏移”表填写（`scan_offset_table`）；工作台文字选
 // “外框切割”时另有切割设置（切缝补偿、桥位、引入 / 引出线、过切，转成 `cut_options`，默认全关）。
 // 创意画板只生成雕刻任务，不带切割设置。
+// 2026-11-17（技术书 r45）：位图（工作台图片、画板转图片）也用这份设置里的扫描子集（`rasterScanPayload`）。
 
 export const FILL_SETTINGS_KEY = "moss.fillSettings.v1";
 
@@ -187,29 +188,55 @@ export function fillSettingsPayload(settings, { withFill = true, withCut = false
   if (!withFill) return { path_options, ...cutPart };
   const angle = numberField(s.angleDeg, "扫描角度", { min: -360, max: 360 });
   if (angle.error) return { error: angle.error };
-  const offset = numberField(s.scanOffsetMm, "双向扫描偏移", { min: -2, max: 2, allowEmpty: true });
-  if (offset.error) return { error: offset.error };
+  const scan = scanOptionsPart(s);
+  if (scan.error) return { error: scan.error };
   const fill_options = {
     grouping: s.grouping,
     angle_deg: angle.value,
     cross_hatch: s.crossHatch,
-    bidirectional: s.bidirectional,
-    scan_offset_mm: offset.value ?? 0,
+    ...scan.value,
   };
+  return { fill_options, path_options, ...cutPart };
+}
+
+/** 逐行扫描共用的部分：双向、扫描偏移（含速度表）、过扫描（自动时带机器加速度）。 */
+function scanOptionsPart(s) {
+  const offset = numberField(s.scanOffsetMm, "双向扫描偏移", { min: -2, max: 2, allowEmpty: true });
+  if (offset.error) return { error: offset.error };
+  const scan = { bidirectional: s.bidirectional, scan_offset_mm: offset.value ?? 0 };
   const table = offsetTablePayload(s.scanOffsetTable);
   if (table.error) return { error: table.error };
-  if (table.value) fill_options.scan_offset_table = table.value;
+  if (table.value) scan.scan_offset_table = table.value;
   if (s.overscanAuto) {
-    fill_options.overscan_mm = "auto";
+    scan.overscan_mm = "auto";
     const accel = numberField(s.accelerationMmS2, "机器加速度", { min: 10, max: 100000, allowEmpty: true });
     if (accel.error) return { error: accel.error };
-    if (accel.value !== null) fill_options.acceleration_mm_s2 = accel.value;
+    if (accel.value !== null) scan.acceleration_mm_s2 = accel.value;
   } else {
     const over = numberField(s.overscanMm, "过扫描距离", { min: 0, max: 20 });
     if (over.error) return { error: over.error };
-    fill_options.overscan_mm = over.value;
+    scan.overscan_mm = over.value;
   }
-  return { fill_options, path_options, ...cutPart };
+  return { value: scan };
+}
+
+/** 位图逐行扫描影响刀路的设置键（工作台图片、画板转图片用）。 */
+const RASTER_SCAN_KEYS = ["bidirectional", "scanOffsetMm", "scanOffsetTable", "overscanAuto", "overscanMm", "accelerationMmS2"];
+
+/**
+ * 位图（工作台图片、创作画板转图片）提交的 `fill_options` 扫描子集（2026-11-17 技术书 r45）：
+ * 过扫描（自动按速度）、双向扫描、扫描偏移与速度表、机器加速度；不带填充分组 / 角度 / 交叉这些矢量项。
+ * 填写有误返回 `{ error }`。
+ */
+export function rasterScanPayload(settings) {
+  const scan = scanOptionsPart(normalizeFillSettings(settings));
+  return scan.error ? { error: scan.error } : { fill_options: scan.value };
+}
+
+/** 位图扫描设置的签名：只看 {@link rasterScanPayload} 用到的键。 */
+export function rasterScanSignature(settings) {
+  const s = normalizeFillSettings(settings);
+  return `scan:${JSON.stringify(RASTER_SCAN_KEYS.map((key) => s[key]))}`;
 }
 
 /** 影响刀路的签名：改了任何一项，旧预览就算过期（切割设置只在外框切割时算进去）。 */

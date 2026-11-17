@@ -15,6 +15,9 @@
 //!   “Weld”），笔画交叠、字与字相连的字体不会在交叠处多刻一道线；可同时放 [`crate::shapes`] 的基础图形
 //!   与边框，文字自动适配进边框里面或 `text_box`。版面以木牌中心为原点，激光头起点仍是木牌中心 /
 //!   左下角；图形超出木牌、与文字重叠直接报错，不悄悄挪动。刻得好坏只取决于机器与材料库参数。
+//! - 转图片（2026-11-17 用户决定，技术书 r45）：[`TextTaskSpec::image`] 为 true 时，版面（焊接后的文字一律
+//!   实心、填满的图形、描边图形与直线按 [`IMAGE_STROKE_MIN_MM`] 线宽）按材料线距渲染成黑白位图，网格与版面
+//!   左下角对齐，再逐行扫描（过扫描、双向与扫描偏移取 `scan`）；起点、走边框范围与矢量相同。切割不能转图片。
 
 use crate::{cut, font, gcode, shapes, vector_plan};
 use image::RgbaImage;
@@ -121,6 +124,22 @@ pub struct TextTaskSpec<'a> {
     pub text_box: Option<TextBox>,
     /// 规划前合并重叠的字形轮廓（默认开）
     pub weld: bool,
+    /// 转图片：版面渲染成位图后逐行扫描（文字一律实心）；false 为矢量规划
+    pub image: bool,
+}
+
+/// 转图片时描边图形与直线的最小线宽（mm）；实际取它与两倍线距中较大的。
+pub const IMAGE_STROKE_MIN_MM: f64 = 0.3;
+
+/// 转图片的位图最多多少个像素。
+pub const MAX_IMAGE_PIXELS: usize = 16_000_000;
+
+/// 转图片的位图信息。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageRaster {
+    pub grid_width: usize,
+    pub grid_height: usize,
+    pub pixel_size_mm: f64,
 }
 
 /// 文字区域（木牌中心为原点、y 向上，mm）。
@@ -177,6 +196,8 @@ pub struct TextTaskArtifacts {
     pub weld: Option<WeldReport>,
     /// 图形个数（含边框线）
     pub shapes: usize,
+    /// 转图片时的位图（矢量规划时为 `None`）
+    pub raster: Option<ImageRaster>,
 }
 
 pub struct TextTaskEngine;
@@ -312,9 +333,16 @@ impl TextTaskEngine {
         let board_w = positive(spec.board_width_mm, "木牌宽度")?;
         let board_h = positive(spec.board_height_mm, "木牌高度")?;
         // 填充的过扫描让扫描线越出笔画：放进木牌时两侧留边至少容得下它（与旧位图扫描一致）
-        let fills = has_text && matches!(spec.fill, TextFill::Fill | TextFill::Hatch);
+        // 转图片：文字一律实心，位图横向逐行扫描，过扫描只往 x 两侧伸
+        let image = spec.image;
+        if image && spec.cut.is_active() {
+            return Err("切割不能转图片，请用矢量".into());
+        }
+        let fills = has_text && (image || matches!(spec.fill, TextFill::Fill | TextFill::Hatch));
         let shape_fills = spec.shapes.iter().any(|s| s.fill);
-        let (over_x, over_y) = if fills || shape_fills {
+        let (over_x, over_y) = if image {
+            (spec.scan.overscan_mm, 0.0)
+        } else if fills || shape_fills {
             spec.scan.extension_mm()
         } else {
             (0.0, 0.0)
@@ -452,7 +480,7 @@ impl TextTaskEngine {
             let geometry = shape.geometry()?;
             let (x0, y0, x1, y1) =
                 shapes::bounds(geometry.points()).ok_or("图形没有可雕刻的线条")?;
-            let (ox, oy) = if shape.fill {
+            let (ox, oy) = if shape.fill || image {
                 (over_x, over_y)
             } else {
                 (0.0, 0.0)
@@ -548,6 +576,22 @@ impl TextTaskEngine {
             let (welded, report) = weld_contours(&paths)?;
             weld = Some(report);
             paths = welded;
+        }
+
+        if image {
+            return rasterize_layout(&RasterLayout {
+                spec,
+                text: &paths,
+                placed: &placed,
+                to_layout: &to_layout,
+                width,
+                height,
+                start: (start_x, start_y),
+                frame,
+                glyphs,
+                font_size_mm: if has_text { size } else { 0.0 },
+                weld,
+            });
         }
 
         // 矢量规划（2026-11-16 用户决定：文字一律转矢量再规划路线；同日对齐 LightBurn：先扫描填充、再描轮廓）。
@@ -684,8 +728,230 @@ impl TextTaskEngine {
             cut_report,
             weld,
             shapes: placed.len(),
+            raster: None,
         })
     }
+}
+
+/// 转图片需要的版面信息（坐标：版面左上角为 0、y 向下）。
+struct RasterLayout<'a, 'b> {
+    spec: &'a TextTaskSpec<'b>,
+    text: &'a Paths,
+    placed: &'a [PlacedShape],
+    to_layout:
+        &'a dyn Fn(&[laser_contracts::geometry::Point]) -> Vec<laser_contracts::geometry::Point>,
+    width: f64,
+    height: f64,
+    start: (f64, f64),
+    frame: HeadRelativeBox,
+    glyphs: usize,
+    font_size_mm: f64,
+    weld: Option<WeldReport>,
+}
+
+/// 非零环绕规则下，水平线 `y` 穿过的区间（x 从小到大）。
+fn nonzero_spans(rings: &[Vec<laser_contracts::geometry::Point>], y: f64) -> Vec<(f64, f64)> {
+    let mut crossings: Vec<(f64, i32)> = Vec::new();
+    for ring in rings {
+        let n = ring.len();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a.1 <= y && b.1 > y) || (b.1 <= y && a.1 > y) {
+                let x = a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0);
+                crossings.push((x, if b.1 > a.1 { 1 } else { -1 }));
+            }
+        }
+    }
+    crossings.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut spans = Vec::new();
+    let mut winding = 0;
+    let mut open = 0.0;
+    for (x, dir) in crossings {
+        let was = winding != 0;
+        winding += dir;
+        match (was, winding != 0) {
+            (false, true) => open = x,
+            (true, false) => spans.push((open, x)),
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// 版面渲染成位图并逐行扫描（见模块说明“转图片”）。
+fn rasterize_layout(layout: &RasterLayout<'_, '_>) -> Result<TextTaskArtifacts, String> {
+    let spec = layout.spec;
+    let pixel = spec.pixel_size_mm;
+    let grid_w = ((layout.width / pixel) - 1e-9).ceil().max(1.0) as usize;
+    let grid_h = ((layout.height / pixel) - 1e-9).ceil().max(1.0) as usize;
+    if grid_w.saturating_mul(grid_h) > MAX_IMAGE_PIXELS {
+        return Err(format!(
+            "转图片后约 {grid_w} × {grid_h} 像素，太大了；请缩小尺寸、加大线距或改用矢量"
+        ));
+    }
+    // 网格与版面左下角对齐：第 r 行（自上而下）像素中心在版面 y = height − (grid_h − r − 0.5)·pixel
+    let center_y = |r: usize| layout.height - (grid_h - r) as f64 * pixel + pixel / 2.0;
+    let mut bitmap = vec![vec![255_u8; grid_w]; grid_h];
+    let mut fill_rings: Vec<Vec<laser_contracts::geometry::Point>> = layout
+        .text
+        .iter()
+        .map(|ring| {
+            let mut ring = ring.clone();
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            ring
+        })
+        .collect();
+    let mut strokes: Vec<Vec<laser_contracts::geometry::Point>> = Vec::new();
+    for item in layout.placed {
+        let points = (layout.to_layout)(item.geometry.points());
+        if item.shape.fill {
+            let mut ring = points;
+            ring.pop();
+            fill_rings.push(ring);
+        } else {
+            strokes.push(points);
+        }
+    }
+    for (r, row) in bitmap.iter_mut().enumerate() {
+        for (x0, x1) in nonzero_spans(&fill_rings, center_y(r)) {
+            // 像素中心落在区间里就出光
+            let first = ((x0 / pixel) - 0.5).ceil().max(0.0) as usize;
+            let last = ((x1 / pixel) - 0.5).floor();
+            if last < 0.0 {
+                continue;
+            }
+            for cell in row
+                .iter_mut()
+                .take((last as usize + 1).min(grid_w))
+                .skip(first)
+            {
+                *cell = 0;
+            }
+        }
+    }
+    let half = IMAGE_STROKE_MIN_MM.max(2.0 * pixel) / 2.0;
+    for line in &strokes {
+        for seg in line.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len2 = dx * dx + dy * dy;
+            let col = |x: f64| ((x / pixel) - 0.5).clamp(0.0, (grid_w - 1) as f64);
+            let (c0, c1) = (
+                col(a.0.min(b.0) - half).floor() as usize,
+                col(a.0.max(b.0) + half).ceil() as usize,
+            );
+            for (r, row) in bitmap.iter_mut().enumerate() {
+                let y = center_y(r);
+                if y < a.1.min(b.1) - half || y > a.1.max(b.1) + half {
+                    continue;
+                }
+                for (c, cell) in row.iter_mut().enumerate().take(c1 + 1).skip(c0) {
+                    let x = (c as f64 + 0.5) * pixel;
+                    let t = if len2 > 0.0 {
+                        (((x - a.0) * dx + (y - a.1) * dy) / len2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let (px, py) = (a.0 + t * dx, a.1 + t * dy);
+                    if (x - px).hypot(y - py) <= half {
+                        *cell = 0;
+                    }
+                }
+            }
+        }
+    }
+    if bitmap.iter().flatten().all(|v| *v != 0) {
+        return Err("转图片后没有要出光的像素（图形太细？），请加粗或改用矢量".into());
+    }
+    let overscan = spec.scan.overscan_mm;
+    let bidirectional = spec.scan.bidirectional;
+    let scan_offset = if bidirectional {
+        spec.scan.scan_offset_mm
+    } else {
+        0.0
+    };
+    if scan_offset.abs() / 2.0 > overscan + 1e-9 {
+        return Err(format!(
+            "转图片时扫描偏移的一半（{:.2} mm）不能超过过扫描（{overscan:.2} mm），请加大过扫描",
+            scan_offset.abs() / 2.0
+        ));
+    }
+    let plan = crate::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+        .map_err(|e| e.to_string())?;
+    let written = gcode::write_raster(
+        &plan,
+        grid_w,
+        grid_h,
+        &gcode::RasterWriterOptions {
+            pixel_size_mm: pixel,
+            overscan_mm: overscan,
+            work_area_width_mm: grid_w as f64 * pixel + 2.0 * overscan,
+            work_area_height_mm: grid_h as f64 * pixel,
+            power: spec.power,
+            feed_rate: spec.feed_rate,
+            laser_mode: "M4",
+            snake_scan: bidirectional,
+            material: None,
+            safety_note: None,
+            power_scale: None,
+            dot_width_mm: 0.0,
+            scan_offset_mm: scan_offset,
+        },
+    )?;
+    // 位图坐标：x 右移一个过扫描，y 与版面（y 向上）相同
+    let (start_x, start_y) = (layout.start.0 + overscan, layout.start.1);
+    let gcode = place_at_head(&written, start_x, start_y)?;
+    let mut preview = RgbaImage::from_pixel(
+        grid_w as u32,
+        grid_h as u32,
+        image::Rgba([255, 255, 255, 255]),
+    );
+    for (r, row) in bitmap.iter().enumerate() {
+        for (c, value) in row.iter().enumerate() {
+            if *value == 0 {
+                preview.put_pixel(c as u32, r as u32, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+    let estimate = gcode::estimate_time(&gcode, 3000.0);
+    Ok(TextTaskArtifacts {
+        gcode,
+        preview,
+        width_mm: layout.width,
+        height_mm: layout.height,
+        glyphs: layout.glyphs,
+        path_optimization: PathOptimizationStats {
+            strategy: "raster_scanline".into(),
+            travel_distance_before: 0.0,
+            travel_distance_after: 0.0,
+            travel_reduction_ratio: 0.0,
+            path_count: 0,
+        },
+        estimate,
+        font_size_mm: layout.font_size_mm,
+        fill: TextFill::Fill,
+        origin: spec.origin,
+        frame: layout.frame,
+        fill_options: Some(vector_plan::FillOptions {
+            spacing: pixel,
+            rule: vector_plan::FillRule::NonZero,
+            angle_deg: 0.0,
+            cross_hatch: false,
+            scan_offset_mm: scan_offset,
+            ..spec.scan
+        }),
+        removed_duplicates: 0,
+        cut_report: None,
+        weld: layout.weld,
+        shapes: layout.placed.len(),
+        raster: Some(ImageRaster {
+            grid_width: grid_w,
+            grid_height: grid_h,
+            pixel_size_mm: pixel,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -725,6 +991,7 @@ mod tests {
             border: None,
             text_box: None,
             weld: true,
+            image: false,
         }
     }
 
@@ -1291,5 +1558,134 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("边框里面"), "{err}");
+    }
+
+    // ---------- 2026-11-17 技术书 r45：转图片 ----------
+
+    /// 出光（S > 0 的 G1）走过的 x / y 范围，相对激光头起点（`G92` 声明的位置）。
+    fn burn_extents(gcode: &str) -> (f64, f64, f64, f64) {
+        let (mut x, mut y, mut s) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let (mut hx, mut hy) = (0.0_f64, 0.0_f64);
+        let mut e = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for line in gcode.lines() {
+            let word = |c: char| {
+                line.split_whitespace()
+                    .find(|w| w.starts_with(c))
+                    .and_then(|w| w[1..].parse::<f64>().ok())
+            };
+            if line.starts_with("G92") {
+                (x, y) = (word('X').unwrap_or(x), word('Y').unwrap_or(y));
+                (hx, hy) = (x, y);
+                continue;
+            }
+            if !(line.starts_with("G0") || line.starts_with("G1")) {
+                continue;
+            }
+            s = word('S').unwrap_or(s);
+            let (nx, ny) = (word('X').unwrap_or(x), word('Y').unwrap_or(y));
+            if line.starts_with("G1") && s > 0.0 {
+                for (px, py) in [(x, y), (nx, ny)] {
+                    e = (e.0.min(px), e.1.min(py), e.2.max(px), e.3.max(py));
+                }
+            }
+            (x, y) = (nx, ny);
+        }
+        (e.0 - hx, e.1 - hy, e.2 - hx, e.3 - hy)
+    }
+
+    #[test]
+    fn image_route_scans_the_same_layout_as_vector() {
+        let board = |image: bool, origin: TextOrigin| TextTaskSpec {
+            board_width_mm: Some(60.0),
+            board_height_mm: Some(30.0),
+            auto_size: true,
+            origin,
+            image,
+            ..spec("AB")
+        };
+        let vector = TextTaskEngine::generate(&board(false, TextOrigin::Center)).unwrap();
+        let image = TextTaskEngine::generate(&board(true, TextOrigin::Center)).unwrap();
+        assert!(image.gcode.contains("; Raster mode"), "转图片走位图扫描");
+        assert!(vector.raster.is_none());
+        let raster = image.raster.unwrap();
+        assert_eq!(raster.pixel_size_mm, 0.1);
+        assert_eq!(image.fill, TextFill::Fill, "转图片时文字一律实心");
+        // 同一版面：文字区域、字号与起点相同，出光范围相差不超过一个像素
+        assert_eq!(image.frame, vector.frame);
+        assert_eq!(image.font_size_mm, vector.font_size_mm);
+        let (v, i) = (burn_extents(&vector.gcode), burn_extents(&image.gcode));
+        for (a, b) in [(v.0, i.0), (v.1, i.1), (v.2, i.2), (v.3, i.3)] {
+            assert!((a - b).abs() <= 0.11, "矢量 {v:?} 与位图 {i:?}");
+        }
+        // 左下角起点：不往负方向越界
+        let corner = TextTaskEngine::generate(&board(true, TextOrigin::LowerLeft)).unwrap();
+        let e = extents(&corner.gcode);
+        assert!(
+            e.min_x >= -1e-6 && e.min_y >= -1e-6 && e.max_x <= 60.0 + 1e-6,
+            "{e:?}"
+        );
+
+        // 描边图形与直线按线宽渲染；切割不能转图片
+        let ring = [shapes::Shape {
+            kind: shapes::ShapeKind::Circle,
+            x_mm: 0.0,
+            y_mm: 0.0,
+            width_mm: 20.0,
+            height_mm: 20.0,
+            rotation_deg: 0.0,
+            fill: false,
+        }];
+        let outline = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(30.0),
+            board_height_mm: Some(30.0),
+            shapes: &ring,
+            image: true,
+            ..spec("")
+        })
+        .unwrap();
+        let (x0, _, x1, _) = burn_extents(&outline.gcode);
+        assert!((x1 - x0 - 20.0).abs() < 0.5, "{x0} {x1}");
+        let err = TextTaskEngine::generate(&TextTaskSpec {
+            image: true,
+            cut: cut::CutOptions {
+                kerf_mm: 0.1,
+                ..cut::CutOptions::default()
+            },
+            ..spec("A")
+        })
+        .unwrap_err();
+        assert!(err.contains("切割不能转图片"), "{err}");
+    }
+
+    #[test]
+    fn image_route_applies_bidirectional_scan_offset() {
+        let with_offset = |offset: f64| {
+            TextTaskEngine::generate(&TextTaskSpec {
+                image: true,
+                scan: vector_plan::FillOptions {
+                    overscan_mm: 1.0,
+                    scan_offset_mm: offset,
+                    ..spec("A").scan
+                },
+                ..spec("A")
+            })
+        };
+        let plain = with_offset(0.0).unwrap();
+        let shifted = with_offset(0.2).unwrap();
+        // 第一行（正向）往回挪 0.1 mm：起点 x 小 0.1
+        let first_burn = |gcode: &str| {
+            gcode
+                .lines()
+                .find(|l| l.starts_with("G1 ") && !l.contains(" S0"))
+                .map(str::to_owned)
+                .unwrap()
+        };
+        assert_ne!(first_burn(&plain.gcode), first_burn(&shifted.gcode));
+        assert!(with_offset(3.0).is_err(), "偏移的一半超过过扫描要拒绝");
     }
 }

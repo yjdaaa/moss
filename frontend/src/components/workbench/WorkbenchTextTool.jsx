@@ -1,10 +1,16 @@
 import React from "react";
 import { isRemoteMode } from "../../authSession.js";
+import { IMAGE_ROUTE_TEXT_NOTE, textStyleAvailable } from "../../engraveRoute.js";
 import { materialLayerHint } from "../../fillOptions.js";
 import { TEXT_ORIGIN_OPTIONS, TEXT_STYLE_OPTIONS } from "../../workbenchParams.js";
+import EngraveRouteSwitch from "../EngraveRouteSwitch.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
 
-/** 雕刻工作台 ② 加工内容 · 矢量文字：文本、字高、刻法、对刀起点与填充 / 切割设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
+/**
+ * 雕刻工作台 ② 加工内容 · 矢量文字：文本、字高、刻法、对刀起点与填充 / 切割设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分）。
+ * 2026-11-17（技术书 r45）：刻法上方加雕刻路线开关（与创作画板、语音同一个值）；转图片时 `textStyle` 传入的是实际生效的刻法，
+ * 描边 / 排线不可选。
+ */
 export function WorkbenchTextTool({
   textContent,
   setTextContent,
@@ -12,6 +18,10 @@ export function WorkbenchTextTool({
   setFontSizeMm,
   textStyle,
   setTextStyle,
+  engraveRoute = "vector",
+  setEngraveRoute,
+  engraveRouteSaving = false,
+  engraveRouteReadOnly = false,
   textOrigin,
   setTextOrigin,
   fillSettings,
@@ -42,6 +52,13 @@ export function WorkbenchTextTool({
           placeholder="输入要雕刻的字符..."
         />
       </div>
+      <EngraveRouteSwitch
+        idPrefix="wb"
+        route={engraveRoute}
+        onChange={setEngraveRoute}
+        saving={engraveRouteSaving}
+        readOnly={engraveRouteReadOnly}
+      />
       <div className="wb-params-grid">
         <label>
           <span>字高 (mm)</span>
@@ -62,9 +79,14 @@ export function WorkbenchTextTool({
             onChange={(e) => setTextStyle(e.target.value)}
             className="select-input wb-compact-select"
           >
-            {TEXT_STYLE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
+            {TEXT_STYLE_OPTIONS.map((opt) => {
+              const available = textStyleAvailable(opt.value, engraveRoute);
+              return (
+                <option key={opt.value} value={opt.value} disabled={!available}>
+                  {available ? opt.label : `${opt.label}（仅矢量）`}
+                </option>
+              );
+            })}
           </select>
         </label>
         <label>
@@ -81,6 +103,9 @@ export function WorkbenchTextTool({
           </select>
         </label>
       </div>
+      {engraveRoute === "image" ? (
+        <div className="wb-params-hint" id="wb-text-route-note">{IMAGE_ROUTE_TEXT_NOTE}</div>
+      ) : null}
       <FillOptionsPanel
         idPrefix="wb"
         settings={fillSettings}

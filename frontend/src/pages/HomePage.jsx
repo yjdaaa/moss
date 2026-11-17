@@ -32,6 +32,8 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { applyImagePreset } from "../qualityPresets.js";
+import { effectiveTextStyle } from "../engraveRoute.js";
+import { useEngraveRoute } from "../useEngraveRoute.js";
 import {
   applyMaterialLayer,
   fillResultNote,
@@ -43,6 +45,8 @@ import {
   materialLayerFromRecommendation,
   materialLayerPayload,
   materialLayerSaveRequest,
+  rasterScanPayload,
+  rasterScanSignature,
   readFillSettings,
   readMachineMotion,
   writeFillSettings,
@@ -126,9 +130,18 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     setFillSettings(next);
     writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
   };
-  const textUsesFill = resolveTextStyle(textStyle).textFill !== "outline";
+  // 雕刻路线全局开关（2026-11-17 技术书 r45，与创作画板、语音同一个值）：转图片时描边 / 排线按实心，
+  // 用户原来选的刻法照样记着，切回矢量即恢复；外框切割始终走矢量
+  const {
+    route: engraveRoute,
+    setRoute: setEngraveRoute,
+    saving: engraveRouteSaving,
+    readOnly: engraveRouteReadOnly,
+  } = useEngraveRoute();
+  const textStyleEffective = effectiveTextStyle(textStyle, engraveRoute);
+  const textUsesFill = resolveTextStyle(textStyleEffective).textFill !== "outline";
   // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
-  const textIsCut = resolveTextStyle(textStyle).laserMode === "cut";
+  const textIsCut = resolveTextStyle(textStyleEffective).laserMode === "cut";
   // 握手读到的机器加速度 / 最大速度：工时估算与自动过扫描用（2026-11-16）
   const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
@@ -191,6 +204,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [dimensions, setDimensions] = useState(null);
   const [fitNote, setFitNote] = useState("");
   const [fillNote, setFillNote] = useState("");
+  const [routeNote, setRouteNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [framingBusy, setFramingBusy] = useState(false);
 
@@ -198,8 +212,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     activeTool,
     textContent,
     fontSizeMm,
-    textStyle,
+    textStyle: textStyleEffective,
     textOrigin,
+    engraveRoute,
     // 自动过扫描随机器加速度变，读到新的加速度后填充文字的旧预览也算过期
     fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill, withCut: textIsCut })
       + (textUsesFill ? JSON.stringify(motionPayload) : ""),
@@ -208,6 +223,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     imageHeightMm,
     imageMode,
     imageExtras,
+    // 图片同样按速度自动过扫描、套用双向扫描偏移表（r45）
+    scanSignature: rasterScanSignature(fillSettings) + JSON.stringify(motionPayload),
     uploadedGcodePath,
     selectedMaterial,
     selectedThickness,
@@ -425,7 +442,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         setHasRecommendation(false);
         return;
       }
-      const recMode = materialRecommendationModes({ activeTool, textStyle });
+      const recMode = materialRecommendationModes({ activeTool, textStyle: textStyleEffective });
       const query = new URLSearchParams({
         material: selectedMaterial,
         thickness_mm: String(selectedThickness),
@@ -470,7 +487,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     return () => {
       cancelled = true;
     };
-  }, [selectedMaterial, selectedThickness, activeTool, textStyle, recRefreshTick]);
+  }, [selectedMaterial, selectedThickness, activeTool, textStyleEffective, recRefreshTick]);
 
   // r40：把当前填充 / 切割设置存进材料库条目（只改图层设置，不动功率速度；扫描偏移与加速度不随材料保存）
   const saveFillToMaterial = async () => {
@@ -637,7 +654,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           setBusy(false);
           return;
         }
-        const spec = resolveTextStyle(textStyle);
+        // 雕刻路线不随请求发送：后端按全局开关（与语音同一条），工作台只按它显示可选刻法
+        const spec = resolveTextStyle(textStyleEffective);
         const fillPayload = fillSettingsPayload(fillSettings, {
           withFill: spec.textFill !== "outline",
           withCut: spec.laserMode === "cut",
@@ -677,6 +695,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           setBusy(false);
           return;
         }
+        const scanPayload = rasterScanPayload(fillSettings);
+        if (scanPayload.error) {
+          showAlert(scanPayload.error, { title: "扫描设置不对", tone: "warning" });
+          setBusy(false);
+          return;
+        }
         res = await postJson("/api/workflow", {
           action: "preview",
           material: selectedMaterial,
@@ -686,6 +710,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           laser_mode: "engrave",
           engraving_mode: "raster",
           ...imgExtra,
+          ...scanPayload,
           ...motionPayload,
           ...manualField,
         });
@@ -756,6 +781,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         setTimeEstimate(artifacts.time_estimate || null);
         setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
         setFillNote(fillResultNote(artifacts.fill_options, artifacts.removed_duplicates, artifacts.cut_options));
+        setRouteNote(typeof artifacts.route_note === "string" ? artifacts.route_note : "");
         if (artifacts.width_mm && artifacts.height_mm) {
           // 2026-11-06：文字默认以激光头对准中心为起点、图片以左下角为起点，开刻前提示放哪
           setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
@@ -805,6 +831,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }
     setTimeEstimate(artifacts.time_estimate || null);
     setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
+    setRouteNote(typeof artifacts.route_note === "string" ? artifacts.route_note : "");
     setDimensions(
       artifacts.width_mm && artifacts.height_mm
         ? { width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" }
@@ -1214,8 +1241,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                 setTextContent={setTextContent}
                 fontSizeMm={fontSizeMm}
                 setFontSizeMm={setFontSizeMm}
-                textStyle={textStyle}
+                textStyle={textStyleEffective}
                 setTextStyle={setTextStyle}
+                engraveRoute={engraveRoute}
+                setEngraveRoute={setEngraveRoute}
+                engraveRouteSaving={engraveRouteSaving}
+                engraveRouteReadOnly={engraveRouteReadOnly}
                 textOrigin={textOrigin}
                 setTextOrigin={setTextOrigin}
                 fillSettings={fillSettings}
@@ -1263,7 +1294,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
         <WorkbenchMaterialCard
           activeTool={activeTool}
-          textStyle={textStyle}
+          textStyle={textStyleEffective}
           materials={materials}
           selectedMaterial={selectedMaterial}
           setSelectedMaterial={setSelectedMaterial}
@@ -1298,6 +1329,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           gcodeText={gcodeText}
           timeEstimate={timeEstimate}
           fitNote={fitNote}
+          routeNote={routeNote}
           fillNote={fillNote}
           busy={busy}
           framingBusy={framingBusy}

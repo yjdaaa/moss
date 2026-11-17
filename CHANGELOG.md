@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增“矢量 / 转图片”全局开关，工作台、画板与语音同步；文字可转图片扫描，图片路线统一并支持自动过扫描与双向扫描偏移（2026-11-17）
+
+- **现象**：画板“生成策略”把矢量和图片做法混在一个下拉里，工作台和语音没有对应选择，两边可能不同步；画板光栅固定 0.1 mm 点距、灰度 128 一刀切，所有位图扫描过扫描固定 1 mm、不能用双向扫描偏移（用户 2026-11-17“生成策略……加一个开关用来转图片还是矢量的……不能两边不同步，还有就是图片生成策略也要优化一下吧”）。
+- **根因与修复**：新增全局设置 `laser_engrave_route`（`GET/POST /api/engrave-route`，默认矢量，局域网只读），文字任务与画板在请求未指定时按它生成，语音 / AI 走同一条；前端 `EngraveRouteSwitch` 在工作台与画板各放一个、读写同一个值并在页内广播，画板生成策略去掉“矢量”，转图片时再选光栅扫描或轮廓描边。文字转图片（`TextTaskSpec::image`）：焊接后的文字（一律实心）与图形按材料线距渲染成位图、网格与版面左下角对齐后逐行扫描，排版、起点与走边框和矢量相同，用光栅参数，外框切割始终走矢量。画板转图片改用工作台图片同一套引擎（`raster_scan_options` / `write_prepared_raster`：材料线距与行间距倍数、图片模式、灰度、透明按白色）；位图写出器新增 `scan_offset_mm`（蛇形扫描每行逆向挪一半，一半不超过过扫描），所有位图扫描的过扫描按速度与加速度自动算（下限 1 mm，常用速度下与原来相同）。**行为变更**：画板光栅改按材料线距与自动识别（线稿多为 Otsu 阈值）生成；照片高速雕刻时过扫描可能大于 1 mm、`frame_mm` 随之变宽；本地 `laserLab.mode` 不再写入。确认、门禁与 SHA 校验不变。技术书 r45。
+- **验证**：`laser-core` 新增 3 项（转图片与矢量同版面出光范围差 ≤ 1 像素、描边图形线宽与切割拒绝转图片、位图双向扫描偏移），`laser-api` 新增 2 项（开关读写与局域网只读、文字跟随开关 / 请求覆盖 / 切割走矢量，画板跟随开关、图片模式与行间距、扫描偏移校验）；前端新增 `tests/engraveRoute.test.mjs` 7 项并更新画板与填充设置用例，`npm test` 331 项；Rust 全量 1367 项、e2e 38 项通过。开关界面只经单元测试与服务端渲染校验，未在真实浏览器里点按；未实机对比矢量与转图片的雕刻效果。
+- **关联**：`crates/laser-api/src/{engrave_route,routes,access}.rs`、`crates/laser-api/src/generation/{text,draw,image_upload}.rs`、`crates/laser-core/src/engine.rs`（`rasterize_layout`）、`crates/laser-core/src/gcode/raster.rs`、`frontend/src/{engraveRoute,useEngraveRoute,drawConnection,fillOptions,workbenchParams,aiPreviewState}.js`、`frontend/src/components/EngraveRouteSwitch.jsx`、`frontend/src/pages/{HomePage,DrawPage}.jsx`。
+
 ### 创作画板矢量模式的文字同样先焊接重叠笔画（2026-11-17）
 
 - **现象**：文字任务已在规划前焊接字形（r44），创作画板矢量模式里的文字元素仍直接用原始字形轮廓，笔画交叠的字体描边时会在交叠处多刻一道线（用户 2026-11-17“可以帮我接上”）。

@@ -18,12 +18,33 @@ pub struct RasterWriterOptions {
     /// 点宽补偿（mm，LightBurn Dot Width Correction，2026-11-16）：每段出光两端各缩短一半，
     /// 抵消光斑直径让线段比像素更长；0 表示不补偿，必须小于行间距（`pixel_size_mm`）。
     pub dot_width_mm: f64,
+    /// 双向扫描偏移（mm，LightBurn Scanning Offset，2026-11-17 技术书 r45）：蛇形扫描时每行逆着自己的
+    /// 行进方向挪一半，来回两行的出光错位正好抵消（与矢量填充相同）；0 表示不补偿。
+    /// 一半不能超过过扫描距离（整行平移后不会越过起点）。
+    pub scan_offset_mm: f64,
 }
 
 fn valid_dot_width(options: &RasterWriterOptions) -> bool {
     options.dot_width_mm.is_finite()
         && options.dot_width_mm >= 0.0
         && options.dot_width_mm < options.pixel_size_mm
+}
+
+fn valid_scan_offset(options: &RasterWriterOptions) -> bool {
+    options.scan_offset_mm.is_finite()
+        && options.scan_offset_mm.abs() <= 2.0
+        && (!options.snake_scan || options.scan_offset_mm.abs() / 2.0 <= options.overscan_mm + 1e-9)
+}
+
+/// 这一行整体平移多少（mm）：蛇形扫描时正向行往回挪半个偏移、反向行往前挪半个偏移。
+fn row_shift(options: &RasterWriterOptions, reverse: bool) -> f64 {
+    if !options.snake_scan || options.scan_offset_mm == 0.0 {
+        0.0
+    } else if reverse {
+        options.scan_offset_mm / 2.0
+    } else {
+        -options.scan_offset_mm / 2.0
+    }
 }
 
 pub fn write_raster(
@@ -47,6 +68,7 @@ pub fn write_raster(
         || options.power > scale
         || options.feed_rate < 1
         || !valid_dot_width(options)
+        || !valid_scan_offset(options)
     {
         return Err("invalid raster writer options");
     }
@@ -207,11 +229,12 @@ pub fn write_raster(
                 .iter()
                 .map(|(_, e)| *e)
                 .fold(f64::NEG_INFINITY, f64::max);
-            let scan_start = (min_start - options.overscan_mm).max(0.0);
-            let scan_end = (max_end + options.overscan_mm).min(max_sweep_mm);
-            if trim > 0.0 {
+            let shift = row_shift(options, reverse);
+            let scan_start = (min_start - options.overscan_mm).max(0.0) + shift;
+            let scan_end = (max_end + options.overscan_mm).min(max_sweep_mm) + shift;
+            if trim > 0.0 || shift != 0.0 {
                 for run in &mut shifted_runs {
-                    *run = (run.0 + trim, run.1 - trim);
+                    *run = (run.0 + trim + shift, run.1 - trim + shift);
                 }
             }
 
@@ -298,6 +321,7 @@ pub fn write_grayscale_raster(
         || options.power > scale
         || options.feed_rate < 1
         || !valid_dot_width(options)
+        || !valid_scan_offset(options)
         || power_table.first() != Some(&0)
         || power_table.iter().any(|p| *p < 0 || *p > options.power)
         || levels
@@ -382,6 +406,12 @@ pub fn write_grayscale_raster(
         let y = (height_mm - pixel - line as f64 * pixel).max(0.0);
         let reverse = options.snake_scan && emitted_lines % 2 == 1;
         emitted_lines += 1;
+        let shift = row_shift(options, reverse);
+        let (scan_start, scan_end) = (scan_start + shift, scan_end + shift);
+        for run in &mut runs {
+            run.0 += shift;
+            run.1 += shift;
+        }
         if reverse {
             lines.push(format!("G0 X{scan_end:.3} Y{y:.3}"));
             let mut cursor = scan_end;

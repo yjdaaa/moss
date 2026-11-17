@@ -5,6 +5,9 @@ import {
   computeSceneRevision,
   drawConnectionPayload,
   drawGenerationSignature,
+  drawInkExportMode,
+  drawRasterImagePayload,
+  drawRequestMode,
   drawSizeValue,
   drawTargetLabel,
   drawTargetMissingText,
@@ -12,7 +15,7 @@ import {
   framingConfirmText,
   isDrawConnectionOk,
   isDrawPreviewStale,
-  normalizeDrawMode,
+  normalizeDrawImageStrategy,
   parseImportedSceneJson,
   readDrawDefaultForm,
   selectedElementIds,
@@ -33,24 +36,53 @@ test("画板连接：网口与串口各自只带本方式的字段", () => {
   assert.equal(drawTargetReady({ connection_mode: "network", network_host: "" }), false);
 });
 
-test("画板尺寸：留空为自动（null），不再用 1 mm 兜底；旧的 auto 模式按光栅处理", () => {
+test("画板尺寸：留空为自动（null），不再用 1 mm 兜底；生成方式由雕刻路线与转图片方式决定", () => {
   assert.equal(drawSizeValue(""), null);
   assert.equal(drawSizeValue("  "), null);
   assert.equal(drawSizeValue("0"), null);
   assert.equal(drawSizeValue("-5"), null);
   assert.equal(drawSizeValue("50"), 50);
   assert.equal(drawSizeValue("12.5"), 12.5);
-  // 2026-11-16 起默认矢量
-  assert.equal(normalizeDrawMode("auto"), "vector");
-  assert.equal(normalizeDrawMode(null), "vector");
-  assert.equal(normalizeDrawMode("outline"), "outline");
-  assert.equal(normalizeDrawMode("raster"), "raster");
-  // 旧版本存下的光栅迁移一次改成矢量；按新版本保存过的光栅（用户自己选的）保留
+  // 2026-11-17（r45）：矢量路线一律 vector；转图片按转图片方式（默认光栅扫描）
+  assert.equal(drawRequestMode("vector", "outline"), "vector");
+  assert.equal(drawRequestMode(undefined, "raster"), "vector", "没读到路线时按矢量");
+  assert.equal(drawRequestMode("image", "raster"), "raster");
+  assert.equal(drawRequestMode("image", "outline"), "outline");
+  assert.equal(drawRequestMode("image", undefined), "raster");
+  assert.equal(drawRequestMode("image", "vector"), "raster", "转图片方式里没有矢量");
+  assert.equal(normalizeDrawImageStrategy("auto"), "raster");
+  assert.equal(normalizeDrawImageStrategy(null), "raster");
+  assert.equal(normalizeDrawImageStrategy("outline"), "outline");
+  // 旧版本的“生成策略”（laserLab.mode）迁移：轮廓描边 → 轮廓描边，光栅 / 矢量 / 没存 → 光栅扫描；新键优先
   const store = (entries) => ({ getItem: (key) => entries[key] ?? null });
-  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "raster" })).mode, "vector");
-  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "raster", "laserLab.mode_version": "2" })).mode, "raster");
-  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "outline" })).mode, "outline");
-  assert.equal(readDrawDefaultForm(store({})).mode, "vector");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "outline" })).image_strategy, "outline");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "raster" })).image_strategy, "raster");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "vector" })).image_strategy, "raster");
+  assert.equal(readDrawDefaultForm(store({})).image_strategy, "raster");
+  assert.equal(
+    readDrawDefaultForm(store({ "laserLab.mode": "outline", "laserLab.image_strategy": "raster" })).image_strategy,
+    "raster",
+    "已按新版本存过转图片方式时不再看旧键",
+  );
+  assert.equal(readDrawDefaultForm(store({})).mode, undefined, "表单不再有生成策略字段");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.image_mode": "jarvis" })).image_mode, "jarvis");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.image_mode": "bogus" })).image_mode, "auto");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.line_interval_scale": "1.5" })).line_interval_scale, "1.5");
+});
+
+test("画板光栅扫描：转换方式与行间距倍数沿用工作台图片的校验；黑白方式才把彩色笔迹压成纯黑", () => {
+  assert.deepEqual(drawRasterImagePayload({ image_mode: "auto", line_interval_scale: "" }), { image_mode: "auto" });
+  assert.deepEqual(drawRasterImagePayload({ image_mode: "jarvis", line_interval_scale: "0.8" }), { image_mode: "jarvis", line_interval_scale: 0.8 });
+  assert.deepEqual(drawRasterImagePayload({ image_mode: "bogus", line_interval_scale: "1" }), { image_mode: "auto" });
+  assert.match(drawRasterImagePayload({ image_mode: "auto", line_interval_scale: "9" }).error, /行间距倍数/);
+  assert.equal(drawRasterImagePayload({}).width_mm, undefined, "成品尺寸由画板宽高字段给，不在这里");
+
+  assert.equal(drawInkExportMode("raster", "auto"), "raster");
+  assert.equal(drawInkExportMode("raster", "threshold"), "raster");
+  assert.notEqual(drawInkExportMode("raster", "jarvis"), "raster", "抖动 / 灰度要保留笔迹深浅");
+  assert.notEqual(drawInkExportMode("raster", "grayscale"), "raster");
+  assert.equal(drawInkExportMode("vector", "auto"), "vector");
+  assert.equal(drawInkExportMode("outline", "auto"), "outline");
 });
 
 test("画板默认表单：存储被禁用时退回默认值；未存画板设备时自动复用工作台连接", () => {
@@ -61,7 +93,9 @@ test("画板默认表单：存储被禁用时退回默认值；未存画板设�
   assert.equal(form.connection_mode, "network");
   assert.equal(form.network_telnet_port, "23");
   assert.equal(form.baudrate, "115200");
-  assert.equal(form.mode, "vector", "2026-11-16 起画板默认矢量");
+  assert.equal(form.image_strategy, "raster", "转图片方式默认光栅扫描");
+  assert.equal(form.image_mode, "auto");
+  assert.equal(form.line_interval_scale, "");
   assert.equal(form.output_format, "gcode");
   assert.deepEqual(readDrawDefaultForm(null), form);
 
@@ -70,7 +104,7 @@ test("画板默认表单：存储被禁用时退回默认值；未存画板设�
   assert.equal(restored.material, "亚克力");
   assert.equal(restored.connection_mode, "serial");
   assert.equal(restored.port, "COM7");
-  assert.equal(restored.mode, "outline");
+  assert.equal(restored.image_strategy, "outline", "旧版本存的轮廓描边迁移成转图片方式");
 
   // 画板尚未存设备目标时，自动带入工作台已填好的网络或串口连接
   const fromWorkbench = {
@@ -124,8 +158,8 @@ test("画板预览过期检测与场景 JSON 导入校验", () => {
   const rev1 = computeSceneRevision([{ id: "rect-1", version: 2, versionNonce: 10, isDeleted: false }]);
   const revDeleted = computeSceneRevision([{ id: "rect-1", version: 3, versionNonce: 11, isDeleted: true }]);
   assert.equal(revDeleted, "empty");
-  const baseForm = { material: "椴木", thickness_mm: "3", width_mm: "", height_mm: "", mode: "raster", vector_simplify_factor: "3" };
-  const sig1 = drawGenerationSignature(baseForm, { enabled: false });
+  const baseForm = { material: "椴木", thickness_mm: "3", width_mm: "", height_mm: "", image_strategy: "raster", image_mode: "auto", line_interval_scale: "", vector_simplify_factor: "3" };
+  const sig1 = drawGenerationSignature(baseForm, { enabled: false }, "image");
   const snap = { sceneRev: rev1, formSig: sig1 };
   assert.equal(isDrawPreviewStale(null, snap), false);
   assert.equal(isDrawPreviewStale(snap, { sceneRev: rev1, formSig: sig1 }), false);
@@ -135,15 +169,26 @@ test("画板预览过期检测与场景 JSON 导入校验", () => {
     "画布元素版本变化立即标过期",
   );
   assert.equal(
-    isDrawPreviewStale(snap, { sceneRev: rev1, formSig: drawGenerationSignature({ ...baseForm, width_mm: "60" }, { enabled: false }) }),
+    isDrawPreviewStale(snap, { sceneRev: rev1, formSig: drawGenerationSignature({ ...baseForm, width_mm: "60" }, { enabled: false }, "image") }),
     true,
     "改尺寸立即标过期",
   );
   assert.equal(
-    isDrawPreviewStale(snap, { sceneRev: rev1, formSig: drawGenerationSignature(baseForm, { enabled: true, power: "55", feed: "1200", passes: "1" }) }),
+    isDrawPreviewStale(snap, { sceneRev: rev1, formSig: drawGenerationSignature(baseForm, { enabled: true, power: "55", feed: "1200", passes: "1" }, "image") }),
     true,
     "开启临时自定义参数立即标过期",
   );
+  // 2026-11-17（r45）：切换雕刻路线、转图片方式、转换方式、行间距倍数或扫描设置都让旧预览过期
+  const stale = (formSig) => isDrawPreviewStale(snap, { sceneRev: rev1, formSig });
+  assert.equal(stale(drawGenerationSignature(baseForm, { enabled: false }, "vector")), true, "切到矢量立即标过期");
+  assert.equal(stale(drawGenerationSignature({ ...baseForm, image_strategy: "outline" }, { enabled: false }, "image")), true);
+  assert.equal(stale(drawGenerationSignature({ ...baseForm, image_mode: "jarvis" }, { enabled: false }, "image")), true);
+  assert.equal(stale(drawGenerationSignature({ ...baseForm, line_interval_scale: "1.5" }, { enabled: false }, "image")), true);
+  assert.equal(stale(drawGenerationSignature({ ...baseForm, line_interval_scale: "1" }, { enabled: false }, "image")), false, "行间距留空与 1 相同");
+  assert.equal(stale(drawGenerationSignature(baseForm, { enabled: false, fill: "scan:changed" }, "image")), true, "光栅扫描的扫描设置进签名");
+  // 矢量路线下转图片的选项不影响刀路，改了不算过期
+  const vectorSig = drawGenerationSignature(baseForm, { enabled: false }, "vector");
+  assert.equal(drawGenerationSignature({ ...baseForm, image_strategy: "outline", image_mode: "jarvis" }, { enabled: false }, "vector"), vectorSig);
 
   assert.match(parseImportedSceneJson("not-json").error, /合法的 JSON/);
   assert.match(parseImportedSceneJson(JSON.stringify({ type: "other" })).error, /elements/);

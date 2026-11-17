@@ -2,7 +2,9 @@
 // 范围与后端 `manual_params` 校验一致（功率 1~100%、速度 100~6000 mm/min、遍数 1~5）。
 // 2026-11-11 增补：文字刻法映射（对齐后端 `text_fill`）、图片尺寸/算法校验、左侧参数改动后的预览过期判定与开刻前确认文案。
 // 2026-11-16（技术书 r41）：图片行间距倍数（质量预设“快速 / 均衡 / 精细”用，见 qualityPresets.js）。
+// 2026-11-17（技术书 r45）：雕刻路线（矢量 / 转图片）进文字签名，图片扫描设置进图片签名。
 
+import { normalizeEngraveRoute } from "./engraveRoute.js";
 import { intervalScaleValue } from "./qualityPresets.js";
 
 export const MANUAL_LIMITS = {
@@ -75,7 +77,7 @@ export function imageModeFields(imageMode) {
   };
 }
 
-function normalizeImageMode(imageMode) {
+export function normalizeImageMode(imageMode) {
   return IMAGE_MODE_OPTIONS.some((opt) => opt.value === imageMode) ? imageMode : "auto";
 }
 
@@ -225,11 +227,13 @@ export function workbenchInputSignature({
   textStyle = "outline",
   textOrigin = "center",
   fillSignature = "",
+  engraveRoute = "vector",
   uploadedImagePath = "",
   imageWidthMm = "",
   imageHeightMm = "",
   imageMode = "auto",
   imageExtras = DEFAULT_IMAGE_EXTRAS,
+  scanSignature = "",
   uploadedGcodePath = "",
   selectedMaterial = "",
   selectedThickness = "",
@@ -258,6 +262,8 @@ export function workbenchInputSignature({
       textStyle: resolveTextStyle(textStyle).style,
       textOrigin: textOrigin === "lower_left" ? "lower_left" : "center",
       fill: String(fillSignature || ""),
+      // 雕刻路线是全局开关，工作台不随请求发送；切换后旧预览必须作废
+      route: normalizeEngraveRoute(engraveRoute),
     });
   }
   if (activeTool === "image") {
@@ -269,6 +275,8 @@ export function workbenchInputSignature({
       imageMode: normalizeImageMode(imageMode),
       // 反相、直通、点宽补偿与当前模式的专属项（隐藏的其他模式输入不影响签名）
       extras: imageExtrasSignature(normalizeImageMode(imageMode), imageExtras),
+      // 过扫描、双向扫描、扫描偏移与机器加速度（随请求发 fill_options 扫描子集）
+      scan: String(scanSignature || ""),
     });
   }
   if (activeTool === "gcode") {

@@ -119,6 +119,16 @@ test("origin note, fill label and head-relative framing request", () => {
   assert.equal(originNote(record), "开刻前把激光头移到木牌中心");
   assert.equal(originNote({ artifacts: {} }), "");
   assert.deepEqual(aiPreviewNotes(record), ["刻法：扫描填充"]);
+  // 2026-11-17（r45）：语音文字任务按雕刻路线全局开关走，转图片与后端改动说明都要让用户看到
+  assert.deepEqual(
+    aiPreviewNotes({ artifacts: { text_fill: "fill", engrave_route: "image", route_note: "转图片时文字一律实心扫描（描边、排线只在矢量下可选）" } }),
+    ["刻法：扫描填充", "雕刻路线：转图片（文字渲染成位图逐行扫描）", "转图片时文字一律实心扫描（描边、排线只在矢量下可选）"],
+  );
+  assert.deepEqual(
+    aiPreviewNotes({ artifacts: { text_fill: "outline", engrave_route: "vector", route_note: "外框切割只能走矢量，本次按矢量生成" } }),
+    ["刻法：只描轮廓", "外框切割只能走矢量，本次按矢量生成"],
+  );
+  assert.deepEqual(aiPreviewNotes({ artifacts: { text_fill: "fill", engrave_route: "vector", route_note: null } }), ["刻法：扫描填充"]);
   const target = { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: 23 };
   assert.deepEqual(framingRequest(record, target), {
     ...target,

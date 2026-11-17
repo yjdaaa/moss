@@ -38,6 +38,8 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { manualParamsPayload } from "../workbenchParams.js";
+import { applyImagePreset } from "../qualityPresets.js";
+import { useEngraveRoute } from "../useEngraveRoute.js";
 import { discoveryOutcome } from "../controllerDiscovery.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import {
@@ -57,6 +59,8 @@ import {
   materialLayerFromRecommendation,
   materialLayerPayload,
   materialLayerSaveRequest,
+  rasterScanPayload,
+  rasterScanSignature,
   readFillSettings,
   readMachineMotion,
   timeEstimateNote,
@@ -70,12 +74,14 @@ import { DrawSendCard } from "../components/draw/DrawSendCard.jsx";
 import { SendConfirmDialog } from "../components/draw/SendConfirmDialog.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
-  DRAW_MODE_VERSION,
   buildDrawFramingPayload,
   selectedElementIds,
   computeSceneRevision,
   drawConnectionPayload,
   drawGenerationSignature,
+  drawInkExportMode,
+  drawRasterImagePayload,
+  drawRequestMode,
   drawSizeValue,
   drawTargetLabel,
   drawTargetMissingText,
@@ -94,7 +100,9 @@ const CONFIG_KEYS = [
   "thickness_mm",
   "width_mm",
   "height_mm",
-  "mode",
+  "image_strategy",
+  "image_mode",
+  "line_interval_scale",
   "connection_mode",
   "network_host",
   "network_telnet_port",
@@ -109,6 +117,15 @@ export function DrawPage({ onNavigate }) {
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
   // 挂载时惰性读取（存储被禁用时退回默认值，若画板未填过设备则自动复用雕刻工作台已填好的连接目标）
   const [form, setForm] = useState(() => readDrawDefaultForm());
+  // 雕刻路线全局开关（2026-11-17 技术书 r45，与工作台、语音同一个值）：矢量 → vector；
+  // 转图片 → 按“转图片方式”光栅扫描 raster / 轮廓描边 outline。请求照样写明实际 mode
+  const {
+    route: engraveRoute,
+    setRoute: setEngraveRoute,
+    saving: engraveRouteSaving,
+    readOnly: engraveRouteReadOnly,
+  } = useEngraveRoute();
+  const drawMode = drawRequestMode(engraveRoute, form.image_strategy);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("准备就绪");
   const [workflowId, setWorkflowId] = useState("");
@@ -223,7 +240,7 @@ export function DrawPage({ onNavigate }) {
       material: mat,
       thickness_mm: thick,
       laser_mode: "engrave",
-      engraving_mode: form.mode === "outline" || form.mode === "vector" ? "outline" : "raster",
+      engraving_mode: drawMode === "raster" ? "raster" : "outline",
     });
     getJson(`/api/ui/material-recommendation?${query.toString()}`).then((res) => {
       if (cancelled) return;
@@ -254,7 +271,7 @@ export function DrawPage({ onNavigate }) {
     return () => {
       cancelled = true;
     };
-  }, [form.material, form.thickness_mm, form.mode, recRefreshTick]);
+  }, [form.material, form.thickness_mm, drawMode, recRefreshTick]);
 
   // r40：把当前填充设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
   const saveFillToMaterial = async () => {
@@ -286,9 +303,13 @@ export function DrawPage({ onNavigate }) {
     feed: customFeed,
     passes: customPasses,
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
-    fill: fillSettingsSignature(fillSettings) + JSON.stringify(motionPayload)
-      + (selectedOnly && form.mode === "vector" ? `|sel:${selectionKey}` : ""),
-  });
+    // 矢量看填充设置与选区，光栅扫描看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
+    fill: drawMode === "vector"
+      ? fillSettingsSignature(fillSettings) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
+      : drawMode === "raster"
+        ? rasterScanSignature(fillSettings) + JSON.stringify(motionPayload)
+        : "",
+  }, engraveRoute);
   const previewStale = Boolean(workflowId) && isDrawPreviewStale(previewSnap, {
     sceneRev,
     formSig: currentFormSig,
@@ -473,7 +494,6 @@ export function DrawPage({ onNavigate }) {
         persistedRef.current[key] = str;
         storage.setItem(`laserLab.${key}`, str);
       });
-      storage.setItem("laserLab.mode_version", DRAW_MODE_VERSION);
       setStatus("配置已保存");
     } catch (error) {
       setStatus(`配置保存失败：${error?.message || error}（本次设置仍可使用，但不会被记住）`);
@@ -596,7 +616,9 @@ export function DrawPage({ onNavigate }) {
     }
     const appState = excalidrawAPI.getAppState();
     const files = excalidrawAPI.getFiles();
-    const exportElements = forLaser ? prepareRasterExportElements(activeElements, form.mode) : activeElements;
+    const exportElements = forLaser
+      ? prepareRasterExportElements(activeElements, drawInkExportMode(drawMode, form.image_mode))
+      : activeElements;
     const exportAppState = {
       ...appState,
       exportBackground: true,
@@ -654,11 +676,23 @@ export function DrawPage({ onNavigate }) {
     }
 
     const formSigSnapshot = currentFormSig;
-    const fillPayload = form.mode === "vector" ? fillSettingsPayload(fillSettings) : {};
-    const selection = selectedOnly && form.mode === "vector"
+    const modeSnapshot = drawMode;
+    // 矢量带整套填充设置；光栅扫描带扫描子集（过扫描、双向、扫描偏移表）与转换方式；只刻选中的图形只在矢量下可用
+    const fillPayload = modeSnapshot === "vector"
+      ? fillSettingsPayload(fillSettings)
+      : modeSnapshot === "raster"
+        ? rasterScanPayload(fillSettings)
+        : {};
+    const imagePayload = modeSnapshot === "raster" ? drawRasterImagePayload(form) : {};
+    const selection = selectedOnly && modeSnapshot === "vector"
       ? selectedElementIds(excalidrawAPI?.getAppState?.())
       : [];
-    if (selectedOnly && form.mode === "vector" && selection.length === 0) {
+    if (imagePayload.error) {
+      setStatus(`转图片设置有误：${imagePayload.error}`);
+      void showAlert(imagePayload.error, { title: "转图片设置不对", tone: "warning" });
+      return;
+    }
+    if (selectedOnly && modeSnapshot === "vector" && selection.length === 0) {
       setStatus("请先在画布上选中要刻的图形，或取消“只刻选中的图形”");
       void showAlert("请先在画布上选中要刻的图形（可框选或按住 Shift 多选），或取消勾选“只刻选中的图形”。", {
         title: "没有选中图形",
@@ -686,14 +720,15 @@ export function DrawPage({ onNavigate }) {
         thickness_mm: Number(form.thickness_mm) || 3.0,
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
-        mode: form.mode,
+        mode: modeSnapshot,
+        ...imagePayload,
         ...fillPayload,
         ...motionPayload,
         ...(selection.length ? { selected_element_ids: selection } : {}),
         ...drawConnectionPayload(form),
         ...(manual ? { manual_params: manual } : {}),
       };
-      if (form.mode === "outline") {
+      if (modeSnapshot === "outline") {
         const simplifyRaw = String(form.vector_simplify_factor ?? "").trim();
         payload.vector_simplify_factor = simplifyRaw === "" ? 3 : Number(simplifyRaw);
       }
@@ -717,6 +752,7 @@ export function DrawPage({ onNavigate }) {
           data.result?.speech || "预览已生成",
           artifacts.fit_note,
           artifacts.vector_note,
+          artifacts.route_note,
           artifacts.selection_note,
           fillResultNote(artifacts.fill_options, artifacts.removed_duplicates),
           timeEstimateNote(artifacts.time_estimate),
@@ -1085,6 +1121,16 @@ export function DrawPage({ onNavigate }) {
         <DrawMaterialCard
           form={form}
           updateForm={updateForm}
+          drawMode={drawMode}
+          engraveRoute={engraveRoute}
+          setEngraveRoute={setEngraveRoute}
+          engraveRouteSaving={engraveRouteSaving}
+          engraveRouteReadOnly={engraveRouteReadOnly}
+          applyImageQualityPreset={(key) => {
+            const next = applyImagePreset(key);
+            if (!next) return;
+            setForm((current) => ({ ...current, image_mode: next.imageMode, line_interval_scale: next.intervalScale }));
+          }}
           materialLibrary={materialLibrary}
           materialMode={materialMode}
           materialSelectValue={materialSelectValue}

@@ -96,11 +96,14 @@ export function canStartAiPreview({ checked, busy, targetReady }) {
 
 const TEXT_FILL_LABEL = { outline: "只描轮廓", fill: "扫描填充", hatch: "排线填充" };
 
-/** 预览产物里的提示：刻法、自动缩小到幅面内、照片抖动。 */
+/** 预览产物里的提示：刻法、雕刻路线（r45）、自动缩小到幅面内、照片抖动。 */
 export function aiPreviewNotes(record) {
   const notes = [];
   const artifacts = record?.artifacts || {};
   if (TEXT_FILL_LABEL[artifacts.text_fill]) notes.push(`刻法：${TEXT_FILL_LABEL[artifacts.text_fill]}`);
+  // 语音生成的文字任务按雕刻路线全局开关走（2026-11-17 技术书 r45）：转图片时说明一句，后端的改动说明原样带上
+  if (artifacts.text_fill && artifacts.engrave_route === "image") notes.push("雕刻路线：转图片（文字渲染成位图逐行扫描）");
+  if (typeof artifacts.route_note === "string" && artifacts.route_note) notes.push(artifacts.route_note);
   if (artifacts.auto_fitted && typeof artifacts.fit_note === "string") notes.push(artifacts.fit_note);
   if (artifacts.image_mode === "dither") notes.push("照片按灰度抖动雕刻");
   if (artifacts.image_mode === "grayscale") notes.push("灰度变功率雕刻：越黑功率越高");

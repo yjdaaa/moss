@@ -6,6 +6,8 @@ pub(crate) fn generate_draw_artifacts(
     object: &serde_json::Map<String, serde_json::Value>,
     generated_root: Option<&std::path::Path>,
     library: &laser_contracts::MaterialLibrary,
+    // 全局雕刻路线（r45）：请求没写 `mode` 时，矢量 → vector，转图片 → raster
+    default_route: crate::engrave_route::EngraveRoute,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
     let motion = parse_machine_motion(object)?;
@@ -37,10 +39,19 @@ pub(crate) fn generate_draw_artifacts(
             "画板生成的是雕刻任务，不支持 cut_options（切割设置只用于工作台文字的外框切割）".into(),
         );
     }
-    let requested_mode = object
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("raster");
+    let requested_mode =
+        object
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(match default_route {
+                crate::engrave_route::EngraveRoute::Vector => "vector",
+                crate::engrave_route::EngraveRoute::Image => "raster",
+            });
+    if !matches!(requested_mode, "vector" | "raster" | "outline") {
+        return Err(format!(
+            "mode 只能是 vector / raster / outline，收到 {requested_mode}"
+        ));
+    }
     // 2026-11-16：矢量模式直接用画板里的图形规划路线；场景里有插入的图片（矢量刻不了）或没带场景时改用光栅
     // 同日：`selected_element_ids` 只刻选中的图形（对齐 LightBurn“只加工选中图形”，不用选区原点）：
     // 排版仍按整幅画计算，选中的部分刻在它在整幅画里的位置，补刻 / 重刻能对上
@@ -150,9 +161,10 @@ pub(crate) fn generate_draw_artifacts(
         String::new()
     };
 
-    let luma_img = image::load_from_memory(&image_bytes)
-        .map_err(|e| format!("图像加载失败: {e}"))?
-        .to_luma8();
+    // 透明背景按白色（不出光）合成，与工作台图片一致
+    let luma_img = laser_core::image_job::flatten_on_white(
+        &image::load_from_memory(&image_bytes).map_err(|e| format!("图像加载失败: {e}"))?,
+    );
     let img_w = luma_img.width();
     let img_h = luma_img.height();
     if img_w == 0 || img_h == 0 {
@@ -186,6 +198,20 @@ pub(crate) fn generate_draw_artifacts(
     let params = feedback::generation_params(object, power as f64, feed_rate as f64, rec_passes)?;
     let power = params.power as i32;
     let feed_rate = params.feed as i32;
+    // 转图片（光栅）与工作台图片同一套：过扫描按速度自动、双向扫描偏移（r45）
+    let raster_scan = if mode == "raster" {
+        Some(super::image_upload::raster_scan_options(
+            object,
+            feed_rate as f64,
+            &motion,
+            recommendation.as_ref(),
+        )?)
+    } else {
+        None
+    };
+    let raster_overscan = raster_scan
+        .as_ref()
+        .map_or(IMAGE_OVERSCAN_MM, |scan| scan.options.overscan_mm);
 
     // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素。
     // 2026-11-06 起按机器幅面（默认 100 mm，请求可传 work_area_*）而不是 400 mm 画布限制；光栅模式宽度另留两侧过扫描
@@ -199,7 +225,7 @@ pub(crate) fn generate_draw_artifacts(
     let usable_w = if mode == "outline" || mode == "vector" {
         area_w
     } else {
-        area_w - 2.0 * IMAGE_OVERSCAN_MM
+        area_w - 2.0 * raster_overscan
     };
     let (width_mm, height_mm, draw_auto_fitted) = draw_target_size_mm(
         img_w,
@@ -217,6 +243,7 @@ pub(crate) fn generate_draw_artifacts(
         .unwrap_or(DRAW_PIXEL_MM);
     let mut path_optimization = None;
     let mut vector_details = None;
+    let mut raster_details = None;
     let gcode_str = if let (Some(sketch), "vector") = (&sketch, mode) {
         let (fill_request, fill_from_material) = merge_layer_options(
             object.get("fill_options"),
@@ -334,67 +361,70 @@ pub(crate) fn generate_draw_artifacts(
             },
         )?
     } else {
-        // 光栅：先把导出图缩放到成品尺寸（每像素 0.1 mm），再二值化逐行扫描
-        let raster_w = ((width_mm / DRAW_PIXEL_MM).round() as u32).max(1);
-        let raster_h = ((height_mm / DRAW_PIXEL_MM).round() as u32).max(1);
-        let scaled = if (raster_w, raster_h) == (img_w, img_h) {
-            luma_img.clone()
-        } else {
-            image::imageops::resize(
-                &luma_img,
-                raster_w,
-                raster_h,
-                image::imageops::FilterType::Triangle,
-            )
+        // 转图片（2026-11-17 技术书 r45，与工作台图片同一套引擎）：按材料线距（可乘 line_interval_scale）重采样到
+        // 成品尺寸，图片模式默认自动识别（画板线稿多为 Otsu 阈值，也可选 Jarvis 等抖动、灰度变功率），
+        // 过扫描按速度自动、双向扫描偏移
+        let scan = raster_scan.as_ref().expect("光栅模式已解析扫描设置");
+        let number = |key: &str| -> Result<Option<f64>, String> {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
+                Some(value) => value
+                    .as_f64()
+                    .or_else(|| value.as_str().and_then(|t| t.trim().parse::<f64>().ok()))
+                    .filter(|v| v.is_finite())
+                    .map(Some)
+                    .ok_or_else(|| format!("{key} 必须是数字")),
+            }
         };
-        let mut bitmap = Vec::with_capacity(raster_h as usize);
-        for y in 0..raster_h {
-            let mut row = Vec::with_capacity(raster_w as usize);
-            for x in 0..raster_w {
-                row.push(if scaled.get_pixel(x, y).0[0] < 128 {
-                    0
-                } else {
-                    255
-                });
-            }
-            bitmap.push(row);
+        let extras = super::image_upload::ImageModeExtras::parse(object, &number)?;
+        if extras.pass_through {
+            return Err("画板转图片不支持直通（pass_through），请去掉".into());
         }
-
-        // 路径预览：二值化后的实际烧蚀像素（黑=出光），与素材预览区分
-        let mut bin = image::GrayImage::from_pixel(raster_w, raster_h, image::Luma([255]));
-        for (y, row) in bitmap.iter().enumerate() {
-            for (x, &v) in row.iter().enumerate() {
-                if v == 0 {
-                    bin.put_pixel(x as u32, y as u32, image::Luma([0]));
-                }
-            }
+        let interval_scale = number("line_interval_scale")?;
+        if let Some(scale) = interval_scale
+            && !(0.5..=3.0).contains(&scale)
+        {
+            return Err("line_interval_scale（行间距倍数）须在 0.5 ~ 3 之间".into());
         }
-        bin.save(root.join(&path_preview_name))
+        let threshold = match number("threshold")? {
+            None => None,
+            Some(v) if (0.0..=255.0).contains(&v) => Some(v.round() as u8),
+            Some(_) => return Err("threshold 必须在 0 ~ 255 之间".into()),
+        };
+        let raster_options = laser_core::image_job::ImageRasterOptions {
+            pixel_size_mm: fill_spacing * interval_scale.unwrap_or(1.0),
+            width_mm: Some(width_mm),
+            height_mm: Some(height_mm),
+            work_area_width_mm: area_w,
+            work_area_height_mm: area_h,
+            scan_overscan_mm: scan.options.overscan_mm,
+            mode: laser_core::image_job::ToneMode::parse(
+                object.get("image_mode").and_then(|v| v.as_str()),
+            )?,
+            threshold,
+            negative: extras.negative,
+            halftone_cell_mm: extras.halftone_cell_mm,
+            halftone_angle_deg: extras.halftone_angle_deg,
+            gray_levels: extras.gray_levels,
+            pass_through: false,
+        };
+        let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
+        prepared
+            .preview()
+            .save(root.join(&path_preview_name))
             .map_err(|e| e.to_string())?;
-
-        let plan =
-            laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
-                .map_err(|e| e.to_string())?;
-        laser_core::gcode::write_raster(
-            &plan,
-            raster_w as usize,
-            raster_h as usize,
-            &laser_core::gcode::RasterWriterOptions {
-                pixel_size_mm: DRAW_PIXEL_MM,
-                overscan_mm: IMAGE_OVERSCAN_MM,
-                work_area_width_mm: area_w,
-                work_area_height_mm: area_h,
-                power,
-                feed_rate,
-                laser_mode: "M4",
-                snake_scan: true,
-                material: Some(material.to_string()),
-                safety_note: None,
-                power_scale: None,
-                dot_width_mm: 0.0,
-            },
-        )
-        .map_err(|e| e.to_string())?
+        let (gcode, gray_power) = super::image_upload::write_prepared_raster(
+            &prepared,
+            &extras,
+            scan,
+            material,
+            power,
+            feed_rate,
+            (area_w, area_h),
+        )?;
+        raster_details = Some((prepared, extras, gray_power, interval_scale));
+        gcode
     };
 
     let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
@@ -453,6 +483,24 @@ pub(crate) fn generate_draw_artifacts(
         res_map.insert("fill_options".into(), serde_json::json!(fill));
         res_map.insert("removed_duplicates".into(), serde_json::json!(removed));
     }
+    if let (Some((prepared, extras, gray_power, interval_scale)), Some(scan)) =
+        (&raster_details, &raster_scan)
+    {
+        if let Some(scale) = interval_scale {
+            res_map.insert("line_interval_scale".into(), serde_json::json!(scale));
+        }
+        super::image_upload::insert_raster_fields(
+            &mut res_map,
+            prepared,
+            extras,
+            scan,
+            *gray_power,
+        );
+    }
+    res_map.insert(
+        "engrave_route".into(),
+        serde_json::json!(if mode == "vector" { "vector" } else { "image" }),
+    );
     res_map.insert("origin".into(), serde_json::json!("lower_left"));
     res_map.insert(
         "origin_note".into(),
@@ -461,7 +509,7 @@ pub(crate) fn generate_draw_artifacts(
     let frame_max_x = if mode == "outline" || mode == "vector" {
         width_mm
     } else {
-        width_mm + 2.0 * IMAGE_OVERSCAN_MM
+        width_mm + 2.0 * raster_overscan
     };
     res_map.insert(
         "frame_mm".into(),

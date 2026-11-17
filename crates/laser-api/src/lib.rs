@@ -14,6 +14,7 @@ mod voice_authority;
 mod access;
 mod auth;
 mod connection;
+mod engrave_route;
 mod events;
 mod files;
 mod generation;

@@ -1,17 +1,31 @@
 import React from "react";
 import { RefreshCw } from "lucide-react";
 import { isRemoteMode } from "../../authSession.js";
+import { DRAW_IMAGE_STRATEGIES, normalizeDrawImageStrategy } from "../../drawConnection.js";
 import { materialLayerHint } from "../../fillOptions.js";
 import { CUSTOM_OPTION_LABEL, CUSTOM_OPTION_VALUE, findMaterialOption } from "../../materialSelectState.js";
-import { MANUAL_LIMITS } from "../../workbenchParams.js";
+import { IMAGE_PRESET_HINTS, detectImagePreset } from "../../qualityPresets.js";
+import { IMAGE_MODE_OPTIONS, MANUAL_LIMITS, normalizeImageMode } from "../../workbenchParams.js";
+import EngraveRouteSwitch from "../EngraveRouteSwitch.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
+import QualityPresetBar from "../QualityPresetBar.jsx";
 import { FoldHeader } from "../FoldHeader.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
 
-/** 创意画板 ① 材料与尺寸卡：材料库 / 自定义材料、厚度、尺寸、生成策略、填充设置与这次自定义功率速度。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分） */
+/**
+ * 创意画板 ① 材料与尺寸卡：材料库 / 自定义材料、厚度、尺寸、雕刻路线、填充设置与这次自定义功率速度。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分）。
+ * 2026-11-17（技术书 r45）：“生成策略”下拉去掉矢量，改为雕刻路线开关（与工作台、语音同一个值）；矢量时显示只刻选中的图形与
+ * 填充设置，转图片时选“转图片方式”（光栅扫描 / 轮廓描边），光栅扫描另有转换方式与质量预设。`drawMode` 是实际请求的 mode。
+ */
 export function DrawMaterialCard({
   form,
   updateForm,
+  drawMode,
+  engraveRoute,
+  setEngraveRoute,
+  engraveRouteSaving,
+  engraveRouteReadOnly,
+  applyImageQualityPreset,
   materialLibrary,
   materialMode,
   materialSelectValue,
@@ -141,16 +155,56 @@ export function DrawMaterialCard({
         </label>
       </div>
 
-      <label>
-        生成策略
-        <select value={form.mode} onChange={(event) => updateForm("mode", event.target.value)}>
-          <option value="vector">矢量（直接用画板图形规划路线，推荐）</option>
-          <option value="raster">光栅填充（逐行扫描填满，适合插入的照片）</option>
-          <option value="outline">轮廓描边（先转图片再描深色边缘）</option>
-        </select>
-      </label>
+      <EngraveRouteSwitch
+        idPrefix="draw"
+        route={engraveRoute}
+        onChange={setEngraveRoute}
+        saving={engraveRouteSaving}
+        readOnly={engraveRouteReadOnly}
+      />
 
-      {form.mode === "vector" ? (
+      {drawMode !== "vector" ? (
+        <label>
+          转图片方式
+          <select
+            id="draw-image-strategy"
+            value={normalizeDrawImageStrategy(form.image_strategy)}
+            onChange={(event) => updateForm("image_strategy", event.target.value)}
+          >
+            {DRAW_IMAGE_STRATEGIES.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {drawMode === "raster" ? (
+        <>
+          <QualityPresetBar
+            id="draw-image-preset"
+            value={detectImagePreset(normalizeImageMode(form.image_mode), form.line_interval_scale)}
+            hints={IMAGE_PRESET_HINTS}
+            onSelect={applyImageQualityPreset}
+          />
+          <label>
+            转换方式
+            <select
+              id="draw-image-mode"
+              value={normalizeImageMode(form.image_mode)}
+              onChange={(event) => updateForm("image_mode", event.target.value)}
+            >
+              {IMAGE_MODE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
+          <div className="wb-params-hint" id="draw-image-scan-hint">
+            与工作台图片同一套转换；过扫描、双向扫描与扫描偏移沿用填充设置（切到矢量可改）
+          </div>
+        </>
+      ) : null}
+
+      {drawMode === "vector" ? (
         <>
           <label
             className="checkbox-row draw-label"
@@ -176,7 +230,7 @@ export function DrawMaterialCard({
         </>
       ) : null}
 
-      {form.mode === "outline" ? (
+      {drawMode === "outline" ? (
         <label>
           轮廓平滑度（0.25 精细 ～ 8 简化）
           <input

@@ -867,6 +867,7 @@ impl ApiService {
                         .as_deref()
                         .or(self.upload_root.as_deref()),
                     &effective_library,
+                    self.engrave_route(),
                 ) {
                     Ok(mut artifacts) => {
                         self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
@@ -1180,6 +1181,7 @@ impl ApiService {
                     .as_deref()
                     .or(self.upload_root.as_deref()),
                 &effective_library,
+                self.engrave_route(),
             ) {
                 Ok(a) => a,
                 Err(error) => return http_json(400, failure(error, None)),
@@ -1385,6 +1387,33 @@ impl ApiService {
                 &self.material_write_lock,
                 &object,
             );
+        }
+        // 雕刻路线全局开关（r45）：矢量 / 转图片，工作台、画板与语音共用（局域网只读）
+        if route == "/api/engrave-route" {
+            if method == "GET" {
+                return http_json(200, success(self.engrave_route_json()));
+            }
+            if method == "POST" {
+                let object = match parse_json_object(&body[..content_length], 1024) {
+                    Ok(value) => value,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                let route = match object
+                    .get("route")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "route 只能是 vector / image".to_owned())
+                    .and_then(crate::engrave_route::EngraveRoute::parse)
+                {
+                    Ok(route) => route,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                return match self.set_engrave_route(route) {
+                    Ok(()) => http_json(200, success(self.engrave_route_json())),
+                    Err(error) => {
+                        http_json(500, failure(format!("保存雕刻路线失败：{error}"), None))
+                    }
+                };
+            }
         }
         // 工时自校准（r40）：查看各台机器的校准系数，或清除（局域网只读，见 is_reference_data_write）
         if route == "/api/time-calibration" {

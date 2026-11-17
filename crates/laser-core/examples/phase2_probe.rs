@@ -148,6 +148,7 @@ fn main() {
                     safety_note: Some("test".into()),
                     power_scale: None,
                     dot_width_mm: 0.0,
+                    scan_offset_mm: 0.0,
                 },
             )
             .unwrap();

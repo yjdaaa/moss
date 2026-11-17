@@ -1,14 +1,43 @@
 // 创作画板的设备连接、成品尺寸、预览过期判定与场景导入校验（2026-10-14；2026-11-11 增补防呆与互通）。
 // 支持网口（Telnet）和串口；宽 / 高留空表示按画板导出尺寸，不再用 1 mm 兜底。
+// 2026-11-17（技术书 r45）：“生成策略”不再有矢量一项，改由雕刻路线全局开关（矢量 / 转图片，与工作台、语音
+// 同一个值）决定；转图片时再选“转图片方式”：光栅扫描（默认，与工作台图片同一套引擎）或轮廓描边。
 
-export const DRAW_MODES = ["vector", "raster", "outline"];
+import { normalizeEngraveRoute } from "./engraveRoute.js";
+import { intervalScaleValue } from "./qualityPresets.js";
+import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
 
-/** 画板模式记忆的版本：2 起默认矢量（2026-11-16 用户决定），旧版存下的“光栅”迁移一次。 */
-export const DRAW_MODE_VERSION = "2";
+/** 转图片方式（雕刻路线为“转图片”时）。 */
+export const DRAW_IMAGE_STRATEGIES = Object.freeze([
+  { value: "raster", label: "光栅扫描（逐行扫描填满，默认）" },
+  { value: "outline", label: "轮廓描边（描出深色边缘）" },
+]);
 
-/** 没存过、或旧版本存了已移除的 "auto"，一律按矢量处理（2026-11-16 起默认矢量）。 */
-export function normalizeDrawMode(mode) {
-  return DRAW_MODES.includes(mode) ? mode : "vector";
+/** 没存过或值无效时按光栅扫描。 */
+export function normalizeDrawImageStrategy(strategy) {
+  return strategy === "outline" ? "outline" : "raster";
+}
+
+/** 画板请求实际的 `mode`：矢量路线 → vector；转图片 → 光栅扫描 raster / 轮廓描边 outline。 */
+export function drawRequestMode(route, imageStrategy) {
+  return normalizeEngraveRoute(route) === "image" ? normalizeDrawImageStrategy(imageStrategy) : "vector";
+}
+
+/** 光栅扫描的转换方式与行间距倍数 → 请求字段（`image_mode`、`line_interval_scale`）；填错返回 `{ error }`。 */
+export function drawRasterImagePayload(form) {
+  return imageParamsPayload({
+    imageMode: form?.image_mode,
+    extras: { intervalScale: form?.line_interval_scale ?? "" },
+  });
+}
+
+/**
+ * 导出 PNG 前要不要把彩色笔迹压成纯黑（`prepareRasterExportElements` 的模式参数）：只在光栅扫描且按黑白
+ * 处理（自动识别 / 清晰黑白线条）时压；选了抖动、灰度等要深浅的方式时保留颜色深浅。
+ */
+export function drawInkExportMode(mode, imageMode) {
+  if (mode !== "raster") return mode;
+  return ["auto", "threshold"].includes(normalizeImageMode(imageMode)) ? "raster" : "raster-tone";
 }
 
 /** 宽 / 高输入：空或非正数为 null（后端按“自动”处理）。 */
@@ -118,11 +147,11 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
     thickness_mm: read("laserLab.thickness_mm") || "3",
     width_mm: read("laserLab.width_mm") || "",
     height_mm: read("laserLab.height_mm") || "",
-    // 旧版本“保存配置”时会连同默认的光栅一起存下，版本 2 之前存的光栅按新默认改成矢量（只迁移一次）
-    mode:
-      read("laserLab.mode") === "raster" && read("laserLab.mode_version") !== DRAW_MODE_VERSION
-        ? "vector"
-        : normalizeDrawMode(read("laserLab.mode")),
+    // 转图片方式；旧版本的“生成策略”（laserLab.mode）存了轮廓描边的迁移成轮廓描边，其余按光栅扫描
+    image_strategy: normalizeDrawImageStrategy(read("laserLab.image_strategy") ?? read("laserLab.mode")),
+    image_mode: normalizeImageMode(read("laserLab.image_mode")),
+    // 行间距倍数（质量预设用）；留空 = 1
+    line_interval_scale: read("laserLab.line_interval_scale") || "",
     connection_mode,
     network_host,
     network_telnet_port,
@@ -167,17 +196,24 @@ export function computeSceneRevision(elements) {
   return parts.length === 0 ? "empty" : parts.join("|");
 }
 
-/** 计算影响画板刀路生成的左侧参数签名（材料、厚度、宽高、生成策略、平滑度与临时自定义功率速度）。 */
-export function drawGenerationSignature(form, custom = {}) {
-  const mode = normalizeDrawMode(form?.mode);
+/**
+ * 计算影响画板刀路生成的左侧参数签名（材料、厚度、宽高、雕刻路线与实际模式、转换方式与行间距、平滑度、
+ * 填充 / 扫描设置与临时自定义功率速度）。`custom.fill` 由页面按实际模式给出（矢量填充设置或位图扫描设置）。
+ */
+export function drawGenerationSignature(form, custom = {}, route = "vector") {
+  const mode = drawRequestMode(route, form?.image_strategy);
   return JSON.stringify({
     material: String(form?.material ?? "").trim(),
     thickness_mm: String(form?.thickness_mm ?? "").trim(),
     width_mm: String(form?.width_mm ?? "").trim(),
     height_mm: String(form?.height_mm ?? "").trim(),
+    route: normalizeEngraveRoute(route),
     mode,
     simplify: mode === "outline" ? String(form?.vector_simplify_factor ?? "3").trim() : "",
-    fill: mode === "vector" ? String(custom?.fill ?? "") : "",
+    image: mode === "raster"
+      ? `${normalizeImageMode(form?.image_mode)}x${intervalScaleValue(form?.line_interval_scale)}`
+      : "",
+    fill: mode === "outline" ? "" : String(custom?.fill ?? ""),
     manual: custom?.enabled
       ? `${String(custom.power ?? "").trim()}/${String(custom.feed ?? "").trim()}/${String(custom.passes ?? "").trim()}`
       : custom?.presetParams

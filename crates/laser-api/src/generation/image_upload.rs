@@ -7,18 +7,19 @@ const IMAGE_INTERVAL_SCALE_RANGE: (f64, f64) = (0.5, 3.0);
 
 /// 图片预览里对齐 LightBurn Image Mode 的可选字段（2026-11-16，技术书 r38）。
 /// 值域在这里先校验；与像素间距相关的（网点网格、点宽补偿）在得到实际行间距后再查。
-struct ImageModeExtras {
-    negative: bool,
-    pass_through: bool,
-    halftone_cell_mm: Option<f64>,
-    halftone_angle_deg: f64,
-    gray_levels: u8,
-    gray_min_power_percent: f64,
-    dot_width_mm: f64,
+/// 2026-11-17（技术书 r45）创作画板转图片同样用它。
+pub(super) struct ImageModeExtras {
+    pub(super) negative: bool,
+    pub(super) pass_through: bool,
+    pub(super) halftone_cell_mm: Option<f64>,
+    pub(super) halftone_angle_deg: f64,
+    pub(super) gray_levels: u8,
+    pub(super) gray_min_power_percent: f64,
+    pub(super) dot_width_mm: f64,
 }
 
 impl ImageModeExtras {
-    fn parse(
+    pub(super) fn parse(
         object: &serde_json::Map<String, serde_json::Value>,
         number: &dyn Fn(&str) -> Result<Option<f64>, String>,
     ) -> Result<Self, String> {
@@ -76,6 +77,160 @@ impl ImageModeExtras {
             dot_width_mm,
         })
     }
+}
+
+/// 位图扫描的过扫描、双向与扫描偏移（2026-11-17 技术书 r45，对齐 LightBurn 图片层）：读请求 `fill_options`
+/// （没写的键取材料库光栅条目随材料保存的值），过扫描省略或 `auto` 时按速度与加速度自动算（下限 1 mm），
+/// 扫描偏移可按速度查表；偏移的一半不能超过过扫描。
+pub(super) fn raster_scan_options(
+    object: &serde_json::Map<String, serde_json::Value>,
+    feed_rate: f64,
+    motion: &MachineMotion,
+    recommendation: Option<&laser_core::material::Recommendation>,
+) -> Result<ParsedFill, String> {
+    let (request, from_material) = merge_layer_options(
+        object.get("fill_options"),
+        recommendation.and_then(|r| {
+            r.params
+                .layer_options(laser_contracts::MATERIAL_FILL_OPTIONS_KEY)
+        }),
+        laser_contracts::MATERIAL_FILL_OPTION_KEYS,
+    );
+    let mut parsed = parse_fill_options(request.as_ref(), feed_rate, motion.overscan_accel())?;
+    parsed.from_material = from_material;
+    let options = &parsed.options;
+    if options.bidirectional && options.scan_offset_mm.abs() / 2.0 > options.overscan_mm + 1e-9 {
+        return Err(format!(
+            "扫描偏移的一半（{:.2} mm）不能超过过扫描（{:.2} mm），请加大过扫描或改成自动",
+            options.scan_offset_mm.abs() / 2.0,
+            options.overscan_mm
+        ));
+    }
+    Ok(parsed)
+}
+
+/// 按 [`raster_scan_options`] 的结果写位图 G-code（灰度模式变功率）；返回 G-code 与灰度的最小 / 最大 S 值。
+pub(super) fn write_prepared_raster(
+    prepared: &laser_core::image_job::PreparedRaster,
+    extras: &ImageModeExtras,
+    scan: &ParsedFill,
+    material: &str,
+    power: i32,
+    feed_rate: i32,
+    work_area: (f64, f64),
+) -> Result<(String, Option<(i32, i32)>), String> {
+    let pixel_size_mm = prepared.pixel_size_mm;
+    if extras.dot_width_mm >= pixel_size_mm {
+        return Err(format!(
+            "dot_width_mm（点宽补偿）必须小于行间距 {pixel_size_mm:.3} mm，收到 {:.3} mm",
+            extras.dot_width_mm
+        ));
+    }
+    let bidirectional = scan.options.bidirectional;
+    let writer_options = laser_core::gcode::RasterWriterOptions {
+        pixel_size_mm,
+        overscan_mm: scan.options.overscan_mm,
+        work_area_width_mm: work_area.0,
+        work_area_height_mm: work_area.1,
+        power,
+        feed_rate,
+        laser_mode: "M4",
+        snake_scan: bidirectional,
+        material: Some(material.to_string()),
+        safety_note: None,
+        power_scale: None,
+        dot_width_mm: extras.dot_width_mm,
+        scan_offset_mm: if bidirectional {
+            scan.options.scan_offset_mm
+        } else {
+            0.0
+        },
+    };
+    if let (Some(levels), Some(count)) = (&prepared.levels, prepared.gray_levels) {
+        // 灰度模式：最大功率 = 本次功率（材料库推荐 / 自定义 / 采用的调参建议），最小功率由请求给出
+        let min_power = (extras.gray_min_power_percent * 10.0).round() as i32;
+        if min_power >= power {
+            return Err(format!(
+                "gray_min_power_percent（灰度最小功率）{}% 必须小于本次最大功率 {:.1}%",
+                extras.gray_min_power_percent,
+                f64::from(power) / 10.0
+            ));
+        }
+        let table = laser_core::raster::grayscale_power_table(count, min_power, power);
+        let gcode = laser_core::gcode::write_grayscale_raster(levels, &table, &writer_options)
+            .map_err(|e| e.to_string())?;
+        Ok((gcode, Some((min_power, power))))
+    } else {
+        let plan = laser_core::raster::raster_plan_with_direction(
+            &prepared.bitmap,
+            "horizontal",
+            "scanline",
+        )
+        .map_err(|e| e.to_string())?;
+        let gcode = laser_core::gcode::write_raster(
+            &plan,
+            prepared.grid_width as usize,
+            prepared.grid_height as usize,
+            &writer_options,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok((gcode, None))
+    }
+}
+
+/// 回显位图的转换方式与扫描设置（工作台图片与画板转图片共用）。
+pub(super) fn insert_raster_fields(
+    res: &mut serde_json::Map<String, serde_json::Value>,
+    prepared: &laser_core::image_job::PreparedRaster,
+    extras: &ImageModeExtras,
+    scan: &ParsedFill,
+    gray_power: Option<(i32, i32)>,
+) {
+    res.insert(
+        "pixel_size_mm".into(),
+        serde_json::json!(prepared.pixel_size_mm),
+    );
+    res.insert(
+        "image_mode".into(),
+        serde_json::json!(prepared.mode.as_str()),
+    );
+    if let Some(value) = prepared.threshold {
+        res.insert("threshold".into(), serde_json::json!(value));
+    }
+    res.insert("negative".into(), serde_json::json!(prepared.negative));
+    res.insert(
+        "pass_through".into(),
+        serde_json::json!(prepared.pass_through),
+    );
+    res.insert(
+        "dot_width_mm".into(),
+        serde_json::json!(extras.dot_width_mm),
+    );
+    if let (Some(cell), Some(angle)) = (prepared.halftone_cell_mm, prepared.halftone_angle_deg) {
+        res.insert("halftone_cell_mm".into(), serde_json::json!(cell));
+        res.insert("halftone_lpi".into(), serde_json::json!(25.4 / cell));
+        res.insert("halftone_angle_deg".into(), serde_json::json!(angle));
+    }
+    if let (Some(count), Some((min_power, max_power))) = (prepared.gray_levels, gray_power) {
+        res.insert("gray_levels".into(), serde_json::json!(count));
+        res.insert("gray_min_power".into(), serde_json::json!(min_power));
+        res.insert("gray_max_power".into(), serde_json::json!(max_power));
+        res.insert(
+            "gray_min_power_percent".into(),
+            serde_json::json!(extras.gray_min_power_percent),
+        );
+    }
+    res.insert(
+        "scan_options".into(),
+        serde_json::json!({
+            "overscan_mm": scan.options.overscan_mm,
+            "overscan_auto": scan.auto,
+            "bidirectional": scan.options.bidirectional,
+            "scan_offset_mm": if scan.options.bidirectional { scan.options.scan_offset_mm } else { 0.0 },
+            "scan_offset_table": scan.offset_table,
+            "from_material": scan.from_material,
+        }),
+    );
 }
 
 pub(crate) fn generate_image_or_gcode_artifacts(
@@ -186,6 +341,9 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             feedback::generation_params(object, power as f64, feed_rate as f64, rec_passes)?;
         let power = params.power as i32;
         let feed_rate = params.feed as i32;
+        // 过扫描按速度自动、双向扫描偏移（r45）
+        let scan = raster_scan_options(object, feed_rate as f64, &motion, recommendation.as_ref())?;
+        let overscan_mm = scan.options.overscan_mm;
 
         // 成品尺寸、机器幅面、材料像素间距与灰度处理（laser_core::image_job）
         let optional_number = |key: &str| -> Result<Option<f64>, String> {
@@ -240,7 +398,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
                 .unwrap_or(MACHINE_WORK_AREA_MM),
             work_area_height_mm: optional_number("work_area_height_mm")?
                 .unwrap_or(MACHINE_WORK_AREA_MM),
-            scan_overscan_mm: IMAGE_OVERSCAN_MM,
+            scan_overscan_mm: overscan_mm,
             mode: laser_core::image_job::ToneMode::parse(
                 object.get("image_mode").and_then(|v| v.as_str()),
             )?,
@@ -252,55 +410,18 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             pass_through: extras.pass_through,
         };
         let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
-        let (img_w, img_h) = (prepared.grid_width, prepared.grid_height);
-        let pixel_size_mm = prepared.pixel_size_mm;
-        if extras.dot_width_mm >= pixel_size_mm {
-            return Err(format!(
-                "dot_width_mm（点宽补偿）必须小于行间距 {pixel_size_mm:.3} mm，收到 {:.3} mm",
-                extras.dot_width_mm
-            ));
-        }
-        let writer_options = laser_core::gcode::RasterWriterOptions {
-            pixel_size_mm,
-            overscan_mm: IMAGE_OVERSCAN_MM,
-            work_area_width_mm: raster_options.work_area_width_mm,
-            work_area_height_mm: raster_options.work_area_height_mm,
+        let (gcode_str, gray_power) = write_prepared_raster(
+            &prepared,
+            &extras,
+            &scan,
+            material,
             power,
             feed_rate,
-            laser_mode: "M4",
-            snake_scan: true,
-            material: Some(material.to_string()),
-            safety_note: None,
-            power_scale: None,
-            dot_width_mm: extras.dot_width_mm,
-        };
-        let mut gray_power = None;
-        let gcode_str = if let (Some(levels), Some(count)) =
-            (&prepared.levels, prepared.gray_levels)
-        {
-            // 灰度模式：最大功率 = 本次功率（材料库推荐 / 自定义 / 采用的调参建议），最小功率由请求给出
-            let min_power = (extras.gray_min_power_percent * 10.0).round() as i32;
-            if min_power >= power {
-                return Err(format!(
-                    "gray_min_power_percent（灰度最小功率）{}% 必须小于本次最大功率 {:.1}%",
-                    extras.gray_min_power_percent,
-                    f64::from(power) / 10.0
-                ));
-            }
-            let table = laser_core::raster::grayscale_power_table(count, min_power, power);
-            gray_power = Some((min_power, power));
-            laser_core::gcode::write_grayscale_raster(levels, &table, &writer_options)
-                .map_err(|e| e.to_string())?
-        } else {
-            let plan = laser_core::raster::raster_plan_with_direction(
-                &prepared.bitmap,
-                "horizontal",
-                "scanline",
-            )
-            .map_err(|e| e.to_string())?;
-            laser_core::gcode::write_raster(&plan, img_w as usize, img_h as usize, &writer_options)
-                .map_err(|e| e.to_string())?
-        };
+            (
+                raster_options.work_area_width_mm,
+                raster_options.work_area_height_mm,
+            ),
+        )?;
 
         let id = format!("img-{}-{}-{}", unix_seconds(), nanos, std::process::id());
         let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
@@ -342,41 +463,10 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             "source_image_file".into(),
             serde_json::Value::String(source_name),
         );
-        res.insert("pixel_size_mm".into(), serde_json::json!(pixel_size_mm));
         if let Some(scale) = interval_scale {
             res.insert("line_interval_scale".into(), serde_json::json!(scale));
         }
-        res.insert(
-            "image_mode".into(),
-            serde_json::json!(prepared.mode.as_str()),
-        );
-        if let Some(value) = prepared.threshold {
-            res.insert("threshold".into(), serde_json::json!(value));
-        }
-        res.insert("negative".into(), serde_json::json!(prepared.negative));
-        res.insert(
-            "pass_through".into(),
-            serde_json::json!(prepared.pass_through),
-        );
-        res.insert(
-            "dot_width_mm".into(),
-            serde_json::json!(extras.dot_width_mm),
-        );
-        if let (Some(cell), Some(angle)) = (prepared.halftone_cell_mm, prepared.halftone_angle_deg)
-        {
-            res.insert("halftone_cell_mm".into(), serde_json::json!(cell));
-            res.insert("halftone_lpi".into(), serde_json::json!(25.4 / cell));
-            res.insert("halftone_angle_deg".into(), serde_json::json!(angle));
-        }
-        if let (Some(count), Some((min_power, max_power))) = (prepared.gray_levels, gray_power) {
-            res.insert("gray_levels".into(), serde_json::json!(count));
-            res.insert("gray_min_power".into(), serde_json::json!(min_power));
-            res.insert("gray_max_power".into(), serde_json::json!(max_power));
-            res.insert(
-                "gray_min_power_percent".into(),
-                serde_json::json!(extras.gray_min_power_percent),
-            );
-        }
+        insert_raster_fields(&mut res, &prepared, &extras, &scan, gray_power);
         res.insert(
             "auto_fitted".into(),
             serde_json::json!(prepared.auto_fitted),
@@ -388,7 +478,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             serde_json::json!("开刻前把激光头移到图片左下角"),
         );
         res.insert("frame_mm".into(), serde_json::json!({
-            "min_x": 0.0, "max_x": width_mm + 2.0 * IMAGE_OVERSCAN_MM, "min_y": 0.0, "max_y": height_mm
+            "min_x": 0.0, "max_x": width_mm + 2.0 * overscan_mm, "min_y": 0.0, "max_y": height_mm
         }));
         res.insert("frame_hull_mm".into(), frame_hull_json(&gcode_str));
         if prepared.auto_fitted {
