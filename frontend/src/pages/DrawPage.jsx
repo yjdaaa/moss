@@ -365,10 +365,12 @@ export function DrawPage({ onNavigate }) {
       const generation = ++materialRefreshGenerationRef.current;
       const loaded = await loadUiMaterialOptions(apiFetch);
       if (cancelled || generation !== materialRefreshGenerationRef.current) return;
+      // 只在挂载时跑一次：读取加载完成那一刻的表单（加载期间用户改过材料时不被首帧旧值覆盖）
+      const currentForm = formRef.current;
       const restored = restoreMaterialSelectState({
         materials: loaded.materials,
-        savedMaterial: form.material,
-        savedThickness: form.thickness_mm,
+        savedMaterial: currentForm.material,
+        savedThickness: currentForm.thickness_mm,
       });
       if (loaded.ok) {
         materialLoadedOnceRef.current = true;
@@ -376,15 +378,10 @@ export function DrawPage({ onNavigate }) {
       setMaterialLibrary(restored.materials);
       setMaterialMode(restored.mode);
       setMaterialSelectValue(restored.selectValue);
-      const nextForm = {
-        ...form,
-        material: restored.material || form.material,
-        thickness_mm: restored.thickness_mm || form.thickness_mm,
-      };
       setForm((current) => ({
         ...current,
-        material: nextForm.material,
-        thickness_mm: nextForm.thickness_mm,
+        material: restored.material || currentForm.material,
+        thickness_mm: restored.thickness_mm || currentForm.thickness_mm,
       }));
     })();
     return () => {
