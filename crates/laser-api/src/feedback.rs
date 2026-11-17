@@ -827,10 +827,15 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
     let seconds = artifacts["time_estimate"]["estimated_seconds"]
         .as_f64()
         .unwrap_or(0.0);
-    let actual_mode = if artifacts["mode"].as_str() == Some("outline") {
-        "outline"
+    // 实际模式：vector（带刻法）/ raster / outline；原来矢量也写成 raster，摘要“策略”显示错（r49）
+    let actual_mode = artifacts["mode"]
+        .as_str()
+        .filter(|mode| matches!(*mode, "vector" | "outline"))
+        .unwrap_or("raster");
+    let task_type = if artifacts["laser_mode"].as_str() == Some("cut") {
+        "cut"
     } else {
-        "raster"
+        "engrave"
     };
     let view = json!({
         "job_summary": {
@@ -839,7 +844,8 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
             "power": artifacts["actual_params"]["laser_max_power"],
             "speed": artifacts["actual_params"]["feed_rate"], "passes": artifacts["actual_params"]["passes"],
             "estimated_display": format!("{seconds:.1} 秒"), "can_send": true,
-            "mode": actual_mode, "task_type": "engrave"
+            "mode": actual_mode, "task_type": task_type, "vector_style": artifacts["vector_style"],
+            "pixel_size_mm": artifacts["pixel_size_mm"]
         },
         "content_fingerprint": artifacts["fingerprint"], "uploaded_image_file": image,
         "scene_file": artifacts["scene_file"]

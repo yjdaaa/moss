@@ -361,6 +361,14 @@ function App() {
     }
   }, []);
 
+  // 创作画板常驻（2026-11-17 r49 用户要求“切到主工作台再回去不要刷新掉”）：第一次打开后一直挂着，
+  // 切到别的页面只是隐藏，画布、撤销记录、预览结果与所有设置原样保留；后台的急停响应照常在线
+  const [drawMounted, setDrawMounted] = useState(currentPath === "/draw");
+  useEffect(() => {
+    if (currentPath === "/draw") setDrawMounted(true);
+  }, [currentPath]);
+  const drawActive = currentPath === "/draw";
+
   const navigateTo = (path) => {
     void preloadRoute(path);
     if (window.location.pathname !== path) {
@@ -439,6 +447,30 @@ function App() {
         />
 
 
+        {drawMounted ? (
+          <div
+            className="main-content-viewport"
+            id="draw-keepalive"
+            role={drawActive ? "main" : undefined}
+            aria-hidden={drawActive ? undefined : true}
+            style={drawActive ? undefined : { display: "none" }}
+          >
+            <Suspense
+              fallback={
+                <div className="ob-page ob-route-loading" aria-busy="true">
+                  <div className="ob-card ob-route-loading-card">
+                    <span className="ob-route-spinner" aria-hidden="true" />
+                    <span>正在载入工作区…</span>
+                  </div>
+                </div>
+              }
+            >
+              <DrawPage onNavigate={navigateTo} active={drawActive} />
+            </Suspense>
+          </div>
+        ) : null}
+
+        {drawActive ? null : (
         <main className="main-content-viewport" key={currentPath}>
           <Suspense
             fallback={
@@ -452,9 +484,6 @@ function App() {
           >
             {currentPath === "/material-lab" && (
               <MaterialLabPage onNavigate={navigateTo} />
-            )}
-            {currentPath === "/draw" && (
-              <DrawPage onNavigate={navigateTo} />
             )}
             {currentPath === "/twin" && (
               <TwinPage
@@ -483,6 +512,7 @@ function App() {
             )}
           </Suspense>
         </main>
+        )}
       </div>
 
       <AuthModal

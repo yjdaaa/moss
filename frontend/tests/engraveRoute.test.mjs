@@ -265,7 +265,10 @@ test("r47 精简：画板发送卡、设备卡与工作台监视舱去掉重复�
     assert.ok(!send.includes(removed), `画板发送卡不再有：${removed}`);
   }
   assert.match(send, /取消任务/, "保留取消任务");
-  assert.match(send, /路径预览/, "保留路径预览");
+  assert.match(send, /tone="dark"/, "保留刀路预览（r49 深色底）");
+  assert.match(send, /invert=\{result\?\.result\?\.artifacts\?\.mode === "raster"\}/, "只有光栅黑白图反色，矢量发光线原色显示");
+  const css = readFileSync(new URL("../src/styles/15-addenda-2026-11.css", import.meta.url), "utf8");
+  assert.match(css, /\.preview-box--dark img \{ background: transparent; max-height: 320px; filter: none; \}/);
   assert.match(send, /下载 G-code/, "保留下载 G-code");
   assert.doesNotMatch(read("components/draw/DrawDeviceCard.jsx"), /onClick=\{saveConfiguration\}|>\s*保存配置\s*</, "设备卡没有保存配置按钮（自动保存）");
   const monitor = read("components/workbench/WorkbenchMonitorCard.jsx");
@@ -295,4 +298,54 @@ test("r48 对刀起点：后端一个值，工作台读写、默认木牌中心�
   const page = readFileSync(new URL("../src/pages/HomePage.jsx", import.meta.url), "utf8");
   assert.match(page, /useTextOrigin\(\)/, "工作台对刀起点来自后端全局设置");
   assert.doesNotMatch(page, /useState\("center"\)/, "不再是只在本页有效的本地状态");
+});
+
+test("r49 画板：画布与上次预览本机保存、切页面常驻、发送卡只显示一条最该看的提示", async () => {
+  const {
+    serializeDrawScene, parseDrawScene, serializeLastPreview, parseLastPreview, MAX_FILES_CHARS,
+  } = await import("../src/drawScenePersist.js");
+  const elements = [
+    { id: "a", type: "rectangle", version: 2, versionNonce: 7, fileId: null },
+    { id: "b", type: "image", version: 1, versionNonce: 3, fileId: "f1" },
+    { id: "gone", type: "line", isDeleted: true },
+  ];
+  const files = { f1: { id: "f1", mimeType: "image/png", dataURL: "data:image/png;base64,AAAA", created: 1 }, unused: { dataURL: "x" } };
+  const raw = serializeDrawScene(elements, { scrollX: 10, zoom: { value: 1.5 }, selectedElementIds: { a: true } }, files);
+  const scene = parseDrawScene(raw);
+  assert.deepEqual(scene.elements.map((e) => e.id), ["a", "b"], "删掉的元素不存");
+  assert.deepEqual(Object.keys(scene.files), ["f1"], "只存用到的图片");
+  assert.deepEqual(scene.appState, { scrollX: 10, zoom: { value: 1.5 } }, "只存视图位置，不存选区");
+  assert.equal(scene.filesDropped, false);
+  const big = { f1: { ...files.f1, dataURL: "x".repeat(MAX_FILES_CHARS + 1) } };
+  const dropped = parseDrawScene(serializeDrawScene(elements, {}, big));
+  assert.equal(dropped.filesDropped, true, "图片太大只存图形并标记");
+  assert.equal(serializeDrawScene([{ id: "x", isDeleted: true }]), "", "空画布清掉保存");
+  assert.equal(parseDrawScene("{broken"), null);
+  const last = parseLastPreview(serializeLastPreview("draw-1", { sceneRev: "a:2:7", formSig: "{}" }));
+  assert.deepEqual(last, { workflowId: "draw-1", snap: { sceneRev: "a:2:7", formSig: "{}" } });
+  assert.equal(serializeLastPreview("", { sceneRev: "x", formSig: "y" }), "");
+
+  const { drawSendNotice } = await import("../src/components/draw/DrawSendCard.jsx").catch(async () => {
+    const { createServer } = await import("vite");
+    const server = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
+    try {
+      return await server.ssrLoadModule("/src/components/draw/DrawSendCard.jsx");
+    } finally {
+      await server.close();
+    }
+  });
+  const base = { canActOnWorkflow: true, previewStale: false, hostReady: true, summaryAllowsSend: true, form: {} };
+  assert.equal(drawSendNotice(base), null);
+  assert.equal(drawSendNotice({ ...base, previewStale: true, hostReady: false }).id, "draw-stale-notice", "旧预览最优先");
+  assert.equal(drawSendNotice({ ...base, hostReady: false }).id, "draw-target-notice");
+  assert.equal(drawSendNotice({ ...base, summaryAllowsSend: false }).id, "draw-send-blocked");
+  assert.equal(drawSendNotice({ ...base, canActOnWorkflow: false }), null);
+
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+  assert.match(main, /id="draw-keepalive"/, "创作画板常驻");
+  assert.match(main, /style=\{drawActive \? undefined : \{ display: "none" \}\}/, "切走只隐藏不卸载");
+  const page = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
+  assert.match(page, /initialData=\{initialScene \?/, "打开时恢复上次的画布");
+  assert.match(page, /DRAW_LAST_PREVIEW_KEY/, "记住上次预览");
 });

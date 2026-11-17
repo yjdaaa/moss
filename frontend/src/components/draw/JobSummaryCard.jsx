@@ -38,13 +38,15 @@ export function JobSummaryCard({ summary, compact = false }) {
         {thicknessRows.map((row) => (
           <SummaryItem key={row.label} label={row.label} value={formatWithUnit(summary[row.valueKey], "mm")} />
         ))}
-        <SummaryItem label="策略" value={modeLabel(summary.mode, summary.task_type)} />
+        <SummaryItem label="策略" value={modeLabel(summary.mode, summary.task_type, summary.vector_style)} />
         <SummaryItem label="尺寸" value={sizeText} icon={<Ruler size={15} />} />
         <SummaryItem label="预计时间" value={summary.estimated_display || "待估算"} icon={<Clock size={15} />} />
         <SummaryItem label="功率" value={summary.power ? `S${summary.power}` : "材料库默认"} />
         <SummaryItem label="速度" value={summary.speed ? `F${summary.speed}` : "材料库默认"} />
         <SummaryItem label="次数" value={summary.passes || "默认"} />
-        <SummaryItem label="点距" value={formatWithUnit(summary.pixel_size_mm, "mm")} />
+        {summary.mode === "raster" ? (
+          <SummaryItem label="线距" value={formatWithUnit(summary.pixel_size_mm, "mm")} />
+        ) : null}
       </div>
       {summary.size_note && <p className="size-note">{summary.size_note}</p>}
       {displayWarnings.length > 0 && (
@@ -69,8 +71,10 @@ function SummaryItem({ label, value, icon = null }) {
   );
 }
 
-function modeLabel(mode, taskType) {
-  if (mode === "vector") return "矢量";
+const VECTOR_STYLE_LABELS = { outline: "轮廓", fill: "填充", cut: "切割", canvas: "按画布颜色" };
+
+function modeLabel(mode, taskType, vectorStyle) {
+  if (mode === "vector") return VECTOR_STYLE_LABELS[vectorStyle] ? `矢量 · ${VECTOR_STYLE_LABELS[vectorStyle]}` : "矢量";
   if (mode === "raster" || taskType === "engrave_photo") return "光栅填充";
   if (mode === "outline" || taskType === "engrave_logo") return "轮廓描边";
   if (taskType === "cut_contour") return "轮廓切割";

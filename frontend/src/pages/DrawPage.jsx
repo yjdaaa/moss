@@ -9,6 +9,16 @@ import {
 } from "lucide-react";
 import { prepareRasterExportElements } from "../rasterInkElements.js";
 import {
+  DRAW_LAST_PREVIEW_KEY,
+  DRAW_SCENE_KEY,
+  parseDrawScene,
+  parseLastPreview,
+  readStored,
+  serializeDrawScene,
+  serializeLastPreview,
+  writeStored,
+} from "../drawScenePersist.js";
+import {
   summaryAllowsConfirmSend,
 } from "../jobSummaryView.js";
 import {
@@ -118,7 +128,9 @@ const CONFIG_KEYS = [
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 const MATERIAL_CHANNEL_NAME = MATERIAL_LIBRARY_CHANNEL;
 
-export function DrawPage({ onNavigate }) {
+export function DrawPage({ onNavigate, active = true }) {
+  // r49：关掉 MOSS 再打开也接着画——上次的画布（含插入的图片，超量时只存图形）从本机存储恢复
+  const [initialScene] = useState(() => parseDrawScene(readStored(safeBrowserStorage(), DRAW_SCENE_KEY)));
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
   // 挂载时惰性读取（存储被禁用时退回默认值，若画板未填过设备则自动复用雕刻工作台已填好的连接目标）
   const [form, setForm] = useState(() => readDrawDefaultForm());
@@ -136,7 +148,7 @@ export function DrawPage({ onNavigate }) {
   const [workflowId, setWorkflowId] = useState("");
   const [result, setResult] = useState(null);
   const [lastScene, setLastScene] = useState(null);
-  const [sceneRev, setSceneRev] = useState("empty");
+  const [sceneRev, setSceneRev] = useState(() => computeSceneRevision(initialScene?.elements));
   const [previewSnap, setPreviewSnap] = useState(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionResult, setConnectionResult] = useState(null);
@@ -189,6 +201,72 @@ export function DrawPage({ onNavigate }) {
   const registrationSourceRef = useRef("");
 
   useEffect(() => () => pollingCleanupRef.current?.(), []);
+
+  // 画布保存：内容变化后 0.6 秒写入本机；关窗口 / 页面隐藏前把还没写的补上
+  const pendingSceneRef = useRef(null);
+  const sceneSaveTimerRef = useRef(null);
+  const flushScene = () => {
+    clearTimeout(sceneSaveTimerRef.current);
+    sceneSaveTimerRef.current = null;
+    const pending = pendingSceneRef.current;
+    if (!pending) return;
+    pendingSceneRef.current = null;
+    writeStored(safeBrowserStorage(), DRAW_SCENE_KEY, serializeDrawScene(pending.elements, pending.appState, pending.files));
+  };
+  const flushSceneRef = useRef(flushScene);
+  useEffect(() => {
+    flushSceneRef.current = flushScene;
+  });
+  useEffect(() => {
+    const onHide = () => flushSceneRef.current();
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
+      onHide();
+    };
+  }, []);
+  useEffect(() => {
+    if (initialScene?.filesDropped) {
+      setStatus("已恢复上次的画布；插入的图片太大没有存进本机，需要重新插入");
+    } else if (initialScene) {
+      setStatus("已恢复上次的画布");
+    }
+  }, [initialScene]);
+
+  // 上次成功的预览：打开时按任务编号重新读回来；画布与参数没变就不算过期（r49）
+  useEffect(() => {
+    const stored = parseLastPreview(readStored(safeBrowserStorage(), DRAW_LAST_PREVIEW_KEY));
+    if (!stored) return undefined;
+    let cancelled = false;
+    postJson("/api/workflow", { action: "status", workflow_id: stored.workflowId })
+      .then((res) => {
+        const record = res.ok && res.data?.success ? res.data.result : null;
+        if (cancelled || !record?.workflow_id) return;
+        setResult(res.data);
+        setWorkflowId(stored.workflowId);
+        setPreviewSnap(stored.snap);
+        const fingerprint = record.draw_lab?.content_fingerprint || "";
+        setRepeatSend((current) => applyPreviewFingerprintSuccess(current, fingerprint));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    writeStored(
+      safeBrowserStorage(),
+      DRAW_LAST_PREVIEW_KEY,
+      workflowId && previewSnap ? serializeLastPreview(workflowId, previewSnap) : "",
+    );
+  }, [workflowId, previewSnap]);
+
+  // 常驻页面（r49）重新显示时让画布重新量一次尺寸
+  useEffect(() => {
+    if (active) excalidrawAPI?.refresh?.();
+  }, [active, excalidrawAPI]);
 
   useEffect(() => {
     const stage = boardStageRef.current;
@@ -1102,7 +1180,15 @@ export function DrawPage({ onNavigate }) {
               excalidrawAPI={setExcalidrawAPI}
               theme="dark"
               langCode={EXCALIDRAW_LANG_CODE}
-              onChange={(elements, appState) => {
+              initialData={initialScene ? {
+                elements: initialScene.elements,
+                appState: initialScene.appState,
+                files: initialScene.files,
+              } : undefined}
+              onChange={(elements, appState, files) => {
+                pendingSceneRef.current = { elements, appState, files };
+                clearTimeout(sceneSaveTimerRef.current);
+                sceneSaveTimerRef.current = setTimeout(() => flushSceneRef.current(), 600);
                 const nextRev = computeSceneRevision(elements);
                 setSceneRev((prev) => (prev === nextRev ? prev : nextRev));
                 const nextSelection = selectedElementIds(appState).join(",");

@@ -478,3 +478,23 @@ button.conn-pill:hover {
 .engrave-route .quality-presets { margin-top: 6px; }
 .engrave-route .ob-chip:disabled { opacity: 0.55; cursor: not-allowed; }
 .engrave-route-hint { font-size: 11px; line-height: 1.5; color: var(--ob-ink-2); overflow-wrap: anywhere; }
+/* 2026-11-17（r49）创作画板“预览与发送”重新布局：主操作并排、一条提示、深色底刀路预览、一行次要操作 */
+.draw-send-card .draw-send-primary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.draw-send-card .draw-send-primary > button { justify-content: center; min-width: 0; }
+.draw-send-notice { padding: 7px 10px; border-radius: 8px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.draw-send-notice.is-warn { color: var(--ob-amber, #fbbf24); background: var(--ob-amber-bg, rgba(245, 158, 11, 0.12)); border: 1px solid var(--ob-amber-bd, rgba(245, 158, 11, 0.38)); }
+.draw-send-origin { font-size: 12px; font-weight: 600; color: #fbbf24; line-height: 1.45; }
+.draw-send-card .preview-box { margin-bottom: 0; }
+.preview-box--dark { background: #121212; padding: 8px; }
+/* 矢量 / 轮廓刀路图是透明底青色发光线：直接放在深色底上，原色显示 */
+.preview-box--dark img { background: transparent; max-height: 320px; filter: none; }
+/* 光栅扫描的黑白位图（白底黑点）反成黑底白点 */
+.preview-box--dark.is-invert img { background: #ffffff; filter: invert(1); }
+.preview-box--dark .preview-empty { padding: 36px 8px; text-align: center; }
+.draw-send-secondary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.draw-send-secondary .wb-sec-btn { flex: 1 1 110px; justify-content: center; gap: 6px; padding: 6px 10px; font-size: 12px; }
+.draw-send-secondary .wb-sec-btn.is-warn { color: var(--ob-amber, #fbbf24); border-color: var(--ob-amber-bd, rgba(245, 158, 11, 0.35)); }
+.draw-send-secondary .wb-framing-shape { flex: 0 0 auto; font-size: 12px; }
+@media (max-width: 520px) {
+  .draw-send-card .draw-send-primary { grid-template-columns: 1fr; }
+}

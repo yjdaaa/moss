@@ -321,6 +321,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 后端直接生成光栅或轮廓 G-code（`generate_draw_artifacts`），写入运行目录 `generated_assets/`，创建 `source_type="draw"` 的 workflow 并冻结 `confirmation_snapshot`。
 成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`time_estimate`、`origin="lower_left"`、`origin_note`、`frame_mm:{min_x,max_x,min_y,max_y}`（供红光走边框）、`frame_hull_mm`（出光点凸包 `[[x,y],…]`，以激光头起点为原点，供橡皮筋走边框；含圆弧或出光点不足时为 null）、`artifacts.width_mm/height_mm/mode`（实际成品尺寸与生成方式）、`draw_lab:{job_summary, content_fingerprint, uploaded_image_file, scene_file}` 与 §1.4 的 `web`。`outline` 没有可描边的深色图形时 400。
+2026-11-17（技术书 r49）起画板记录的 `draw_lab.job_summary` 按实际模式填写：`mode` 为 `vector` / `raster` / `outline`（此前矢量也写成 `raster`，摘要“策略”显示错），另有 `vector_style`（矢量刻法）、`task_type`（`cut` / `engrave`）与 `pixel_size_mm`（光栅线距）。
 失败 400：各校验文案；`保存画板素材失败: …`。前端未收录的字段（`threshold`、`dither_algorithm`、`raster_quality_strategy` 等）当前被忽略。
 
 ### 3.3 `/api/connection/check`
