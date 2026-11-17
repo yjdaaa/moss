@@ -293,6 +293,7 @@ pub const SLOW_TOOL_FILLER_DELAY: Duration = Duration::from_millis(1000);
 pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
 问机器连没连、在干什么，用 check_laser_connection_tool。\
 要刻字，先用 laser_workflow_tool 的 preview（带文字、材料、厚度，知道木牌尺寸就带上），预览会弹到电脑上；\
+要刻圆、星星、爱心、边框这类图形，在同一个 preview 里带 shapes / border（坐标 mm，木牌中心为原点，y 正数在上），图形别和文字重叠，需要时用 text_box 给文字留位置；改图形大小位置就带改好的参数重新 preview。\
 用户核对后明确说确认，再用 confirm_send 带同一个 workflow_id。功率速度默认来自材料库，用户明确说了这次的功率、速度或遍数就放进 manual_params。\
 问进度用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
 边刻边调快慢或功率，用 laser_safe_action_tool 的 feed_ 或 power_ 动作。查某种材料的参数用 material_params_tool 的 get。\

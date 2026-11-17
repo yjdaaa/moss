@@ -11,8 +11,12 @@
 //!   `G92`（声明激光头在图案坐标中的位置），刀路本身不变；结束时激光头关光回到起点。
 //! - 切割质量 [`TextTaskSpec::cut`]（2026-11-16，对齐 LightBurn）：切缝补偿在规划前改轮廓，桥位、
 //!   引入 / 引出线、过切在规划（及其出光长度自检）之后改写闭合轮廓，见 [`crate::cut`]；默认全关。
+//! - 焊接与基础图形（2026-11-17 用户决定，技术书 r44）：字形轮廓在规划前按非零环绕取并集（对齐 LightBurn
+//!   “Weld”），笔画交叠、字与字相连的字体不会在交叠处多刻一道线；可同时放 [`crate::shapes`] 的基础图形
+//!   与边框，文字自动适配进边框里面或 `text_box`。版面以木牌中心为原点，激光头起点仍是木牌中心 /
+//!   左下角；图形超出木牌、与文字重叠直接报错，不悄悄挪动。刻得好坏只取决于机器与材料库参数。
 
-use crate::{cut, font, gcode, vector_plan};
+use crate::{cut, font, gcode, shapes, vector_plan};
 use image::RgbaImage;
 use laser_contracts::geometry::{PathOptimizationStats, Paths};
 
@@ -109,6 +113,30 @@ pub struct TextTaskSpec<'a> {
     pub plan: vector_plan::PlanOptions,
     /// 切割质量设置（切缝补偿、桥位、引线、过切），默认全关；只在切割时由调用方填写
     pub cut: cut::CutOptions,
+    /// 基础图形（木牌中心为原点、y 向上，mm）；文字可以为空
+    pub shapes: &'a [shapes::Shape],
+    /// 沿木牌边缘的边框；文字自动放进边框里面
+    pub border: Option<shapes::Border>,
+    /// 文字放进这个矩形区域（木牌坐标）；给了就不按边框 / 整块木牌排版
+    pub text_box: Option<TextBox>,
+    /// 规划前合并重叠的字形轮廓（默认开）
+    pub weld: bool,
+}
+
+/// 文字区域（木牌中心为原点、y 向上，mm）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+}
+
+/// 焊接统计：合并前后的字形轮廓数（`None` = 没有焊接）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeldReport {
+    pub before: usize,
+    pub after: usize,
 }
 
 /// 排线填充的线距是实心填充的几倍（线条可见、更快）。
@@ -145,6 +173,10 @@ pub struct TextTaskArtifacts {
     pub removed_duplicates: usize,
     /// 切割质量设置生效时的统计（全关时为 `None`）
     pub cut_report: Option<cut::CutReport>,
+    /// 焊接统计（没有文字或关闭焊接时为 `None`）
+    pub weld: Option<WeldReport>,
+    /// 图形个数（含边框线）
+    pub shapes: usize,
 }
 
 pub struct TextTaskEngine;
@@ -209,6 +241,50 @@ fn place_at_head(gcode: &str, start_x: f64, start_y: f64) -> Result<String, Stri
     Ok(format!("{body}M5\nG0 X{start_x:.3} Y{start_y:.3}\nM2\n"))
 }
 
+/// 焊接：一组闭合轮廓按非零环绕取并集（对齐 LightBurn “Weld”），返回首尾点相同的闭合轮廓。
+pub fn weld_contours(paths: &Paths) -> Result<(Paths, WeldReport), String> {
+    let welded = cut::offset_contours(paths, 0.0).map_err(|e| match e.0 {
+        "没有可切割的闭合图形" => "文字没有可雕刻的闭合笔画".to_owned(),
+        "切割图形太复杂，无法做切缝补偿" => {
+            "文字笔画太复杂，无法合并重叠笔画；请减少字数或关闭焊接".to_owned()
+        }
+        other => other.to_owned(),
+    })?;
+    let report = WeldReport {
+        before: paths.len(),
+        after: welded.contours.len(),
+    };
+    Ok((welded.contours, report))
+}
+
+/// 一个图形在版面里的几何（木牌坐标转成 y 向下后）。
+struct PlacedShape {
+    shape: shapes::Shape,
+    geometry: shapes::ShapeGeometry,
+}
+
+/// 图形与文字墨迹框 `ink`（y 向上，min_x, min_y, max_x, max_y）是否重叠。
+fn overlaps_text(placed: &PlacedShape, ink: (f64, f64, f64, f64)) -> bool {
+    const GAP_MM: f64 = 0.2;
+    let rect = (
+        ink.0 - GAP_MM,
+        ink.1 - GAP_MM,
+        ink.2 + GAP_MM,
+        ink.3 + GAP_MM,
+    );
+    let points = placed.geometry.points();
+    if points
+        .windows(2)
+        .any(|w| shapes::segment_hits_rect(w[0], w[1], rect))
+    {
+        return true;
+    }
+    // 填满的图形把整段文字包在里面也算重叠（只描边的外框不算）
+    placed.shape.fill
+        && matches!(placed.geometry, shapes::ShapeGeometry::Closed(_))
+        && vector_plan::point_in_polygon(((ink.0 + ink.2) / 2.0, (ink.1 + ink.3) / 2.0), points)
+}
+
 impl TextTaskEngine {
     pub fn generate(spec: &TextTaskSpec<'_>) -> Result<TextTaskArtifacts, String> {
         if !(spec.pixel_size_mm.is_finite() && (0.05..=1.0).contains(&spec.pixel_size_mm)) {
@@ -217,8 +293,15 @@ impl TextTaskEngine {
         if !(spec.margin_mm.is_finite() && spec.margin_mm >= 0.0) {
             return Err("留边必须是不小于 0 的数字".into());
         }
-        let data =
-            std::fs::read(spec.font_path).map_err(|_| "font file cannot be read".to_owned())?;
+        let has_text = !spec.text.trim().is_empty();
+        if !has_text && spec.shapes.is_empty() && spec.border.is_none() {
+            return Err("要刻的文字和图形不能都为空".into());
+        }
+        let data = if has_text {
+            std::fs::read(spec.font_path).map_err(|_| "font file cannot be read".to_owned())?
+        } else {
+            Vec::new()
+        };
         let positive = |v: Option<f64>, name: &str| -> Result<Option<f64>, String> {
             match v {
                 None => Ok(None),
@@ -229,12 +312,14 @@ impl TextTaskEngine {
         let board_w = positive(spec.board_width_mm, "木牌宽度")?;
         let board_h = positive(spec.board_height_mm, "木牌高度")?;
         // 填充的过扫描让扫描线越出笔画：放进木牌时两侧留边至少容得下它（与旧位图扫描一致）
-        let fills = matches!(spec.fill, TextFill::Fill | TextFill::Hatch);
-        let (over_x, over_y) = if fills {
+        let fills = has_text && matches!(spec.fill, TextFill::Fill | TextFill::Hatch);
+        let shape_fills = spec.shapes.iter().any(|s| s.fill);
+        let (over_x, over_y) = if fills || shape_fills {
             spec.scan.extension_mm()
         } else {
             (0.0, 0.0)
         };
+        let (text_over_x, text_over_y) = if fills { (over_x, over_y) } else { (0.0, 0.0) };
         // 切缝外扩与引线同样会越出笔画，各方向都要留出来
         spec.cut.validate().map_err(|e| e.to_string())?;
         let cut_reach = if spec.cut.is_active() {
@@ -242,34 +327,78 @@ impl TextTaskEngine {
         } else {
             0.0
         };
+        let (text_over_x, text_over_y) = (text_over_x.max(cut_reach), text_over_y.max(cut_reach));
         let (over_x, over_y) = (over_x.max(cut_reach), over_y.max(cut_reach));
-        let margin_x = spec.margin_mm.max(over_x);
-        let margin_y = spec.margin_mm.max(over_y);
-        let avail_w = board_w.map(|b| b - 2.0 * margin_x);
-        let avail_h = board_h.map(|b| b - 2.0 * margin_y);
-        if avail_w.is_some_and(|v| v <= 0.0) || avail_h.is_some_and(|v| v <= 0.0) {
-            return Err("木牌尺寸小于两侧留边，放不下任何文字".into());
-        }
+        let margin_x = spec.margin_mm.max(text_over_x);
+        let margin_y = spec.margin_mm.max(text_over_y);
 
-        let mut size = spec.font_size_mm;
-        let (mut paths, mut width, mut height, mut glyphs) = layout(&data, spec, size)?;
-        let effective_w = |w: f64| w;
-        let fits = |w: f64, h: f64| {
-            avail_w.is_none_or(|a| effective_w(w) <= a + 1e-6)
-                && avail_h.is_none_or(|a| h <= a + 1e-6)
+        // 图形：用户给的 + 边框生成的线
+        let mut all_shapes: Vec<shapes::Shape> = spec.shapes.to_vec();
+        let mut region = None;
+        if let Some(border) = spec.border {
+            let (ring, inner) = border.build(board_w, board_h, spec.margin_mm)?;
+            all_shapes.extend(ring);
+            region = Some(inner);
+        }
+        if all_shapes.len() > shapes::MAX_SHAPES {
+            return Err(format!("图形最多 {} 个（含边框线）", shapes::MAX_SHAPES));
+        }
+        if let Some(text_box) = spec.text_box {
+            let w = positive(Some(text_box.width_mm), "text_box 宽度")?;
+            let h = positive(Some(text_box.height_mm), "text_box 高度")?;
+            if !(text_box.x_mm.is_finite() && text_box.y_mm.is_finite()) {
+                return Err("text_box 的 x_mm / y_mm 必须是数字".into());
+            }
+            let (w, h) = (w.unwrap_or_default(), h.unwrap_or_default());
+            let outside = board_w.is_some_and(|b| text_box.x_mm.abs() + w / 2.0 > b / 2.0 + 1e-6)
+                || board_h.is_some_and(|b| text_box.y_mm.abs() + h / 2.0 > b / 2.0 + 1e-6);
+            if outside {
+                return Err("text_box 超出了木牌范围".into());
+            }
+            region = Some(shapes::TextRegion::Rect {
+                cx: text_box.x_mm,
+                cy: text_box.y_mm,
+                width: Some(w),
+                height: Some(h),
+            });
+        }
+        let default_region = region.is_none();
+        let region = match region {
+            Some(region) => region,
+            None => {
+                let avail_w = board_w.map(|b| b - 2.0 * margin_x);
+                let avail_h = board_h.map(|b| b - 2.0 * margin_y);
+                if has_text
+                    && (avail_w.is_some_and(|v| v <= 0.0) || avail_h.is_some_and(|v| v <= 0.0))
+                {
+                    return Err("木牌尺寸小于两侧留边，放不下任何文字".into());
+                }
+                shapes::TextRegion::Rect {
+                    cx: 0.0,
+                    cy: 0.0,
+                    width: avail_w,
+                    height: avail_h,
+                }
+            }
         };
-        if board_w.is_some() || board_h.is_some() {
+
+        // 文字：按区域自动适配字号，墨迹框以区域中心为中心
+        let mut size = spec.font_size_mm;
+        let (mut paths, mut ink_w, mut ink_h, mut glyphs) = if has_text {
+            layout(&data, spec, size)?
+        } else {
+            (Vec::new(), 0.0, 0.0, 0)
+        };
+        if has_text && region.is_bounded() {
             if spec.auto_size {
                 // 字号与笔画尺寸近似成正比，字距是固定 mm，迭代几次收敛到能放下的最大字号
                 for _ in 0..5 {
-                    let cur_w = effective_w(width);
-                    let ratio_w = avail_w.map_or(f64::INFINITY, |a| a / cur_w);
-                    let ratio_h = avail_h.map_or(f64::INFINITY, |a| a / height);
-                    let ratio = ratio_w.min(ratio_h);
-                    if fits(width, height) && ratio < 1.001 {
+                    let ratio = region.ratio(ink_w, ink_h);
+                    let fits = region.fits(ink_w, ink_h);
+                    if fits && ratio < 1.001 {
                         break;
                     }
-                    let step = if !fits(width, height) && ratio >= 0.998 {
+                    let step = if !fits && ratio >= 0.998 {
                         0.995
                     } else {
                         ratio * 0.999
@@ -277,29 +406,132 @@ impl TextTaskEngine {
                     size *= step;
                     if size < MIN_FONT_SIZE_MM {
                         return Err(format!(
-                            "文字太长，放进这块木牌后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行"
+                            "文字太长，放进{}后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行",
+                            if default_region {
+                                "这块木牌"
+                            } else {
+                                "文字区域"
+                            }
                         ));
                     }
-                    (paths, width, height, glyphs) = layout(&data, spec, size)?;
+                    (paths, ink_w, ink_h, glyphs) = layout(&data, spec, size)?;
                 }
             }
-            if !fits(width, height) {
-                return Err(format!(
-                    "按 {size:.1} mm 字号文字约 {width:.1} × {height:.1} mm，放不进 {} × {} mm 的木牌（四周各留 {:.1} mm）；请减小字号，或不指定字号让 MOSS 自动适配",
-                    board_w.map_or("—".to_owned(), |v| format!("{v:.0}")),
-                    board_h.map_or("—".to_owned(), |v| format!("{v:.0}")),
-                    margin_x
-                ));
+            if !region.fits(ink_w, ink_h) {
+                return Err(if default_region {
+                    format!(
+                        "按 {size:.1} mm 字号文字约 {ink_w:.1} × {ink_h:.1} mm，放不进 {} × {} mm 的木牌（四周各留 {:.1} mm）；请减小字号，或不指定字号让 MOSS 自动适配",
+                        board_w.map_or("—".to_owned(), |v| format!("{v:.0}")),
+                        board_h.map_or("—".to_owned(), |v| format!("{v:.0}")),
+                        margin_x
+                    )
+                } else {
+                    format!(
+                        "按 {size:.1} mm 字号文字约 {ink_w:.1} × {ink_h:.1} mm，放不进{}；请减小字号，或不指定字号让 MOSS 自动适配",
+                        if spec.text_box.is_some() {
+                            " text_box"
+                        } else {
+                            "边框里面"
+                        }
+                    )
+                });
             }
         }
+        let (rcx, rcy) = region.center();
+        // 墨迹框（木牌坐标，y 向上）
+        let ink = (
+            rcx - ink_w / 2.0,
+            rcy - ink_h / 2.0,
+            rcx + ink_w / 2.0,
+            rcy + ink_h / 2.0,
+        );
 
-        // 激光头起点在图案坐标（y 向上，笔画范围 0..width × 0..height）中的位置
+        // 图形几何（木牌坐标，y 向上），检查是否超出木牌、是否与文字重叠
+        let mut placed = Vec::with_capacity(all_shapes.len());
+        for shape in &all_shapes {
+            let geometry = shape.geometry()?;
+            let (x0, y0, x1, y1) =
+                shapes::bounds(geometry.points()).ok_or("图形没有可雕刻的线条")?;
+            let (ox, oy) = if shape.fill {
+                (over_x, over_y)
+            } else {
+                (0.0, 0.0)
+            };
+            let outside = board_w
+                .is_some_and(|b| x0 - ox < -b / 2.0 - 1e-6 || x1 + ox > b / 2.0 + 1e-6)
+                || board_h.is_some_and(|b| y0 - oy < -b / 2.0 - 1e-6 || y1 + oy > b / 2.0 + 1e-6);
+            if outside {
+                return Err(format!(
+                    "{}（中心 {:.1}, {:.1}，{:.1} × {:.1} mm）超出了木牌{}；请缩小或往里挪",
+                    shape.kind.label(),
+                    shape.x_mm,
+                    shape.y_mm,
+                    x1 - x0,
+                    y1 - y0,
+                    if shape.fill && (ox > 0.0 || oy > 0.0) {
+                        "（填满时两头还要留出过扫描）"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            let item = PlacedShape {
+                shape: *shape,
+                geometry,
+            };
+            if has_text && overlaps_text(&item, ink) {
+                return Err(format!(
+                    "{}（中心 {:.1}, {:.1}）和文字重叠了；请挪开图形，或用 text_box 给文字留出位置",
+                    shape.kind.label(),
+                    shape.x_mm,
+                    shape.y_mm
+                ));
+            }
+            placed.push(item);
+        }
+
+        // 版面范围（y 向下）：文字墨迹框与全部图形；平移到左上角为 (0,0)
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut grow = |x: f64, y_down: f64| {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y_down);
+            max_y = max_y.max(y_down);
+        };
+        if has_text {
+            grow(ink.0, -ink.3);
+            grow(ink.2, -ink.1);
+        }
+        for item in &placed {
+            for p in item.geometry.points() {
+                grow(p.0, -p.1);
+            }
+        }
+        let (width, height) = (max_x - min_x, max_y - min_y);
+        // 文字笔画（墨迹左上角为 0,0）在版面里的平移；只有文字时为 0
+        let (ink_dx, ink_dy) = ((rcx - ink_w / 2.0) - min_x, (-rcy - ink_h / 2.0) - min_y);
+        if ink_dx != 0.0 || ink_dy != 0.0 {
+            for point in paths.iter_mut().flatten() {
+                point.0 += ink_dx;
+                point.1 += ink_dy;
+            }
+        }
+        let to_layout =
+            |points: &[laser_contracts::geometry::Point]| -> Vec<laser_contracts::geometry::Point> {
+                points.iter().map(|p| (p.0 - min_x, -p.1 - min_y)).collect()
+            };
+
+        // 激光头起点在图案坐标（y 向上，版面范围 0..width × 0..height）中的位置：木牌中心在版面里是 (-min_x, -min_y)
+        let (board_cx, board_cy_up) = (-min_x, height + min_y);
         let (start_x, start_y) = match spec.origin {
-            TextOrigin::Center => (width / 2.0, height / 2.0),
+            TextOrigin::Center => (board_cx, board_cy_up),
             // 没给木牌时激光头在过扫描范围的左下角，扫描线不会往起点的负方向越界
             TextOrigin::LowerLeft => (
-                -board_w.map_or(over_x, |b| (b - width) / 2.0),
-                -board_h.map_or(over_y, |b| (b - height) / 2.0),
+                board_w.map_or(-over_x, |b| board_cx - b / 2.0),
+                board_h.map_or(-over_y, |b| board_cy_up - b / 2.0),
             ),
         };
         let frame = HeadRelativeBox {
@@ -309,29 +541,58 @@ impl TextTaskEngine {
             max_y: height - start_y,
         };
 
+        // 焊接（2026-11-17 技术书 r44）：字形轮廓按非零环绕取并集，交叠处不再多一道线；
+        // 填充本来就按非零环绕算，焊接前后填满的区域相同
+        let mut weld = None;
+        if has_text && spec.weld && !paths.is_empty() {
+            let (welded, report) = weld_contours(&paths)?;
+            weld = Some(report);
+            paths = welded;
+        }
+
         // 矢量规划（2026-11-16 用户决定：文字一律转矢量再规划路线；同日对齐 LightBurn：先扫描填充、再描轮廓）。
         // 笔画坐标 y 向下，激光头在 (start_x, height - start_y)；扫描角度按机器视角逆时针，y 向下时取反
         let head = (start_x, height - start_y);
-        // 切缝补偿：规划前把轮廓整体外扩 / 内缩（孔反向），规划自检的是补偿后的轮廓
+        // 切缝补偿：规划前把轮廓整体外扩 / 内缩（孔反向），规划自检的是补偿后的轮廓；图形各自补偿
         let mut kerf_contours = None;
-        let contours: Vec<vector_plan::Unit> = if spec.cut.kerf_mm != 0.0 {
-            let offset =
-                cut::offset_contours(&paths, spec.cut.kerf_mm).map_err(|e| e.to_string())?;
-            kerf_contours = Some((offset.before, offset.after));
-            offset
-                .contours
-                .into_iter()
-                .map(vector_plan::Unit::Closed)
-                .collect()
-        } else {
-            paths
-                .iter()
-                .cloned()
-                .map(vector_plan::Unit::Closed)
-                .collect()
+        let mut contours: Vec<vector_plan::Unit> = Vec::new();
+        let mut filled_shapes: Vec<Vec<laser_contracts::geometry::Point>> = Vec::new();
+        let kerf = |ring: &[Vec<laser_contracts::geometry::Point>]| {
+            cut::offset_contours(ring, spec.cut.kerf_mm).map_err(|e| e.to_string())
         };
-        let fill_options = fills.then(|| vector_plan::FillOptions {
-            spacing: if spec.fill == TextFill::Fill {
+        let (mut kerf_before, mut kerf_after) = (0, 0);
+        if spec.cut.kerf_mm != 0.0 && !paths.is_empty() {
+            let offset = kerf(&paths)?;
+            kerf_before += offset.before;
+            kerf_after += offset.after;
+            contours.extend(offset.contours.into_iter().map(vector_plan::Unit::Closed));
+        } else {
+            contours.extend(paths.iter().cloned().map(vector_plan::Unit::Closed));
+        }
+        for item in &placed {
+            let points = to_layout(item.geometry.points());
+            match item.geometry {
+                shapes::ShapeGeometry::Open(_) => contours.push(vector_plan::Unit::Open(points)),
+                shapes::ShapeGeometry::Closed(_) => {
+                    if item.shape.fill {
+                        filled_shapes.push(points.clone());
+                    }
+                    if spec.cut.kerf_mm != 0.0 {
+                        let offset = kerf(std::slice::from_ref(&points))?;
+                        kerf_before += offset.before;
+                        kerf_after += offset.after;
+                        contours.extend(offset.contours.into_iter().map(vector_plan::Unit::Closed));
+                    } else {
+                        contours.push(vector_plan::Unit::Closed(points));
+                    }
+                }
+            }
+        }
+        if spec.cut.kerf_mm != 0.0 {
+            kerf_contours = Some((kerf_before, kerf_after));
+        }
+        let fill_options = (fills || shape_fills).then(|| vector_plan::FillOptions {
+            spacing: if !fills || spec.fill == TextFill::Fill {
                 spec.pixel_size_mm
             } else {
                 spec.pixel_size_mm * HATCH_SPACING_FACTOR
@@ -339,19 +600,31 @@ impl TextTaskEngine {
             rule: vector_plan::FillRule::NonZero,
             ..spec.scan
         });
-        let layers = match fill_options {
-            None => vec![contours],
-            Some(options) => {
-                let fill = vector_plan::scan_fill(
-                    &paths,
-                    &vector_plan::FillOptions {
-                        angle_deg: -options.angle_deg,
-                        ..options
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-                vec![fill, contours]
-            }
+        let scan = |rings: &[Vec<laser_contracts::geometry::Point>], spacing: f64| {
+            let options = fill_options.expect("有填充时才扫描");
+            vector_plan::scan_fill(
+                rings,
+                &vector_plan::FillOptions {
+                    angle_deg: -options.angle_deg,
+                    spacing,
+                    ..options
+                },
+            )
+            .map_err(|e| e.to_string())
+        };
+        let mut fill_units = Vec::new();
+        if fills {
+            let spacing = fill_options.map_or(spec.pixel_size_mm, |o| o.spacing);
+            fill_units.extend(scan(&paths, spacing)?);
+        }
+        if shape_fills {
+            // 图形填满一律实心线距（材料像素间距）
+            fill_units.extend(scan(&filled_shapes, spec.pixel_size_mm)?);
+        }
+        let layers = if fill_units.is_empty() {
+            vec![contours]
+        } else {
+            vec![fill_units, contours]
         };
         let mut planned =
             vector_plan::plan_layers(layers, head, &spec.plan).map_err(|e| e.to_string())?;
@@ -402,13 +675,15 @@ impl TextTaskEngine {
             glyphs,
             path_optimization: planned.stats,
             estimate,
-            font_size_mm: size,
+            font_size_mm: if has_text { size } else { 0.0 },
             fill: spec.fill,
             origin: spec.origin,
             frame,
             fill_options,
             removed_duplicates: planned.removed_duplicates,
             cut_report,
+            weld,
+            shapes: placed.len(),
         })
     }
 }
@@ -446,6 +721,10 @@ mod tests {
             },
             plan: vector_plan::PlanOptions::default(),
             cut: cut::CutOptions::default(),
+            shapes: &[],
+            border: None,
+            text_box: None,
+            weld: true,
         }
     }
 
@@ -759,5 +1038,258 @@ mod tests {
         assert!(parse_alignment(Some("justify")).is_err());
         assert_eq!(TextFill::parse(None).unwrap(), TextFill::Outline);
         assert_eq!(TextOrigin::parse(None).unwrap(), TextOrigin::Center);
+    }
+
+    // ---------- 2026-11-17 技术书 r44：焊接、基础图形与边框 ----------
+
+    /// G-code 里出光（S > 0 的 G1）的总长度。
+    fn burn_len(gcode: &str) -> f64 {
+        let (mut x, mut y, mut s, mut total) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0);
+        for line in gcode.lines() {
+            let word = |c: char| {
+                line.split_whitespace()
+                    .find(|w| w.starts_with(c))
+                    .and_then(|w| w[1..].parse::<f64>().ok())
+            };
+            if line.starts_with("G92") {
+                (x, y) = (word('X').unwrap_or(x), word('Y').unwrap_or(y));
+                continue;
+            }
+            if !(line.starts_with("G0") || line.starts_with("G1")) {
+                continue;
+            }
+            s = word('S').unwrap_or(s);
+            let (nx, ny) = (word('X').unwrap_or(x), word('Y').unwrap_or(y));
+            if line.starts_with("G1") && s > 0.0 {
+                total += (nx - x).hypot(ny - y);
+            }
+            (x, y) = (nx, ny);
+        }
+        total
+    }
+
+    #[test]
+    fn weld_merges_overlapping_contours_and_keeps_separate_ones() {
+        let square =
+            |x: f64, y: f64| vec![(x, y), (x + 10.0, y), (x + 10.0, y + 10.0), (x, y + 10.0)];
+        // 两个交叠的方块 + 一个分开的方块
+        let paths = vec![square(0.0, 0.0), square(5.0, 5.0), square(30.0, 0.0)];
+        let (welded, report) = weld_contours(&paths).unwrap();
+        assert_eq!(
+            report,
+            WeldReport {
+                before: 3,
+                after: 2
+            }
+        );
+        let perimeters: Vec<f64> = welded
+            .iter()
+            .map(|ring| {
+                ring.windows(2)
+                    .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+                    .sum()
+            })
+            .collect();
+        // 交叠两块合并后的外框周长 = 2 × 40（交叠处的内线没了），分开的那块不变
+        assert!(
+            perimeters.iter().any(|p| (p - 60.0).abs() < 1e-6),
+            "{perimeters:?}"
+        );
+        assert!(
+            perimeters.iter().any(|p| (p - 40.0).abs() < 1e-6),
+            "{perimeters:?}"
+        );
+        // 内孔（反向轮廓）保留
+        let hole = vec![(2.0, 2.0), (2.0, 8.0), (8.0, 8.0), (8.0, 2.0)];
+        let (with_hole, report) = weld_contours(&vec![square(0.0, 0.0), hole]).unwrap();
+        assert_eq!(report.after, 2);
+        assert_eq!(with_hole.len(), 2);
+    }
+
+    #[test]
+    fn welding_text_without_overlaps_keeps_the_same_strokes() {
+        let welded = TextTaskEngine::generate(&spec("AB")).unwrap();
+        let raw = TextTaskEngine::generate(&TextTaskSpec {
+            weld: false,
+            ..spec("AB")
+        })
+        .unwrap();
+        assert!(welded.weld.is_some() && raw.weld.is_none());
+        let (a, b) = (burn_len(&welded.gcode), burn_len(&raw.gcode));
+        assert!(
+            (a - b).abs() < 1e-3 * b,
+            "不交叠的字焊接前后出光长度相同：{a} vs {b}"
+        );
+        assert_eq!(welded.frame, raw.frame);
+    }
+
+    fn coaster_shapes() -> Vec<shapes::Shape> {
+        vec![shapes::Shape {
+            kind: shapes::ShapeKind::Star {
+                points: 5,
+                inner_ratio: shapes::regular_star_ratio(5),
+            },
+            x_mm: 0.0,
+            y_mm: 30.0,
+            width_mm: 10.0,
+            height_mm: 10.0,
+            rotation_deg: 0.0,
+            fill: true,
+        }]
+    }
+
+    #[test]
+    fn coaster_with_double_circle_border_text_and_a_star_stays_on_the_board() {
+        let star = coaster_shapes();
+        let job = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(90.0),
+            board_height_mm: Some(90.0),
+            auto_size: true,
+            fill: TextFill::Fill,
+            shapes: &star,
+            border: Some(shapes::Border {
+                shape: shapes::BorderShape::Circle,
+                double: true,
+                inset_mm: 3.0,
+                gap_mm: 1.5,
+                corner_radius_mm: None,
+            }),
+            text_box: Some(TextBox {
+                x_mm: 0.0,
+                y_mm: -5.0,
+                width_mm: 40.0,
+                height_mm: 30.0,
+            }),
+            ..spec("AB")
+        })
+        .unwrap();
+        assert_eq!(job.shapes, 3, "星星 + 两圈边框");
+        let e = extents(&job.gcode);
+        // 激光头在木牌中心：外圈直径 84，范围关于起点对称（星星在上面、不超过外圈）
+        assert!(
+            (e.min_x + 42.0).abs() < 0.05 && (e.max_x - 42.0).abs() < 0.05,
+            "{e:?}"
+        );
+        assert!(
+            (e.min_y + 42.0).abs() < 0.05 && (e.max_y - 42.0).abs() < 0.05,
+            "{e:?}"
+        );
+        assert!(
+            job.font_size_mm > 10.0,
+            "文字按 text_box 自动放大：{}",
+            job.font_size_mm
+        );
+        // 外圈直径 84：版面宽高就是外圈
+        assert!((job.width_mm - 84.0).abs() < 0.05 && (job.height_mm - 84.0).abs() < 0.05);
+        // 星星填满：有大量扫描出光段
+        assert!(job.gcode.lines().filter(|l| l.contains(" S420")).count() > 100);
+
+        // 左下角起点：版面在木牌内、不往负方向越界
+        let corner = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(90.0),
+            board_height_mm: Some(90.0),
+            auto_size: true,
+            origin: TextOrigin::LowerLeft,
+            shapes: &star,
+            text_box: Some(TextBox {
+                x_mm: 0.0,
+                y_mm: -5.0,
+                width_mm: 40.0,
+                height_mm: 30.0,
+            }),
+            ..spec("AB")
+        })
+        .unwrap();
+        let e = extents(&corner.gcode);
+        assert!(
+            e.min_x >= -1e-6 && e.min_y >= -1e-6 && e.max_x <= 90.0 && e.max_y <= 90.0,
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn shapes_only_jobs_and_layout_errors() {
+        let heart = [shapes::Shape {
+            kind: shapes::ShapeKind::Heart,
+            x_mm: 0.0,
+            y_mm: 0.0,
+            width_mm: 30.0,
+            height_mm: 26.0,
+            rotation_deg: 0.0,
+            fill: false,
+        }];
+        let job = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(40.0),
+            board_height_mm: Some(40.0),
+            shapes: &heart,
+            ..spec("")
+        })
+        .unwrap();
+        assert_eq!(job.glyphs, 0);
+        assert!(job.weld.is_none());
+        let e = extents(&job.gcode);
+        assert!((e.max_x - e.min_x - 30.0).abs() < 0.05, "{e:?}");
+
+        // 超出木牌
+        let far = [shapes::Shape {
+            x_mm: 15.0,
+            ..heart[0]
+        }];
+        let err = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(40.0),
+            board_height_mm: Some(40.0),
+            shapes: &far,
+            ..spec("")
+        })
+        .unwrap_err();
+        assert!(err.contains("超出了木牌"), "{err}");
+        // 与文字重叠
+        let err = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(80.0),
+            board_height_mm: Some(40.0),
+            auto_size: true,
+            shapes: &heart,
+            ..spec("AB")
+        })
+        .unwrap_err();
+        assert!(err.contains("重叠"), "{err}");
+        // 只描边的外框把文字围在里面不算重叠
+        let frame = [shapes::Shape {
+            kind: shapes::ShapeKind::Rect {
+                corner_radius_mm: 2.0,
+            },
+            x_mm: 0.0,
+            y_mm: 0.0,
+            width_mm: 76.0,
+            height_mm: 36.0,
+            rotation_deg: 0.0,
+            fill: false,
+        }];
+        TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(80.0),
+            board_height_mm: Some(40.0),
+            font_size_mm: 10.0,
+            shapes: &frame,
+            ..spec("AB")
+        })
+        .unwrap();
+        // 文字和图形都没有
+        assert!(TextTaskEngine::generate(&spec("  ")).is_err());
+        // 边框里放不下指定字号
+        let err = TextTaskEngine::generate(&TextTaskSpec {
+            board_width_mm: Some(40.0),
+            board_height_mm: Some(40.0),
+            font_size_mm: 30.0,
+            border: Some(shapes::Border {
+                shape: shapes::BorderShape::Rect,
+                double: false,
+                inset_mm: 3.0,
+                gap_mm: 1.5,
+                corner_radius_mm: None,
+            }),
+            ..spec("ABAB")
+        })
+        .unwrap_err();
+        assert!(err.contains("边框里面"), "{err}");
     }
 }

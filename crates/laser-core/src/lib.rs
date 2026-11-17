@@ -11,6 +11,7 @@ pub mod pycompat;
 pub mod raster;
 pub mod registration;
 pub mod safety;
+pub mod shapes;
 pub mod stroke_font;
 pub mod trace;
 pub mod vector_plan;

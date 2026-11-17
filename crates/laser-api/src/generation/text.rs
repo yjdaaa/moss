@@ -1,4 +1,5 @@
-//! 文字预览：字形转矢量后按填充 / 描边 / 光栅 / 切割生成 G-code。
+//! 文字预览：字形转矢量后按填充 / 描边 / 光栅 / 切割生成 G-code；可带基础图形、边框与文字区域
+//! （2026-11-17 技术书 r44，见 [`super::shapes`]），文字可以为空。
 
 use super::*;
 
@@ -14,7 +15,11 @@ pub(crate) fn generate_text_artifacts(
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .trim();
-    if text.is_empty() {
+    let shapes = super::shapes::parse_shapes(object.get("shapes"))?;
+    let border = super::shapes::parse_border(object.get("border"))?;
+    let text_box = super::shapes::parse_text_box(object.get("text_box"))?;
+    if text.is_empty() && shapes.is_empty() && border.is_none() {
+        // 报错原文是兼容快照（tests/golden/api/text-generate.response.json），只刻图形时给 shapes 或 border
         return Err("text 不能为空".into());
     }
     let material = object
@@ -27,13 +32,18 @@ pub(crate) fn generate_text_artifacts(
     if material.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
         return Err("thickness_mm 必须是大于 0 的数字".into());
     }
-    let font_path_buf = object
-        .get("font_path")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| laser_core::font::find_system_font_for_text(text))
-        .ok_or("font_path 必须指向可读的 TTF/TTC 字体")?;
+    // 只刻图形时不需要字体
+    let font_path_buf = if text.is_empty() {
+        std::path::PathBuf::new()
+    } else {
+        object
+            .get("font_path")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| laser_core::font::find_system_font_for_text(text))
+            .ok_or("font_path 必须指向可读的 TTF/TTC 字体")?
+    };
     let font_path = font_path_buf.to_str().ok_or("非法字体路径")?;
     let font_size = parse_float(object.get("font_size_mm"), "font_size_mm", 10.0)
         .map_err(|error| error.to_string())?;
@@ -52,12 +62,18 @@ pub(crate) fn generate_text_artifacts(
     let is_cut = raw_engraving_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"))
         || raw_laser_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"));
     // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 实心填充用材料库 raster 参数
-    // （2026-11-16 起改为矢量密排线，行距、速度与扫描填充同档），outline / hatch 用 outline 参数
+    // （2026-11-16 起改为矢量密排线，行距、速度与扫描填充同档），outline / hatch 用 outline 参数；
+    // 有填满的图形时整件同样用 raster 参数（r44）
     let text_fill =
         laser_core::engine::TextFill::parse(object.get("text_fill").and_then(|v| v.as_str()))?;
+    if is_cut && shapes.iter().any(|shape| shape.fill) {
+        return Err("切割时图形不能填满，请去掉 fill".into());
+    }
+    let solid_fill = (!text.is_empty() && text_fill == laser_core::engine::TextFill::Fill)
+        || shapes.iter().any(|shape| shape.fill);
     let (rec_laser_mode, rec_engraving_mode) = if is_cut {
         ("cut", None)
-    } else if text_fill == laser_core::engine::TextFill::Fill {
+    } else if solid_fill {
         ("engrave", Some("raster"))
     } else {
         ("engrave", Some("outline"))
@@ -167,6 +183,10 @@ pub(crate) fn generate_text_artifacts(
             ..parse_path_options(object)?
         },
         cut,
+        shapes: &shapes,
+        border,
+        text_box,
+        weld: parse_bool(object.get("text_weld"), true),
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
     // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
@@ -181,7 +201,7 @@ pub(crate) fn generate_text_artifacts(
         && (extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01)
     {
         return Err(format!(
-            "文字成品约 {:.1} × {:.1} mm，超出机器幅面 {area_w:.0} × {area_h:.0} mm，请减小字号（当前 {:.1} mm）或减少字数",
+            "成品约 {:.1} × {:.1} mm，超出机器幅面 {area_w:.0} × {area_h:.0} mm，请减小字号（当前 {:.1} mm）、减少字数或缩小图形",
             extents.width(),
             extents.height(),
             artifacts.font_size_mm
@@ -240,6 +260,11 @@ pub(crate) fn generate_text_artifacts(
         "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, &fill)),
         "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref(), &cut_from_material)),
         "removed_duplicates": artifacts.removed_duplicates,
+        "shapes": super::shapes::shapes_json(&shapes),
+        "shape_count": artifacts.shapes,
+        "border": border.as_ref().map(super::shapes::border_json),
+        "text_box": text_box.map(|b| serde_json::json!({"x_mm": b.x_mm, "y_mm": b.y_mm, "width_mm": b.width_mm, "height_mm": b.height_mm})),
+        "weld": artifacts.weld.map(|w| serde_json::json!({"contours_before": w.before, "contours_after": w.after})),
         "time_estimate": time_estimate_json(&estimate, &motion)
     }).as_object().cloned().unwrap_or_default())
 }

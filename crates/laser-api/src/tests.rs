@@ -7,6 +7,7 @@ mod material_test_routes;
 mod preview;
 mod registration;
 mod send_gate;
+mod shapes;
 mod stop_and_resume;
 mod strict_mode;
 mod system_routes;

@@ -340,7 +340,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 | 字段 | 类型 | 必填 | 默认 |
 |---|---|---|---|
-| text、material | string | 是 | `text 不能为空` |
+| text、material | string | 是 | `text 不能为空`；2026-11-17（技术书 r44）起给了 `shapes` 或 `border` 时 `text` 可以为空（只刻图形，不读字体） |
 | thickness_mm | float | 是 | >0，否则 400 `thickness_mm 必须是大于 0 的数字` |
 | engraving_mode | string | 否 | 只用于判断是否切割（`cut`）；不再决定文字刻法（此前写 `raster` 也只描轮廓） |
 | text_fill | string | 否 | `outline`（默认，2026-11-06 用户决定）只描字的轮廓，取材料库 outline 参数；`fill` 实心填充：2026-11-16 起改为矢量扫描线（线距 `pixel_size_mm`，从轮廓精确求交，不经过位图；扫描设置见 `fill_options`，默认一次填完、双向、过扫描自动；最后描一遍轮廓），取 raster 参数；`hatch` 排线填充，线距为 `pixel_size_mm` 的 3 倍并描边，取 outline 参数；切割（`laser_mode` / `engraving_mode` 为 `cut`）时闭合轮廓先内后外。填充按非零环绕规则，字内孔不填 |
@@ -355,14 +355,19 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | font_size_mm | float | 否 | 10.0；给了木牌尺寸且没填时自动适配 |
 | letter_spacing_mm | float | 否 | 0.5 |
 | font_path | string | 否 | 缺省使用内置字体 |
-| work_area_width_mm / work_area_height_mm | float | 否 | 100（翼宿 V1.0 幅面）；成品超出时 400 `文字成品约 W × H mm，超出机器幅面…`（2026-11-06） |
+| work_area_width_mm / work_area_height_mm | float | 否 | 100（翼宿 V1.0 幅面）；成品超出时 400 `成品约 W × H mm，超出机器幅面…`（2026-11-06；r44 起含图形） |
+| shapes | array | 否 | 2026-11-17 技术书 r44 基础图形（`laser_core::shapes`，轮廓按公式生成，曲线弦高误差 0.01 mm），最多 32 个（含边框线）。坐标 mm、**木牌中心为原点、x 向右、y 向上**。每项：`kind`（`circle` / `ellipse` / `rect` / `polygon` / `star` / `heart` / `line`），`x_mm` / `y_mm`（中心，默认 0），尺寸 `size_mm`（圆的直径、正多边形 / 星形的外接直径；`heart` 只给一边时宽:高 = 1:0.9）或 `width_mm` + `height_mm`（椭圆、矩形必须两边都有），直线用 `length_mm`（或 `width_mm`）；`rect` 可带 `corner_radius_mm`（超过短边一半按一半）；`polygon` 的 `sides` 3～24（默认 6）、`star` 的 `points` 3～24（默认 5）与 `inner_ratio` 0.1～0.95（默认正星形比例，五角星 0.382）；`rotation_deg` 逆时针；`fill`：`outline`（默认）/ `fill`（也接受布尔），直线不能填满。尺寸 0.5～2000 mm。正多边形、星形第一个角朝上。图形超出木牌（填满时含过扫描）400 `…超出了木牌…`；与文字墨迹框（外扩 0.2 mm）相交、或填满的图形把文字包在里面 400 `…和文字重叠了…`（只描边的外框围着文字不算）。有填满的图形时整件取材料库 raster 参数（同 `text_fill=fill`），填满一律按 `pixel_size_mm` 实心线距，扫描设置同 `fill_options`；切割（`laser_mode=cut`）时图形不能填满（400 `切割时图形不能填满`），切缝补偿对每个图形单独做 |
+| border | object | 否 | r44 沿木牌边缘的边框（只描边）：`shape` `rect`（默认）/ `rounded` / `circle` / `ellipse`，`style` `single`（默认）/ `double`，`inset_mm`（外圈离木牌边缘，默认 3）、`gap_mm`（双线间距，默认 1.5）、`corner_radius_mm`（圆角，默认外圈短边的 12%）。矩形类要同时给木牌宽高，圆形给一边即可（取短边）。文字自动适配进最里圈再留 `safe_margin_mm` 的区域（圆 / 椭圆边框按椭圆区域适配，圆角边框避开圆角）；放不下 400 `…放不进边框里面…` |
+| text_box | object | 否 | r44 文字区域 `{x_mm, y_mm, width_mm, height_mm}`（坐标同 `shapes`，必须在木牌内，否则 400 `text_box 超出了木牌范围`）：文字以它为中心自动适配（给图形留位置时用），优先于边框 / 整块木牌 |
+| text_weld | bool | 否 | r44 字形焊接，默认 `true`：规划前把字形轮廓按非零环绕取并集（对齐 LightBurn “Weld”），笔画交叠或字与字相连的字体不在交叠处多刻 / 多切一道线；填满区域本来就按非零环绕，焊接前后相同。`false` 关闭 |
 | machine_motion | object | 否 | 2026-11-16 按加速度估算工时：键名与 §3.3 `machine_limits` 相同——`x_accel_mm_s2`、`y_accel_mm_s2`（0 ~ 100000，只给一个时两轴同值）、`x_max_rate_mm_per_min`、`y_max_rate_mm_per_min`（G0 按两轴较大者走，再按方向逐轴封顶）、`junction_deviation_mm`（默认 0.01）；全部可省略，缺省按 1000 mm/s²。自动过扫描缺省时也取两轴加速度较小者。非数字或越界 400 |
 | manual_params | object | 否 | n73：这一次临时指定的 `{power_percent 1~100, feed_rate 100~6000 整数 mm/min, passes 1~5 整数}`，各项可缺省；覆盖材料库推荐或已采用的调参建议，不改材料库；有未知字段或越界 400。图片预览（`/api/workflow` preview）与画板预览同样接受 |
 | 连接字段 | 见 §1.5 | 否 | 只记录 |
 
 后端用材料库推荐参数（或 `manual_params`）生成 G-code 与预览 PNG（运行目录 `generated_assets/`），创建 `source_type="text"` 的 workflow 并冻结快照。
+r44 起成功 `result.artifacts` 另含 `shapes`（实际使用的图形，尺寸与默认值已补齐，`fill` 为 `fill` / `outline`）、`shape_count`（含边框线）、`border`、`text_box`、`weld`（`{contours_before, contours_after}`，没有文字或关闭焊接时为 null）；有图形时 `width_mm` / `height_mm` 与 `frame_mm` 是文字与图形合起来的范围，`origin=center` 时激光头仍对准**木牌中心**（不是版面中心）。
 成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`font_path`、`material`、`thickness_mm`、`width_mm`、`height_mm`（笔画实际范围）、`font_size_mm`（实际字号）、`text_fill`、`origin`、`origin_note`（开刻前激光头放哪）、`board_width_mm`、`board_height_mm`、`frame_mm:{min_x,max_x,min_y,max_y}`（笔画相对激光头起点的范围，不含过扫描，供走边框）、`glyphs`、`path_optimization`、`fill_options`（实际使用的 `{spacing_mm, grouping, angle_deg, cross_hatch, bidirectional, overscan_mm, overscan_auto, scan_offset_mm, scan_offset_source:"fixed"|"table", scan_offset_table}`，`scan_offset_mm` 为实际生效值（用表时为插值结果），只描轮廓时为 null）、`cut_options`（切割时回显 `{active, kerf_mm, tab_mode:"off"|"count"|"spacing", tab_count, tab_spacing_mm, tab_width_mm, tabs_skip_inner, lead_in_mm, lead_out_mm, lead_angle_deg, overcut_mm, report:{contours, kerf_contours_before, kerf_contours_after, tabs, tab_gap_mm, contours_without_tabs, lead_ins, lead_outs, leads_skipped, overcut_mm}, note}`，非切割为 null）、`removed_duplicates`、`frame_hull_mm`（出光点凸包，同 §3.2）、`time_estimate:{estimated_seconds, estimated_minutes, laser_seconds, non_laser_seconds, model:"acceleration", acceleration_mm_s2:{x,y}, acceleration_source:"machine"|"default"}`（2026-11-16 起按 GRBL 规划器模型估算：梯形加减速、相邻两段按转角偏差公式限速、M3/M4/M5 切换与 G4 处停住；图片、画板、导入 G-code 与标定网格的 `time_estimate` 同样如此，都接受 `machine_motion`）与 §1.4 的 `web`。
-材料安全门：后端调用 `laser_core::safety::evaluate_material`；PVC、聚氯乙烯及明确危险材料返回 400 `material_safety_blocked`，仅写“塑料”等成分不明描述时同样返回 400 并要求澄清。MCP 工具 `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` 与 `laser_workflow_tool preview`（带 `text`）都转发到本路由；工具的 `font_size` 按 `32px≈1mm` 折算为 `font_size_mm` 并限制在 3～80。
+材料安全门：后端调用 `laser_core::safety::evaluate_material`；PVC、聚氯乙烯及明确危险材料返回 400 `material_safety_blocked`，仅写“塑料”等成分不明描述时同样返回 400 并要求澄清。MCP 工具 `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` 与 `laser_workflow_tool preview`（带 `text`，r44 起带 `shapes` 或 `border` 也算）都转发到本路由；工具的 `font_size` 按 `32px≈1mm` 折算为 `font_size_mm` 并限制在 3～80。
 
 ### 3.5 `/api/text-task/send`
 

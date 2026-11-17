@@ -5,6 +5,7 @@ use super::*;
 mod draw;
 mod image_upload;
 mod options;
+mod shapes;
 mod text;
 
 pub(crate) use draw::generate_draw_artifacts;

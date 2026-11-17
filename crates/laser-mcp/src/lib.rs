@@ -142,6 +142,66 @@ fn image_mode_schema() -> serde_json::Value {
 }
 
 /// 材料测试（`/api/material-lab/preview`）对齐 LightBurn 的字段：完整清单与精简清单共用，说明保持简短。
+/// 文字任务的基础图形、边框与文字区域（2026-11-17 技术书 r44）：两种清单的 laser_workflow_tool 与
+/// regenerate_text_laser_task_tool 共用。坐标以木牌中心为原点、y 向上，轮廓由后端按公式生成。
+fn design_props(regenerate: bool) -> Vec<(&'static str, serde_json::Value)> {
+    let note = if regenerate {
+        "（不改就不填，给了就整组替换）"
+    } else {
+        ""
+    };
+    vec![
+        (
+            "shapes",
+            serde_json::json!({
+                "type": "array", "maxItems": 32,
+                "description": format!("preview：基础图形，坐标 mm、木牌中心为原点、y 正数在上，别和文字重叠{note}"),
+                "items": {
+                    "type": "object", "required": ["kind"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["circle", "ellipse", "rect", "polygon", "star", "heart", "line"], "description": "circle 圆 / ellipse 椭圆 / rect 矩形 / polygon 正多边形 / star 星形 / heart 爱心 / line 直线"},
+                        "x_mm": {"type": "number", "default": 0, "description": "中心 x"},
+                        "y_mm": {"type": "number", "default": 0, "description": "中心 y"},
+                        "size_mm": {"type": "number", "description": "直径或外接尺寸；直线是长度"},
+                        "width_mm": {"type": "number", "description": "宽（椭圆、矩形）"},
+                        "height_mm": {"type": "number", "description": "高（椭圆、矩形）"},
+                        "sides": {"type": "integer", "default": 6, "description": "正多边形边数 3~24"},
+                        "points": {"type": "integer", "default": 5, "description": "星形角数 3~24"},
+                        "corner_radius_mm": {"type": "number", "default": 0, "description": "矩形圆角半径"},
+                        "rotation_deg": {"type": "number", "default": 0, "description": "逆时针旋转角度"},
+                        "fill": {"type": "string", "enum": ["outline", "fill"], "default": "outline", "description": "outline 描边，fill 填满（直线不能填）"}
+                    }
+                }
+            }),
+        ),
+        (
+            "border",
+            serde_json::json!({
+                "type": "object",
+                "description": format!("preview：沿木牌边缘加边框（要给木牌尺寸），文字自动放进边框里{note}"),
+                "properties": {
+                    "shape": {"type": "string", "enum": ["rect", "rounded", "circle", "ellipse"], "default": "rect", "description": "rect 直角 / rounded 圆角 / circle 圆 / ellipse 椭圆"},
+                    "style": {"type": "string", "enum": ["single", "double"], "default": "single", "description": "single 单线 / double 双线"}
+                }
+            }),
+        ),
+        (
+            "text_box",
+            serde_json::json!({
+                "type": "object",
+                "description": format!("preview：文字放进这个矩形（给图形留位置时用），坐标同 shapes{note}"),
+                "required": ["width_mm", "height_mm"],
+                "properties": {
+                    "x_mm": {"type": "number", "default": 0, "description": "中心 x"},
+                    "y_mm": {"type": "number", "default": 0, "description": "中心 y"},
+                    "width_mm": {"type": "number", "description": "宽"},
+                    "height_mm": {"type": "number", "description": "高"}
+                }
+            }),
+        ),
+    ]
+}
+
 fn calibration_test_props() -> Vec<(&'static str, serde_json::Value)> {
     let axis = |default: &str, label: &str| {
         serde_json::json!({
@@ -215,6 +275,9 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                     {"not":{"required":["feedback_id"]}},
                     {"required":["task_id","feedback_id","confirmed"],"properties":{"confirmed":{"const":true},"feedback_id":{"minLength":1}}}
                 ]);
+                for (key, value) in design_props(true) {
+                    tool["inputSchema"]["properties"][key] = value;
+                }
             }
             "generate_text_laser_task_tool"
             | "generate_text_image_gcode_tool"
@@ -289,6 +352,9 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                         "type": "number", "minimum": 0.5, "maximum": 3,
                         "description": "source_type=image：行间距 = 材料推荐线距 × 倍数；1.5 快速、1 均衡（默认）、0.8 精细"
                     });
+                    for (key, value) in design_props(false) {
+                        props[key] = value;
+                    }
                 }
             }
             "run_calibration_grid_tool" => {
@@ -349,6 +415,12 @@ pub fn compact_tools_list_json(developer_mode: bool) -> serde_json::Value {
     for tool in &mut tools {
         if tool["name"] == "run_calibration_grid_tool" {
             for (key, value) in calibration_test_props() {
+                tool["inputSchema"]["properties"][key] = value;
+            }
+        }
+        // 精简清单只在 laser_workflow_tool 上列图形参数（每轮工具说明有字数预算）：改图形就重新 preview
+        if tool["name"] == "laser_workflow_tool" {
+            for (key, value) in design_props(false) {
                 tool["inputSchema"]["properties"][key] = value;
             }
         }
@@ -962,8 +1034,12 @@ fn dispatch_allowed(
             };
             let mut body = arguments.as_object().cloned().unwrap_or_default();
             body.insert("action".into(), serde_json::Value::String(action.into()));
+            // 文字或基础图形（r44：可以只刻图形）走文字任务生成
+            let has_design = ["shapes", "border"]
+                .iter()
+                .any(|key| arguments.get(*key).is_some_and(|v| !v.is_null()));
             let route = if action == "preview"
-                && arg_str(arguments, "text").is_some()
+                && (arg_str(arguments, "text").is_some() || has_design)
                 && arg_str(arguments, "gcode_file").is_none()
             {
                 "/api/text-task/generate"
@@ -1218,6 +1294,11 @@ fn dispatch_allowed(
                 "thickness_mm",
                 "text",
                 "manual_params",
+                // r44：图形、边框、文字区域与刻法也能改（给了就整组替换）
+                "shapes",
+                "border",
+                "text_box",
+                "text_fill",
             ] {
                 if let Some(value) = arguments.get(key).filter(|v| !v.is_null()) {
                     body.insert(key.into(), value.clone());
@@ -1780,6 +1861,81 @@ mod tests {
                 serde_json::json!({"success": false, "result": "no response"}),
             )))
         }
+    }
+
+    /// r44（2026-11-17）：只刻图形的预览也走文字任务生成；两种清单的 laser_workflow_tool 都列图形参数，
+    /// 重新生成可整组替换图形。
+    #[test]
+    fn shape_previews_route_to_text_generation_and_schemas_list_them() {
+        let backend = FakeBackend::new(vec![(
+            200,
+            serde_json::json!({"success": true, "result": {}}),
+        )]);
+        dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "preview", "material": "椴木", "thickness_mm": 3,
+                "width_mm": 40, "height_mm": 40, "shapes": [{"kind": "heart", "size_mm": 30}]}),
+            false,
+            Some(&backend),
+        );
+        let calls = backend.calls();
+        assert_eq!(calls[0].1, "/api/text-task/generate");
+        assert_eq!(calls[0].2["shapes"][0]["kind"], "heart", "原样交给后端");
+
+        let backend = FakeBackend::new(vec![
+            (
+                200,
+                serde_json::json!({"success": true, "result": {"input": {
+                "text": "AB", "material": "椴木", "thickness_mm": 3,
+                "shapes": [{"kind": "star", "size_mm": 10}]}}}),
+            ),
+            (200, serde_json::json!({"success": true, "result": {}})),
+        ]);
+        dispatch_tool_call_with(
+            "regenerate_text_laser_task_tool",
+            &serde_json::json!({"task_id": "wf-1", "shapes": [{"kind": "star", "size_mm": 14}],
+                "border": {"shape": "rounded"}}),
+            false,
+            Some(&backend),
+        );
+        let calls = backend.calls();
+        assert_eq!(calls[1].1, "/api/text-task/generate");
+        assert_eq!(calls[1].2["shapes"][0]["size_mm"], 14);
+        assert_eq!(calls[1].2["border"]["shape"], "rounded");
+        assert_eq!(calls[1].2["text"], "AB");
+
+        let props = |list: serde_json::Value, name: &str| {
+            list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()["inputSchema"]["properties"]
+                .clone()
+        };
+        for list in [tools_list_json(false), compact_tools_list_json(false)] {
+            let workflow = props(list, "laser_workflow_tool");
+            for key in ["shapes", "border", "text_box"] {
+                assert!(workflow[key]["description"].is_string(), "{key}");
+            }
+            assert!(
+                workflow["shapes"]["items"]["properties"]["kind"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("heart"))
+            );
+        }
+        assert!(
+            props(tools_list_json(false), "regenerate_text_laser_task_tool")["shapes"].is_object()
+        );
+        assert!(
+            props(
+                compact_tools_list_json(false),
+                "regenerate_text_laser_task_tool"
+            )["shapes"]
+                .is_null(),
+            "精简清单的重新生成不列图形（字数预算），改图形就重新 preview"
+        );
     }
 
     /// 严格模式开启的假后端（技术书 §6.2），记录收到的审计。
