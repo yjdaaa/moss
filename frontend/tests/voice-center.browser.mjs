@@ -406,8 +406,8 @@ try {
     const header = page.locator(`#voice-group-${id} > .voice-group-h`);
     if ((await header.getAttribute("aria-expanded")) !== "true") await header.click();
   };
-  const shot = async (name) => {
-    if (writeBaseline) await page.screenshot({ path: path.join(baselineDir, `${name}.png`) });
+  const shot = async (name, options = {}) => {
+    if (writeBaseline) await page.screenshot({ path: path.join(baselineDir, `${name}.png`), ...options });
   };
 
   await page.goto(new URL("voice", local).href, { waitUntil: "domcontentloaded" });
@@ -487,7 +487,10 @@ try {
 
   // 4. 切到内置：确认框 → 切换
   await page.locator("#voice-mode-builtin").click();
-  await shot("voice-mode-confirm");
+  // 等确认框真正弹出来再截图（基线要的是切换前的确认框）
+  await page.getByRole("alertdialog").filter({ has: page.getByRole("button", { name: "确认切换", exact: true }) }).waitFor();
+  // 确认框有入场动画：截图时让动画直接到结束状态
+  await shot("voice-mode-confirm", { animations: "disabled" });
   await confirmDialog("确认切换");
   await page.locator("#voice-mode-builtin[aria-checked=true]").waitFor();
   assert.equal(last("voice_set_mode").args.mode, "builtin");
@@ -1069,6 +1072,17 @@ try {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   assert.ok(overflow <= 1, `窄屏横向溢出 ${overflow}px`);
   await shot("voice-narrow");
+
+  // 10. 关闭主窗口时的退出选择（n102 起没有“同时停止语音服务端”）
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    localStorage.removeItem("moss_close_action");
+    window.dispatchEvent(new Event("moss:close-requested"));
+  });
+  const closeDialog = page.getByRole("dialog", { name: "关闭主窗口" });
+  await closeDialog.waitFor();
+  assert.doesNotMatch(await closeDialog.innerText(), /语音服务端/, "退出选择里不再有停止语音服务端");
+  await shot("voice-close-exit");
 
   assert.deepEqual(errors, [], "不应有前端未处理异常");
   console.log(`VOICE_CENTER_BROWSER_TEST=PASS calls=${calls.length}`);

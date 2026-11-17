@@ -13,15 +13,15 @@
 | `approval-mismatch.png` | 审批卡显示 `approval_mismatch` 原因，按钮收起为“关闭” | 1440 × 900 |
 | `approval-sending.png` | 批准后的发送覆盖层（四步 + 取消后续发送 + 急停 0x18） | 1440 × 900 |
 | `voice-official.png` | 语音中心 · 官方链路 · 服务与设备（其他链路折叠） | 1440 × 1000 |
-| `voice-mode-confirm.png` | 切换链路前的确认框（2026-11-17 前截的是切到已删除的自建链路，待 `--baseline` 重新生成） | 1440 × 1000 |
+| `voice-mode-confirm.png` | 切换链路前的确认框（官方小智 → MOSS 内置服务；2026-11-17 删除自建链路后重新生成，确认框入场动画按结束状态截） | 1440 × 1000 |
 | `voice-builtin.png` | 内置链路 · 模型标签：本地模型“未保存”、语音体验保存结果 | 1440 × 1000 |
 | `voice-narrow.png` | 窄屏 · 连接标签（各组摘要、官方接入点保存结果） | 820 × 1000 |
-| `voice-close-exit.png` | 关闭窗口时的退出选择（2026-10-07 截图仍含已于 2026-11-17 删除的“同时停止语音服务端”勾选，未重新生成） | 1440 × 900 |
+| `voice-close-exit.png` | 关闭窗口时的退出选择（隐藏到菜单栏 / 完全退出，已无“同时停止语音服务端”；2026-11-17 起随 `--baseline` 生成，并断言不再出现语音服务端） | 1440 × 900 |
 | `voice-agent.png` | 语音中心 · 功能扩展 · Agent 卡（开关、CLI 可用情况、严格模式提示；2026-10-15 起随 `--baseline` 生成） | 1440 × 1000 |
 
 ## 生成方式与局限
 
-- 语音中心 `voice-*.png`（除 `voice-close-exit.png`）于 2026-10-14 随 UI-3 重新生成：`cd frontend; node tests/voice-center.browser.mjs --baseline`（Vite 回环 + 有状态假 Tauri 桥，Edge 无头渲染）。
+- 语音中心 `voice-*.png` 于 2026-10-14 随 UI-3 重新生成（`voice-mode-confirm.png`、`voice-close-exit.png` 于 2026-11-17 在 macOS 上用 `PLAYWRIGHT_CHANNEL=chrome` 重新生成，其余保持原图）：`cd frontend; node tests/voice-center.browser.mjs --baseline`（Vite 回环 + 有状态假 Tauri 桥，Edge 无头渲染）。
 
 - 截图于 2026-10-06 生成：用 esbuild 打包 `frontend/src`，在 Chromium（SwiftShader WebGL）中渲染。
 - 后端接口使用**预览桩数据**（固定的材料列表、端口 9666、小智“已配置未连接”），不是真实设备状态。
