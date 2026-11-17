@@ -1,15 +1,17 @@
 //! 语音中心设置（技术书 §9.4.2 / §9.4.3，实施清单 P4-01）。
 //!
 //! 存放在运行目录 `settings.json` 的 `voice` 对象中，读-改-写时保留其他键；顶层 `mcp_endpoint`
-//! 仍由原有设置使用。切到自建模式前把当时的官方 `mcp_endpoint` 备份到
-//! `voice.official_mcp_endpoint`，切回官方时恢复。模型密钥**不**保存在这里：外部服务端链路只写服务端配置文件，
+//! 仍是 MOSS 小智桥连接的官方接入点（官方与内置链路共用）。模型密钥**不**保存在这里：
 //! 内置语音服务（NV5）的密钥存 SQLite `app_secrets`（名称见 [`builtin_secret_name`]），这里只存地址与模型名。
+//!
+//! 2026-11-17 起删除自建服务端链路：旧的 `"mode": "self_hosted"` 按内置链路读取，
+//! 启动时由 [`migrate_legacy_self_hosted`] 改写文件并恢复备份的官方接入点。
 
 mod home_transfer;
 pub use crate::colab::BuiltinColab;
 pub use home_transfer::{export_home_template, parse_home_template};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +24,11 @@ pub enum VoiceMode {
     /// 官方小智（默认，保持现状）
     #[default]
     Official,
-    /// 自建 xiaozhi-server + 接入点
-    SelfHosted,
-    /// MOSS 内置语音服务（内置语音技术书，NV5）：设备 OTA 指向 MOSS，内置服务随 MOSS 启动
+    /// MOSS 内置语音服务（内置语音技术书，NV5）：设备 OTA 指向 MOSS，内置服务随 MOSS 启动。
+    ///
+    /// 2026-11-17 删除的自建链路（`self_hosted`）按内置链路读取：那时设备 OTA 已指向本机，
+    /// 内置服务监听同样的 8000 / 8003 端口。
+    #[serde(alias = "self_hosted")]
     Builtin,
 }
 
@@ -32,18 +36,9 @@ impl VoiceMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Official => "official",
-            Self::SelfHosted => "self_hosted",
             Self::Builtin => "builtin",
         }
     }
-}
-
-fn default_args() -> Vec<String> {
-    vec!["app.py".into()]
-}
-
-fn default_server_port() -> u16 {
-    8000
 }
 
 fn default_builtin_ws_port() -> u16 {
@@ -1181,27 +1176,6 @@ pub struct VoiceSettings {
     pub mcp_servers: Vec<moss_mcp_client::ServerConfig>,
     #[serde(default)]
     pub mode: VoiceMode,
-    /// xiaozhi-server 源码目录（`main/xiaozhi-server`）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_dir: Option<String>,
-    /// Python 3.10 解释器路径
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub python: Option<String>,
-    /// 启动参数，默认 `["app.py"]`
-    #[serde(default = "default_args")]
-    pub args: Vec<String>,
-    /// 服务端 WebSocket 端口（用于识别外部已运行的实例），默认 8000
-    #[serde(default = "default_server_port")]
-    pub server_port: u16,
-    /// 自建接入点地址（写入 MOSS 的 `mcp_endpoint` 与服务端配置的 `mcp_endpoint`）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub self_hosted_mcp_endpoint: Option<String>,
-    /// 切到自建前备份的官方接入点地址
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub official_mcp_endpoint: Option<String>,
-    /// 接入点健康检查地址（`…/mcp_endpoint/health?key=…`），用于判断设备是否在线；不填则显示“未知”
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_health_url: Option<String>,
     /// 内置语音服务的设备连接（WebSocket）端口，默认 8000（内置语音技术书 V3）
     #[serde(default = "default_builtin_ws_port")]
     pub builtin_ws_port: u16,
@@ -1264,13 +1238,6 @@ impl Default for VoiceSettings {
         Self {
             mode: VoiceMode::Official,
             mcp_servers: Vec::new(),
-            server_dir: None,
-            python: None,
-            args: default_args(),
-            server_port: default_server_port(),
-            self_hosted_mcp_endpoint: None,
-            official_mcp_endpoint: None,
-            endpoint_health_url: None,
             builtin_ws_port: default_builtin_ws_port(),
             builtin_http_port: default_builtin_http_port(),
             mcp_full_tool_list: false,
@@ -1329,15 +1296,6 @@ impl VoiceSettings {
         Section::ALL.into_iter().all(|section| {
             self.builtin_section_ready_with_colab(section, models_root, colab_key_set)
         })
-    }
-
-    /// 服务端配置文件 `data/.config.yaml` 的位置（未设置目录时为空）。
-    pub fn config_path(&self) -> Option<PathBuf> {
-        self.server_dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| Path::new(dir).join("data").join(".config.yaml"))
     }
 }
 
@@ -1460,6 +1418,70 @@ pub fn mcp_endpoint(settings_file: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// 已删除的自建服务端链路在 `voice` 对象里留下的键（2026-11-17）：读取时忽略，迁移时删除。
+const LEGACY_SELF_HOSTED_KEYS: [&str; 7] = [
+    "server_dir",
+    "python",
+    "args",
+    "server_port",
+    "self_hosted_mcp_endpoint",
+    "official_mcp_endpoint",
+    "endpoint_health_url",
+];
+
+/// 一次性迁移已删除的自建服务端链路（2026-11-17 用户决定）。桌面端在启动小智桥之前调用。
+///
+/// 只在 `voice.mode` 仍为 `"self_hosted"` 时改写文件：链路改为内置服务；旧 `voice` 对象里备份的
+/// 官方接入点（`official_mcp_endpoint`，非空时）写回顶层 `mcp_endpoint`——与原来“切回官方时恢复备份”
+/// 相同；没有备份时 `mcp_endpoint` 原样不动；再删掉自建链路专用的旧键。其他键全部保留。
+/// 返回是否改写了文件；文件缺失或不需要迁移时返回 `Ok(false)`，文件损坏时返回错误且不覆盖。
+pub fn migrate_legacy_self_hosted(settings_file: &Path) -> Result<bool, String> {
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = read_root_checked(settings_file)?;
+        let Some(voice) = root
+            .get_mut("voice")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Ok(false);
+        };
+        if voice.get("mode").and_then(serde_json::Value::as_str) != Some("self_hosted") {
+            return Ok(false);
+        }
+        voice.insert("mode".into(), serde_json::Value::String("builtin".into()));
+        let text = |voice: &serde_json::Map<String, serde_json::Value>, key: &str| {
+            voice
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let official = text(voice, "official_mcp_endpoint");
+        let self_hosted = text(voice, "self_hosted_mcp_endpoint");
+        for key in LEGACY_SELF_HOSTED_KEYS {
+            voice.remove(key);
+        }
+        match official {
+            Some(official) => {
+                root.insert("mcp_endpoint".into(), serde_json::Value::String(official));
+            }
+            // 没有官方备份：顶层接入点若还是原来的自建接入点（那个服务端 MOSS 已不再启动），清掉，
+            // 免得连接桥一直对着不存在的地址重试；用户另设的地址不动
+            None => {
+                let current = root
+                    .get("mcp_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim);
+                if self_hosted.is_some() && current == self_hosted.as_deref() {
+                    root.remove("mcp_endpoint");
+                }
+            }
+        }
+        write_root(settings_file, &root)?;
+        Ok(true)
+    })
 }
 
 /// 一次写入顶层 `mcp_endpoint` 与 `voice`（链路切换用，避免中途状态）。`None` 表示删除 `mcp_endpoint`。
@@ -2193,8 +2215,6 @@ mod tests {
         .unwrap();
         let voice = load(&file);
         assert_eq!(voice.mode, VoiceMode::Official);
-        assert_eq!(voice.args, vec!["app.py".to_string()]);
-        assert_eq!(voice.server_port, 8000);
         std::fs::write(&file, b"{broken").unwrap();
         assert_eq!(load(&file), VoiceSettings::default());
         // voice 字段部分缺失也能读
@@ -2228,18 +2248,122 @@ mod tests {
                 && !plugins.rag_enabled
         );
         assert!(plugins.news_sources.is_empty() && plugins.rag_dataset_ids.is_empty());
+        // 2026-11-17 删除的自建链路：旧模式与旧键都不能让读取失败（不能退回默认值丢掉其他设置）
         std::fs::write(
             &file,
-            br#"{"voice": {"mode": "self_hosted", "server_dir": "D:/srv"}}"#,
+            br#"{"voice": {"mode": "self_hosted", "server_dir": "D:/srv", "python": "py", "args": ["app.py"], "server_port": 8100, "endpoint_health_url": "http://h/health?key=k", "builtin_http_port": 8013}}"#,
         )
         .unwrap();
         let voice = load(&file);
-        assert_eq!(voice.mode, VoiceMode::SelfHosted);
-        assert_eq!(voice.args, vec!["app.py".to_string()]);
+        assert_eq!(voice.mode, VoiceMode::Builtin);
+        assert_eq!(voice.builtin_http_port, 8013, "其他设置照常读取");
+    }
+
+    /// 2026-11-17：自建链路删除后的一次性迁移——改为内置链路、恢复备份的官方接入点、删掉旧键、保留其他键。
+    #[test]
+    fn legacy_self_hosted_mode_migrates_to_builtin_and_restores_official_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        const OFFICIAL: &str = "wss://official.test/mcp/?token=official";
+        const SELF_HOSTED: &str = "ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=self";
+        // 文件缺失：不需要迁移，也不创建文件
+        assert_eq!(migrate_legacy_self_hosted(&file), Ok(false));
+        assert!(!file.exists());
+
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "web_port": 9666,
+                "mcp_endpoint": SELF_HOSTED,
+                "mcp_extra_endpoints": ["wss://extra.test/mcp/?token=x"],
+                "voice": {
+                    "mode": "self_hosted",
+                    "server_dir": "D:/srv",
+                    "python": "py",
+                    "args": ["app.py"],
+                    "server_port": 8000,
+                    "self_hosted_mcp_endpoint": SELF_HOSTED,
+                    "official_mcp_endpoint": OFFICIAL,
+                    "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=k",
+                    "builtin_http_port": 8013,
+                    "mcp_full_tool_list": true
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(migrate_legacy_self_hosted(&file), Ok(true));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(root["voice"]["mode"], "builtin");
         assert_eq!(
-            voice.config_path().unwrap(),
-            Path::new("D:/srv").join("data").join(".config.yaml")
+            root["mcp_endpoint"], OFFICIAL,
+            "恢复切到自建前备份的官方接入点"
         );
+        for key in LEGACY_SELF_HOSTED_KEYS {
+            assert!(root["voice"].get(key).is_none(), "旧键 {key} 应删除");
+        }
+        assert_eq!(root["web_port"], 9666);
+        assert_eq!(
+            root["mcp_extra_endpoints"][0],
+            "wss://extra.test/mcp/?token=x"
+        );
+        assert_eq!(root["voice"]["builtin_http_port"], 8013);
+        assert_eq!(root["voice"]["mcp_full_tool_list"], true);
+        let voice = load(&file);
+        assert_eq!(voice.mode, VoiceMode::Builtin);
+        assert!(voice.mcp_full_tool_list);
+        // 已迁移：再调用不改文件
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(migrate_legacy_self_hosted(&file), Ok(false));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+
+        // 没有官方备份（或备份为空）：顶层接入点是用户另设的地址时原样不动
+        for backup in [None, Some("  ")] {
+            let mut voice = serde_json::json!({"mode": "self_hosted", "server_dir": "D:/srv"});
+            if let Some(backup) = backup {
+                voice["official_mcp_endpoint"] = backup.into();
+            }
+            std::fs::write(
+                &file,
+                serde_json::json!({"mcp_endpoint": SELF_HOSTED, "voice": voice}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(migrate_legacy_self_hosted(&file), Ok(true));
+            let root: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            assert_eq!(root["voice"]["mode"], "builtin");
+            assert_eq!(root["mcp_endpoint"], SELF_HOSTED, "{backup:?}");
+            assert!(root["voice"].get("server_dir").is_none());
+            assert!(root["voice"].get("official_mcp_endpoint").is_none());
+        }
+
+        // 没有官方备份、顶层接入点还是原来的自建接入点：清掉（那个服务端已不再由 MOSS 启动）
+        std::fs::write(
+            &file,
+            serde_json::json!({"mcp_endpoint": SELF_HOSTED, "voice": {
+                "mode": "self_hosted", "self_hosted_mcp_endpoint": SELF_HOSTED}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(migrate_legacy_self_hosted(&file), Ok(true));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(root["voice"]["mode"], "builtin");
+        assert!(root.get("mcp_endpoint").is_none(), "{root}");
+
+        // 官方 / 内置链路的文件不动（即使带着旧键）
+        for mode in ["official", "builtin"] {
+            let text = serde_json::json!({"mcp_endpoint": OFFICIAL, "voice": {"mode": mode, "server_dir": "D:/srv"}}).to_string();
+            std::fs::write(&file, &text).unwrap();
+            assert_eq!(migrate_legacy_self_hosted(&file), Ok(false), "{mode}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        }
+
+        // 文件损坏：报错且不覆盖
+        std::fs::write(&file, b"{broken").unwrap();
+        assert!(migrate_legacy_self_hosted(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"{broken");
     }
 
     #[test]
@@ -2249,14 +2373,7 @@ mod tests {
         std::fs::write(&file, br#"{"web_port": 9777, "export": {"dir": "X"}, "mcp_endpoint": "wss://official.test/?token=a"}"#).unwrap();
         let voice = VoiceSettings {
             mcp_servers: Vec::new(),
-            mode: VoiceMode::SelfHosted,
-            server_dir: Some("srv".into()),
-            python: Some("py".into()),
-            args: vec!["app.py".into(), "--debug".into()],
-            server_port: 8100,
-            self_hosted_mcp_endpoint: Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=b".into()),
-            official_mcp_endpoint: Some("wss://official.test/?token=a".into()),
-            endpoint_health_url: None,
+            mode: VoiceMode::Builtin,
             builtin_ws_port: 8100,
             builtin_http_port: 8103,
             mcp_full_tool_list: false,
@@ -2345,10 +2462,10 @@ mod tests {
         );
         assert!(old.selected(ModelKind::Tts).is_none(), "开关关闭");
 
-        save_with_endpoint(&file, &voice, voice.self_hosted_mcp_endpoint.as_deref()).unwrap();
+        save_with_endpoint(&file, &voice, Some("wss://official.test/?token=b")).unwrap();
         assert_eq!(
             mcp_endpoint(&file).as_deref(),
-            Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=b")
+            Some("wss://official.test/?token=b")
         );
         save_with_endpoint(&file, &VoiceSettings::default(), None).unwrap();
         assert_eq!(mcp_endpoint(&file), None);

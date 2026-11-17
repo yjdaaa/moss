@@ -1,34 +1,25 @@
-//! 语音中心的业务编排（技术书 §9.4，实施清单 P4-05 / P4-06 / P4-07）。
+//! 语音中心的业务编排（技术书 §9.4，实施清单 P4-05 / P4-07）。
 //!
-//! 不依赖 Tauri：桌面壳把 MOSS 后端的能力（严格模式开关、小智桥重连、设备会话遥测）
+//! 不依赖 Tauri：桌面壳把 MOSS 后端的能力（严格模式状态、小智桥重连、设备会话遥测、内置服务启停）
 //! 通过 [`HostHooks`] 交进来，页面操作经 Tauri 命令调用本模块。
 //!
-//! - 链路切换：官方 / 自建互斥；先断旧桥再接新桥；切到自建必开严格模式，`mcp_endpoint` 指向
-//!   自建接入点并备份官方地址；任一步失败整体回滚（A-60、A-61）。
-//! - 模型配置：先测试后保存（保存的内容必须与测试通过的完全一致）；密钥只在内存与服务端配置文件中。
-//! - 接入点与工具（NV8）：附加官方接入点（`mcp_extra_endpoints`，自建模式下暂停连接）、工具开关
-//!   （`mcp_disabled_tools`）；改动后重连小智桥，让接入点重新获取工具清单。
+//! - 链路切换：官方小智 / MOSS 内置服务互斥；切入内置时启动内置服务（失败整体回滚），离开时停止；
+//!   切换不改接入点，也不改严格模式。2026-11-17 起删除自建服务端链路（用户决定）。
+//! - 接入点与工具（NV8）：官方接入点（顶层 `mcp_endpoint`）、附加官方接入点（`mcp_extra_endpoints`）、
+//!   工具开关（`mcp_disabled_tools`）；改动后重连小智桥，让接入点重新获取工具清单。
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::config_yaml;
-use crate::health::{self, HealthCounts, redact_url};
-use crate::logfile::RotatingLog;
-use crate::models::{self, ModelsInput, Section, TestResult};
+use crate::redact::redact_url;
 use crate::settings::{self, VoiceMode, VoiceSettings};
-use crate::supervisor::{ServerSpec, ServerState, Supervisor, VoiceError};
 
 /// MOSS 后端提供给语音中心的能力。
 pub trait HostHooks: Send + Sync {
     fn strict_mode(&self) -> bool;
-    fn set_strict_mode(&self, enabled: bool);
-    /// `.env` 中的严格模式设置（切回官方链路时恢复为该值）
+    /// `.env` 中的严格模式设置（页面提示当前开关的来源）
     fn strict_from_env(&self) -> bool;
     /// 先断旧桥，再按 `settings.json` 当前的 `mcp_endpoint` 接新桥；返回新桥是否已启动。
     fn restart_bridge(&self) -> bool;
@@ -86,44 +77,7 @@ impl CenterError {
     }
 }
 
-impl From<VoiceError> for CenterError {
-    fn from(error: VoiceError) -> Self {
-        Self {
-            code: error.code().into(),
-            message: error.message(),
-            status: error.http_status(),
-            detail: None,
-        }
-    }
-}
-
 type CenterResult<T> = Result<T, CenterError>;
-
-#[derive(Debug, Clone, Serialize)]
-struct TestRecord {
-    ok: bool,
-    elapsed_ms: u64,
-    at: f64,
-    detail: String,
-    final_url: String,
-    #[serde(skip)]
-    fingerprint: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct HealthSnapshot {
-    #[serde(flatten)]
-    counts: HealthCounts,
-    checked_at: Option<f64>,
-    error: Option<String>,
-}
-
-fn unix_now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 fn valid_ws(url: &str) -> bool {
     (url.starts_with("ws://") || url.starts_with("wss://"))
@@ -131,47 +85,20 @@ fn valid_ws(url: &str) -> bool {
         && !url.chars().any(char::is_whitespace)
 }
 
-fn valid_http(url: &str) -> bool {
-    (url.starts_with("http://") || url.starts_with("https://"))
-        && !url.contains('<')
-        && !url.chars().any(char::is_whitespace)
-}
-
 pub struct VoiceCenter {
     settings_file: PathBuf,
-    supervisor: Supervisor,
     hooks: Arc<dyn HostHooks>,
-    tests: Mutex<BTreeMap<Section, TestRecord>>,
-    health: Mutex<HealthSnapshot>,
     /// 链路切换与设置保存串行执行
     switching: Mutex<()>,
-    poller_stop: Arc<AtomicBool>,
 }
 
 impl VoiceCenter {
-    /// `runtime_dir` 为 MOSS 运行目录：设置在 `settings.json`，服务端日志在 `logs/xiaozhi-server.log`。
+    /// `runtime_dir` 为 MOSS 运行目录，设置在其中的 `settings.json`。
     pub fn new(runtime_dir: &Path, hooks: Arc<dyn HostHooks>) -> Self {
-        let log = RotatingLog::new(runtime_dir.join("logs").join("xiaozhi-server.log"));
-        Self::with_supervisor(
-            runtime_dir.join("settings.json"),
-            Supervisor::new(log),
-            hooks,
-        )
-    }
-
-    pub fn with_supervisor(
-        settings_file: PathBuf,
-        supervisor: Supervisor,
-        hooks: Arc<dyn HostHooks>,
-    ) -> Self {
         Self {
-            settings_file,
-            supervisor,
+            settings_file: runtime_dir.join("settings.json"),
             hooks,
-            tests: Mutex::new(BTreeMap::new()),
-            health: Mutex::new(HealthSnapshot::default()),
             switching: Mutex::new(()),
-            poller_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -179,126 +106,46 @@ impl VoiceCenter {
         settings::load(&self.settings_file)
     }
 
-    pub fn supervisor(&self) -> &Supervisor {
-        &self.supervisor
-    }
-
     // ---------- 状态 ----------
 
     /// 页面所需的全部状态（地址中的令牌已脱敏，不含任何模型密钥）。
     pub fn status(&self) -> serde_json::Value {
         let voice = self.settings();
-        let server = self.supervisor.status(voice.server_port);
-        let config_path = voice.config_path();
-        let config_text = config_path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(path).ok());
-        let health = self
-            .health
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
-        let self_hosted = voice.mode == VoiceMode::SelfHosted;
-        let device = if !self_hosted {
-            serde_json::json!({"state": "unknown", "sessions": null, "reason": "官方链路无法得知设备会话"})
-        } else {
-            match health.counts.robot_connections {
-                Some(0) => serde_json::json!({"state": "waiting", "sessions": 0}),
-                Some(count) => serde_json::json!({"state": "online", "sessions": count}),
-                None => {
-                    let reason: String = if voice.endpoint_health_url.is_some() {
-                        health
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "等待首次检查".into())
-                    } else {
-                        "未填写接入点健康检查地址".into()
-                    };
-                    serde_json::json!({"state": "unknown", "sessions": null, "reason": reason})
-                }
-            }
-        };
-        let tests = self
-            .tests
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
-        let models: serde_json::Map<String, serde_json::Value> = Section::ALL
-            .iter()
-            .map(|section| {
-                (
-                    section.as_str().to_owned(),
-                    tests
-                        .get(section)
-                        .map(|record| serde_json::to_value(record).unwrap_or_default())
-                        .unwrap_or(serde_json::Value::Null),
-                )
-            })
-            .collect();
-        // 官方接入点：官方模式下为当前 `mcp_endpoint`，自建模式下为切换前的备份
-        let official = if self_hosted {
-            voice.official_mcp_endpoint.clone()
-        } else {
-            settings::mcp_endpoint(&self.settings_file)
-        };
-        let health_view = if self_hosted && voice.endpoint_health_url.is_some() {
-            serde_json::to_value(&health).unwrap_or_default()
-        } else {
-            serde_json::Value::Null
-        };
+        // 官方接入点就是当前顶层 `mcp_endpoint`（官方与内置链路共用）
+        let official = settings::mcp_endpoint(&self.settings_file);
         serde_json::json!({
             "mode": voice.mode.as_str(),
             "settings": {
-                "server_dir": voice.server_dir,
-                "python": voice.python,
-                "args": voice.args,
-                "server_port": voice.server_port,
                 "builtin_ws_port": voice.builtin_ws_port,
                 "builtin_http_port": voice.builtin_http_port,
                 "builtin_mqtt_enabled": voice.builtin_mqtt_enabled,
                 "builtin_mqtt_port": voice.builtin_mqtt_port,
                 "builtin_udp_port": voice.builtin_udp_port,
-                "self_hosted_mcp_endpoint": voice.self_hosted_mcp_endpoint.as_deref().map(redact_url),
-                "self_hosted_mcp_endpoint_set": voice.self_hosted_mcp_endpoint.is_some(),
-                "endpoint_health_url": voice.endpoint_health_url.as_deref().map(redact_url),
-                "endpoint_health_url_set": voice.endpoint_health_url.is_some(),
-                "official_backup_set": voice.official_mcp_endpoint.is_some(),
                 "official_mcp_endpoint": official.as_deref().map(redact_url),
                 "official_mcp_endpoint_set": official.is_some(),
             },
-            "mcp_endpoint": settings::mcp_endpoint(&self.settings_file).as_deref().map(redact_url),
-            "server": server,
-            "server_config": {
-                "exists": config_text.is_some(),
-                "full_module": config_text.as_deref().map(config_yaml::is_full_module).unwrap_or(false),
-            },
-            "endpoint": {
-                "configured": voice.self_hosted_mcp_endpoint.is_some(),
-                "health": health_view,
-            },
-            "device": device,
+            "mcp_endpoint": official.as_deref().map(redact_url),
             "bridge": {"connected": self.hooks.bridge_connected()},
             "strict": {
                 "enabled": self.hooks.strict_mode(),
-                "locked": self_hosted,
                 "from_env": self.hooks.strict_from_env(),
             },
             "gateway": {"enabled": false, "note": "网关属于可选的 P2b，本版本未启用"},
-            "models": models,
             "mcp": self.hooks.mcp_overview(),
         })
     }
 
-    // ---------- 服务端设置 ----------
+    // ---------- 设置 ----------
 
-    /// 保存服务端目录、Python、启动参数、端口、自建接入点与健康检查地址，以及附加接入点与工具开关（NV8）。
-    /// 地址类字段留空表示不改；`clear_*` 为真时删除。自建模式下改了接入点会立即重连小智桥。
+    /// 保存内置服务端口与常连模式、官方接入点，以及附加接入点与工具开关（NV8）。
+    /// 地址类字段留空表示不改；`clear_*` 为真时删除。不认识的键（含已删除的自建链路字段）忽略。
     ///
+    /// - `official_mcp_endpoint` / `clear_official_mcp_endpoint`：顶层 `mcp_endpoint`，改了立即重连；
     /// - `add_extra_mcp_endpoint`：新增一个附加官方接入点（最多 [`MAX_EXTRA_ENDPOINTS`] 个，不能与已有地址重复）；
     /// - `remove_extra_mcp_endpoint`：按编号（`extra-1`……）删除；
     /// - `disabled_tools`：关闭的工具名单（整体替换）。
     ///
-    /// 附加接入点在官方与内置模式下改动后立即重连；工具开关改动后在任何模式下都重连（接入点重新获取工具清单）。
+    /// 接入点、附加接入点、工具开关或完整工具清单改动后重连小智桥（接入点重新获取工具清单）。
     pub fn save_settings(&self, patch: &serde_json::Value) -> CenterResult<serde_json::Value> {
         let _guard = self
             .switching
@@ -312,39 +159,6 @@ impl VoiceCenter {
                 .map(str::trim)
         };
         let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
-        if let Some(dir) = text("server_dir") {
-            voice.server_dir = (!dir.is_empty()).then(|| dir.to_owned());
-        }
-        if let Some(python) = text("python") {
-            voice.python = (!python.is_empty()).then(|| python.to_owned());
-        }
-        if let Some(args) = patch.get("args") {
-            let parsed: Vec<String> = match args {
-                serde_json::Value::String(line) => {
-                    line.split_whitespace().map(str::to_owned).collect()
-                }
-                serde_json::Value::Array(items) => items
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                _ => return Err(invalid("启动参数格式不正确")),
-            };
-            voice.args = if parsed.is_empty() {
-                vec!["app.py".into()]
-            } else {
-                parsed
-            };
-        }
-        if let Some(port) = patch.get("server_port") {
-            let port = port
-                .as_u64()
-                .filter(|port| (1..=65535).contains(port))
-                .ok_or_else(|| invalid("服务端端口必须在 1 ~ 65535 之间"))?;
-            voice.server_port = port as u16;
-        }
         for (key, label) in [
             ("builtin_ws_port", "内置服务设备连接端口"),
             ("builtin_http_port", "内置服务 OTA 端口"),
@@ -386,40 +200,7 @@ impl VoiceCenter {
                 "常连模式 MQTT 端口不能和设备连接端口、OTA 端口相同",
             ));
         }
-        let mut endpoint_changed = false;
-        if let Some(endpoint) = text("self_hosted_mcp_endpoint").filter(|value| !value.is_empty()) {
-            if !valid_ws(endpoint) {
-                return Err(invalid(
-                    "自建接入点必须以 ws:// 或 wss:// 开头，且不含占位符",
-                ));
-            }
-            endpoint_changed = voice.self_hosted_mcp_endpoint.as_deref() != Some(endpoint);
-            voice.self_hosted_mcp_endpoint = Some(endpoint.to_owned());
-        }
-        if patch
-            .get("clear_self_hosted_mcp_endpoint")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            if voice.mode == VoiceMode::SelfHosted {
-                return Err(invalid("自建模式下不能删除自建接入点，请先切回官方链路"));
-            }
-            voice.self_hosted_mcp_endpoint = None;
-        }
-        if let Some(url) = text("endpoint_health_url").filter(|value| !value.is_empty()) {
-            if !valid_http(url) {
-                return Err(invalid("健康检查地址必须以 http:// 或 https:// 开头"));
-            }
-            voice.endpoint_health_url = Some(url.to_owned());
-        }
-        if patch
-            .get("clear_endpoint_health_url")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            voice.endpoint_health_url = None;
-        }
-        // 官方接入点：官方模式下就是当前 `mcp_endpoint`（改了立即重连）；自建模式下只改备份
+        // 官方接入点：就是当前 `mcp_endpoint`（改了立即重连）
         let mut official_change: Option<Option<String>> = None;
         if let Some(endpoint) = text("official_mcp_endpoint").filter(|value| !value.is_empty()) {
             if !valid_ws(endpoint) {
@@ -446,12 +227,8 @@ impl VoiceCenter {
                 ));
             }
             let primary = settings::mcp_endpoint(&self.settings_file);
-            let taken = [
-                primary.as_deref(),
-                voice.official_mcp_endpoint.as_deref(),
-                voice.self_hosted_mcp_endpoint.as_deref(),
-            ];
-            if extras.iter().any(|existing| existing == endpoint) || taken.contains(&Some(endpoint))
+            if extras.iter().any(|existing| existing == endpoint)
+                || primary.as_deref() == Some(endpoint)
             {
                 return Err(invalid("这个接入点已经在列表中"));
             }
@@ -502,22 +279,11 @@ impl VoiceCenter {
             voice.mcp_full_tool_list = full;
         }
         let mut reconnect = false;
-        let endpoint_to_write: Option<Option<String>> = match voice.mode {
-            VoiceMode::SelfHosted => {
-                if let Some(change) = official_change {
-                    voice.official_mcp_endpoint = change;
-                }
-                reconnect = endpoint_changed;
-                endpoint_changed.then(|| voice.self_hosted_mcp_endpoint.clone())
-            }
-            // 内置链路下顶层 mcp_endpoint 仍是官方接入点（小智桥照常按它连接）
-            VoiceMode::Official | VoiceMode::Builtin => official_change.map(|change| {
-                reconnect = settings::mcp_endpoint(&self.settings_file) != change;
-                change
-            }),
-        };
-        reconnect |= extras_changed && voice.mode != VoiceMode::SelfHosted;
-        reconnect |= tools_change.is_some() || full_list_changed;
+        let endpoint_to_write = official_change.map(|change| {
+            reconnect = settings::mcp_endpoint(&self.settings_file) != change;
+            change
+        });
+        reconnect |= extras_changed || tools_change.is_some() || full_list_changed;
         let saved = settings::save_all(
             &self.settings_file,
             &voice,
@@ -538,9 +304,6 @@ impl VoiceCenter {
         }
         // `reconnected`：本次保存是否重新发起了接入点连接（且有桥启动）；握手结果看 `bridge.connected`
         let reconnected = reconnect && self.hooks.restart_bridge();
-        if let Ok(mut health) = self.health.lock() {
-            *health = HealthSnapshot::default();
-        }
         let mut status = self.status();
         if let Some(object) = status.as_object_mut() {
             object.insert("reconnected".into(), reconnected.into());
@@ -556,106 +319,49 @@ impl VoiceCenter {
         if voice.mode == target {
             return Ok(Vec::new());
         }
-        let current_endpoint = settings::mcp_endpoint(&self.settings_file);
-        let show =
-            |value: Option<&str>| value.map(redact_url).unwrap_or_else(|| "（未设置）".into());
-        let mut changes = Vec::new();
         let label = |mode: VoiceMode| match mode {
             VoiceMode::Official => "官方小智",
-            VoiceMode::SelfHosted => "自建服务端",
             VoiceMode::Builtin => "MOSS 内置服务",
         };
-        let link = format!("语音链路：{} → {}", label(voice.mode), label(target));
+        let mut changes = vec![format!(
+            "语音链路：{} → {}",
+            label(voice.mode),
+            label(target)
+        )];
         match target {
-            VoiceMode::SelfHosted => {
-                let endpoint = voice.self_hosted_mcp_endpoint.as_deref();
-                if endpoint.is_none() {
-                    changes.push(
-                        "尚未填写自建接入点：切换后在“服务 → 自建接入点”填好并保存才会连接".into(),
-                    );
-                }
-                changes.push(link);
-                if voice.mode == VoiceMode::Builtin {
-                    changes.push("停止 MOSS 内置语音服务".into());
-                }
-                changes.push("严格模式：开启（自建模式下不可关闭；运动与出光需要桌面审批）".into());
-                changes.push(match endpoint {
-                    Some(ep) => format!(
-                        "MOSS 小智接入点（mcp_endpoint）：{} → {}",
-                        show(current_endpoint.as_deref()),
-                        redact_url(ep)
-                    ),
-                    None => {
-                        "MOSS 小智接入点（mcp_endpoint）：保持未设置，填好自建接入点后连接".into()
-                    }
-                });
-                changes.push("备份当前官方接入点，切回官方时恢复".into());
-                changes.push("断开当前小智桥，再连接自建接入点".into());
-                let extras = settings::extra_mcp_endpoints(&self.settings_file).len();
-                if extras > 0 {
-                    changes.push(format!(
-                        "{extras} 个附加官方接入点暂停连接（切回官方或内置时恢复）"
-                    ));
-                }
-                changes.push("设备的 OTA 地址需要你自行改为自建服务端（MOSS 不会修改设备）".into());
-            }
-            VoiceMode::Official | VoiceMode::Builtin => {
-                changes.push(link);
-                if voice.mode == VoiceMode::SelfHosted {
-                    let strict = if self.hooks.strict_from_env() {
-                        "开启"
-                    } else {
-                        "关闭"
-                    };
-                    changes.push(format!(
-                        "MOSS 小智接入点（mcp_endpoint）：{} → {}",
-                        show(current_endpoint.as_deref()),
-                        voice
-                            .official_mcp_endpoint
-                            .as_deref()
-                            .map(redact_url)
-                            .unwrap_or_else(|| "删除（没有可恢复的官方地址）".into())
-                    ));
-                    changes.push(format!("严格模式：恢复为 .env 中的设置（{strict}）"));
-                    changes.push("断开自建接入点的小智桥，再连接官方接入点".into());
-                    if self.supervisor.owns_running_server() {
-                        changes.push("MOSS 启动的服务端仍在运行，切换后会询问是否停止".into());
-                    }
-                }
-                if target == VoiceMode::Builtin {
-                    let models_root = self
-                        .settings_file
-                        .parent()
-                        .map(|dir| dir.join("models"))
-                        .unwrap_or_default();
-                    let models = if voice.builtin_chat_ready(&models_root) {
-                        "已配置识别、大模型与合成：以对话模式运行"
-                    } else {
-                        "模型未配置齐全：先以回声测试模式运行，配置后自动切换为对话"
-                    };
-                    changes.push(format!(
-                        "启动 MOSS 内置语音服务（端口 {} / {}），之后随 MOSS 自动启动；{models}",
-                        voice.builtin_ws_port, voice.builtin_http_port
-                    ));
-                    let gate = if self.hooks.strict_mode() {
-                        "严格模式已开启：内置语音发起的运动与出光需要在电脑上批准"
-                    } else {
-                        "严格模式未开启：内置语音发起的运动与出光在你口头确认后直接执行（与官方小智相同）"
-                    };
-                    changes.push(gate.into());
-                    changes.push(format!("设备的 OTA 地址需要你自行改为 http://<本机局域网地址>:{}/xiaozhi/ota/（MOSS 不会修改设备）", voice.builtin_http_port));
+            VoiceMode::Builtin => {
+                let models_root = self
+                    .settings_file
+                    .parent()
+                    .map(|dir| dir.join("models"))
+                    .unwrap_or_default();
+                let models = if voice.builtin_chat_ready(&models_root) {
+                    "已配置识别、大模型与合成：以对话模式运行"
                 } else {
-                    if voice.mode == VoiceMode::Builtin {
-                        changes.push("停止 MOSS 内置语音服务".into());
-                    }
-                    changes.push("设备的 OTA 地址需要你自行改回官方（MOSS 不会修改设备）".into());
-                }
+                    "模型未配置齐全：先以回声测试模式运行，配置后自动切换为对话"
+                };
+                changes.push(format!(
+                    "启动 MOSS 内置语音服务（端口 {} / {}），之后随 MOSS 自动启动；{models}",
+                    voice.builtin_ws_port, voice.builtin_http_port
+                ));
+                let gate = if self.hooks.strict_mode() {
+                    "严格模式已开启：内置语音发起的运动与出光需要在电脑上批准"
+                } else {
+                    "严格模式未开启：内置语音发起的运动与出光在你口头确认后直接执行（与官方小智相同）"
+                };
+                changes.push(gate.into());
+                changes.push(format!("设备的 OTA 地址需要你自行改为 http://<本机局域网地址>:{}/xiaozhi/ota/（MOSS 不会修改设备）", voice.builtin_http_port));
+            }
+            VoiceMode::Official => {
+                changes.push("停止 MOSS 内置语音服务".into());
+                changes.push("设备的 OTA 地址需要你自行改回官方（MOSS 不会修改设备）".into());
             }
         }
         Ok(changes)
     }
 
-    /// 执行链路切换；失败时恢复 `settings.json`、严格模式与原来的小智桥。
+    /// 执行链路切换：接入点与严格模式都不变；切入内置时启动内置服务，失败时恢复 `settings.json`
+    /// 并停止内置服务；离开内置时停止内置服务。
     pub fn set_mode(&self, target: VoiceMode) -> CenterResult<serde_json::Value> {
         let _guard = self
             .switching
@@ -665,56 +371,12 @@ impl VoiceCenter {
         if old_voice.mode == target {
             return Ok(self.status());
         }
-        let old_endpoint = settings::mcp_endpoint(&self.settings_file);
-        let old_strict = self.hooks.strict_mode();
         let mut new_voice = old_voice.clone();
         new_voice.mode = target;
-        let (new_endpoint, new_strict) = match target {
-            // 从官方切到内置：接入点与严格模式不变
-            VoiceMode::Builtin if old_voice.mode == VoiceMode::Official => {
-                (old_endpoint.clone(), old_strict)
-            }
-            VoiceMode::SelfHosted => {
-                // n30（2026-10-19 用户决定）：没填自建接入点也允许切换——切过去后由用户在
-                // “服务 → 自建接入点”填好保存再连接，避免“看不见就填不了、不填又不许切”的死锁。
-                // 地址非空但格式不对仍然拒绝，因为那更像笔误。
-                let endpoint = old_voice.self_hosted_mcp_endpoint.clone();
-                if let Some(value) = endpoint.as_deref() {
-                    if !valid_ws(value) {
-                        return Err(CenterError::new(
-                            "voice_settings_invalid",
-                            400,
-                            "自建接入点地址无效：需要 ws:// 或 wss:// 地址",
-                        ));
-                    }
-                    // 只备份官方地址（当前值若已是自建接入点则保留原备份）
-                    if old_endpoint.as_deref() != Some(value) {
-                        new_voice.official_mcp_endpoint = old_endpoint.clone();
-                    }
-                }
-                (endpoint, true)
-            }
-            VoiceMode::Official | VoiceMode::Builtin => match old_voice.mode {
-                VoiceMode::SelfHosted => (
-                    old_voice.official_mcp_endpoint.clone(),
-                    self.hooks.strict_from_env(),
-                ),
-                _ => (old_endpoint.clone(), old_strict),
-            },
-        };
-        let leaving_builtin = old_voice.mode == VoiceMode::Builtin;
         let rollback = |reason: String| -> CenterError {
-            let _ = settings::save_with_endpoint(
-                &self.settings_file,
-                &old_voice,
-                old_endpoint.as_deref(),
-            );
-            self.hooks.set_strict_mode(old_strict);
-            self.hooks.restart_bridge();
+            let _ = settings::save(&self.settings_file, &old_voice);
             if target == VoiceMode::Builtin {
                 self.hooks.builtin_stop();
-            } else if leaving_builtin {
-                let _ = self.hooks.builtin_start();
             }
             CenterError::new(
                 "voice_mode_switch_failed",
@@ -722,281 +384,29 @@ impl VoiceCenter {
                 format!("{reason}；已回滚到切换前的状态"),
             )
         };
-        // 1. 先开严格模式（切到自建时），保证新桥接上之前门禁已就位
-        if new_strict {
-            self.hooks.set_strict_mode(true);
-            if !self.hooks.strict_mode() {
-                return Err(rollback("严格模式开启失败".into()));
-            }
-        }
-        // 2. 写设置（mcp_endpoint 与 voice 一次写入）
-        if let Err(error) =
-            settings::save_with_endpoint(&self.settings_file, &new_voice, new_endpoint.as_deref())
-        {
+        if let Err(error) = settings::save(&self.settings_file, &new_voice) {
             return Err(rollback(format!("保存设置失败：{error}")));
         }
-        // 3. 接入点变了才重连：先断旧桥再接新桥
-        if new_endpoint != old_endpoint {
-            let started = self.hooks.restart_bridge();
-            if new_endpoint.is_some() && !started {
-                return Err(rollback("新的小智桥没有启动（接入点地址无效）".into()));
-            }
-        }
-        // 3b. 内置服务：切入时启动（失败整体回滚），离开时停止
-        if target == VoiceMode::Builtin {
-            if let Err(error) = self.hooks.builtin_start() {
-                return Err(rollback(format!("内置语音服务启动失败：{error}")));
-            }
-        } else if leaving_builtin {
-            self.hooks.builtin_stop();
-        }
-        // 4. 切回官方后严格模式恢复为 .env 设置
-        if !new_strict {
-            self.hooks.set_strict_mode(false);
-        }
-        if let Ok(mut health) = self.health.lock() {
-            *health = HealthSnapshot::default();
-        }
-        // 官方链路无法得知设备会话；内置链路的会话数由内置服务自己上报
-        if target == VoiceMode::Official {
-            self.hooks.set_device_sessions(None);
-        }
-        let mut status = self.status();
-        status["server_still_running"] = serde_json::Value::Bool(
-            target != VoiceMode::SelfHosted && self.supervisor.owns_running_server(),
-        );
-        Ok(status)
-    }
-
-    // ---------- 服务端启停 ----------
-
-    pub fn server_start(&self) -> CenterResult<serde_json::Value> {
-        let voice = self.settings();
-        // 全模块部署也可以由 MOSS 启动，只是模型配置不经向导写入
-        let spec = ServerSpec::from_settings(&voice)?;
-        self.supervisor.start(&spec)?;
-        Ok(self.status())
-    }
-
-    pub fn server_stop(&self) -> CenterResult<serde_json::Value> {
-        let port = self.settings().server_port;
-        self.supervisor.stop(port)?;
-        Ok(self.status())
-    }
-
-    /// 重启只针对 MOSS 启动的实例。
-    pub fn server_restart(&self) -> CenterResult<serde_json::Value> {
-        let voice = self.settings();
-        let status = self.supervisor.status(voice.server_port);
-        match status.state {
-            ServerState::Running => {
-                self.supervisor.stop(voice.server_port)?;
-            }
-            ServerState::External => return Err(VoiceError::NotOwned.into()),
-            ServerState::Stopped | ServerState::Exited => {}
-        }
-        self.server_start()
-    }
-
-    /// 已脱敏的日志尾部。
-    pub fn log_tail(&self, count: usize) -> Vec<String> {
-        self.supervisor.log().tail(count.clamp(1, 1000))
-    }
-
-    /// MOSS 退出：`stop` 为真时停止服务端（先请求正常退出，5 秒后强制），否则放开让它继续运行。
-    /// 必须在 `ShutdownCoordinator` 急停之后调用（技术书 §9.4.3）。
-    pub fn shutdown(&self, stop: bool) {
-        self.poller_stop.store(true, Ordering::SeqCst);
-        if !self.supervisor.owns_running_server() {
-            return;
-        }
-        if stop {
-            let _ = self.supervisor.stop(self.settings().server_port);
-        } else {
-            let _ = self.supervisor.detach();
-        }
-    }
-
-    // ---------- 模型配置向导 ----------
-
-    /// 测试一个分区；结果（不含密钥）记在内存中供状态卡显示。
-    pub fn models_test(
-        &self,
-        section: Section,
-        input: &models::SectionInput,
-    ) -> CenterResult<TestResult> {
-        let resolved = models::resolve(section, input)
-            .map_err(|error| CenterError::new("model_input_invalid", 400, error))?
-            .ok_or_else(|| {
-                CenterError::new(
-                    "model_input_invalid",
-                    400,
-                    format!("{}：请填写地址与模型", section.label()),
-                )
-            })?;
-        let result = models::test_section(&resolved);
-        if let Ok(mut tests) = self.tests.lock() {
-            tests.insert(
-                section,
-                TestRecord {
-                    ok: result.ok,
-                    elapsed_ms: result.elapsed_ms,
-                    at: unix_now(),
-                    detail: result.detail.clone(),
-                    final_url: result.final_url.clone(),
-                    fingerprint: resolved.fingerprint(),
-                },
-            );
-        }
-        Ok(result)
-    }
-
-    /// 保存到服务端配置。每个非空分区都必须与最近一次**测试通过**的内容完全一致。
-    pub fn models_save(&self, input: &ModelsInput) -> CenterResult<serde_json::Value> {
-        let voice = self.settings();
-        let config_path = voice.config_path().ok_or_else(|| {
-            CenterError::new(
-                "voice_config_invalid",
-                400,
-                "请先在“服务 → 自建服务端程序”中填写 xiaozhi-server 目录",
-            )
-        })?;
-        if !voice
-            .server_dir
-            .as_deref()
-            .map(Path::new)
-            .map(Path::is_dir)
-            .unwrap_or(false)
-        {
-            return Err(CenterError::new(
-                "voice_config_invalid",
-                400,
-                "xiaozhi-server 目录不存在",
-            ));
-        }
-        let mut sections = Vec::new();
-        for section in Section::ALL {
-            let Some(raw) = input.section(section) else {
-                continue;
-            };
-            let Some(resolved) = models::resolve(section, raw)
-                .map_err(|error| CenterError::new("model_input_invalid", 400, error))?
-            else {
-                continue;
-            };
-            let tested = self.tests.lock().ok().and_then(|tests| {
-                tests
-                    .get(&section)
-                    .filter(|record| record.ok)
-                    .map(|record| record.fingerprint)
-            });
-            if tested != Some(resolved.fingerprint()) {
-                return Err(CenterError::new(
-                    "model_test_required",
-                    409,
-                    format!(
-                        "{}：请先用当前填写的内容测试连接并成功后再保存",
-                        section.label()
-                    ),
-                ));
-            }
-            sections.push(resolved);
-        }
-        if sections.is_empty() {
-            return Err(CenterError::new(
-                "model_input_invalid",
-                400,
-                "三个分区都留空，没有需要保存的内容",
-            ));
-        }
-        let edits = config_yaml::edits_for(&sections, voice.self_hosted_mcp_endpoint.as_deref());
-        let outcome = config_yaml::write(&config_path, &edits).map_err(|error| {
-            let code = if error.contains("智控台") {
-                "server_full_module"
-            } else {
-                "server_config_write_failed"
-            };
-            CenterError::new(code, 409, error)
-        })?;
-        let _ = self.supervisor.log().write_line(&format!(
-            "[MOSS] 已更新服务端配置：{}",
-            sections
-                .iter()
-                .map(|section| section.section.label())
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-        Ok(serde_json::json!({
-            "saved": sections.iter().map(|section| section.section.as_str()).collect::<Vec<_>>(),
-            "created": outcome.created,
-            "backup": outcome.backup.is_some(),
-            "changed_keys": outcome.changed_keys.iter().filter(|key| !key.ends_with("api_key")).collect::<Vec<_>>(),
-            "keys_written": outcome.changed_keys.iter().filter(|key| key.ends_with("api_key")).count(),
-            "restart_hint": self.supervisor.owns_running_server(),
-            "status": self.status(),
-        }))
-    }
-
-    // ---------- 健康检查 ----------
-
-    /// 立即检查一次接入点（自建模式且填写了健康检查地址时）。
-    pub fn refresh_health(&self) {
-        let voice = self.settings();
-        let snapshot = match (voice.mode, voice.endpoint_health_url.as_deref()) {
-            (VoiceMode::SelfHosted, Some(url)) => match health::fetch(url) {
-                Ok(counts) => HealthSnapshot {
-                    counts,
-                    checked_at: Some(unix_now()),
-                    error: None,
-                },
-                Err(error) => HealthSnapshot {
-                    counts: HealthCounts::default(),
-                    checked_at: Some(unix_now()),
-                    error: Some(error),
-                },
-            },
-            _ => HealthSnapshot::default(),
-        };
-        let sessions = if voice.mode == VoiceMode::SelfHosted {
-            snapshot.counts.robot_connections
-        } else {
-            None
-        };
-        self.hooks.set_device_sessions(sessions);
-        if let Ok(mut guard) = self.health.lock() {
-            *guard = snapshot;
-        }
-    }
-
-    /// 后台每 `interval` 检查一次，直到 [`shutdown`](Self::shutdown)。
-    pub fn spawn_health_poller(self: &Arc<Self>, interval: Duration) {
-        let center = Arc::downgrade(self);
-        let stop = self.poller_stop.clone();
-        let _ = std::thread::Builder::new()
-            .name("voice-health".into())
-            .spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    let Some(center) = center.upgrade() else {
-                        break;
-                    };
-                    center.refresh_health();
-                    drop(center);
-                    let mut slept = Duration::ZERO;
-                    while slept < interval && !stop.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(200));
-                        slept += Duration::from_millis(200);
-                    }
+        match target {
+            VoiceMode::Builtin => {
+                if let Err(error) = self.hooks.builtin_start() {
+                    return Err(rollback(format!("内置语音服务启动失败：{error}")));
                 }
-            });
+            }
+            VoiceMode::Official => {
+                self.hooks.builtin_stop();
+                // 官方链路无法得知设备会话；内置链路的会话数由内置服务自己上报
+                self.hooks.set_device_sessions(None);
+            }
+        }
+        Ok(self.status())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::SectionInput;
-    use crate::models::fake_http::serve_once;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct FakeHost {
@@ -1019,10 +429,6 @@ mod tests {
     impl HostHooks for FakeHost {
         fn strict_mode(&self) -> bool {
             self.strict.load(Ordering::SeqCst)
-        }
-        fn set_strict_mode(&self, enabled: bool) {
-            self.strict
-                .store(enabled || self.env_strict, Ordering::SeqCst);
         }
         fn strict_from_env(&self) -> bool {
             self.env_strict
@@ -1079,7 +485,6 @@ mod tests {
     }
 
     const OFFICIAL: &str = "wss://official.example/mcp/?token=official-token";
-    const SELF_HOSTED: &str = "ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=self-token";
 
     fn fixture() -> (tempfile::TempDir, Arc<FakeHost>, VoiceCenter) {
         let dir = tempfile::tempdir().unwrap();
@@ -1098,72 +503,49 @@ mod tests {
         (dir, host, center)
     }
 
-    /// A-60 / A-61：切到自建开启严格模式并指向自建接入点；切回官方恢复备份；两次都先断旧桥再接新桥。
+    /// 2026-11-17：状态里只剩官方 / 内置链路要用的字段，令牌脱敏；自建链路的字段与严格模式锁都不再出现。
     #[test]
-    fn mode_switch_round_trip_restores_official_endpoint() {
-        let (dir, host, center) = fixture();
-        let file = dir.path().join("settings.json");
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        assert_eq!(
-            host.restarts.load(Ordering::SeqCst),
-            0,
-            "官方模式下保存自建地址不重连"
-        );
-        let changes = center.mode_changes(VoiceMode::SelfHosted).unwrap();
-        assert!(changes.iter().any(|line| line.contains("严格模式")));
-        assert!(
-            changes
-                .iter()
-                .all(|line| !line.contains("official-token") && !line.contains("self-token")),
-            "{changes:?}"
-        );
-
-        let status = center.set_mode(VoiceMode::SelfHosted).unwrap();
-        assert_eq!(status["mode"], "self_hosted");
-        assert_eq!(status["strict"]["enabled"], true);
-        assert_eq!(status["strict"]["locked"], true);
-        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(SELF_HOSTED));
-        assert_eq!(
-            settings::load(&file).official_mcp_endpoint.as_deref(),
-            Some(OFFICIAL)
-        );
-        assert_eq!(
-            host.endpoints.lock().unwrap().last().unwrap().as_deref(),
-            Some(SELF_HOSTED)
-        );
-        let shown = status.to_string();
-        assert!(
-            !shown.contains("self-token") && !shown.contains("official-token"),
-            "{shown}"
-        );
-        // 其他键保留
-        let root: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(root["web_port"], 9666);
-
-        let status = center.set_mode(VoiceMode::Official).unwrap();
+    fn status_reports_only_official_and_builtin_fields() {
+        let (_dir, _host, center) = fixture();
+        let status = center.status();
         assert_eq!(status["mode"], "official");
-        assert_eq!(status["strict"]["enabled"], false);
-        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
         assert_eq!(
-            host.endpoints.lock().unwrap().last().unwrap().as_deref(),
-            Some(OFFICIAL)
+            status["settings"]["official_mcp_endpoint"],
+            "wss://official.example/mcp/?token=***"
         );
-        assert_eq!(host.restarts.load(Ordering::SeqCst), 2);
-        // 同一模式再切一次是空操作
-        center.set_mode(VoiceMode::Official).unwrap();
-        assert_eq!(host.restarts.load(Ordering::SeqCst), 2);
-        assert!(center.mode_changes(VoiceMode::Official).unwrap().is_empty());
+        assert_eq!(status["settings"]["official_mcp_endpoint_set"], true);
+        assert_eq!(
+            status["mcp_endpoint"],
+            status["settings"]["official_mcp_endpoint"]
+        );
+        assert_eq!(status["gateway"]["enabled"], false);
+        assert!(!status.to_string().contains("official-token"));
+        for removed in ["server", "server_config", "endpoint", "device", "models"] {
+            assert!(status.get(removed).is_none(), "{removed}: {status}");
+        }
+        for removed in [
+            "server_dir",
+            "python",
+            "args",
+            "server_port",
+            "self_hosted_mcp_endpoint",
+            "self_hosted_mcp_endpoint_set",
+            "endpoint_health_url",
+            "endpoint_health_url_set",
+            "official_backup_set",
+        ] {
+            assert!(status["settings"].get(removed).is_none(), "{removed}");
+        }
+        assert!(status["strict"].get("locked").is_none(), "{status}");
     }
 
-    /// NV5：内置链路——切入时启动内置服务、接入点与严格模式不变；离开时停止；从自建切入时恢复官方接入点。
+    /// NV5：内置链路——切入时启动内置服务、接入点与严格模式不变；离开时停止，同样不改接入点与严格模式。
     #[test]
     fn builtin_mode_starts_and_stops_the_builtin_service() {
         let (dir, host, center) = fixture();
         let file = dir.path().join("settings.json");
         host.builtin_ok.store(true, Ordering::SeqCst);
+        assert!(center.mode_changes(VoiceMode::Official).unwrap().is_empty());
         let changes = center.mode_changes(VoiceMode::Builtin).unwrap();
         assert!(
             changes[0].contains("官方小智 → MOSS 内置服务"),
@@ -1201,58 +583,60 @@ mod tests {
             .unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), 1);
 
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
+        let changes = center.mode_changes(VoiceMode::Official).unwrap();
         assert!(
-            center
-                .mode_changes(VoiceMode::SelfHosted)
-                .unwrap()
+            changes[0].contains("MOSS 内置服务 → 官方小智"),
+            "{changes:?}"
+        );
+        assert!(
+            changes
                 .iter()
                 .any(|line| line.contains("停止 MOSS 内置语音服务"))
         );
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
-        assert!(
-            !host.builtin_running.load(Ordering::SeqCst),
-            "离开内置链路时停止内置服务"
-        );
-        assert_eq!(
-            settings::load(&file).official_mcp_endpoint.as_deref(),
-            Some(other)
-        );
-        assert!(host.strict.load(Ordering::SeqCst));
-
-        center.set_mode(VoiceMode::Builtin).unwrap();
-        assert!(host.builtin_running.load(Ordering::SeqCst));
-        assert_eq!(
-            settings::mcp_endpoint(&file).as_deref(),
-            Some(other),
-            "从自建切入时恢复官方接入点"
-        );
-        assert!(
-            !host.strict.load(Ordering::SeqCst),
-            "严格模式恢复为 .env 设置"
-        );
-        let restarts = host.restarts.load(Ordering::SeqCst);
-        center.set_mode(VoiceMode::Official).unwrap();
+        assert!(changes.iter().any(|line| line.contains("改回官方")));
+        *host.sessions.lock().unwrap() = Some(2);
+        let status = center.set_mode(VoiceMode::Official).unwrap();
+        assert_eq!(status["mode"], "official");
         assert!(!host.builtin_running.load(Ordering::SeqCst));
         assert_eq!(
             host.restarts.load(Ordering::SeqCst),
-            restarts,
+            1,
             "内置切回官方不重连"
+        );
+        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(other));
+        assert!(!host.strict.load(Ordering::SeqCst), "切换不改严格模式");
+        assert_eq!(
+            *host.sessions.lock().unwrap(),
+            None,
+            "官方链路无法得知设备会话"
         );
     }
 
+    /// 内置服务启动失败：设置文件原样恢复、内置服务停止、接入点与严格模式不变。
     #[test]
     fn builtin_start_failure_rolls_back() {
         let (dir, host, center) = fixture();
         let file = dir.path().join("settings.json");
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         let error = center.set_mode(VoiceMode::Builtin).unwrap_err();
         assert_eq!(error.code, "voice_mode_switch_failed");
         assert!(error.message.contains("端口 8000 已被占用"), "{error:?}");
+        assert!(error.message.contains("回滚"));
         assert_eq!(settings::load(&file).mode, VoiceMode::Official);
         assert!(!host.builtin_running.load(Ordering::SeqCst));
         assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(after["mcp_endpoint"], before["mcp_endpoint"]);
+        assert_eq!(after["web_port"], before["web_port"]);
+        assert_eq!(after["voice"]["mode"], "official");
+        assert_eq!(
+            host.restarts.load(Ordering::SeqCst),
+            0,
+            "接入点没变，不重连"
+        );
+        assert!(!host.strict_mode());
     }
 
     /// n71 常连模式：开关与两个端口随“内置服务”设置保存；8883 和与其他 TCP 端口撞车的端口被拒绝。
@@ -1298,7 +682,7 @@ mod tests {
         );
     }
 
-    /// A-77：官方接入点只在语音中心修改；官方模式下保存即重连，自建模式下只改备份。
+    /// A-77：官方接入点只在语音中心修改；保存即重连，相同地址不重连；可以删除。
     #[test]
     fn official_endpoint_is_edited_in_voice_center() {
         let (dir, host, center) = fixture();
@@ -1327,57 +711,31 @@ mod tests {
             .unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), 1);
         assert_eq!(status["reconnected"], false);
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
-        let restarts = host.restarts.load(Ordering::SeqCst);
-        center
+        // 发起了重连但没有桥启动：不能报告已重连
+        host.bridge_ok.store(false, Ordering::SeqCst);
+        let status = center
             .save_settings(&serde_json::json!({"official_mcp_endpoint": OFFICIAL}))
             .unwrap();
-        assert_eq!(
-            host.restarts.load(Ordering::SeqCst),
-            restarts,
-            "自建模式下只改备份"
-        );
-        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(SELF_HOSTED));
-        center.set_mode(VoiceMode::Official).unwrap();
-        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
-        center
-            .save_settings(&serde_json::json!({"clear_official_mcp_endpoint": true}))
-            .unwrap();
-        assert_eq!(settings::mcp_endpoint(&file), None);
-    }
-
-    /// A-61：新桥启动失败时整体回滚（设置、严格模式、原来的桥）。
-    #[test]
-    fn failed_switch_rolls_back_everything() {
-        let (dir, host, center) = fixture();
-        let file = dir.path().join("settings.json");
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        let before = std::fs::read(&file).unwrap();
-        host.bridge_ok.store(false, Ordering::SeqCst);
-        let error = center.set_mode(VoiceMode::SelfHosted).unwrap_err();
-        assert_eq!(error.code, "voice_mode_switch_failed");
-        assert!(error.message.contains("回滚"));
-        let after: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        let before: serde_json::Value = serde_json::from_slice(&before).unwrap();
-        assert_eq!(after, before);
-        assert!(!host.strict_mode(), "严格模式恢复为切换前");
-        // 回滚后重新按旧地址接桥
+        assert_eq!(host.restarts.load(Ordering::SeqCst), 2);
+        assert_eq!(status["reconnected"], false);
         assert_eq!(
             host.endpoints.lock().unwrap().last().unwrap().as_deref(),
             Some(OFFICIAL)
         );
-        assert_eq!(settings::load(&file).mode, VoiceMode::Official);
+        host.bridge_ok.store(true, Ordering::SeqCst);
+        center
+            .save_settings(&serde_json::json!({"clear_official_mcp_endpoint": true}))
+            .unwrap();
+        assert_eq!(settings::mcp_endpoint(&file), None);
+        assert_eq!(
+            center.status()["settings"]["official_mcp_endpoint_set"],
+            false
+        );
     }
 
-    /// `.env` 开启严格模式时，切回官方后仍保持开启。
+    /// `.env` 开启的严格模式与链路无关：切换前后都照实显示，切换不会去改它。
     #[test]
-    fn env_strict_survives_switch_back() {
+    fn strict_mode_is_reported_and_not_changed_by_link_switch() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         let host = Arc::new(FakeHost {
@@ -1386,40 +744,54 @@ mod tests {
             ..Default::default()
         });
         host.strict.store(true, Ordering::SeqCst);
-        host.bridge_ok.store(true, Ordering::SeqCst);
+        host.builtin_ok.store(true, Ordering::SeqCst);
         let center = VoiceCenter::new(dir.path(), host.clone());
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
-        // 没有官方备份：切回官方时删除 mcp_endpoint，桥不启动也不算失败
+        let changes = center.mode_changes(VoiceMode::Builtin).unwrap();
+        assert!(
+            changes.iter().any(|line| line.contains("严格模式已开启")),
+            "{changes:?}"
+        );
+        let status = center.set_mode(VoiceMode::Builtin).unwrap();
+        assert_eq!(status["strict"]["enabled"], true);
+        assert_eq!(status["strict"]["from_env"], true);
         let status = center.set_mode(VoiceMode::Official).unwrap();
         assert_eq!(status["strict"]["enabled"], true);
-        assert_eq!(settings::mcp_endpoint(&file), None);
+        assert!(host.strict_mode());
     }
 
+    /// 2026-11-17 删除自建链路后：旧页面或脚本传来的自建字段一律忽略（不报错、不写入、不重连）；
+    /// 主窗口设置也不能打开私有窗口才能开的记忆开关。
     #[test]
-    fn settings_validation_and_self_hosted_endpoint_change_reconnects() {
-        let (_dir, host, center) = fixture();
-        for bad in [
-            serde_json::json!({"self_hosted_mcp_endpoint": "http://x"}),
-            serde_json::json!({"self_hosted_mcp_endpoint": "ws://<host>/mcp"}),
-            serde_json::json!({"endpoint_health_url": "ws://x"}),
-            serde_json::json!({"server_port": 0}),
-        ] {
-            assert_eq!(
-                center.save_settings(&bad).unwrap_err().code,
-                "voice_settings_invalid",
-                "{bad}"
-            );
-        }
-        center
-            .save_settings(&serde_json::json!({"server_dir": " D:/srv ", "python": "py", "args": "app.py --x", "server_port": 8100, "self_hosted_mcp_endpoint": SELF_HOSTED}))
+    fn removed_self_hosted_and_private_keys_are_ignored() {
+        let (dir, host, center) = fixture();
+        let file = dir.path().join("settings.json");
+        let status = center
+            .save_settings(&serde_json::json!({
+                "server_dir": " D:/srv ",
+                "python": "py",
+                "args": "app.py --x",
+                "server_port": 0,
+                "self_hosted_mcp_endpoint": "ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=self",
+                "clear_self_hosted_mcp_endpoint": true,
+                "endpoint_health_url": "ws://x",
+                "clear_endpoint_health_url": true
+            }))
             .unwrap();
-        let voice = center.settings();
-        assert_eq!(voice.server_dir.as_deref(), Some("D:/srv"));
-        assert_eq!(voice.args, vec!["app.py".to_string(), "--x".to_string()]);
-        assert_eq!(voice.server_port, 8100);
+        assert_eq!(status["reconnected"], false);
+        assert_eq!(host.restarts.load(Ordering::SeqCst), 0);
+        assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        for key in [
+            "server_dir",
+            "python",
+            "args",
+            "server_port",
+            "self_hosted_mcp_endpoint",
+            "endpoint_health_url",
+        ] {
+            assert!(root["voice"].get(key).is_none(), "{key}: {root}");
+        }
         center
             .save_settings(&serde_json::json!({"builtin_person_memory_enabled":true}))
             .unwrap();
@@ -1433,176 +805,11 @@ mod tests {
             crate::settings::BuiltinContext::default(),
             "主窗口设置不能打开长期记忆或改当前项目"
         );
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
-        let restarts = host.restarts.load(Ordering::SeqCst);
-        // 留空表示不改
-        let status = center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": ""}))
-            .unwrap();
-        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts);
-        assert_eq!(status["reconnected"], false, "没有重连时不能报告已重连");
-        let status = center.save_settings(&serde_json::json!({"endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=k"})).unwrap();
-        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts);
-        assert_eq!(status["reconnected"], false, "只改健康检查地址不重连");
-        let other = "ws://127.0.0.1:8005/mcp_endpoint/mcp/?token=other";
-        let status = center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": other}))
-            .unwrap();
-        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts + 1);
-        assert_eq!(status["reconnected"], true);
-        assert_eq!(
-            host.endpoints.lock().unwrap().last().unwrap().as_deref(),
-            Some(other)
-        );
-        // 发起了重连但没有桥启动：不能报告正在重连
-        host.bridge_ok.store(false, Ordering::SeqCst);
-        let status = center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts + 2);
-        assert_eq!(status["reconnected"], false);
-        host.bridge_ok.store(true, Ordering::SeqCst);
-        assert_eq!(
-            center
-                .save_settings(&serde_json::json!({"clear_self_hosted_mcp_endpoint": true}))
-                .unwrap_err()
-                .code,
-            "voice_settings_invalid"
-        );
     }
 
-    /// A-67：测试不落盘；保存必须先测试通过；密钥只出现在服务端配置文件中。
+    /// NV8：附加接入点——校验、上限、去重、按编号删除；官方与内置链路下改动都立即重连。
     #[test]
-    fn models_require_successful_test_and_keys_stay_out_of_moss_storage() {
-        let (dir, _host, center) = fixture();
-        let server_dir = dir.path().join("xiaozhi-server");
-        std::fs::create_dir_all(&server_dir).unwrap();
-        center
-            .save_settings(&serde_json::json!({"server_dir": server_dir.to_string_lossy(), "python": "python"}))
-            .unwrap();
-        let fake_key = "sk-moss-fake-key-A67";
-        let reply = br#"{"choices":[{"message":{"tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}]}"#;
-        let (base, _rx) = serve_once(
-            "HTTP/1.1 200 OK",
-            "Content-Type: application/json\r\n",
-            reply.to_vec(),
-        );
-        let llm = SectionInput {
-            url: format!("{base}/v1"),
-            api_key: fake_key.into(),
-            model: "m".into(),
-            ..Default::default()
-        };
-        let input = ModelsInput {
-            llm: Some(llm.clone()),
-            ..Default::default()
-        };
-        // 未测试不能保存
-        assert_eq!(
-            center.models_save(&input).unwrap_err().code,
-            "model_test_required"
-        );
-        let result = center.models_test(Section::Llm, &llm).unwrap();
-        assert!(result.ok, "{result:?}");
-        // 测试不落盘
-        assert!(!server_dir.join("data").join(".config.yaml").exists());
-        // 测试后改了内容也不能保存
-        let changed = ModelsInput {
-            llm: Some(SectionInput {
-                model: "m2".into(),
-                ..llm.clone()
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            center.models_save(&changed).unwrap_err().code,
-            "model_test_required"
-        );
-        let saved = center.models_save(&input).unwrap();
-        assert_eq!(saved["saved"][0], "llm");
-        assert_eq!(saved["keys_written"], 1);
-        let config = std::fs::read_to_string(server_dir.join("data").join(".config.yaml")).unwrap();
-        assert!(config.contains(fake_key));
-        // MOSS 的 settings.json、日志、返回给页面的状态中都没有密钥
-        for path in [
-            dir.path().join("settings.json"),
-            dir.path().join("logs").join("xiaozhi-server.log"),
-        ] {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            assert!(!text.contains(fake_key), "{} 中出现了密钥", path.display());
-        }
-        assert!(!saved.to_string().contains(fake_key));
-        assert!(!serde_json::to_string(&result).unwrap().contains(fake_key));
-        assert_eq!(center.status()["models"]["llm"]["ok"], true);
-        // 全模块部署：拒绝写入
-        std::fs::write(
-            server_dir.join("data").join(".config.yaml"),
-            "manager-api:\n  url: http://127.0.0.1:8002/xiaozhi\n",
-        )
-        .unwrap();
-        assert_eq!(
-            center.models_save(&input).unwrap_err().code,
-            "server_full_module"
-        );
-        assert_eq!(center.status()["server_config"]["full_module"], true);
-    }
-
-    #[test]
-    fn health_updates_device_sessions_only_in_self_hosted_mode() {
-        let (_dir, host, center) = fixture();
-        let (base, _rx) = serve_once(
-            "HTTP/1.1 200 OK",
-            "Content-Type: application/json\r\n",
-            br#"{"data":{"robot_connections":1,"tool_connections":1}}"#.to_vec(),
-        );
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED, "endpoint_health_url": format!("{base}/mcp_endpoint/health?key=k")}))
-            .unwrap();
-        center.refresh_health();
-        assert_eq!(
-            *host.sessions.lock().unwrap(),
-            None,
-            "官方模式不提供设备会话"
-        );
-        assert_eq!(center.status()["device"]["state"], "unknown");
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
-        center.refresh_health();
-        assert_eq!(*host.sessions.lock().unwrap(), Some(1));
-        let status = center.status();
-        assert_eq!(status["device"]["state"], "online");
-        assert_eq!(status["endpoint"]["health"]["tool_connections"], 1);
-        assert!(!status.to_string().contains("key=k"));
-        // 接入点不可达：未知，不猜
-        center.refresh_health();
-        assert_eq!(center.status()["device"]["state"], "unknown");
-        assert_eq!(*host.sessions.lock().unwrap(), None);
-    }
-
-    #[test]
-    fn server_errors_map_to_codes() {
-        let (_dir, _host, center) = fixture();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        center
-            .save_settings(&serde_json::json!({"server_port": port}))
-            .unwrap();
-        assert_eq!(
-            center.server_start().unwrap_err().code,
-            "voice_config_invalid"
-        );
-        assert_eq!(center.server_stop().unwrap_err().code, "server_not_running");
-        let status = center.status();
-        assert_eq!(status["server"]["state"], "stopped");
-        assert_eq!(status["gateway"]["enabled"], false);
-        center.shutdown(true);
-    }
-
-    /// NV8：附加接入点——校验、上限、去重、按编号删除；官方模式下改动立即重连，自建模式下只保存并在切换说明里提示暂停。
-    #[test]
-    fn extra_endpoints_are_validated_saved_and_reconnect_outside_self_hosted_mode() {
+    fn extra_endpoints_are_validated_saved_and_reconnect() {
         let (dir, host, center) = fixture();
         let file = dir.path().join("settings.json");
         let extra = |n: usize| format!("wss://official.example/mcp/?token=extra-{n}");
@@ -1624,7 +831,7 @@ mod tests {
         assert_eq!(
             host.restarts.load(Ordering::SeqCst),
             MAX_EXTRA_ENDPOINTS,
-            "官方模式下每次改动都重连"
+            "每次改动都重连"
         );
         let error = center
             .save_settings(&serde_json::json!({"add_extra_mcp_endpoint": extra(9)}))
@@ -1655,28 +862,14 @@ mod tests {
         assert_eq!(root["web_port"], 9666);
         assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
 
-        // 自建模式：附加接入点暂停连接，改动只保存不重连；切换说明里提示
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        let changes = center.mode_changes(VoiceMode::SelfHosted).unwrap();
-        assert!(
-            changes
-                .iter()
-                .any(|line| line.contains("3 个附加官方接入点暂停连接")),
-            "{changes:?}"
-        );
-        host.bridge_ok.store(true, Ordering::SeqCst);
-        center.set_mode(VoiceMode::SelfHosted).unwrap();
+        // 内置链路下改动同样立即重连
+        host.builtin_ok.store(true, Ordering::SeqCst);
+        center.set_mode(VoiceMode::Builtin).unwrap();
         let restarts = host.restarts.load(Ordering::SeqCst);
         center
             .save_settings(&serde_json::json!({"remove_extra_mcp_endpoint": "extra-1"}))
             .unwrap();
-        assert_eq!(
-            host.restarts.load(Ordering::SeqCst),
-            restarts,
-            "自建模式下附加接入点不连接，改动不重连"
-        );
+        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts + 1);
         assert_eq!(
             settings::extra_mcp_endpoints(&file),
             vec![extra(3), extra(4)]
@@ -1792,27 +985,6 @@ mod tests {
                 .unwrap_err()
                 .code,
             "voice_settings_invalid"
-        );
-    }
-
-    /// n30（2026-10-19 用户决定）：没填自建接入点也能切换，切过去后由用户填；填好保存后才连接。
-    #[test]
-    fn empty_self_hosted_endpoint_switches_then_connects_after_saving() {
-        let (_dir, host, center) = fixture();
-        let status = center.set_mode(VoiceMode::SelfHosted).unwrap();
-        assert_eq!(status["mode"], "self_hosted");
-        assert!(
-            status["mcp_endpoint"].is_null(),
-            "未填接入点时不连接：{status}"
-        );
-        assert_eq!(status["strict"]["enabled"], true, "自建链路仍强制严格模式");
-        let restarts = host.restarts.load(Ordering::SeqCst);
-        center
-            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
-            .unwrap();
-        assert!(
-            host.restarts.load(Ordering::SeqCst) > restarts,
-            "填好地址后应重连自建接入点"
         );
     }
 }

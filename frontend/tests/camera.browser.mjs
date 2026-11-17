@@ -62,8 +62,7 @@ try {
           if (cmd === "voice_status") {
             return {
               mode: "builtin",
-              server: { state: "stopped", owned: false },
-              strict: { enabled: true, locked: false, from_env: false },
+              strict: { enabled: true, from_env: false },
               mcp: { endpoints: [], tools: [], max_extra_endpoints: 4 },
             };
           }

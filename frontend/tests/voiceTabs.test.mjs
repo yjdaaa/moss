@@ -2,16 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { VOICE_TABS, normalizeVoiceTab, voiceTabsFor } from "../src/voiceState.js";
 
-test("按链路过滤标签：官方链路无模型与隐私与家居，自建无隐私与家居，内置保留全部标签", () => {
+test("按链路过滤标签：官方链路无模型与隐私与家居，内置保留全部标签", () => {
   const official = voiceTabsFor("official");
   assert.equal(official.some((item) => item.key === "models"), false, "官方链路的模型在小智控制台配置");
   assert.equal(official.some((item) => item.key === "privacy"), false, "官方链路不显示仅内置生效的隐私与家居标签");
   assert.deepEqual(official.map((item) => item.key), ["service", "devices", "features", "records"]);
 
-  const selfHosted = voiceTabsFor("self_hosted");
-  assert.equal(selfHosted.some((item) => item.key === "models"), true, "自建链路显示模型标签");
-  assert.equal(selfHosted.some((item) => item.key === "privacy"), false, "自建链路不显示仅内置生效的隐私与家居标签");
-  assert.deepEqual(selfHosted.map((item) => item.key), ["service", "devices", "models", "features", "records"]);
+  // 2026-11-17 删除自建链路：遗留的 self_hosted 与官方链路显示同样的标签
+  assert.deepEqual(voiceTabsFor("self_hosted").map((item) => item.key), ["service", "devices", "features", "records"]);
 
   const builtin = voiceTabsFor("builtin");
   assert.equal(builtin.length, VOICE_TABS.length, "builtin 显示全部 6 个标签");

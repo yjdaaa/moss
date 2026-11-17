@@ -22,7 +22,7 @@ import { VoiceActivityDock } from "./components/VoiceActivityDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
-import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
+import { isVoiceCenterAvailable } from "./voiceApi.js";
 import {
   readHideTopPills,
   readSideCollapsed,
@@ -125,8 +125,6 @@ function App() {
       return !prev;
     });
   }, []);
-  // 退出时是否有 MOSS 启动的语音服务端在运行（决定关闭弹窗是否显示“同时停止语音服务端”）
-  const [voiceServerOwned, setVoiceServerOwned] = useState(false);
   // 全局审批卡（技术书 §9.5.2）：只在桌面端（有桌面会话）显示
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [approvalCount, setApprovalCount] = useState(0);
@@ -144,7 +142,7 @@ function App() {
     }
   }, [approvalCount]);
 
-  const executeDesktopAction = useCallback(async (action, { stopServer = true } = {}) => {
+  const executeDesktopAction = useCallback(async (action) => {
     const invoke = window.__TAURI__?.core?.invoke;
     const command = action === "tray"
       ? "minimize_to_tray"
@@ -164,8 +162,7 @@ function App() {
     }
 
     try {
-      // 完全退出时告诉桌面端是否一并停止 MOSS 启动的语音服务端（默认是，技术书 §9.4.3）
-      await invoke(command, command === "exit_application" ? { stopServer } : undefined);
+      await invoke(command);
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -182,27 +179,16 @@ function App() {
     } catch (_error) {
       // 存储被禁用时按“每次询问”处理
     }
-    let owned = false;
-    if (voiceEnabled) {
-      try {
-        const status = await voiceApi.status();
-        owned = status?.server?.state === "running" && Boolean(status?.server?.owned);
-      } catch {
-        owned = false;
-      }
-    }
-    setVoiceServerOwned(owned);
     if (pref === "tray") {
       void executeDesktopAction("tray");
-    } else if (pref === "exit" && !owned) {
+    } else if (pref === "exit") {
       void executeDesktopAction("exit");
     } else {
-      // 记住了“退出”但语音服务端在运行时仍弹窗，让用户决定是否一并停止
       setShowCloseModal(true);
     }
-  }, [executeDesktopAction, voiceEnabled]);
+  }, [executeDesktopAction]);
 
-  const handleCloseConfirm = useCallback(async (action, remember, stopServer = true) => {
+  const handleCloseConfirm = useCallback(async (action, remember) => {
     if (remember) {
       try {
         globalThis.localStorage?.setItem("moss_close_action", action);
@@ -210,7 +196,7 @@ function App() {
         // 存储被禁用：本次照常执行，只是不记住选择
       }
     }
-    const succeeded = await executeDesktopAction(action, { stopServer });
+    const succeeded = await executeDesktopAction(action);
     if (succeeded) {
       setShowCloseModal(false);
     }
@@ -546,7 +532,6 @@ function App() {
         visible={showCloseModal}
         onClose={() => setShowCloseModal(false)}
         onConfirm={handleCloseConfirm}
-        voiceServerRunning={voiceServerOwned}
       />
 
       <ApprovalCenter

@@ -10,11 +10,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::job::JobHandle;
 use crate::onejev::{
     DetectedAccelerator, LlamaLog, configure_no_window, ensure_llama_runtime, probe_http_health,
     probe_llama_accelerator_with_cancel, with_log_hint,
 };
-use crate::supervisor::JobHandle;
 
 /// 请求里用的模型名（llama-server 只加载一个模型，名字仅作标识）。
 pub const LOCAL_VISION_MODEL_NAME: &str = "moss-local-vision";

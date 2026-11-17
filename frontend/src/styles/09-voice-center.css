@@ -183,7 +183,6 @@
   background: var(--ob-well); border: 1px solid var(--ob-line); color: var(--ob-ink-2);
   font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all;
 }
-.close-voice-option { margin-top: 12px; display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--ob-amber); cursor: pointer; }
 /* 语音中心分组与保存（UI-3，技术书 §9.5.1 r15） */
 .voice-statusline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 /* 严格模式改为可点击开关（n27）：外观与状态胶囊一致，点击即切换并写入 .env */

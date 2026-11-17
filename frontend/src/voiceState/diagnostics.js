@@ -1,28 +1,7 @@
-// 运行诊断：服务端与设备连接状态、错误码大白话、事件流、审批记录、日志遮挡与耗时报告。
+// 运行诊断：设备连接提示、错误码大白话、事件流、审批记录、日志遮挡与耗时报告。
 
-export const SERVER_STATE = {
-  running: { text: "运行中（由 MOSS 启动）", tone: "ok" },
-  external: { text: "外部运行", tone: "info" },
-  exited: { text: "意外退出", tone: "bad" },
-  stopped: { text: "未运行", tone: "off" },
-};
-
-export function serverStateView(server) {
-  const state = server?.state || "stopped";
-  const base = SERVER_STATE[state] || SERVER_STATE.stopped;
-  return {
-    ...base,
-    state,
-    canStart: state === "stopped" || state === "exited",
-    // 外部启动的实例不显示停止按钮（A-63）
-    canStop: state === "running" && Boolean(server?.owned),
-    canRestart: state === "running" && Boolean(server?.owned),
-  };
-}
-
-/** 设备卡与 OTA 一致性提示（§9.4.2 规则 2：无法判断时显示“未知”，不猜）。 */
-export function deviceView(mode, device) {
-  const state = device?.state || "unknown";
+/** 设备连接与 OTA 提示（§9.4.2 规则 2：无法判断时显示“未知”，不猜）。2026-11-17 起只有官方与内置两条链路。 */
+export function deviceView(mode) {
   if (mode === "builtin") {
     return {
       text: "见内置服务",
@@ -30,24 +9,11 @@ export function deviceView(mode, device) {
       hint: "内置链路：设备的 OTA 地址应指向本机；地址见“服务”标签，设备连接情况见“设备”标签。",
     };
   }
-  if (mode !== "self_hosted") {
-    return {
-      text: "未知",
-      tone: "off",
-      hint: "官方链路下 MOSS 无法得知设备连接。若之前改过设备 OTA 地址，请改回官方服务器。",
-    };
-  }
-  if (state === "online") {
-    return { text: `在线（${device.sessions} 个会话）`, tone: "ok", hint: "一致：自建服务端已看到设备连接。" };
-  }
-  if (state === "waiting") {
-    return {
-      text: "等待设备",
-      tone: "warn",
-      hint: "自建服务端没有看到设备：请检查设备 OTA 地址是否指向自建服务端（http://<服务端地址>:8003/xiaozhi/ota/）。MOSS 不会修改设备。",
-    };
-  }
-  return { text: "未知", tone: "off", hint: `无法判断设备当前连接的服务端：${device?.reason || "未填写接入点健康检查地址"}。` };
+  return {
+    text: "未知",
+    tone: "off",
+    hint: "官方链路下 MOSS 无法得知设备连接。若之前改过设备 OTA 地址，请改回官方服务器。",
+  };
 }
 
 /**
@@ -71,10 +37,6 @@ export const VOICE_DIAG_CATEGORIES = {
 export const VOICE_ERROR_CODES = {
   voice_unavailable: "语音中心不可用：本机后端未启动。",
   voice_desktop_only: "语音中心仅在 MOSS 桌面端可用。",
-  self_hosted_endpoint_missing: "还没有可用的自建接入点：在“服务 → 自建接入点”填好 ws:// 地址并保存。",
-  server_not_owned: "正在运行的服务端不是 MOSS 启动的，请在启动它的地方关闭。",
-  server_external: "服务端端口已被其他程序占用（外部运行的服务端），MOSS 不会再启动一个。",
-  model_test_required: "请先用当前填写的内容测试连接并成功后再保存。",
   voice_acl_denied: "这个操作只能在 MOSS 主窗口里做。",
   voice_internal: "MOSS 内部出错了，重启 MOSS 再试；一直出现请导出诊断包反馈。",
   builtin_start_failed: "内置语音服务没能启动。",
@@ -283,7 +245,6 @@ export function approvalHistoryStatus(record) {
 
 /** 切换确认框正文。 */
 const MODE_TITLE = {
-  self_hosted: "切换到自建服务端？",
   builtin: "切换到 MOSS 内置服务？",
   official: "切换回官方小智？",
 };

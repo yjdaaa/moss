@@ -174,26 +174,24 @@ fn minimize_to_tray(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// 完全退出。`stop_server`：MOSS 启动的语音服务端是否一并停止（默认是，技术书 §9.4.3）。
-/// 顺序不变：先急停（`ShutdownState::request` → `ShutdownCoordinator`），再处理服务端，最后退出。
+/// 完全退出。顺序不变：先急停（`ShutdownState::request` → `ShutdownCoordinator`），
+/// 再停止内置语音服务与第三方 MCP 子进程，最后退出。
 #[tauri::command]
 async fn exit_application(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-    stop_server: Option<bool>,
 ) -> Result<(), String> {
     use tauri::Manager;
     require_trusted_app_window(&window, "退出程序")?;
     app.state::<ShutdownState>().request();
-    let stop = stop_server.unwrap_or(true);
     let handle = app.clone();
-    // 停止服务端最长约 5 秒，放到阻塞线程，避免卡住窗口
-    let _ = tauri::async_runtime::spawn_blocking(move || shutdown_and_exit(&handle, stop)).await;
+    // 停止子进程可能要几秒，放到阻塞线程，避免卡住窗口
+    let _ = tauri::async_runtime::spawn_blocking(move || shutdown_and_exit(&handle)).await;
     Ok(())
 }
 
 /// 幂等停止桌面端托管子进程与内置语音服务（`shutdown_and_exit` 与 macOS `Cmd+Q` / Dock `RunEvent::Exit` 共用，仅执行一次）。
-fn shutdown_desktop_services(handle: &tauri::AppHandle, stop_server: bool) {
+fn shutdown_desktop_services(handle: &tauri::AppHandle) {
     use tauri::Manager;
     let state = handle.state::<ShutdownState>();
     state.request();
@@ -202,18 +200,15 @@ fn shutdown_desktop_services(handle: &tauri::AppHandle, stop_server: bool) {
     }
     #[cfg(desktop)]
     {
-        voice::shutdown(handle, stop_server);
         voice_builtin::shutdown(handle);
         voice_mcp::shutdown(handle);
     }
-    #[cfg(mobile)]
-    let _ = stop_server;
 }
 
-/// 退出的唯一收尾顺序：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出。
-/// 关闭窗口退出与托盘退出都走这里（2026-10-14 前托盘在没有自有服务端时直接退出，漏了后两项）。
-fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
-    shutdown_desktop_services(handle, stop_server);
+/// 退出的唯一收尾顺序：先急停，再停止内置语音服务与第三方 MCP 子进程，最后退出。
+/// 关闭窗口退出与托盘退出都走这里。
+fn shutdown_and_exit(handle: &tauri::AppHandle) {
+    shutdown_desktop_services(handle);
     handle.exit(0);
 }
 
@@ -235,6 +230,15 @@ fn start_backend(
                         Err(format!("后端服务无法监听本机端口: {e}"))
                     }
                 };
+                // 2026-11-17 删除自建服务端链路：旧设置在接小智桥之前迁移为内置链路，并恢复备份的官方接入点
+                #[cfg(desktop)]
+                match moss_voice::settings::migrate_legacy_self_hosted(
+                    &host.runtime_root.path.join("settings.json"),
+                ) {
+                    Ok(true) => eprintln!("提示：语音链路“自建服务端”已删除，已改为 MOSS 内置服务"),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("警告: 迁移旧的自建语音链路设置失败: {e}"),
+                }
                 // 小智 MCP 桥接（MCP_ENDPOINT 未配置时静默跳过）
                 let _mcp_bridge = host.spawn_mcp_bridge();
                 (Some(host), origin)
@@ -304,17 +308,10 @@ pub fn run() {
             app_update::app_update_status,
             app_update::app_update_install,
             voice::voice_status,
-            voice::voice_detect_python,
             voice::voice_strict_set,
             voice::voice_save_settings,
             voice::voice_mode_changes,
             voice::voice_set_mode,
-            voice::voice_server_start,
-            voice::voice_server_stop,
-            voice::voice_server_restart,
-            voice::voice_server_log,
-            voice::voice_models_test,
-            voice::voice_models_save,
             voice_builtin::voice_music_pick_directory,
             voice_builtin::voice_music_status,
             voice_builtin::voice_music_save,
@@ -431,15 +428,19 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
             // 获取默认窗口图标
-            let icon = app.default_window_icon().cloned().expect("缺少默认窗口图标");
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .expect("缺少默认窗口图标");
 
             // 同源窗口导航: 默认打开本地同源后端服务；debug 热重载模式下可打开白名单回环 Vite 页面
             if let Ok(origin) = &backend_origin {
                 let target_origin = dev_ui_origin.as_deref().unwrap_or(origin.as_str());
                 if let Some(window) = app.get_webview_window("main")
-                    && let Ok(parsed) = format!("{target_origin}/").parse() {
-                        let _ = window.navigate(parsed);
-                    }
+                    && let Ok(parsed) = format!("{target_origin}/").parse()
+                {
+                    let _ = window.navigate(parsed);
+                }
             }
 
             let _tray = TrayIconBuilder::with_id("moss-tray")
@@ -456,26 +457,9 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        if !voice::owns_running_server(app) {
-                            app.state::<ShutdownState>().request();
-                            let handle = app.clone();
-                            std::thread::spawn(move || shutdown_and_exit(&handle, true));
-                            return;
-                        }
-                        // MOSS 启动的语音服务端在运行：询问是否一并停止（默认停止，技术书 §9.4.3）
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                        app.state::<ShutdownState>().request();
                         let handle = app.clone();
-                        app.dialog()
-                            .message("MOSS 启动的语音服务端（xiaozhi-server）仍在运行。\n退出 MOSS 时是否同时停止它？")
-                            .title("退出 MOSS")
-                            .kind(MessageDialogKind::Warning)
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "停止服务端并退出".into(),
-                                "保留服务端并退出".into(),
-                            ))
-                            .show(move |stop| {
-                                std::thread::spawn(move || shutdown_and_exit(&handle, stop));
-                            });
+                        std::thread::spawn(move || shutdown_and_exit(&handle));
                     }
                     _ => {}
                 })
@@ -507,7 +491,9 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Private settings windows must be destroyed on close, not
                 // trapped as hidden windows retaining personal memory data.
-                if window.label() != "main" { return; }
+                if window.label() != "main" {
+                    return;
+                }
                 // 拦截操作系统粗暴强杀以保护可能正在运行的激光加工任务
                 api.prevent_close();
                 // 优先通知前端弹出“最小化到托盘 / 完全退出”选择框
@@ -536,7 +522,7 @@ pub fn run() {
             }
             // 应用级退出（含 macOS Cmd+Q / Dock 退出）：幂等触发急停 0x18 并清理语音/本地推理子进程
             tauri::RunEvent::Exit => {
-                shutdown_desktop_services(app_handle, true);
+                shutdown_desktop_services(app_handle);
             }
             _ => {
                 let _ = app_handle;
@@ -813,13 +799,6 @@ mod tests {
                     "voice_save_settings",
                     "voice_mode_changes",
                     "voice_set_mode",
-                    "voice_server_start",
-                    "voice_server_stop",
-                    "voice_server_restart",
-                    "voice_server_log",
-                    "voice_models_test",
-                    "voice_models_save",
-                    "voice_detect_python",
                     "voice_strict_set",
                 ][..],
             ),

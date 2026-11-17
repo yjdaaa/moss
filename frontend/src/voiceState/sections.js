@@ -407,11 +407,10 @@ export function sectionInputError(section, form) {
 }
 
 /**
- * “保存到服务端配置”是否可点：该分区最近一次测试成功，且测试后没有改动（先测试后保存）。
+ * 模型分区的“保存”是否可点：该分区最近一次测试成功，且测试后没有改动（先测试后保存）。
  * `test` 为 `{ok, fingerprint}`。
  */
-export function canSaveSection(section, form, test, { fullModule = false } = {}) {
-  if (fullModule) return false;
+export function canSaveSection(section, form, test) {
   if (isSectionBlank(form) || sectionInputError(section, form)) return false;
   return Boolean(test && test.ok && test.fingerprint === sectionFingerprint(section, form));
 }
@@ -443,10 +442,4 @@ export function builtinModelSummary(section, entry, localOn = false) {
   if (!entry?.configured) return "未配置";
   const kind = entry.kind === "doubao" ? "豆包流式" : "";
   return ["已配置", kind, entry.model].filter(Boolean).join(" · ");
-}
-
-/** 外部服务端模型分组折叠时的一行摘要（MOSS 不读回服务端配置，只能显示最近一次测试）。 */
-export function externalModelSummary(record) {
-  if (!record) return "未测试";
-  return `上次测试${record.ok ? "通过" : "未通过"}`;
 }

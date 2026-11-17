@@ -629,12 +629,11 @@ fn read_runtime_settings(
         .unwrap_or_default()
 }
 
-/// 运行目录 `settings.json` 中配置的接入点（NV8）：`(编号, 地址, 是否连接)`。
+/// 运行目录 `settings.json` 中配置的接入点（NV8）：`(编号, 地址)`。
 ///
 /// - `primary`：顶层 `mcp_endpoint`，未配置时回退环境变量 `MCP_ENDPOINT`；
-/// - `extra-N`：`mcp_extra_endpoints` 的第 N 项（最多 [`laser_mcp::MAX_EXTRA_ENDPOINTS`] 个）。附加接入点是官方接入点，
-///   自建模式下（主接入点指向自建接入点）暂不连接；无效地址与重复地址跳过。
-pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, String, bool)> {
+/// - `extra-N`：`mcp_extra_endpoints` 的第 N 项（最多 [`laser_mcp::MAX_EXTRA_ENDPOINTS`] 个），无效地址与重复地址跳过。
+pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, String)> {
     let settings = read_runtime_settings(runtime_dir);
     let mut endpoints = Vec::new();
     let primary = settings
@@ -643,9 +642,8 @@ pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, S
         .and_then(laser_mcp::endpoint_from_value)
         .or_else(laser_mcp::endpoint_from_env);
     if let Some(primary) = primary {
-        endpoints.push(("primary".to_owned(), primary, true));
+        endpoints.push(("primary".to_owned(), primary));
     }
-    let extras_active = !voice_mode_is_self_hosted(runtime_dir);
     let extras = settings
         .get("mcp_extra_endpoints")
         .and_then(serde_json::Value::as_array)
@@ -659,18 +657,15 @@ pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, S
         let Some(endpoint) = value.as_str().and_then(laser_mcp::endpoint_from_value) else {
             continue;
         };
-        if endpoints
-            .iter()
-            .any(|(_, existing, _)| existing == &endpoint)
-        {
+        if endpoints.iter().any(|(_, existing)| existing == &endpoint) {
             continue;
         }
-        endpoints.push((format!("extra-{}", index + 1), endpoint, extras_active));
+        endpoints.push((format!("extra-{}", index + 1), endpoint));
     }
     endpoints
 }
 
-/// 语音中心写入的自建链路设备会话数（`/api/system/info` 的 `voice.device_sessions`，`None` 为未知）。
+/// 内置语音服务写入的设备会话数（`/api/system/info` 的 `voice.device_sessions`，`None` 为未知）。
 pub fn set_voice_device_sessions(sessions: Option<u32>) {
     laser_contracts::global_voice_telemetry().set_device_sessions(sessions);
 }
@@ -679,27 +674,12 @@ pub fn set_voice_device_sessions(sessions: Option<u32>) {
 pub fn set_voice_pulse(phase: Option<&str>, level: u8) {
     laser_contracts::global_voice_telemetry().set_pulse(phase, level);
 }
-/// 运行目录 `settings.json` 中语音链路是否为自建模式（自建模式必须开启严格模式，技术书 §9.4.2）。
-pub fn voice_mode_is_self_hosted(runtime_dir: &std::path::Path) -> bool {
-    std::fs::read(runtime_dir.join("settings.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| {
-            value
-                .get("voice")?
-                .get("mode")?
-                .as_str()
-                .map(|mode| mode == "self_hosted")
-        })
-        .unwrap_or(false)
-}
-
 /// 语音中心“接入点与工具”卡片的数据（NV8）：各接入点的状态与身份、每个工具的开关与调用统计。地址均已脱敏。
 pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_json::Value {
     let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
     let endpoints: Vec<serde_json::Value> = configured_mcp_endpoints(runtime_dir)
         .into_iter()
-        .map(|(id, endpoint, active)| {
+        .map(|(id, endpoint)| {
             let link = telemetry
                 .endpoints
                 .iter()
@@ -709,8 +689,7 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
             serde_json::json!({
                 "id": id,
                 "endpoint": laser_mcp::redact_endpoint(&endpoint),
-                "active": active,
-                "connected": active && link.connected,
+                "connected": link.connected,
                 "connected_at": link.connected_at,
                 "connections": link.connections,
                 "last_error": link.last_error,
@@ -752,7 +731,6 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
         .collect();
     serde_json::json!({
         "endpoints": endpoints,
-        "extras_paused": voice_mode_is_self_hosted(runtime_dir),
         "max_extra_endpoints": laser_mcp::MAX_EXTRA_ENDPOINTS,
         "tools": tools,
         "full_tool_list": api.full_tool_list(),
@@ -819,8 +797,7 @@ impl HostApplication {
         // 严格模式（技术书 §6.2）；开启网关却关闭严格模式、或写错取值时启动失败。
         let strict_from_env = laser_runtime::config::fusion_strict_from_env()
             .map_err(|e| format!("配置读取失败: {e}"))?;
-        // 语音中心选择了自建链路时，严格模式必须开启（技术书 §9.4.2）
-        let strict_mode = strict_from_env || voice_mode_is_self_hosted(&runtime_root.path);
+        let strict_mode = strict_from_env;
         let db = RuntimeDb::open(&runtime_root.database)
             .map_err(|e| format!("数据库打开失败: {e:?}"))?;
         // 落实 D6 规范：启动时对未完成残留任务执行安全清零，注明"host 重启中断，任务安全终止"，并定额清理陈旧历史记录
@@ -928,10 +905,7 @@ impl HostApplication {
         if !stopped_cleanly {
             eprintln!("提示：旧的小智桥 5 秒内未退出，将在其下次检查时停止");
         }
-        let expected = configured_mcp_endpoints(&self.runtime_root.path)
-            .into_iter()
-            .filter(|(_, _, active)| *active)
-            .count();
+        let expected = configured_mcp_endpoints(&self.runtime_root.path).len();
         let spawned = self.spawn_mcp_bridge();
         (stopped_cleanly, expected, spawned)
     }
@@ -942,15 +916,12 @@ impl HostApplication {
         let endpoints = configured_mcp_endpoints(&self.runtime_root.path);
         let redacted: Vec<(String, String)> = endpoints
             .iter()
-            .map(|(id, endpoint, _)| (id.clone(), laser_mcp::redact_endpoint(endpoint)))
+            .map(|(id, endpoint)| (id.clone(), laser_mcp::redact_endpoint(endpoint)))
             .collect();
         laser_contracts::global_mcp_telemetry().register_endpoints(&redacted);
         let developer_mode = laser_tools::developer_mode_enabled();
         let mut controls = Vec::new();
-        for (id, endpoint, active) in endpoints {
-            if !active {
-                continue;
-            }
+        for (id, endpoint) in endpoints {
             let backend: laser_mcp::SharedBackend = Arc::new(InProcessBackend {
                 api: self.api_service.clone(),
             });
@@ -1270,9 +1241,10 @@ mod tests {
         }
     }
 
-    /// NV8：主接入点加附加接入点；无效、重复与超出上限的跳过；自建模式下附加接入点暂停连接。
+    /// NV8：主接入点加附加接入点；无效、重复与超出上限的跳过。
+    /// 2026-11-17 删除自建链路后，遗留的 `"mode": "self_hosted"` 不再让附加接入点暂停。
     #[test]
-    fn configured_endpoints_include_extras_and_pause_them_in_self_hosted_mode() {
+    fn configured_endpoints_include_extras() {
         let primary = "wss://official.example/mcp/?token=primary";
         let runtime = TempRuntime::new(
             "endpoints",
@@ -1289,29 +1261,28 @@ mod tests {
             }),
         );
         let endpoints = configured_mcp_endpoints(&runtime.0);
-        let ids: Vec<&str> = endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
+        let ids: Vec<&str> = endpoints.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(
             ids,
             ["primary", "extra-1", "extra-4"],
             "无效与重复跳过，只看前 {MAX_EXTRA_ENDPOINTS} 项"
         );
-        assert!(endpoints.iter().all(|(_, _, active)| *active));
 
         let mut settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(runtime.0.join("settings.json")).unwrap())
                 .unwrap();
         settings["voice"] = serde_json::json!({"mode": "self_hosted"});
         std::fs::write(runtime.0.join("settings.json"), settings.to_string()).unwrap();
-        let endpoints = configured_mcp_endpoints(&runtime.0);
-        assert!(endpoints[0].2, "主接入点照常连接");
-        assert!(
-            endpoints[1..].iter().all(|(_, _, active)| !active),
-            "自建模式下附加接入点暂停"
+        assert_eq!(
+            configured_mcp_endpoints(&runtime.0).len(),
+            3,
+            "遗留的自建模式不再暂停附加接入点"
         );
 
-        // 总览：地址脱敏、带身份字段；自建模式标记暂停
+        // 总览：地址脱敏、带身份字段；不再有暂停标记
         let overview = mcp_overview(&runtime.0, &plain_service());
-        assert_eq!(overview["extras_paused"], true);
+        assert!(overview.get("extras_paused").is_none(), "{overview}");
+        assert!(overview["endpoints"][1].get("active").is_none());
         assert_eq!(
             overview["endpoints"][0]["endpoint"],
             "wss://official.example/mcp/?token=***"

@@ -13,9 +13,8 @@ const STATE_BADGE = {
 };
 
 /**
- * MOSS 全息语音孪生舱（三链路自适应 + 多态光学球核与注视联动）：
+ * MOSS 全息语音孪生舱（按链路自适应 + 多态光学球核与注视联动）：
  * - builtin：真实 PCM 振幅驱动机械眼光圈、核心呼吸与对称交错声波 + 会话阶段/识别字数/已播句数；
- * - self_hosted：同步自建 xiaozhi-server 进程状态、健康检查会话、脱敏日志与 MCP 工具脉冲；
  * - official：同步云端 MCP 握手状态、累计 JSON-RPC 指令帧数与远端工具调用脉冲。
  */
 export function MossVoiceTwin({
@@ -23,7 +22,6 @@ export function MossVoiceTwin({
   status = null,
   builtinStatus = null,
   mcpStatus = null,
-  logLines = [],
   approvalCount = 0,
 }) {
   const twin = mossEyeTwinView({
@@ -31,7 +29,6 @@ export function MossVoiceTwin({
     status,
     builtinStatus,
     mcpStatus,
-    logLines,
     approvalCount,
   });
   const stateMeta = STATE_BADGE[twin.visualState] || STATE_BADGE.idle;

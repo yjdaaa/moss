@@ -27,8 +27,8 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::job::JobHandle;
 use crate::local_models::{fetch_verified_file, safe_relative};
-use crate::supervisor::JobHandle;
 
 mod archive;
 mod gateway;

@@ -55,7 +55,6 @@ import {
   sectionFingerprint,
   sectionInputError,
   sectionPayload,
-  serverStateView,
   voiceCenterAvailable,
   voiceErrorText,
   builtinDeviceView,
@@ -109,7 +108,6 @@ import {
   builtinModelSummary,
   builtinJevForm,
   builtinJevSavePayload,
-  externalModelSummary,
   preferencesShowJev,
 } from "../src/voiceState.js";
 
@@ -157,32 +155,14 @@ test("先测试后保存：测试成功且内容未改动才可保存（A-78）"
   // 只是多写了结尾斜杠：最终地址相同，仍可保存
   assert.equal(canSaveSection("llm", { ...form, url: "https://h/v1/" }, ok), true);
   assert.equal(canSaveSection("llm", form, { ok: false, fingerprint: ok.fingerprint }), false);
-  assert.equal(canSaveSection("llm", form, ok, { fullModule: true }), false, "全模块部署只测试不写");
 });
 
-test("服务端按钮：外部实例不显示停止（A-63），崩溃可重新启动（A-65）", () => {
-  assert.deepEqual(
-    { ...serverStateView({ state: "running", owned: true }) },
-    { text: "运行中（由 MOSS 启动）", tone: "ok", state: "running", canStart: false, canStop: true, canRestart: true },
-  );
-  const external = serverStateView({ state: "external", owned: false });
-  assert.equal(external.canStop, false);
-  assert.equal(external.canStart, false);
-  assert.equal(external.text, "外部运行");
-  const exited = serverStateView({ state: "exited", exit_code: 3 });
-  assert.equal(exited.canStart, true);
-  assert.equal(exited.tone, "bad");
-  assert.equal(serverStateView(null).state, "stopped");
-});
-
-test("设备状态：无法判断时显示未知，不猜（§9.4.2）", () => {
-  assert.equal(deviceView("official", { state: "online", sessions: 1 }).text, "未知");
-  assert.equal(deviceView("self_hosted", { state: "online", sessions: 2 }).text, "在线（2 个会话）");
-  const waiting = deviceView("self_hosted", { state: "waiting", sessions: 0 });
-  assert.equal(waiting.text, "等待设备");
-  assert.match(waiting.hint, /OTA/);
-  assert.equal(deviceView("self_hosted", { state: "unknown", reason: "健康检查超时" }).text, "未知");
-  assert.match(deviceView("self_hosted", { state: "unknown", reason: "健康检查超时" }).hint, /健康检查超时/);
+test("设备状态：官方链路无法判断时显示未知，不猜（§9.4.2）", () => {
+  const official = deviceView("official");
+  assert.equal(official.text, "未知");
+  assert.match(official.hint, /OTA/);
+  // 2026-11-17 删除自建链路：其他取值都按官方链路提示
+  assert.equal(deviceView("self_hosted").text, "未知");
 });
 
 test("审批记录状态", () => {
@@ -199,11 +179,11 @@ test("审批记录状态", () => {
 });
 
 test("切换确认框列出改动项；错误文字；日志兜底脱敏（A-66）", () => {
-  const confirm = modeConfirmText("self_hosted", ["严格模式：开启", "mcp_endpoint 改为自建"]);
-  assert.equal(confirm.title, "切换到自建服务端？");
-  assert.match(confirm.message, /• 严格模式：开启/);
+  const confirm = modeConfirmText("builtin", ["启动 MOSS 内置语音服务", "设备的 OTA 地址需要你自行改为本机"]);
+  assert.equal(confirm.title, "切换到 MOSS 内置服务？");
+  assert.match(confirm.message, /• 启动 MOSS 内置语音服务/);
   assert.equal(modeConfirmText("official", []).title, "切换回官方小智？");
-  assert.equal(voiceErrorText({ code: "server_not_owned", message: "" }), "正在运行的服务端不是 MOSS 启动的，请在启动它的地方关闭。");
+  assert.equal(voiceErrorText({ code: "voice_acl_denied", message: "" }), "这个操作只能在 MOSS 主窗口里做。");
   assert.equal(voiceErrorText({ code: "x", message: "具体原因" }), "具体原因");
   assert.equal(voiceErrorText("文字"), "文字");
   assert.equal(maskLogLine("api_key: sk-123 ok"), "api_key: *** ok");
@@ -253,7 +233,7 @@ test("NV5: 内置服务的模式、表单预填与密钥占位（不回显密钥
   assert.match(builtinKeyPlaceholder({ key_set: true }), /留空则沿用/);
   assert.match(builtinKeyPlaceholder({ key_set: false }), /未设置/);
   assert.equal(modeConfirmText("builtin", ["a"]).title, "切换到 MOSS 内置服务？");
-  assert.equal(deviceView("builtin", { state: "waiting" }).text, "见内置服务");
+  assert.equal(deviceView("builtin").text, "见内置服务");
 });
 
 test("2026-11-07: OneJev 推理引擎准备进度、Laya 运行环境自动准备与删除提示", () => {
@@ -482,9 +462,10 @@ test("NV8: 接入点状态、身份、工具开关名单与新增校验", () => 
   assert.equal(failing.tone, "bad");
   assert.match(failing.detail, /连接被拒绝/);
   assert.equal(endpointView({ active: true, connected: false }).text, "连接中");
-  const paused = endpointView({ active: false }, true);
-  assert.equal(paused.text, "已暂停");
-  assert.match(paused.detail, /自建模式/);
+  // 2026-11-17 删除自建链路后没有“暂停”的附加接入点：后端不再给 active 字段
+  assert.equal(endpointView({ connected: false }).text, "连接中");
+  assert.equal(endpointView({ connected: true, connections: 1 }).text, "已连接");
+  assert.equal(endpointView(null).text, "未配置");
 
   const identity = identityView({ fields: { agentId: "agent-7" }, expires_at: 1000 }, 2000);
   assert.equal(identity.expired, true);
@@ -516,12 +497,11 @@ test("NV8: 接入点状态、身份、工具开关名单与新增校验", () => 
 
 test("UI-3 设置分组：只提交本组字段，带令牌的字段留空不提交，端口转数字", () => {
   const form = {
-    server_dir: " D:/xz ", python: "py", args: "app.py", server_port: "8000",
     builtin_ws_port: "8100", builtin_http_port: "8103",
-    self_hosted_mcp_endpoint: "", endpoint_health_url: "  ", official_mcp_endpoint: " wss://example.test/mcp/?token=t ",
+    official_mcp_endpoint: " wss://example.test/mcp/?token=t ",
   };
   assert.deepEqual(settingsGroupPayload("official", form), { official_mcp_endpoint: "wss://example.test/mcp/?token=t" });
-  assert.deepEqual(settingsGroupPayload("selfHostedEndpoint", form), {});
+  assert.deepEqual(settingsGroupPayload("official", { ...form, official_mcp_endpoint: "  " }), {}, "令牌字段留空不提交");
   assert.deepEqual(settingsGroupPayload("builtinPorts", form), { builtin_ws_port: 8100, builtin_http_port: 8103 });
   // n71 常连模式：开关按布尔值提交，端口转数字
   assert.deepEqual(
@@ -530,18 +510,22 @@ test("UI-3 设置分组：只提交本组字段，带令牌的字段留空不提
   );
   assert.equal(settingsGroupPayload("builtinMqtt", { builtin_mqtt_enabled: "false", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }).builtin_mqtt_enabled, false);
   assert.ok(settingsGroupDirty("builtinMqtt", { builtin_mqtt_enabled: "true", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }, { builtin_mqtt_enabled: "false", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }));
-  assert.match(settingsSaveEffect("builtinMqtt", "builtin", false), /小智要再重启一次/);
-  assert.deepEqual(settingsGroupPayload("selfHostedServer", form), { server_dir: "D:/xz", python: "py", args: "app.py", server_port: 8000 });
+  assert.match(settingsSaveEffect("builtinMqtt", false), /小智要再重启一次/);
   // 各组字段互不重叠：保存一组不会顺带提交另一组
   const keys = Object.values(SETTINGS_GROUPS).flatMap((group) => group.keys);
   assert.equal(new Set(keys).size, keys.length);
+  // 2026-11-17 删除自建链路：只剩官方接入点与内置服务的分组，不再有自建字段
+  assert.deepEqual(Object.keys(SETTINGS_GROUPS).sort(), ["builtinMqtt", "builtinPorts", "official"]);
+  for (const removed of ["server_dir", "python", "args", "server_port", "self_hosted_mcp_endpoint", "endpoint_health_url"]) {
+    assert.equal(keys.includes(removed), false, removed);
+  }
 });
 
 test("UI-3 设置分组改动判断：普通字段与已保存值比较，令牌字段填了才算改动", () => {
-  const saved = { server_dir: "D:/xz", python: "", args: "app.py", server_port: "8000", builtin_ws_port: "8000", builtin_http_port: "8003", self_hosted_mcp_endpoint: "", endpoint_health_url: "", official_mcp_endpoint: "" };
-  assert.equal(settingsGroupDirty("selfHostedServer", { ...saved, server_dir: " D:/xz " }, saved), false);
-  assert.equal(settingsGroupDirty("selfHostedServer", { ...saved, server_port: "8001" }, saved), true);
-  assert.equal(settingsGroupDirty("builtinPorts", { ...saved, server_port: "8001" }, saved), false);
+  const saved = { builtin_ws_port: "8000", builtin_http_port: "8003", builtin_mqtt_enabled: "false", builtin_mqtt_port: "1883", builtin_udp_port: "8888", official_mcp_endpoint: "" };
+  assert.equal(settingsGroupDirty("builtinPorts", { ...saved, builtin_ws_port: " 8000 " }, saved), false);
+  assert.equal(settingsGroupDirty("builtinPorts", { ...saved, builtin_ws_port: "8001" }, saved), true);
+  assert.equal(settingsGroupDirty("builtinPorts", { ...saved, builtin_mqtt_port: "1884" }, saved), false, "别组字段不算本组改动");
   assert.equal(settingsGroupDirty("official", { ...saved, official_mcp_endpoint: "wss://x" }, saved), true);
   assert.equal(settingsGroupDirty("official", saved, saved), false);
 });
@@ -583,14 +567,10 @@ test("UI-3 两组本地设置各自只检查本组字段", () => {
 });
 
 test("UI-3 连接设置保存后，只有后端真的重新发起连接才说正在重新连接", () => {
-  assert.equal(settingsSaveEffect("selfHostedEndpoint", "self_hosted", true), "正在重新连接自建接入点");
-  assert.equal(settingsSaveEffect("selfHostedEndpoint", "self_hosted", false), "接入点未变，没有重新连接");
-  assert.equal(settingsSaveEffect("selfHostedEndpoint", "official", false), "切到自建链路时使用");
-  assert.equal(settingsSaveEffect("official", "official", true), "正在重新连接小智");
-  assert.equal(settingsSaveEffect("official", "builtin", false), "接入点未变，没有重新连接");
-  assert.equal(settingsSaveEffect("official", "self_hosted", false), "切回官方链路时使用");
-  assert.equal(settingsSaveEffect("builtinPorts", "builtin", false), "重启内置服务后生效");
-  assert.equal(settingsSaveEffect("selfHostedServer", "self_hosted", false), "下次启动服务端时生效");
+  assert.equal(settingsSaveEffect("official", true), "正在重新连接小智");
+  assert.equal(settingsSaveEffect("official", false), "接入点未变，没有重新连接");
+  assert.equal(settingsSaveEffect("builtinPorts", false), "重启内置服务后生效");
+  assert.equal(settingsSaveEffect("builtinPorts", true), "重启内置服务后生效");
 });
 
 test("UI-3 保存结果、未保存标签与分组摘要", () => {
@@ -604,8 +584,6 @@ test("UI-3 保存结果、未保存标签与分组摘要", () => {
   assert.equal(builtinModelSummary("tts", { configured: true, kind: "doubao", model: "r" }), "已配置 · 豆包流式 · r");
   assert.equal(builtinModelSummary("asr", null, true), "使用本地模型");
   assert.equal(builtinModelSummary("llm", null, true), "未配置", "大模型没有本地选项");
-  assert.equal(externalModelSummary(null), "未测试");
-  assert.equal(externalModelSummary({ ok: false }), "上次测试未通过");
 });
 
 test("声纹简易标定：至少两人且每人三段测试音才能计算；名单变化提示重新标定", async () => {
@@ -1108,22 +1086,16 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
   assert.equal(builtinSpeaking.metrics.find((m) => m.label === "本轮识别").value, "12 字");
   assert.equal(builtinSpeaking.metrics.find((m) => m.label === "播报/路由").value, "已播 3 句");
 
-  // 2. 自建服务链路：进程日志自动脱敏，无音频流时 level 恒为 0，工具调用触发 pulse
-  const selfHosted = mossEyeTwinView({
+  // 2. 2026-11-17 删除自建链路：遗留的 self_hosted 取值按官方链路显示；云端事件同样兜底脱敏
+  const legacy = mossEyeTwinView({
     mode: "self_hosted",
-    status: {
-      server: { state: "running", pid: 4242 },
-      bridge: { connected: true },
-      endpoint: { health: { robot_connections: 2 } },
-    },
-    mcpStatus: { connected: true, last_request: "tools/call: material_params_tool" },
-    logLines: ["[info] connected api_key=sk-secret-value-123"],
+    status: { mcp_endpoint: "wss://api.example.test/mcp/?token=***", bridge: { connected: true } },
+    mcpStatus: { configured: true, connected: true, recent_events: ["[info] connected api_key=sk-secret-value-123"] },
   });
-  assert.equal(selfHosted.visualState, "pulse");
-  assert.equal(selfHosted.sourceBadge, "LOCAL SERVER BRIDGE");
-  assert.equal(selfHosted.level, 0, "自建链路不伪造音频振幅");
-  assert.equal(selfHosted.subline.includes("sk-secret-value-123"), false, "进程日志必须脱敏");
-  assert.match(selfHosted.headline, /material_params_tool/);
+  assert.equal(legacy.mode, "official");
+  assert.equal(legacy.sourceBadge, "CLOUD MCP TELEMETRY");
+  assert.equal(legacy.level, 0, "非内置链路不伪造音频振幅");
+  assert.equal(legacy.subline.includes("sk-secret-value-123"), false, "事件文字必须脱敏");
 
   // 3. 官方云端链路：同步云端 MCP 握手、消息帧数、最近工具调用与审批警戒
   const official = mossEyeTwinView({
@@ -1910,7 +1882,6 @@ test("按场景推荐的整套模型：一次保存、缺什么提示什么、�
 test("偏好设置里的 Jev 加工反馈判断：除内置链路外都显示，链路未读到前不显示", () => {
   assert.equal(preferencesShowJev({ hasVoiceCenter: false, voiceMode: null }), true, "网页环境没有语音中心，始终显示");
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "official" }), true, "官方链路没有“模型”标签，只能在这里配");
-  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "self_hosted" }), true, "自建链路的“模型”标签没有 Jev 卡片");
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "builtin" }), false, "内置链路由“模型 → Jev”统一管理，不重复");
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: null }), false, "链路未读到时先不显示，避免闪烁");
 });

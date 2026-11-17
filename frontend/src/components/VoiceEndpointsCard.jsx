@@ -5,7 +5,7 @@ import { showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { TOOL_EDIT_PROMPTS, TOOL_RISK_LABELS, endpointLabel, endpointView, extraEndpointError, groupedTools, identityView, toolEditPrompt, toolStatText, toolSwitchPayload } from "../voiceState.js";
 
-// 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方/自建链路渲染，放在“设备”标签）；
+// 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方链路渲染，放在“设备”标签）；
 // 内置工具开关与调用统计（所有链路共用，n69 起放在“扩展”标签，紧挨第三方 MCP 工具，方便对照两者区别）。
 // 地址一律由后端脱敏后返回；新增时填写的完整地址只在本页内存中，提交后清空。
 
@@ -46,7 +46,6 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
       <div id="voice-endpoints-card" className="voice-stack">
       <p className="voice-muted">
         MOSS 作为工具提供方连接这些小智接入点，断线后自动重连。
-        {overview.extras_paused && " 当前为自建模式：附加接入点暂停连接。"}
       </p>
       <div className="ob-tbl voice-tbl">
         <table>
@@ -65,7 +64,7 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
               </tr>
             ) : (
               endpoints.map((endpoint) => {
-                const view = endpointView(endpoint, overview.extras_paused);
+                const view = endpointView(endpoint);
                 const identity = identityView(endpoint.identity);
                 return (
                   <tr key={endpoint.id} id={`voice-endpoint-${endpoint.id}`}>
@@ -144,7 +143,7 @@ export function VoiceToolsCard({ overview, busy, run }) {
   const offered = tools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
   return (
     <VoiceGroup id="tools" title="MOSS 内置工具（所有链路共用）" summary={`${fullList ? "完整清单" : "精简清单"} · AI 可用 ${offered} 个${disabled ? ` · ${disabled} 个已关闭` : ""}`}>
-      <p className="voice-muted">这些是 MOSS 自带的工具，官方小智、自建服务端和内置语音都用这一套。勾选立即生效；“停止与机器控制”不能关闭。</p>
+      <p className="voice-muted">这些是 MOSS 自带的工具，官方小智和内置语音都用这一套。勾选立即生效；“停止与机器控制”不能关闭。</p>
       <label className="voice-check voice-tools-full" id="voice-tools-full-switch">
         <input type="checkbox" checked={fullList} disabled={Boolean(busy)} onChange={(e) => switchFullList(e.target.checked)} />
         <span>

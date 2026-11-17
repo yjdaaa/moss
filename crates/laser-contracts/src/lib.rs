@@ -171,8 +171,8 @@ pub fn global_mcp_telemetry() -> &'static McpTelemetry {
     MCP_TELEMETRY.get_or_init(McpTelemetry::new)
 }
 
-/// 自建链路的设备会话数（技术书 §9.4.5）：由桌面端语音中心轮询接入点 health 后写入，
-/// `/api/system/info` 读取。负数表示未知（未配置健康检查地址、查询失败或官方链路）。
+/// 内置链路的设备会话数（技术书 §9.4.5）：由桌面端内置语音服务写入，
+/// `/api/system/info` 读取。负数表示未知（官方链路或尚未上报）。
 pub struct VoiceTelemetry {
     device_sessions: std::sync::atomic::AtomicI64,
     /// 高 8 位存储 `phase_code`（0=None, 1=idle, 2=listening, 3=thinking, 4=speaking），低 8 位存储 `level`（0..=100），

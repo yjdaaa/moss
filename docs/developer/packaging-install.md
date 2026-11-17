@@ -40,7 +40,7 @@
 | 运行数据目录 | `laser-host` 调用 `RuntimeRoot::resolve(None, None)`，默认目录由 `RuntimeRoot::default_base()` 决定：Windows 为 `%APPDATA%\moss`，macOS 为 `~/Library/Application Support/moss`，Linux 为 `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`，均缺失时退回当前目录 `.runtime/`；`moss-host migrate` 不写 `--target` 时也用它 | **各桌面系统实际写入当前用户的应用数据目录，不在程序目录旁**。安装到 `C:\Program Files` 或 `/Applications/MOSS.app` 都不需要程序目录写权限，Finder 双击启动不会因只读 `/` 失败，覆盖升级也不会碰到用户数据 |
 | `.env` 读取 | `config::load_env_files`：先读进程环境变量，再读**启动时当前目录**（向上查找）的 `.env`，最后读**运行目录**的 `.env`（Windows 为 `%APPDATA%\moss\.env`）；先加载的优先，后者不覆盖前者 | 已修复（PKG-02）：快捷方式启动时当前目录不确定也不影响，运行目录里的 `.env` 一定能读到。`settings.json` 的 `web_port`、`mcp_endpoint` 照常可用 |
 | 实例锁 | 运行目录下 `moss.lock`（`fs4` 独占锁） | 安装器可据此判断是否有实例在运行 |
-| 语音中心外部目录 | 技术书 §9.4：`xiaozhi-server`、`mcp-endpoint-server` 源码目录由用户自备，路径存于 `settings.json` | **卸载不得删除**这些外部目录；只删除 MOSS 自己的程序文件和（用户同意时）运行数据 |
+| 语音中心外部目录 | 技术书 §9.4：`xiaozhi-server`、`mcp-endpoint-server` 源码目录由用户自备（2026-11-17 起自建链路删除，MOSS 不再记录其路径） | **卸载不得删除**这些外部目录；只删除 MOSS 自己的程序文件和（用户同意时）运行数据 |
 | Android | APK 安装；运行目录在没有 `APPDATA` 时退回当前目录 `.runtime/` | Android 上实际可写位置需实机核对（建议改用应用私有目录），不在本规范的安装器范围内 |
 
 ## 2a. 实施状态（2026-10-06）
@@ -194,7 +194,7 @@
 
 ## 4. 与其他功能的关系
 
-- **语音中心**（技术书 §9.4）：安装包只含 MOSS 本体，不捆绑 Python 运行环境与 `xiaozhi-server`；语音中心的“服务端目录”仍由用户在向导中指定。卸载时不触碰这些目录，但若 MOSS 启动过服务端子进程，卸载前的“请先退出 MOSS”会连带按 §9.4.3 规则停止它们。
+- **语音中心**（技术书 §9.4）：安装包只含 MOSS 本体，不捆绑 Python 运行环境与 `xiaozhi-server`。2026-11-17 起语音中心不再有自建服务端链路，MOSS 不再记录或启动外部服务端目录；用户以前自备的这些目录卸载时仍不触碰。
 - **CORS 允许来源**（技术书 §6.5）：安装版 WebView 来源与开发版相同（`http://tauri.localhost`），无需额外配置。
 - **端口**：安装版首次启动使用默认 9666；端口被占用时按现有规则回退，用户可在偏好设置修改（写入 `%APPDATA%\moss\settings.json`）。
 

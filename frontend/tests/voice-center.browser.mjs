@@ -45,8 +45,7 @@ try {
       ],
     },
     mode: "official",
-    server: { state: "stopped", owned: false },
-    settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
+    settings: { builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
@@ -113,10 +112,10 @@ try {
     },
   };
   const voiceStatus = (extra = {}) => ({
-    mode: state.mode, settings: structuredClone(state.settings), server: structuredClone(state.server),
-    server_config: { exists: true, full_module: false }, endpoint: { health: null }, device: { state: state.mode === "self_hosted" ? "waiting" : "unknown" },
-    bridge: { connected: true }, strict: { enabled: state.mode === "self_hosted", locked: state.mode === "self_hosted", from_env: false }, gateway: { enabled: false },
-    models: {}, mcp_endpoint: masked,
+    // 与 center.rs status() 一致（2026-11-17 删除自建链路后没有 server / endpoint / device / models / strict.locked）
+    mode: state.mode, settings: structuredClone(state.settings),
+    bridge: { connected: true }, strict: { enabled: false, from_env: false }, gateway: { enabled: false },
+    mcp_endpoint: masked,
     mcp: { endpoints: [{ id: "primary", endpoint: masked, connected: true }], tools: [{ name: "get_status", description: "状态", enabled: true }, { name: "laser_workflow_tool", description: "workflow", enabled: true, in_compact: true }, { name: "laser_grbl_tool", description: "grbl", enabled: true, in_compact: false }], full_tool_list: false, max_extra_endpoints: 4 },
     ...extra,
   });
@@ -124,7 +123,6 @@ try {
     get_backend_origin: () => "http://127.0.0.1:9666",
     get_desktop_session: () => "a".repeat(64),
     voice_status: () => voiceStatus(),
-    voice_server_log: () => ({ lines: ["[fake] started api_key=secret"] }),
     voice_builtin_status: () => structuredClone(state.builtin),
     voice_diagnostics_export: () => ({ saved: true, file_name: "moss-voice-diagnostics-1790000000.json", bytes: 4096, events: state.builtin.events.length }),
     voice_mcp_status: () => ({ servers: [], connections: [], audit: [], revision: "r1", max_servers: 8 }),
@@ -155,7 +153,6 @@ try {
         default: return {};
       }
     },
-    voice_detect_python: () => ({ candidates: ["C:\\Python312\\python.exe"], suggested: "C:\\Python312\\python.exe" }),
     voice_strict_set: ({ enabled }) => ({ enabled, applied: true, needs_restart: false, env_file: "C:\\moss\\.env" }),
     voice_music_status: () => ({
       settings: { enabled: true, directory: "D:\\unplugged-music" },
@@ -196,11 +193,11 @@ try {
       return { ...handlers.voice_agent_status(), stopped };
     },
     voice_save_settings: ({ settings }) => {
-      // 与 center.rs 一致：官方/内置链路下官方接入点变了才重连，并在返回里报告 reconnected
+      // 与 center.rs 一致：官方接入点变了才重连，并在返回里报告 reconnected
       let reconnected = false;
       for (const [key, value] of Object.entries(settings)) {
         if (key === "official_mcp_endpoint") {
-          reconnected = state.mode !== "self_hosted" && state.officialRaw !== value;
+          reconnected = state.officialRaw !== value;
           state.officialRaw = value;
           state.settings[key] = masked;
         } else state.settings[key] = value;
@@ -209,17 +206,8 @@ try {
     },
     voice_mode_changes: ({ mode }) => ({ changes: [`语音链路：${state.mode} → ${mode}`] }),
     voice_set_mode: ({ mode }) => {
-      const stillRunning = mode !== "self_hosted" && state.server.state === "running";
       state.mode = mode;
       state.builtin.link_mode = mode;
-      return voiceStatus({ server_still_running: stillRunning });
-    },
-    voice_server_start: () => {
-      state.server = { state: "running", owned: true, pid: 4242, started_at: 1_790_000_000 };
-      return voiceStatus();
-    },
-    voice_server_stop: () => {
-      state.server = { state: "stopped", owned: false };
       return voiceStatus();
     },
     voice_builtin_models_test: ({ section, input }) => (
@@ -444,7 +432,6 @@ try {
   await tab("服务").click();
   assert.ok(await page.locator("#voice-endpoint-card").isVisible(), "官方链路显示接入点");
   assert.equal(await page.locator("#voice-builtin-card").count(), 0, "官方链路不渲染内置服务面板");
-  assert.equal(await page.locator("#voice-server-card").count(), 0, "官方链路不渲染自建服务端面板");
   await shot("voice-official");
   await tab("设备").click();
   assert.ok(await page.locator("#voice-group-endpoints").isVisible(), "官方链路渲染接入点状态");
@@ -494,37 +481,16 @@ try {
   assert.equal(await tab("服务").locator(".voice-tab-dot").count(), 0);
   assert.ok(!(await page.locator("body").innerText()).includes("fake-ui-token"), "令牌不回显");
 
-  // 3. 切到自建：确认框 → 切换；启动、停止服务端
-  await page.locator("#voice-mode-self_hosted").click();
+  // 3. 链路只有“MOSS 内置服务”与“官方小智”两项（2026-11-17 删除自建服务端链路）
+  assert.equal(await page.locator("#voice-mode-card [role=radio]").count(), 2, "链路选择只列两项");
+  assert.equal(await page.locator("#voice-mode-self_hosted").count(), 0, "没有自建服务端选项");
+
+  // 4. 切到内置：确认框 → 切换
+  await page.locator("#voice-mode-builtin").click();
   await shot("voice-mode-confirm");
   await confirmDialog("确认切换");
-  await page.locator("#voice-mode-self_hosted[aria-checked=true]").waitFor();
-  assert.equal(last("voice_set_mode").args.mode, "self_hosted");
-  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "self_hosted", "切换自建链路后孪生舱同步为 LOCAL SERVER BRIDGE");
-  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /LOCAL SERVER BRIDGE/);
-  assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "自建链路同样不显示隐私与家居标签");
-  await tab("服务").click();
-  assert.ok(await page.locator("#voice-server-card").isVisible(), "自建链路显示服务端");
-  await page.locator("#voice-server-start").click();
-  await page.locator("#voice-server-state").filter({ hasText: "运行中" }).waitFor();
-  await shot("voice-self-hosted");
-  await page.locator("#voice-server-stop").click();
-  await page.locator("#voice-server-state").filter({ hasText: "未运行" }).waitFor();
-  // 意外退出：显示退出码、不自动重启，可再次启动
-  state.server = { state: "exited", owned: true, exit_code: 1 };
-  await page.locator("#voice-server-state").filter({ hasText: "意外退出" }).waitFor({ timeout: 10_000 });
-  assert.ok(await page.getByText("退出码 1，不会自动重启").isVisible());
-  await shot("voice-crashed");
-  await page.locator("#voice-server-start").click();
-  await page.locator("#voice-server-state").filter({ hasText: "运行中" }).waitFor();
-
-  // 4. 切到内置：服务端仍在运行时再问是否停止
-  await page.locator("#voice-mode-builtin").click();
-  await confirmDialog("确认切换");
-  await confirmDialog("停止服务端");
   await page.locator("#voice-mode-builtin[aria-checked=true]").waitFor();
-  assert.equal(last("voice_server_stop") !== undefined, true);
-  assert.equal(state.server.state, "stopped");
+  assert.equal(last("voice_set_mode").args.mode, "builtin");
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "builtin", "切换内置链路后孪生舱同步为 REALTIME AUDIO TWIN");
   assert.match(await page.locator("#voice-moss-twin-source").innerText(), /REALTIME AUDIO TWIN/);
 

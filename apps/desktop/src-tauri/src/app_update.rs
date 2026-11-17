@@ -764,7 +764,7 @@ pub async fn app_update_install(
             .timeout(std::time::Duration::from_secs(600))
             .configure_client(|client| client.redirect(update_redirect_policy(false)))
             // Windows 安装器启动后插件直接结束进程：先走与“完全退出”相同的急停与停服务顺序
-            .on_before_exit(move || crate::shutdown_desktop_services(&exit_handle, true));
+            .on_before_exit(move || crate::shutdown_desktop_services(&exit_handle));
         if let Some(target) = target {
             builder = builder.target(target);
         }
@@ -849,7 +849,7 @@ pub async fn app_update_install(
                 if let Ok(mut p) = progress.lock() {
                     p.phase = "restarting";
                 }
-                crate::shutdown_desktop_services(&app, true);
+                crate::shutdown_desktop_services(&app);
                 app.restart();
             })
             .await;

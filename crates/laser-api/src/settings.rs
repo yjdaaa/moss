@@ -13,8 +13,9 @@ pub(crate) fn normalize_mcp_endpoint(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
-/// `/api/system/info` 的 `voice` 字段：`{mode, device_sessions}`。设备会话数只在自建与内置链路下有意义
-/// （自建来自接入点健康检查，内置来自内置语音服务）；未知时为 null。
+/// `/api/system/info` 的 `voice` 字段：`{mode, device_sessions}`。设备会话数只在内置链路下有意义
+/// （来自内置语音服务）；未知时为 null。2026-11-17 删除的自建链路（遗留 `self_hosted`）按内置链路报告，
+/// 与桌面端启动时的设置迁移一致。
 pub(crate) fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde_json::Value {
     let settings = read_runtime_settings(runtime_path);
     let mode = match settings
@@ -22,8 +23,7 @@ pub(crate) fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde
         .and_then(|voice| voice.get("mode"))
         .and_then(serde_json::Value::as_str)
     {
-        Some("self_hosted") => "self_hosted",
-        Some("builtin") => "builtin",
+        Some("builtin" | "self_hosted") => "builtin",
         _ => "official",
     };
     let telemetry = laser_contracts::global_voice_telemetry();

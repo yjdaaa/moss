@@ -4,11 +4,9 @@ import { AlertCircle, X } from "lucide-react";
 import { trayActionCopy } from "../platform.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
-export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunning = false }) {
+export function CloseConfirmModal({ visible, onClose, onConfirm }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
-  // 技术书 §9.4.3：完全退出时询问是否同时停止 MOSS 启动的语音服务端，默认“是”
-  const [stopServer, setStopServer] = useState(true);
   const backdropRef = useRef(null);
   const backdropPressRef = useRef(false);
   const trayCopy = trayActionCopy();
@@ -30,7 +28,7 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
   if (!visible) return null;
 
   const handleConfirm = () => {
-    onConfirm(selectedAction, remember, stopServer);
+    onConfirm(selectedAction, remember);
   };
 
   const content = (
@@ -129,13 +127,6 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
               </div>
             </label>
           </div>
-
-          {voiceServerRunning && selectedAction === "exit" && (
-            <label className="close-voice-option" id="close-stop-voice-server">
-              <input type="checkbox" checked={stopServer} onChange={(e) => setStopServer(e.target.checked)} className="close-confirm-field-2" />
-              <span>同时停止语音服务端（由 MOSS 启动的 xiaozhi-server）。取消勾选则退出后服务端继续运行，其输出不再记录。</span>
-            </label>
-          )}
 
           <div className="close-confirm-box-5">
             <label className="close-confirm-label">

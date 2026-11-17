@@ -160,9 +160,53 @@ fn match_marker(chars: &[char], lower: &[char], index: usize) -> Option<(usize, 
     None
 }
 
+/// 地址中的 `key` / `token` 等查询参数替换为 `***`（用于页面显示与日志）。
+pub fn redact_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_owned();
+    };
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) => {
+                let lower = name.to_ascii_lowercase();
+                if [
+                    "key",
+                    "token",
+                    "access_token",
+                    "api_key",
+                    "secret",
+                    "password",
+                ]
+                .contains(&lower.as_str())
+                {
+                    format!("{name}=***")
+                } else {
+                    pair.to_owned()
+                }
+            }
+            None => pair.to_owned(),
+        })
+        .collect();
+    format!("{base}?{}", parts.join("&"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::redact_line;
+    use super::{redact_line, redact_url};
+
+    #[test]
+    fn redact_url_hides_key_and_token() {
+        assert_eq!(
+            redact_url("http://h:8004/mcp_endpoint/health?key=abc"),
+            "http://h:8004/mcp_endpoint/health?key=***"
+        );
+        assert_eq!(
+            redact_url("ws://h/mcp/?token=abc&x=1"),
+            "ws://h/mcp/?token=***&x=1"
+        );
+        assert_eq!(redact_url("ws://h/mcp/"), "ws://h/mcp/");
+    }
 
     /// A-66
     #[test]

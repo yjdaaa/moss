@@ -531,7 +531,7 @@ export function SettingsModal({
           )}
 
           {/* Jev 判断服务（加工反馈判断）：内置链路由「语音中心 → 模型 → Jev」统一管理，这里不重复；
-              官方与自建链路及无语音中心的网页环境没有别的入口，在这里配置（2026-11-15） */}
+              官方链路及无语音中心的网页环境没有别的入口，在这里配置（2026-11-15） */}
           {showJevSettings && (
           <div className="ob-fold settings-box-3" id="settings-jev">
             <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" defaultOpen={false} />

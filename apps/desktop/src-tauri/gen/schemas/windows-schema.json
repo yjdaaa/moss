@@ -327,12 +327,6 @@
           "markdownDescription": "Enables the voice_context_pick_folder command without any pre-configured scope."
         },
         {
-          "description": "Enables the voice_detect_python command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-detect-python",
-          "markdownDescription": "Enables the voice_detect_python command without any pre-configured scope."
-        },
-        {
           "description": "Enables the voice_device_rename command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-device-rename",
@@ -531,18 +525,6 @@
           "markdownDescription": "Enables the voice_mode_changes command without any pre-configured scope."
         },
         {
-          "description": "Enables the voice_models_save command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-models-save",
-          "markdownDescription": "Enables the voice_models_save command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_models_test command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-models-test",
-          "markdownDescription": "Enables the voice_models_test command without any pre-configured scope."
-        },
-        {
           "description": "Enables the voice_music_pick_directory command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-music-pick-directory",
@@ -577,30 +559,6 @@
           "type": "string",
           "const": "allow-voice-save-settings",
           "markdownDescription": "Enables the voice_save_settings command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_server_log command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-server-log",
-          "markdownDescription": "Enables the voice_server_log command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_server_restart command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-server-restart",
-          "markdownDescription": "Enables the voice_server_restart command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_server_start command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-server-start",
-          "markdownDescription": "Enables the voice_server_start command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_server_stop command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-server-stop",
-          "markdownDescription": "Enables the voice_server_stop command without any pre-configured scope."
         },
         {
           "description": "Enables the voice_set_mode command without any pre-configured scope.",
@@ -813,12 +771,6 @@
           "markdownDescription": "Denies the voice_context_pick_folder command without any pre-configured scope."
         },
         {
-          "description": "Denies the voice_detect_python command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-detect-python",
-          "markdownDescription": "Denies the voice_detect_python command without any pre-configured scope."
-        },
-        {
           "description": "Denies the voice_device_rename command without any pre-configured scope.",
           "type": "string",
           "const": "deny-voice-device-rename",
@@ -1017,18 +969,6 @@
           "markdownDescription": "Denies the voice_mode_changes command without any pre-configured scope."
         },
         {
-          "description": "Denies the voice_models_save command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-models-save",
-          "markdownDescription": "Denies the voice_models_save command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_models_test command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-models-test",
-          "markdownDescription": "Denies the voice_models_test command without any pre-configured scope."
-        },
-        {
           "description": "Denies the voice_music_pick_directory command without any pre-configured scope.",
           "type": "string",
           "const": "deny-voice-music-pick-directory",
@@ -1063,30 +1003,6 @@
           "type": "string",
           "const": "deny-voice-save-settings",
           "markdownDescription": "Denies the voice_save_settings command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_server_log command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-server-log",
-          "markdownDescription": "Denies the voice_server_log command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_server_restart command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-server-restart",
-          "markdownDescription": "Denies the voice_server_restart command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_server_start command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-server-start",
-          "markdownDescription": "Denies the voice_server_start command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_server_stop command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-server-stop",
-          "markdownDescription": "Denies the voice_server_stop command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_set_mode command without any pre-configured scope.",

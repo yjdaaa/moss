@@ -76,12 +76,10 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 ## 4b. 语音中心（P4，仅桌面端）
 
 - crate `crates/moss-voice` 不依赖 Tauri，由 `apps/desktop/src-tauri` 在非 Android / iOS 目标引入（`src/voice.rs`，Tauri 命令见 [接口契约](api-contracts.md) §5）；`laser-host` 的 `external_mcp`（同样限非移动目标）与 `moss-agent`、`moss-home`、`moss-usb-provision` 只用其设置读写；`laser-api`、`moss-host`、Android 不包含进程管理代码。
-- `VoiceCenter` 编排页面操作；MOSS 后端的能力经 `HostHooks` 交入：严格模式开关（`ApiService::set_strict_mode`，`.env` 开启的不能被关掉）、小智桥重连（`HostApplication::restart_mcp_bridge`：先停旧桥、等待其退出，再按 `settings.json` 接新桥）、桥连接状态、设备会话数（写 `laser_contracts::global_voice_telemetry`，`/api/system/info` 的 `voice.device_sessions` 读取）。
-- 链路切换：官方 / 自建互斥；切到自建先开严格模式，再一次写入 `settings.json` 的 `voice` 与 `mcp_endpoint`（备份官方地址），再重连桥；任一步失败恢复设置、严格模式与原来的桥。宿主启动时 `voice.mode = self_hosted` 也会开启严格模式。
-- 服务端进程：`Supervisor` 单实例、端口探测识别外部实例、停止先正常退出 5 秒后强制、Windows Job Object（随 MOSS 关闭结束进程树；用户退出时选择保留则解除）、崩溃不自动重启；输出脱敏后写 `logs/xiaozhi-server.log`。
-- 退出顺序：`ShutdownState::request()`（急停与任务清零）→ 处理服务端（停止或保留）→ 退出。托盘“退出程序”在服务端运行时用对话框询问。
-- 模型向导：测试连接用 `reqwest` 阻塞客户端（15 秒超时、不跟随重定向，错误信息不含地址与密钥）；保存要求与最近一次成功测试的内容一致，按行读-改-写 `data/.config.yaml`（保留注释，`.bak` 备份，`serde_yaml` 重新解析核对），全模块部署（`manager-api.url`）拒绝写入。密钥不进入 MOSS 的 SQLite、`settings.json` 与日志。
-- 设备在线：自建模式下每 5 秒请求接入点 `…/mcp_endpoint/health?key=…`（3 秒超时），取 `robot_connections`；未配置或失败时为未知。
+- `VoiceCenter` 编排页面操作；MOSS 后端的能力经 `HostHooks` 交入：严格模式状态（只读展示；开关由 `voice_strict_set` 写 `.env` 并热切换）、小智桥重连（`HostApplication::restart_mcp_bridge`：先停旧桥、等待其退出，再按 `settings.json` 接新桥）、桥连接状态、设备会话数（切到官方时清零；内置链路由内置服务写 `laser_contracts::global_voice_telemetry`，`/api/system/info` 的 `voice.device_sessions` 读取）、内置服务启停。
+- 链路切换：官方 / 内置二选一，切换不改 `mcp_endpoint` 与严格模式，只写 `settings.json` 的 `voice.mode` 并启停内置服务，失败恢复设置与内置服务。2026-11-17 起自建服务端链路连代码删除（原 `supervisor` 子进程管理、`config_yaml` 模型向导、`health` 接入点健康检查、服务端日志与“自建链路强制严格模式”一并移除）。旧设置里的 `voice.mode = "self_hosted"` 读作 `builtin`，桌面端在后端初始化后、启动小智桥前调用 `moss_voice::settings::migrate_legacy_self_hosted` 一次性改写（有官方接入点备份则写回顶层 `mcp_endpoint`）。
+- 子进程句柄：内置服务的本地进程（OneJev、本地视觉、Laya）共用 `moss_voice::job::JobHandle`（Windows Job Object，随 MOSS 关闭结束进程树）。
+- 退出顺序：`ShutdownState::request()`（急停与任务清零）→ 停止内置语音服务与第三方 MCP 子进程 → 退出。
 
 ## 4c. 内置语音服务（NV，仅桌面端，建设中）
 
@@ -94,7 +92,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 - 工具（NV4）：MOSS 工具经 `moss_voice_server::HostTools`（宿主实现 `ToolHost`，桌面端调用 `laser_host::voice_tool_call`，身份 `CallerContext::Voice`）；`approval_required` 的结果直接朗读固定话术，不交给模型改写。设备声明 `features.mcp` 时，会话经同一 WebSocket 做 `initialize`、分页 `tools/list`，设备工具以 `device__<名称>` 提供给模型（`.` 等字符换成 `_`，调用时换回原名）。
 - 本地模型（NV6 / n93）：`apps/moss-voice-local`（GPL-3.0，独立工作区）运行 sherpa-onnx 的判停（Silero / TEN-VAD）、前端降噪（GTCRN，`denoise` 默认 `false`）、命令词抗噪（关键词检测 zipformer，随判停流运行，`kws` 默认 `false`，协议 7 / n101）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 约 0.5 秒周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice-Distill），另外 Qwen3-TTS 0.6B（`qwen3_tts_0_6b`）经按需下载且 SHA-256 校验的独立 `speech.cpp v0.10.1` 进程运行（`moss_voice::speech_cpp` / `moss_voice_providers::speech_cpp`），SmartTurn v3 尾音语义判停（`turn` 默认 `false`）由独立 `TurnHelper` 进程（单次 250 ms 软超时）与 `moss_voice_server::TurnEndPredictor` 并发估算且永不延迟 `is_stop` / `TurnGate`；MOSS 经标准输入输出协议 6（`crates/moss-voice-local-proto`）调用，客户端 `moss_voice_providers::local`（`streaming` 支持的本地识别均经 `LocalStreamingAsr` 接入边说边识别，`LocalAsr` 作整段兜底）；判停经 `moss_voice_server::VadFactory` / `LocalVad` 接入，出错退回能量判停。模型由 `moss_voice::local_models`（`CATALOG` 26 项）下载到运行目录 `models/` 并校验 SHA-256。辅助程序与 `moss-desktop.exe` 同目录，崩溃不影响 MOSS 主进程与急停。
 - 流式云厂商（NV7，`moss_voice_providers::doubao`）：豆包流式识别实现 `StreamingAsr`——会话在开始说话时建立 WebSocket、边说边送 16 kHz 音频，说完只等最后结果（失败退回整段识别）；豆包双向流式合成实现 `Tts::synthesize_stream`——每句第一段音频到达即播放，连接在句与句之间复用。帧协议移植自 univoice（MIT），WebSocket 与 axum 共用 tokio-tungstenite 0.29，TLS 为 rustls。
-- 接入点增强（NV8）：小智桥每个接入点一条线程（主接入点 `mcp_endpoint` + `mcp_extra_endpoints` 最多 4 个，自建模式下附加接入点暂停），30 秒心跳、90 秒无数据判定断线，遥测按接入点记录状态（`McpTelemetrySnapshot::endpoints`）。工具开关 `mcp_disabled_tools` 由 `ApiService` 持有，经 `HostBackend::tool_disabled` 在 `tools/list` 与调用两处生效，接入点与内置语音共用；`laser_safe_action_tool` 不可关闭。`dispatch_tool_call_with` 统一计入调用统计（`tool_stats`，内存）。
+- 接入点增强（NV8）：小智桥每个接入点一条线程（主接入点 `mcp_endpoint` + `mcp_extra_endpoints` 最多 4 个），30 秒心跳、90 秒无数据判定断线，遥测按接入点记录状态（`McpTelemetrySnapshot::endpoints`）。工具开关 `mcp_disabled_tools` 由 `ApiService` 持有，经 `HostBackend::tool_disabled` 在 `tools/list` 与调用两处生效，接入点与内置语音共用；`laser_safe_action_tool` 不可关闭。`dispatch_tool_call_with` 统一计入调用统计（`tool_stats`，内存）。
 - 桌面端（NV5，`apps/desktop/src-tauri/src/voice_builtin.rs` 保留 Tauri 命令与来源校验，其余按职责在 `voice_builtin/imp/`，其中 `usb_provision.rs` 只做 `voice_usb_provision` 的并发锁、激光串口判断与诊断记录，串口读/写小智 `0x9000` NVS 分区与预签设备密钥在 `crates/moss-usb-provision`）：模型地址等存 `settings.json` 的 `voice.builtin_models`，密钥存 `app_secrets`（`voice.llm.main` / `voice.asr.main` / `voice.tts.main`）；三项都配置时以对话模式启动（OpenAI 兼容提供方 + `DesktopToolHost` 调用 `laser_host::voice_tool_call`），否则回声模式。语音链路 `builtin`（`moss_voice::VoiceMode::Builtin`）时随 MOSS 后台启动；语音中心切换链路经 `HostHooks::builtin_start / builtin_stop`，启动失败整体回滚。设备会话数经 `DeviceRegistry::sessions_changed` 写入 `global_voice_telemetry`，`/api/system/info` 的 `voice.mode` 为 `builtin` 时据此报告。
 
 ## 5. 设备层与发送链路

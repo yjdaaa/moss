@@ -360,8 +360,8 @@ impl ApiService {
                     "is_fallback": actual != preferred,
                     "web_host": self.settings.web_host,
                     "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count),
-                    // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端语音中心
-                    // 轮询自建接入点 health 后提供，官方链路或未知时为 null（技术书 §9.4.5）
+                    // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端内置语音服务
+                    // 上报，官方链路或未知时为 null（技术书 §9.4.5）
                     "voice": voice_status_json(self.runtime_path.as_deref())
                 })),
             );

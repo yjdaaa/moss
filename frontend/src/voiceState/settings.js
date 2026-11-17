@@ -14,11 +14,8 @@ export function endpointLabel(id) {
 }
 
 /** 一个接入点的状态显示：`{tone, text, detail}`。 */
-export function endpointView(endpoint, extrasPaused = false) {
+export function endpointView(endpoint) {
   if (!endpoint) return { tone: "off", text: "未配置", detail: "" };
-  if (!endpoint.active) {
-    return { tone: "off", text: "已暂停", detail: extrasPaused ? "自建模式下附加接入点不连接，切回官方或内置时恢复" : "" };
-  }
   const reconnects = Math.max(0, Number(endpoint.connections || 0) - 1);
   if (endpoint.connected) {
     const parts = [];
@@ -219,12 +216,12 @@ export function normalizeVoiceTab(key) {
 
 /**
  * 当前链路要显示的标签（2026-10-18 / 2026-11-02 用户决定）：
- * - 官方链路的模型在小智控制台配置，不显示“模型”标签；
+ * - 官方链路的模型在小智控制台配置，不显示“模型”标签（2026-11-17 删除自建链路后，“模型”只属于内置链路）；
  * - “隐私与家居”四项（对话记忆、信息服务、声纹、家居）均挂在 MOSS 内置语音会话上，只在 `builtin` 链路显示。
  */
 export function voiceTabsFor(mode) {
   return VOICE_TABS.filter((item) => {
-    if (item.key === "models" && mode === "official") return false;
+    if (item.key === "models" && mode !== "builtin") return false;
     if (item.key === "privacy" && mode !== "builtin") return false;
     return true;
   });
@@ -232,7 +229,7 @@ export function voiceTabsFor(mode) {
 
 /**
  * 右上角偏好设置是否显示“OpenRouter · Jev 判断服务”（加工反馈判断，`/api/jev`）。
- * 桌面端只有内置链路的“模型 → Jev”卡片能配这项；官方链路没有“模型”标签、自建链路的“模型”标签也没有这张卡片，
+ * 桌面端只有内置链路的“模型 → Jev”卡片能配这项；官方链路没有“模型”标签，
  * 所以除内置链路外都在偏好设置里保留入口（2026-11-15 用户决定）。没有语音中心的网页环境一直显示；
  * 链路还没读到（null）时先不显示，避免内置链路下闪一下。
  */
@@ -241,7 +238,8 @@ export function preferencesShowJev({ hasVoiceCenter, voiceMode }) {
   return voiceMode != null && voiceMode !== "builtin";
 }
 
-export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建服务端", builtin: "MOSS 内置服务" };
+/** 语音链路名称（2026-11-17 删除自建服务端链路，只剩这两条）。 */
+export const VOICE_MODE_LABEL = { official: "官方小智", builtin: "MOSS 内置服务" };
 
 /**
  * 链路与服务端设置拆成独立保存的分组：每组只提交自己的字段（后端按字段合并，见 center.rs save_settings）。
@@ -249,19 +247,12 @@ export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建
  */
 export const SETTINGS_GROUPS = {
   official: { mode: "official", title: "官方接入点", keys: ["official_mcp_endpoint"], secret: ["official_mcp_endpoint"] },
-  selfHostedServer: { mode: "self_hosted", title: "自建服务端程序", keys: ["server_dir", "python", "args", "server_port"], secret: [], advanced: ["args"] },
-  selfHostedEndpoint: {
-    mode: "self_hosted",
-    title: "自建接入点",
-    keys: ["self_hosted_mcp_endpoint", "endpoint_health_url"],
-    secret: ["self_hosted_mcp_endpoint", "endpoint_health_url"],
-  },
   builtinPorts: { mode: "builtin", title: "内置服务端口", keys: ["builtin_ws_port", "builtin_http_port"], secret: [] },
   // n71（2026-11-08）：常连模式（MQTT + 加密 UDP），默认关
   builtinMqtt: { mode: "builtin", title: "常连模式（实验）", keys: ["builtin_mqtt_enabled", "builtin_mqtt_port", "builtin_udp_port"], secret: [] },
 };
 
-const PORT_KEYS = new Set(["server_port", "builtin_ws_port", "builtin_http_port", "builtin_mqtt_port", "builtin_udp_port"]);
+const PORT_KEYS = new Set(["builtin_ws_port", "builtin_http_port", "builtin_mqtt_port", "builtin_udp_port"]);
 const BOOL_KEYS = new Set(["builtin_mqtt_enabled"]);
 
 /** 表单值与已保存值逐项比较（都按去首尾空白的字符串比较）；`keys` 缺省为两边字段的并集。 */
@@ -274,13 +265,10 @@ export function formDirty(baseline, form, keys) {
  * 设置分组保存后按钮旁的生效说明。`reconnected` 取自后端返回（center.rs save_settings），
  * 只在真的重新发起了连接时才说“正在重新连接”；是否连上看页面顶部的连接状态。
  */
-export function settingsSaveEffect(group, mode, reconnected) {
-  if (group === "selfHostedServer") return "下次启动服务端时生效";
+export function settingsSaveEffect(group, reconnected) {
   if (group === "builtinPorts") return "重启内置服务后生效";
   if (group === "builtinMqtt") return "重启内置服务后生效；小智要再重启一次才会换连接方式";
-  if (reconnected) return group === "official" ? "正在重新连接小智" : "正在重新连接自建接入点";
-  if (group === "official") return mode === "self_hosted" ? "切回官方链路时使用" : "接入点未变，没有重新连接";
-  return mode === "self_hosted" ? "接入点未变，没有重新连接" : "切到自建链路时使用";
+  return reconnected ? "正在重新连接小智" : "接入点未变，没有重新连接";
 }
 
 /** 某个设置分组是否有未保存的改动。 */

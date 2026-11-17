@@ -20,7 +20,7 @@
 | `crates/moss-xiaozhi-proto` | 小智设备协议：消息、音频帧、设备 token、OTA |
 | `crates/moss-voice-server` | 内置语音服务：OTA / WebSocket、设备允许、会话、插件（仅桌面） |
 | `crates/moss-voice-providers` | ASR / LLM / TTS 提供方（OpenAI 兼容、本地模型、豆包流式） |
-| `crates/moss-voice` | 语音中心设置、外部 xiaozhi-server 进程管理与模型配置（仅桌面） |
+| `crates/moss-voice` | 语音中心设置与链路切换（官方 / 内置）、内置服务的模型配置与本地模型管理（仅桌面） |
 | `crates/moss-voice-local-proto` | 与本地模型 helper 的帧协议 |
 | `crates/moss-mcp-client` | 第三方 MCP 客户端（stdio / Streamable HTTP），默认拒绝 Ask |
 | `apps/moss-host` | 命令行宿主 `serve` / `migrate` |
@@ -29,7 +29,7 @@
 | `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端；`prototypes/` 已定稿的静态设计原型（演示数据，不参与构建） |
 | `tests/golden/` | 黄金样本；`mcp_tools.json` 被 `laser-mcp` 编译期嵌入 |
 | `tests/fixtures/` | 字体（编译期嵌入）与示例图片 |
-| `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成、上游 xiaozhi-server 配置离线核验等开发工具 |
+| `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成等开发工具 |
 | `scripts/voice-helper/` | 带语音 helper 的专用安装包构建、包内容核查、原生依赖许可审计与源码收集（NV18） |
 | `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
 | `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |

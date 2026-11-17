@@ -106,7 +106,7 @@ pub struct ApiService {
     /// 局域网扫描时等每台设备回应的时限（默认 1.5 秒；收齐回应即返回）
     discovery_reply_timeout: std::time::Duration,
     /// 严格模式（`MOSS_FUSION_STRICT`，技术书 §6.2）：开启后 R3 动作需要桌面会话或审批授权。
-    /// 语音中心切换链路时可在运行中改变（自建模式必须开启），因此用原子量。
+    /// 语音中心的严格模式开关可在运行中改变（n27），因此用原子量。
     strict_mode: std::sync::atomic::AtomicBool,
     /// 桌面审批服务（有本地数据库时可用）。
     approvals: Option<std::sync::Arc<approval::ApprovalService>>,

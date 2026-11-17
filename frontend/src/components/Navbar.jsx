@@ -39,8 +39,7 @@ export function Navbar({
 }) {
   const page = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
-  const pillClass =
-    mcpPill.key === "connected" && mcpPill.link === "自建" ? "ob-pill--ok" : MCP_PILL_CLASS[mcpPill.key];
+  const pillClass = MCP_PILL_CLASS[mcpPill.key];
   const hardware = hardwarePillView(connectionStatus);
   const headerRef = useRef(null);
 

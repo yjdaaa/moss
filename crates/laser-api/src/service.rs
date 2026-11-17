@@ -80,7 +80,7 @@ impl ApiService {
         self.strict_mode.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// 运行中切换严格模式（语音中心切到自建链路时开启，切回官方时恢复 `.env` 的设置，技术书 §9.4.2）。
+    /// 运行中切换严格模式（语音中心的严格模式开关，写 `.env` 后即时生效，n27）。
     pub fn set_strict_mode(&self, strict: bool) {
         self.strict_mode
             .store(strict, std::sync::atomic::Ordering::SeqCst);

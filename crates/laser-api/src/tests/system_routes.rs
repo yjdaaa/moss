@@ -283,7 +283,8 @@ fn system_info_tools_count_matches_actual_catalog() {
 }
 
 /// 技术书 §9.4.6 / A-68：语音中心只以桌面端 Tauri 命令提供，HTTP 后端（含 `moss-host serve`
-/// 与 Android）没有 `/v1/voice/*`；自建模式下顶栏读取语音中心写入的设备会话数（§9.5.3）。
+/// 与 Android）没有 `/v1/voice/*`；内置链路下顶栏读取内置服务写入的设备会话数（§9.5.3）。
+/// 2026-11-17 删除的自建链路：遗留的 `self_hosted` 按内置链路报告。
 #[test]
 fn voice_routes_are_not_served_over_http_and_system_info_reads_sessions() {
     let temp = tempfile::tempdir().unwrap();
@@ -309,7 +310,7 @@ fn voice_routes_are_not_served_over_http_and_system_info_reads_sessions() {
         &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
     );
     laser_contracts::global_voice_telemetry().set_device_sessions(None);
-    assert_eq!(value["result"]["voice"]["mode"], "self_hosted");
+    assert_eq!(value["result"]["voice"]["mode"], "builtin");
     assert_eq!(value["result"]["voice"]["device_sessions"], 0);
     // 内置链路（NV5）：会话数来自内置语音服务
     std::fs::write(
@@ -327,7 +328,7 @@ fn voice_routes_are_not_served_over_http_and_system_info_reads_sessions() {
     assert_eq!(builtin["result"]["voice"]["device_sessions"], 2);
     assert_eq!(builtin["result"]["voice"]["phase"], "speaking");
     assert_eq!(builtin["result"]["voice"]["level"], 76);
-    // 未知（未配置健康检查或查询失败）时为 null，不猜
+    // 未知（内置服务尚未上报）时为 null，不猜
     let value = parse_json_response(
         &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
     );

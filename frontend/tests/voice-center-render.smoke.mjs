@@ -28,12 +28,10 @@ try {
   const fixture = {
     voice_status: {
       // 内置链路：音乐卡等内置子卡片与 n69 的设备 / 副屏预览分组都会渲染（官方链路下音乐卡本来就不出现，旧断言永远不成立）
-      mode: "builtin", settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000,
-        builtin_ws_port: 8000, builtin_http_port: 8003 },
-      server: { state: "stopped", owned: false }, server_config: { exists: false, full_module: false },
-      endpoint: { health: null }, device: { state: "unknown" }, bridge: { connected: false },
-      strict: { enabled: true, locked: false, from_env: false }, gateway: { enabled: false },
-      models: {}, mcp: { endpoints: [], tools: [], max_extra_endpoints: 4 },
+      mode: "builtin", settings: { builtin_ws_port: 8000, builtin_http_port: 8003 },
+      bridge: { connected: false },
+      strict: { enabled: true, from_env: false }, gateway: { enabled: false },
+      mcp: { endpoints: [], tools: [], max_extra_endpoints: 4 },
     },
     voice_builtin_status: {
       running: false, mode: "echo", link_mode: "builtin", ws_port: 8000,

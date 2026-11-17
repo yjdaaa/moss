@@ -24,13 +24,6 @@ fn main() {
         "voice_save_settings",
         "voice_mode_changes",
         "voice_set_mode",
-        "voice_server_start",
-        "voice_server_stop",
-        "voice_server_restart",
-        "voice_server_log",
-        "voice_models_test",
-        "voice_models_save",
-        "voice_detect_python",
         "voice_strict_set",
         // 内置语音服务（内置语音技术书 NV1）
         "voice_builtin_status",

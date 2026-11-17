@@ -87,7 +87,7 @@ pub(super) struct LocalLayaRunner {
     pub(super) starting_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) cancelling_model: Option<String>,
     pub(super) child: Option<std::process::Child>,
-    pub(super) job: Option<moss_voice::supervisor::JobHandle>,
+    pub(super) job: Option<moss_voice::job::JobHandle>,
     pub(super) onejev: Option<moss_voice::onejev::OneJevGateway>,
     pub(super) generation: u64,
     /// 最近一次启动失败（模型编号、原因），供状态接口说明；开始新的启动或启动成功时清除（2026-11-07）。
@@ -815,7 +815,7 @@ impl BuiltinVoice {
                     let child = cmd
                         .spawn()
                         .map_err(|e| format!("启动本地 Laya 服务失败：{e}"))?;
-                    runner.job = moss_voice::supervisor::JobHandle::for_child(&child);
+                    runner.job = moss_voice::job::JobHandle::for_child(&child);
                     runner.child = Some(child);
                     runner.active_model = Some(canonical_id.to_owned());
                     runner.last_failure = None;

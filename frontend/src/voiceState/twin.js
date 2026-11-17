@@ -1,8 +1,8 @@
-// MOSS 全息机械眼与三链路语音孪生的视图模型。
+// MOSS 全息机械眼与语音孪生的视图模型（官方 / 内置两条链路）。
 
 import { maskLogLine } from "./diagnostics.js";
 
-// ---------- MOSS 全息机械眼与三链路语音孪生（2026-11-03） ----------
+// ---------- MOSS 全息机械眼与语音孪生（2026-11-03；2026-11-17 删除自建链路） ----------
 
 const SYMMETRIC_WAVE_WEIGHTS = [0.34, 0.50, 0.68, 0.84, 0.94, 1.0, 1.0, 0.94, 0.84, 0.68, 0.50, 0.34];
 const THINKING_SCAN_BARS = [22, 34, 48, 62, 48, 34, 34, 48, 62, 48, 34, 22];
@@ -135,20 +135,19 @@ function pickPrimarySession(sessions) {
 }
 
 /**
- * 语音中心顶部「MOSS 全息语音孪生舱」三链路自适应视图（确定性纯函数）。
+ * 语音中心顶部「MOSS 全息语音孪生舱」按链路自适应的视图（确定性纯函数）。
  * - `builtin`：同步 60ms 真实 PCM 振幅 `level`、会话阶段、识别字数、已播句数与工具调用；
- * - `self_hosted`：同步自建 `xiaozhi-server` 进程状态、健康检查会话数、脱敏日志与 MCP 工具脉冲；
  * - `official`：同步官方云端 MCP 握手状态、累计 JSON-RPC 消息帧数与远端工具调用脉冲。
+ * 其他取值（含 2026-11-17 删除的 `self_hosted`）按官方链路显示。
  */
 export function mossEyeTwinView({
   mode = "official",
   status = null,
   builtinStatus = null,
   mcpStatus = null,
-  logLines = [],
   approvalCount = 0,
 } = {}) {
-  const normalizedMode = mode === "builtin" || mode === "self_hosted" || mode === "official" ? mode : "official";
+  const normalizedMode = mode === "builtin" ? "builtin" : "official";
   const approvals = finiteNonNegativeInt(approvalCount, 0);
   const approvalAlert = approvals > 0;
 
@@ -226,77 +225,6 @@ export function mossEyeTwinView({
         { label: "实时振幅", value: activeAudio ? `${level}%` : "0% (静音)" },
         { label: "本轮识别", value: utteranceChars > 0 ? `${utteranceChars} 字` : "—" },
         { label: "播报/路由", value: progressValue },
-      ],
-    };
-  }
-
-  if (normalizedMode === "self_hosted") {
-    const serverState = status?.server?.state || "stopped";
-    const serverRunning = serverState === "running";
-    const serverExited = serverState === "exited";
-    const bridgeConnected = Boolean(status?.bridge?.connected ?? mcpStatus?.connected);
-    const healthSessions = finiteNonNegativeInt(status?.endpoint?.health?.robot_connections, null);
-    const mcpTools = Array.isArray(status?.mcp?.tools) ? status.mcp.tools : [];
-    const latestCalledTool = [...mcpTools].filter((t) => finiteNonNegativeInt(t?.calls, 0) > 0).sort((a, b) => (Number(b?.last_at) || 0) - (Number(a?.last_at) || 0))[0];
-    const rawLastRequest = String(mcpStatus?.last_request || (latestCalledTool ? `tools/call: ${latestCalledTool.name}` : "")).trim();
-    const lastRequest = sanitizeTwinLine(rawLastRequest, 72);
-    const sanitizedLines = (Array.isArray(logLines) ? logLines : [])
-      .map((line) => sanitizeTwinLine(line))
-      .filter(Boolean);
-    const lastLog = sanitizedLines.length > 0 ? sanitizedLines[sanitizedLines.length - 1] : "";
-    const hasToolCall = lastRequest.startsWith("tools/call:");
-    const toolName = hasToolCall ? sanitizeIdentifier(lastRequest.slice("tools/call:".length), 48) : "";
-
-    let visualState = "offline";
-    if (approvalAlert) {
-      visualState = "alert";
-    } else if (serverRunning || bridgeConnected) {
-      visualState = hasToolCall ? "pulse" : "idle";
-    }
-
-    let headline = "自建服务端未运行 · 桥接休眠";
-    if (approvalAlert) {
-      headline = `自建链路发起受控操作 · ${approvals} 项待桌面批准`;
-    } else if (serverExited) {
-      headline = `自建服务端意外退出 (退出码 ${status?.server?.exit_code ?? "未知"})`;
-    } else if (hasToolCall && (serverRunning || bridgeConnected)) {
-      headline = `正在响应自建服务指令 · ${toolName}`;
-    } else if (serverRunning && healthSessions !== null && healthSessions > 0) {
-      headline = `自建服务运行中 · ${healthSessions} 台小智会话在线`;
-    } else if (serverRunning) {
-      headline = "自建服务运行中 · 监听进程日志与 MCP 信号";
-    } else if (bridgeConnected) {
-      headline = "自建 MCP 桥已连接 · 等待服务端会话";
-    }
-
-    const recentMcpEvent = Array.isArray(mcpStatus?.recent_events) && mcpStatus.recent_events[0]
-      ? sanitizeTwinLine(mcpStatus.recent_events[0])
-      : "";
-    const subline = lastLog
-      ? `最新日志：${lastLog}`
-      : recentMcpEvent || "音频流由外部 xiaozhi-server 处理；此处同步进程脱敏日志与 MCP 工具脉冲（不伪造音频分贝）";
-
-    const pid = finiteNonNegativeInt(status?.server?.pid, null);
-    return {
-      mode: "self_hosted",
-      visualState,
-      sourceBadge: "LOCAL SERVER BRIDGE",
-      sourceLabel: "自建服务 · 进程日志与 MCP 桥接",
-      level: 0,
-      approvalAlert,
-      approvalCount: approvals,
-      activePolling: false,
-      headline,
-      subline,
-      bars: buildTwinWaveBars(visualState, 0),
-      metrics: [
-        {
-          label: "服务端进程",
-          value: serverRunning ? (pid !== null ? `运行中 (PID ${pid})` : "运行中") : serverExited ? "异常退出" : "未运行",
-        },
-        { label: "MCP 桥接", value: bridgeConnected ? "已连接" : "未连接" },
-        { label: "设备会话", value: healthSessions !== null ? `${healthSessions} 台` : "未配置健康检查" },
-        { label: "最近指令", value: lastRequest || "尚无工具调用" },
       ],
     };
   }
@@ -541,7 +469,7 @@ export function globalEyeSensorView({
         jobProgress,
         level: 0,
         shortBadge: "硬件已连接",
-        label: `激光硬件已就绪 · ${mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接"}`,
+        label: "激光硬件已就绪 · 小智 MCP 桥未连接",
       };
     }
     return {
@@ -550,7 +478,7 @@ export function globalEyeSensorView({
       jobProgress,
       level: 0,
       shortBadge: hardwareState === "fault" ? "硬件未连接" : "未连接 · 待机",
-      label: withHwSuffix(mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接"),
+      label: withHwSuffix("小智 MCP 桥未连接"),
     };
   }
   return {
@@ -559,6 +487,6 @@ export function globalEyeSensorView({
     jobProgress,
     level: 0,
     shortBadge: hardwareState === "online" ? "硬件·小智已连" : "小智已连接",
-    label: withHwSuffix(mode === "self_hosted" ? "自建 MCP 桥已连接" : "官方小智 MCP 桥已连接"),
+    label: withHwSuffix("官方小智 MCP 桥已连接"),
   };
 }
