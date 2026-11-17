@@ -6,7 +6,8 @@
 //! - 直线 / 箭头（`line` / `arrow`）按点连线，首尾相接的多边形算闭合；箭头补两笔箭头头部；
 //! - 矩形 / 菱形 / 椭圆按形状描边（圆角按直角处理）；元素的旋转角一并换算；
 //! - 有填充色（`backgroundColor` 不透明）的闭合图形用矢量排线填满；
-//! - 文字元素用系统字体转成字形轮廓，填满并描边（画板手写体换成系统字体，字形会不同）；
+//! - 文字元素用系统字体转成字形轮廓，先焊接（交叠笔画合成一笔，2026-11-17 技术书 r44），再填满并描边
+//!   （画板手写体换成系统字体，字形会不同）；
 //! - 插入的图片矢量刻不了：返回 `has_image`，由调用方改用光栅。
 
 use laser_contracts::geometry::Point;
@@ -332,6 +333,10 @@ pub(crate) fn sketch_from_scene(
                     },
                 )
                 .map_err(|error| format!("画板文字转轮廓失败：{error}"))?;
+                // 焊接（2026-11-17 技术书 r44，与文字任务相同）：交叠的笔画合成一笔，描边时交叠处不多一道线；
+                // 并集与缩放、旋转无关，在字形坐标里做即可
+                let (welded, _) = laser_core::engine::weld_contours(&layout.paths)
+                    .map_err(|error| format!("画板文字合并笔画失败：{error}"))?;
                 // 字形块放进文字元素的框：等比缩放、左上对齐
                 let scale = if layout.width > 0.0 && layout.height > 0.0 && w > 0.0 && h > 0.0 {
                     (w / layout.width).min(h / layout.height)
@@ -339,8 +344,7 @@ pub(crate) fn sketch_from_scene(
                     1.0
                 };
                 let center = (x + w / 2.0, y + h / 2.0);
-                let glyphs: Vec<Vec<Point>> = layout
-                    .paths
+                let glyphs: Vec<Vec<Point>> = welded
                     .iter()
                     .map(|path| {
                         let placed = path
@@ -405,6 +409,26 @@ mod tests {
         .unwrap();
         assert!((min_x - 0.0).abs() < 1e-9 && (max_x - 10.0).abs() < 1e-9);
         assert!((min_y - 0.0).abs() < 1e-9 && (max_y - 10.0).abs() < 1e-9);
+    }
+
+    /// 画板文字转轮廓后先焊接（r44）：输出首尾点相同的闭合轮廓，填满与描边用同一组焊接后的轮廓。
+    #[test]
+    fn text_elements_become_welded_glyph_contours() {
+        let font = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        ));
+        let scene = json!([
+            {"type": "text", "x": 0, "y": 0, "width": 40, "height": 20, "text": "AB", "fontSize": 20,
+             "strokeColor": "#1e1e1e", "strokeWidth": 1},
+        ]);
+        let sketch = sketch_from_scene(&scene, &|_| Some(font.clone())).unwrap();
+        assert!(!sketch.closed.is_empty());
+        for ring in &sketch.closed {
+            assert_eq!(ring.first(), ring.last(), "焊接输出闭合轮廓");
+        }
+        assert_eq!(sketch.filled_text.len(), 1);
+        assert_eq!(sketch.filled_text[0], sketch.closed);
     }
 
     #[test]
