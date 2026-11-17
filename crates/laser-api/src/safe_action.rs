@@ -414,7 +414,8 @@ impl ApiService {
 
     /// 低功率点射（2026-11-16，对齐 LightBurn “Fire”）：没有红光指示的机器在两点对位时，
     /// 以极低功率原地打一个点看清激光头位置。只给工作台 / 画板界面的人手动用：
-    /// 语音、小智 MCP、网关与审批重放一律 403；严格模式下只有桌面会话可用（点射不进审批队列）。
+    /// 语音、小智 MCP、网关与审批重放一律 403；启用了桌面会话时不带会话的本机回环进程 403；
+    /// 严格模式下只有桌面会话可用（点射不进审批队列）。
     /// 功率 S1..=10（0~1000 标尺，下发时按 `$30` 换算）、时长 10..=200 ms，越界拒绝不截断；
     /// 必须 `confirmed=true`。走与走边框相同的设备占用、握手、Idle 预检与活动作业登记（`pointer-…`），
     /// 关光行 `M5 S0` 与开光行一起进入控制器缓冲区；失败或取消时补发实时 0x18。
@@ -434,6 +435,18 @@ impl ApiService {
                 failure(
                     "点射只能在工作台或画板界面由人手动操作，语音与 AI 工具不能出光",
                     Some(serde_json::json!({"error_code": "pointer_fire_not_allowed"})),
+                ),
+            );
+        }
+        // 桌面版里工作台 / 画板总以桌面会话来访：不带会话的本机进程不能出光（与确认停机、设置一致）
+        if self.desktop_session.get().is_some()
+            && matches!(ctx, laser_contracts::CallerContext::Loopback)
+        {
+            return http_json(
+                403,
+                failure(
+                    "点射只能在 MOSS 桌面端的工作台或画板里操作",
+                    Some(serde_json::json!({"error_code": "desktop_session_required"})),
                 ),
             );
         }

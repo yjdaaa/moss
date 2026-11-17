@@ -43,7 +43,12 @@ test("填充预设：默认即均衡，套用后只改预设字段，并进入�
   );
   // 手动改了预设字段 → 自定义
   assert.equal(detectFillPreset({ ...fine, bidirectional: true }), CUSTOM_PRESET);
-  assert.equal(detectFillPreset({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false }), CUSTOM_PRESET);
+  // 过扫描不属于预设（r43）：材料库带出的固定过扫描在切换预设后原样保留，仍识别为对应预设
+  const calibrated = { ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "3" };
+  assert.equal(detectFillPreset(calibrated), "balanced");
+  const calibratedFine = applyFillPreset(calibrated, "fine");
+  assert.equal(detectFillPreset(calibratedFine), "fine");
+  assert.equal(fillSettingsPayload(calibratedFine).fill_options.overscan_mm, 3);
   // 未知预设不改设置；三个预设互不相同
   assert.deepEqual(applyFillPreset(DEFAULT_FILL_SETTINGS, "bogus"), { ...DEFAULT_FILL_SETTINGS });
   const keys = Object.values(FILL_QUALITY_PRESETS).map((preset) => JSON.stringify(preset));

@@ -432,7 +432,7 @@ Rust 实现：只生成不出光。区间字段缺省或为 -1 时以材料推�
 
 **材料测试 / 线距测试（2026-11-16，用户决定对齐 LightBurn，“直接一起修改完在git推送”）**：`laser_core::material::material_test_cells` 按 `MaterialTestSpec` 生成单元格（`cell_number` 仍按行优先，`select-cell` 不变），`risk_order` 按单位面积能量 功率 × 遍数 ÷（速度 × 线距）从低到高排加工顺序（高速、低功率、宽线距、少遍数先刻），`layout_material_test` 在网格上方刻列值与列标题、左侧刻行值与竖排行标题（只标多于 1 格的方向），整体以激光头位置为左下角、坐标全 ≥ 0；`build_material_test_gcode` 先刻标注再逐格加工，单元格刀路写法与旧版相同，刀路超过 200 万行 400。`run_order=grid, labels=false` 时切割 / 轮廓矩阵的 G-code 与旧版逐字节相同；光栅矩阵的填充线距改为材料推荐值（旧版固定 0.2 mm）。线距测试是一排 8 mm 填充方块（默认 0.08 ~ 0.16 mm、9 块），每块上方刻线距值，目标是相邻扫描线刚好相接。确认、存储、发送门禁与普通矩阵完全相同。
 
-**首次标定向导的测试图案（r40，2026-11-16，`laser_core::wizard_patterns`）**：与矩阵一样只生成、落盘、冻结 SHA-256、存为 calibration 记录（`wizard_pattern:true`、`next_actions:["send"]`、`rows=1`、`cells[]` 带 `overscan_mm` / `scan_offset_mm` / `x_label`、`square_mm`、`pattern{…, hint}`、`labels.enabled=false`），发送照常走 §3.8 的确认与完整门禁；`select-cell` 对这三种记录返回 400 `pattern_not_selectable`（结果由用户量好后在向导里填写）。
+**首次标定向导的测试图案（r40，2026-11-16，`laser_core::wizard_patterns`）**：与矩阵一样只生成、落盘、冻结 SHA-256、存为 calibration 记录（`wizard_pattern:true`、`next_actions:["send"]`、`rows=1`、`cells[]` 带 `overscan_mm` / `scan_offset_mm` / `x_label`、`square_mm`、`pattern{…, hint}`、`labels.enabled=false`），发送照常走 §3.8 的确认与完整门禁；`select-cell` 对这三种记录返回 400 `pattern_not_selectable`（结果由用户量好后在向导里填写）。记录另含 `matched_thickness_mm` 与如实的 `surface_entry`（2026-11-17 技术书 r43）：标明测试参数取自哪个材料库条目（雕刻在所选厚度没有光栅参数时回退到“表面通用”或最近厚度；切缝只认同厚度），向导的 `save_layer_options` 写回同一条目。
 
 | test_type | 加工内容 | 参数来源 | 用户量什么、存到哪 |
 |---|---|---|---|
@@ -546,7 +546,7 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 
 `power` / `duration_ms` 必须是范围内的 JSON 整数，越界、小数、字符串、溢出一律在连接设备之前 400 `pointer_fire_params_invalid`，不截断；请求里的 `x`、`y`、`feed_rate` 等运动字段被忽略，激光头不移动。
 
-调用方：只接受工作台身份（桌面会话、本机回环、局域网配对）。内置语音、小智接入点 / MCP 桥、网关与审批重放（`CallerContext::Voice` / `McpBridge` / `Gateway` / `Approval`）**不论严格模式开关一律 403 `pointer_fire_not_allowed`**，不连接设备；`ToolCatalog` 与 `laser_safe_action_tool` 都没有点射动作。严格模式开启时只有桌面会话放行，本机回环与局域网配对 403 `strict_mode_blocked`（尽力记审计，类别记为 `safe_action`），**不创建审批**——事后批准的一次点射对“此刻对准标记”没有意义。
+调用方：只接受工作台身份（桌面会话、本机回环、局域网配对）。内置语音、小智接入点 / MCP 桥、网关与审批重放（`CallerContext::Voice` / `McpBridge` / `Gateway` / `Approval`）**不论严格模式开关一律 403 `pointer_fire_not_allowed`**，不连接设备；`ToolCatalog` 与 `laser_safe_action_tool` 都没有点射动作。启用了桌面会话（桌面版）时，不带会话的本机回环请求不论严格模式开关一律 403 `desktop_session_required`（2026-11-17 技术书 r43，与确认停机、操作员设置一致）。严格模式开启时只有桌面会话放行，本机回环与局域网配对 403 `strict_mode_blocked`（尽力记审计，类别记为 `safe_action`），**不创建审批**——事后批准的一次点射对“此刻对准标记”没有意义。
 
 下发的 G-code（`safe_action::pointer_fire_lines`，以 S10、100 ms 为例）：
 

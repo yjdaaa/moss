@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 审查修正：标定向导结果写回参数来源条目，质量预设不再冲掉固定过扫描，桌面版点射只认桌面会话（2026-11-17）
+
+- **现象**：审查近期改动（用户 2026-11-17“你审查一下最近的修改吧”）发现：① 所选厚度没有光栅参数时，向导的扫描偏移 / 过扫描测试参数回退到“表面通用”或最近厚度条目，保存过扫描却只找所选厚度，报“材料库里还没有这一档参数”；② 点任一质量预设都会把过扫描改回“自动”，向导存进材料库的固定过扫描被悄悄丢掉；③ 桌面版里不带桌面会话的本机进程在严格模式关闭时也能调点射出光；④ 材料库厚度键不是规范写法（如 `3.0`）时，光栅选格成功后向导的线距 / 矩阵步骤仍显示未完成；⑤ 画板对位请求返回前重新生成了预览时，迟到的对位结果会顶替新任务；⑥ `scripts/verify.mjs` 在 Windows 上不检查并发构建进程。另修正 `a88b081` 去掉切割后处理自检失败路径遗留的 `eprintln!` 调试输出（当时未记条目）。
+- **根因与修复**：① 测试图案记录新增 `matched_thickness_mm`，`surface_entry` 如实写参数来源（原恒为 false），前端 `patternSaveTarget` 按它写回同一条目并在提示里说明；② `FILL_QUALITY_PRESETS` 去掉 `overscanAuto`，过扫描与角度、偏移一样不受预设影响；③ `run_pointer_fire` 在启用桌面会话时拒绝 `CallerContext::Loopback`（403 `desktop_session_required`，与确认停机、操作员设置一致）；④ 进度键改用材料库原始厚度键；⑤ `adoptRegistered` 以 ref 记录当前原任务（当前任务或它的 `registered_from`）传给 `adoptRegisteredDrawRecord` 核对；⑥ Windows 用 `Get-CimInstance Win32_Process` 列命令行，识别正则兼容反斜杠、引号与 `.exe`。契约与安全文档同步，技术书 r43。
+- **验证**：`laser-api` 新增 2 项（向导图案记录参数来源并可按它保存、桌面会话下无会话回环点射 403）；前端新增 / 改写 3 项（`patternSaveTarget`、预设保留固定过扫描、画板对位来源核对源码断言）；`scripts/tests` 新增 Windows 命令行识别 1 项。Windows 下的进程检查只有单元测试，未在 Windows 上实跑；点射与向导均未实机验证。
+- **关联**：`crates/laser-api/src/{material_lab_patterns,safe_action}.rs`、`crates/laser-core/src/cut/postprocess.rs`、`frontend/src/{qualityPresets,calibrationWizard}.js`、`frontend/src/components/CalibrationWizard.jsx`、`frontend/src/pages/{DrawPage,MaterialLabPage}.jsx`、`scripts/verify.mjs`。
+
 ### 按职责拆分 G-code、矢量规划、切割、预览生成、材料实验室与三个前端大页面（行为不变，2026-11-16）
 
 - **现象**：`laser-core` 的 `gcode.rs`（2598 行）、`vector_plan.rs`（1403 行）、`cut.rs`（1290 行），`laser-api` 的 `generation.rs`（1867 行）、`material_lab.rs`（1181 行），以及前端 `HomePage.jsx`（2190 行）、`DrawPage.jsx`（1853 行）、`MaterialLabPage.jsx`（1715 行）各自混着多块职责，改一处要在两三千行里找，评审也难聚焦（用户 2026-11-16“代码健康也完成一下吧”）。

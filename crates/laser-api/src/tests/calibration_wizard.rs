@@ -368,6 +368,61 @@ fn wizard_patterns_are_generated_as_sendable_calibration_records_but_not_selecta
     assert_eq!(status, 400);
 }
 
+/// 所选厚度没有光栅参数时，测试图案的参数回退到最近厚度 / “表面通用”条目；记录标明取自哪一条，
+/// 向导按它写回（2026-11-17 审查修复，技术书 r43），写到所选厚度会因条目不存在而失败。
+#[test]
+fn wizard_pattern_records_the_library_entry_its_params_came_from() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = wizard_service(&temp);
+    let overscan = |thickness: f64| {
+        post_json(
+            &service,
+            "/api/material-lab/preview",
+            &serde_json::json!({"material": "椴木", "thickness_mm": thickness, "test_type": "overscan"}),
+        )
+    };
+    let exact = overscan(3.0);
+    assert_eq!(exact["result"]["surface_entry"], false, "{exact}");
+    assert_eq!(exact["result"]["matched_thickness_mm"], 3.0, "{exact}");
+
+    let nearest = overscan(7.25);
+    assert_eq!(nearest["success"], true, "{nearest}");
+    assert_eq!(nearest["result"]["surface_entry"], false, "{nearest}");
+    let matched = nearest["result"]["matched_thickness_mm"].as_f64().unwrap();
+    assert!((matched - 7.25).abs() > 1e-9, "{nearest}");
+    let save = |target: serde_json::Value| {
+        let mut body = serde_json::json!({"action": "save_layer_options", "material": "椴木",
+            "laser_mode": "engrave", "engraving_mode": "raster", "merge": true,
+            "fill_options": {"overscan_mm": 3}});
+        body.as_object_mut()
+            .unwrap()
+            .extend(target.as_object().unwrap().clone());
+        post_status(&service, "/api/material-lab/manage", &body)
+    };
+    let (status, missing) = save(serde_json::json!({"thickness_mm": 7.25}));
+    assert_eq!(status, 400);
+    assert_eq!(missing["detail"]["error_code"], "material_entry_missing");
+    let (status, saved) = save(serde_json::json!({"thickness_mm": matched}));
+    assert_eq!(status, 200, "{saved}");
+
+    // 有“表面通用”光栅条目时，没有该厚度光栅参数的请求回退到它
+    let surface = post_json(
+        &service,
+        "/api/material-lab/manage",
+        &serde_json::json!({"action": "save", "material": "椴木", "surface": true,
+            "laser_mode": "engrave", "engraving_mode": "raster", "laser_max_power": 300,
+            "feed_rate": 1500, "passes": 1, "pixel_size_mm": 0.1}),
+    );
+    assert_eq!(surface["success"], true, "{surface}");
+    let from_surface = overscan(7.25);
+    assert_eq!(
+        from_surface["result"]["surface_entry"], true,
+        "{from_surface}"
+    );
+    let (status, saved) = save(serde_json::json!({"surface": true}));
+    assert_eq!(status, 200, "{saved}");
+}
+
 #[test]
 fn time_calibration_math_and_exclusion_rules() {
     let ok = JobTiming {

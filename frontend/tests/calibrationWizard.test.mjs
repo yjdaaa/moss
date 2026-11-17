@@ -12,6 +12,7 @@ import {
   mergeScanOffsetTable,
   normalizeWizardState,
   overscanSuggestion,
+  patternSaveTarget,
   readWizardState,
   scanOffsetRowsFromMeasurements,
   stepRecord,
@@ -198,4 +199,20 @@ test("标定向导面板：列出六步、当前步骤展开、只读时不给�
   } finally {
     await server.close();
   }
+});
+
+test("向导结果写回测试参数所在的材料库条目（r43）", () => {
+  assert.deepEqual(patternSaveTarget({ thickness_mm: 3, matched_thickness_mm: 3, surface_entry: false }, "3"), {
+    request: { thickness_mm: 3 },
+    note: "",
+  });
+  const nearest = patternSaveTarget({ thickness_mm: 3.2, matched_thickness_mm: 3, surface_entry: false }, "3.2");
+  assert.deepEqual(nearest.request, { thickness_mm: 3 });
+  assert.match(nearest.note, /3mm 条目/);
+  const surface = patternSaveTarget({ thickness_mm: 3, matched_thickness_mm: 3, surface_entry: true }, "3");
+  assert.deepEqual(surface.request, { surface: true });
+  assert.match(surface.note, /表面通用/);
+  // 旧记录没有来源字段：按请求厚度
+  assert.deepEqual(patternSaveTarget({ thickness_mm: 5 }, "5").request, { thickness_mm: 5 });
+  assert.deepEqual(patternSaveTarget(null, "4").request, { thickness_mm: 4 });
 });

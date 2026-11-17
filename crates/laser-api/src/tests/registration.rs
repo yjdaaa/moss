@@ -802,6 +802,34 @@ fn pointer_fire_is_an_active_job_that_emergency_stop_can_find() {
     assert_eq!(service.active_job_count(), 0);
 }
 
+/// 桌面版（启用了桌面会话）里不带会话的本机回环进程不能点射，哪怕严格模式关着；桌面会话照常可用。
+#[test]
+fn pointer_fire_rejects_sessionless_loopback_once_a_desktop_session_exists() {
+    let (service, lines, _) = pointer_service("Idle", "1000", None);
+    service.enable_desktop_session().unwrap();
+    let body = fire_body(serde_json::json!({}));
+    let (status, refused) = post_with_ctx(
+        &service,
+        "/api/device/pointer-fire",
+        &body,
+        laser_contracts::CallerContext::Loopback,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert_eq!(
+        refused["detail"]["error_code"], "desktop_session_required",
+        "{refused}"
+    );
+    assert!(lines.lock().unwrap().is_empty(), "拒绝时不得连接设备");
+    let (status, fired) = post_with_ctx(
+        &service,
+        "/api/device/pointer-fire",
+        &body,
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(status, 200, "{fired}");
+    assert!(gcode_lines(&lines).contains(&"M3 S10".to_owned()));
+}
+
 /// 严格模式下只有桌面会话能点射（不创建审批）；语音、小智 MCP、网关、审批重放不论开关一律拒绝；
 /// `laser_safe_action_tool` 与 MCP 工具清单里都没有点射。
 #[test]

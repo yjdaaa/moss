@@ -275,7 +275,9 @@ impl ApiService {
             "height_mm": round_mm(height_mm),
             "pattern": pattern_note,
             "labels": {"enabled": false},
-            "surface_entry": false,
+            // 测试参数取自哪个材料库条目（可能回退到“表面通用”或最近厚度）：向导保存结果写回同一条目
+            "surface_entry": recommendation.surface,
+            "matched_thickness_mm": recommendation.matched_thickness_mm,
             "gcode_file": gcode_name,
             "gcode_sha256": gcode_sha,
         });

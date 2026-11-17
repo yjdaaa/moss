@@ -239,6 +239,23 @@ export function timeCalibrationSummary(status) {
     .join("；");
 }
 
+/**
+ * 向导结果写回哪个材料库条目：测试图案记录里 `surface_entry` / `matched_thickness_mm` 标明参数取自哪一条
+ * （所选厚度没有光栅参数时回退到“表面通用”或最近厚度），写回同一条；旧记录没有这两项时按请求厚度。
+ * `note` 在写回的条目与所选厚度不同时给出说明。
+ */
+export function patternSaveTarget(pattern, fallbackThickness) {
+  const requested = Number(pattern?.thickness_mm ?? fallbackThickness);
+  if (pattern?.surface_entry === true) {
+    return { request: { surface: true }, note: "（参数来自“表面通用”条目，已存到该条目）" };
+  }
+  const matched = Number(pattern?.matched_thickness_mm);
+  if (Number.isFinite(matched) && matched > 0 && matched !== requested) {
+    return { request: { thickness_mm: matched }, note: `（参数来自 ${matched}mm 条目，已存到该条目）` };
+  }
+  return { request: { thickness_mm: requested }, note: "" };
+}
+
 /** 向导测试图案的预览请求体（`/api/material-lab/preview`）。 */
 export function buildPatternPreviewPayload({ testType, material, thickness, speeds = null, fillOptions = null, motion = null }) {
   if (!["scan_offset", "overscan", "kerf"].includes(testType)) return { error: "未知的测试类型" };

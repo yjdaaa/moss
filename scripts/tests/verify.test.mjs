@@ -69,6 +69,17 @@ test("识别并发构建进程并忽略自身", () => {
   assert.deepEqual(hits.map((h) => h.pid), [1002, 1003]);
 });
 
+test("识别 Windows 风格的带路径、.exe 后缀与引号的构建进程命令行", () => {
+  const ps = [
+    "2001 node scripts/verify.mjs",
+    "2002 \"D:\\toolchain\\.cargo\\bin\\cargo.exe\" test --workspace",
+    "2003 C:\\Windows\\system32\\cmd.exe /d /s /c vite build",
+    "2004 \"C:\\Program Files\\MOSS\\moss-desktop.exe\"",
+    "2005 C:\\tools\\cargo-sweep.exe sweep --time 3",
+  ].join("\r\n");
+  assert.deepEqual(detectActiveBuildProcesses(ps, 2001).map((h) => h.pid), [2002, 2003]);
+});
+
 test("Windows 下将 .cmd 包装为 cmd.exe /d /c，防止 EINVAL", () => {
   assert.deepEqual(buildSpawnSpec("npm.cmd", ["--prefix", "frontend", "run", "lint"], "win32", "C:\\Windows\\System32\\cmd.exe"), {
     cmd: "C:\\Windows\\System32\\cmd.exe",

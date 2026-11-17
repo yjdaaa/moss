@@ -13,6 +13,7 @@ import {
   stepRecord,
   timeCalibrationSummary,
   wizardMaterialKey,
+  patternSaveTarget,
   wizardProgress,
 } from "../calibrationWizard.js";
 import {
@@ -105,16 +106,18 @@ export function CalibrationWizard({
   };
 
   const saveLayer = async (body, okText) => {
-    // 结果写回生成测试时绑定的材料与厚度（之后在左侧换了材料也不会写错条目）
+    // 结果写回生成测试时参数所在的材料库条目（之后在左侧换了材料也不会写错条目）；
+    // 测试参数回退到“表面通用”或最近厚度时，写回的就是那一条
+    const target = patternSaveTarget(pattern, thickness);
     const res = await postJson("/api/material-lab/manage", {
       action: "save_layer_options",
       material: pattern?.material || material,
-      thickness_mm: Number(pattern?.thickness_mm ?? thickness),
+      ...target.request,
       merge: true,
       ...body,
     });
     if (res.ok && res.data?.success) {
-      setNote(okText);
+      setNote(target.note ? `${okText}${target.note}` : okText);
       return true;
     }
     showAlert(res.data?.result || res.error || "保存失败", { title: "保存到材料库失败", tone: "error" });

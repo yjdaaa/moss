@@ -164,6 +164,8 @@ export function DrawPage({ onNavigate }) {
   const materialLoadedOnceRef = useRef(false);
   const materialRefreshGenerationRef = useRef(0);
   const boardStageRef = useRef(null);
+  // 两点对位的原画板任务：当前任务本身，或（已换成对位结果时）它指回的原任务
+  const registrationSourceRef = useRef("");
 
   useEffect(() => () => pollingCleanupRef.current?.(), []);
 
@@ -186,6 +188,9 @@ export function DrawPage({ onNavigate }) {
   useEffect(() => {
     formRef.current = form;
   }, [form]);
+  useEffect(() => {
+    registrationSourceRef.current = result?.result?.registered_from || workflowId || "";
+  }, [result, workflowId]);
 
   // 自动按需持久化修改过的配置键（切页面不再丢失填写；存储受限时静默退回当前会话）
   useEffect(() => {
@@ -915,7 +920,8 @@ export function DrawPage({ onNavigate }) {
   // 两点对位生成的新任务（带画板视图、指回原画板任务）：换成当前任务，画布与参数快照不变，
   // 改了画布或参数照样判为过期；尚未发送，发送仍走本页确认框与重复发送防呆
   function adoptRegistered(record) {
-    const adopted = adoptRegisteredDrawRecord(record);
+    // 对位请求返回前重新生成了画板预览时，迟到的结果指向旧任务，不能顶替新任务
+    const adopted = adoptRegisteredDrawRecord(record, registrationSourceRef.current);
     if (adopted.error) {
       setStatus(adopted.error);
       void showAlert(adopted.error, { title: "对位结果不能用于画板", tone: "warning" });

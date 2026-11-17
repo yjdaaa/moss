@@ -149,7 +149,12 @@ test("点射默认关闭、先确认再请求；画板复用对位面板并单�
   assert.match(draw, /idPrefix="draw-reg"/);
   assert.match(draw, /onRegistered=\{adoptRegistered\}/);
   const adopt = draw.slice(draw.indexOf("function adoptRegistered(record)"), draw.indexOf("async function workflowAction("));
-  assert.match(adopt, /adoptRegisteredDrawRecord\(record\)/);
+  assert.match(
+    adopt,
+    /adoptRegisteredDrawRecord\(record, registrationSourceRef\.current\)/,
+    "迟到的对位结果须核对是否来自当前画板任务",
+  );
+  assert.match(draw, /registrationSourceRef\.current = result\?\.result\?\.registered_from \|\| workflowId/);
   assert.match(adopt, /applyPreviewFingerprintSuccess/, "对位结果换指纹，重复发送防呆照常");
   assert.doesNotMatch(adopt, /confirm_send/, "采用对位结果不得顺带发送");
 });

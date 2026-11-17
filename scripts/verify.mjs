@@ -124,7 +124,8 @@ export function planVerification(changedFiles, options = {}) {
 /** 解析 ps 输出中的并发构建/测试进程，排除当前进程及常见父级 shell/检测命令。 */
 export function detectActiveBuildProcesses(psOutput, selfPid = process.pid) {
   const hits = [];
-  const toolRe = /(?:^|[\s/])(cargo|rustc|vite|playwright|test_e2e\.mjs)(?:\s|$)/;
+  // Windows 命令行形如 `"C:\…\cargo.exe" test`：允许反斜杠 / 引号分隔与 `.exe` 后缀
+  const toolRe = /(?:^|[\s/\\"])(cargo|rustc|vite|playwright|test_e2e\.mjs)(?:\.exe)?(?:["\s]|$)/i;
   for (const raw of psOutput.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
@@ -203,9 +204,20 @@ function readChangedFiles(root) {
 }
 
 function readActiveProcesses() {
-  if (process.platform === "win32") return [];
   try {
-    const psOut = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+    // Windows 没有 ps：用 CIM 列出“PID 命令行”，格式与 ps 输出一致，交给同一个解析函数
+    const psOut = process.platform === "win32"
+      ? execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
+        ],
+        { encoding: "utf8", windowsHide: true },
+      )
+      : execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
     return detectActiveBuildProcesses(psOut, process.pid);
   } catch {
     return [];

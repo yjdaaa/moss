@@ -16,12 +16,13 @@ export const QUALITY_PRESET_OPTIONS = [
  * - 快速：逐块填充（LightBurn “Fill shapes individually”，图形间空白多时少跑空行程），双向出光；
  * - 均衡：一次填完、双向出光（原默认）；
  * - 精细：只单向出光（来回错位不影响边缘）并加交叉排线（再转 90° 扫一遍，更实更匀），耗时约 3~4 倍。
- * 三档都按速度自动算过扫描。扫描角度、扫描偏移、机器加速度属于“跟机器 / 跟设计走”的值，预设不改。
+ * 过扫描、扫描角度、扫描偏移、机器加速度属于“跟机器 / 跟材料 / 跟设计走”的值，预设不改（2026-11-17 技术书 r43：
+ * 标定向导量出的固定过扫描存在材料库里，点预设不能把它冲回自动）。
  */
 export const FILL_QUALITY_PRESETS = Object.freeze({
-  fast: Object.freeze({ grouping: "individual", bidirectional: true, crossHatch: false, overscanAuto: true }),
-  balanced: Object.freeze({ grouping: "all", bidirectional: true, crossHatch: false, overscanAuto: true }),
-  fine: Object.freeze({ grouping: "all", bidirectional: false, crossHatch: true, overscanAuto: true }),
+  fast: Object.freeze({ grouping: "individual", bidirectional: true, crossHatch: false }),
+  balanced: Object.freeze({ grouping: "all", bidirectional: true, crossHatch: false }),
+  fine: Object.freeze({ grouping: "all", bidirectional: false, crossHatch: true }),
 });
 
 export const FILL_PRESET_HINTS = {

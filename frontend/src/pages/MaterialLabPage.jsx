@@ -710,8 +710,12 @@ export function MaterialLabPage({ onNavigate }) {
         if (targetLaserMode !== "cut" && targetEngravingMode === "raster") {
           const wizardStep = matrixPreview?.test_type === "interval" ? "interval" : "matrix";
           const cell = matrixPreview?.cells?.[cellIndex] || {};
+          // 进度键与向导读取时一致：厚度用材料库里的原始键（如 "3.0"），不用解析后的数字
+          const wizardThickness = savedSurface
+            ? "surface"
+            : Number(selectedThickness) === targetThick ? String(selectedThickness) : String(targetThick);
           updateWizard(markWizardStep(readWizardState(), wizardStep, "done", {
-            materialKey: wizardMaterialKey(targetMat, savedSurface ? "surface" : String(targetThick)),
+            materialKey: wizardMaterialKey(targetMat, wizardThickness),
             note: wizardStep === "interval"
               ? `线距 ${cell.line_interval_mm ?? "-"} mm（#${cellNumber}）`
               : `功率 S${cell.power ?? "-"} · 速度 ${cell.speed ?? "-"} mm/min（#${cellNumber}）`,
