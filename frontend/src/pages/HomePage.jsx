@@ -286,11 +286,29 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     setLogs((prev) => [...prev.slice(-99), { time, tag, message, level }]);
   };
 
-  // Initial Load: Materials & Config & 优化1: 启动自动静默握手一次
+  // 挂载时那次加载与启动握手用到的最新值和函数：每次渲染后同步，定时器触发时读到的是当时的连接目标
+  // （运行配置在这 600 ms 内加载回来改了默认连接时，握手按新目标，而不是首帧的旧值）
+  const startupRef = useRef(null);
+  // 挂载时是否已经探测过（从其他页面切回工作台时为 true）
+  const initialCheckedAtRef = useRef(connectionStatus?.checkedAt);
   useEffect(() => {
-    loadMaterials();
-    loadSerialPorts();
-    loadRuntimeConfig();
+    startupRef.current = {
+      loadMaterials,
+      loadSerialPorts,
+      loadRuntimeConfig,
+      performConnectionProbe,
+      connectionMode,
+      networkHost,
+      serialPort,
+    };
+  });
+
+  // Initial Load: Materials & Config & 优化1: 启动自动静默握手一次（只在挂载时运行）
+  useEffect(() => {
+    const startup = startupRef.current;
+    startup.loadMaterials();
+    startup.loadSerialPorts();
+    startup.loadRuntimeConfig();
 
     // 材料实验室修改后经 BroadcastChannel 跨页同步刷新
     let channel = null;
@@ -298,7 +316,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       if (typeof BroadcastChannel === "function") {
         channel = new BroadcastChannel(MATERIAL_LIBRARY_CHANNEL);
         channel.addEventListener("message", (event) => {
-          if (event?.data?.type === "materials-updated") loadMaterials();
+          if (event?.data?.type === "materials-updated") startupRef.current.loadMaterials();
         });
       }
     } catch {
@@ -306,12 +324,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }
 
     // 优化 1: 仅在应用启动后尚未探测过时自动静默握手一次；从其他页面切回工作台时不重复探测
-    if (connectionStatus?.checkedAt) {
+    // （挂载那一刻的状态：之前已探测过就不再探测）
+    if (initialCheckedAtRef.current) {
       return () => channel?.close?.();
     }
     const timer = setTimeout(() => {
-      if ((connectionMode === "network" && networkHost) || (connectionMode === "serial" && serialPort)) {
-        performConnectionProbe(true);
+      const latest = startupRef.current;
+      if (
+        (latest.connectionMode === "network" && latest.networkHost) ||
+        (latest.connectionMode === "serial" && latest.serialPort)
+      ) {
+        latest.performConnectionProbe(true);
       }
     }, 600);
     return () => {
