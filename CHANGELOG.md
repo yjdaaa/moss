@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 语音中心“语音链路”选择改版：两张卡平分一行并写清各自特点（2026-11-17）
+
+- **现象**：删除自建服务端链路后，“语音链路”仍按三列排，MOSS 内置服务与官方小智两张卡只占左边三分之二、右侧空一列；卡片只有一句说明，看不出两者区别，当前用哪条也不够醒目（用户 2026-11-17“语音链路选择moss内置和官方小智这个ui你调整一下”）。
+- **根因与修复**：`.voice-mode-row` 改为两列（窄于 720px 上下叠）；`VoicePage` 的链路卡加图标（内置 `Cpu`、官方 `Cloud`）、一句话说明与三条特点标签，当前链路显示“当前使用”标记、高亮边框与阴影，单选圆点移到右侧。元素 id 与 `role="radio"` / `aria-checked` 不变。
+- **验证**：前端 lint 0/0、`npm test` 334 项；`voice-center.browser.mjs` 通过并在宽屏 1440 与窄屏 820 下截图人工核对（无挤压、无横向溢出），更新 `voice-official.png`、`voice-builtin.png`、`voice-narrow.png` 视觉基线。
+- **关联**：`frontend/src/pages/VoicePage.jsx`、`frontend/src/styles/09-voice-center.css`、`frontend/tests/visual-baseline/`。
+
 ### 删除语音中心的自建服务端链路，只留官方小智与 MOSS 内置服务；旧设置自动转为内置服务（2026-11-17）
 
 - **现象**：语音中心有官方小智 / 自建服务端 / MOSS 内置服务三条链路，自建服务端（MOSS 托管外部 xiaozhi-server、自建接入点、写 `data/.config.yaml` 的模型向导、健康检查、服务端日志、Python 探测、退出时问是否停服务端）已被内置服务取代、不再使用（用户 2026-11-17“语音中心的自建服务我觉得可以删除了”，选择“连代码一起删干净”，并要求核对这些设置在内置服务和官方小智上有没有用，没用的不要加过去）。

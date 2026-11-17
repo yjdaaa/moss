@@ -21,7 +21,7 @@
 
 ## 生成方式与局限
 
-- 语音中心 `voice-*.png` 于 2026-10-14 随 UI-3 重新生成（`voice-mode-confirm.png`、`voice-close-exit.png` 于 2026-11-17 在 macOS 上用 `PLAYWRIGHT_CHANNEL=chrome` 重新生成，其余保持原图）：`cd frontend; node tests/voice-center.browser.mjs --baseline`（Vite 回环 + 有状态假 Tauri 桥，Edge 无头渲染）。
+- 语音中心 `voice-*.png` 于 2026-10-14 随 UI-3 重新生成（2026-11-17 在 macOS 上用 `PLAYWRIGHT_CHANNEL=chrome` 重新生成：`voice-mode-confirm.png`、`voice-close-exit.png`，以及语音链路选择改版后的 `voice-official.png`、`voice-builtin.png`、`voice-narrow.png`；其余保持原图）：`cd frontend; node tests/voice-center.browser.mjs --baseline`（Vite 回环 + 有状态假 Tauri 桥，Edge 无头渲染）。
 
 - 截图于 2026-10-06 生成：用 esbuild 打包 `frontend/src`，在 Chromium（SwiftShader WebGL）中渲染。
 - 后端接口使用**预览桩数据**（固定的材料列表、端口 9666、小智“已配置未连接”），不是真实设备状态。

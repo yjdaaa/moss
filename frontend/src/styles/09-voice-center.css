@@ -6,21 +6,41 @@
 .voice-bad { color: var(--ob-red-2); }
 .voice-break { word-break: break-all; }
 .voice-push { margin-left: auto; }
-.voice-mode-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+/* 语音链路两选一（2026-11-17：删除自建后两张卡平分一行，带图标、当前使用标记与特点） */
+.voice-mode-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .voice-mode-option {
-  display: flex; align-items: flex-start; gap: 12px; text-align: left;
-  padding: 14px 16px; border-radius: 14px; border: 1px solid var(--ob-line-2);
+  display: flex; align-items: flex-start; gap: 14px; text-align: left; min-width: 0;
+  padding: 16px 18px; border-radius: 14px; border: 1px solid var(--ob-line-2);
   background: rgba(255, 255, 255, 0.035); color: var(--ob-ink-2); cursor: pointer;
-  transition: border-color 0.2s var(--ob-ease), background 0.2s var(--ob-ease);
+  transition: border-color 0.2s var(--ob-ease), background 0.2s var(--ob-ease), box-shadow 0.2s var(--ob-ease);
 }
-.voice-mode-option b { display: block; color: var(--ob-ink); font-size: 14px; margin-bottom: 2px; }
-.voice-mode-option small { display: block; font-size: 12px; line-height: 1.5; color: var(--ob-ink-3); }
+.voice-mode-icon {
+  flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+  color: var(--ob-ink-3); background: rgba(255, 255, 255, 0.05); border: 1px solid var(--ob-line-2);
+}
+.voice-mode-option.on .voice-mode-icon { color: var(--ob-accent); background: rgba(139, 123, 255, 0.14); border-color: rgba(139, 123, 255, 0.45); }
+.voice-mode-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.voice-mode-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-mode-option b { display: block; color: var(--ob-ink); font-size: 15px; }
+.voice-mode-current {
+  font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  color: var(--ob-accent); background: rgba(139, 123, 255, 0.16); border: 1px solid rgba(139, 123, 255, 0.4);
+}
+.voice-mode-option small { display: block; font-size: 12.5px; line-height: 1.55; color: var(--ob-ink-3); overflow-wrap: anywhere; }
+.voice-mode-traits { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.voice-mode-trait {
+  font-size: 11px; line-height: 1.4; padding: 2px 8px; border-radius: 999px;
+  color: var(--ob-ink-2); background: rgba(255, 255, 255, 0.05); border: 1px solid var(--ob-line-2);
+}
 .voice-mode-option:hover:not(:disabled) { border-color: var(--ob-line-3); }
-.voice-mode-option.on { border-color: rgba(139, 123, 255, 0.6); background: var(--ob-accent-bg); }
+.voice-mode-option.on {
+  border-color: rgba(139, 123, 255, 0.65); background: var(--ob-accent-bg);
+  box-shadow: 0 0 0 1px rgba(139, 123, 255, 0.25), 0 8px 24px -12px rgba(139, 123, 255, 0.55);
+}
 .voice-mode-option:disabled { opacity: 0.6; cursor: wait; }
 .voice-mode-option:focus-visible, .voice-pagetab:focus-visible, .voice-group-h:focus-visible, .voice-other-toggle:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 2px; }
 .voice-radio {
-  flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%;
+  flex: none; width: 18px; height: 18px; margin-top: 11px; border-radius: 50%;
   border: 2px solid var(--ob-line-3); box-sizing: border-box;
 }
 .voice-mode-option.on .voice-radio { border-color: var(--ob-accent); background: radial-gradient(circle, var(--ob-accent) 0 40%, transparent 45%); }
@@ -259,7 +279,7 @@
 .voice-table th, .voice-table td { padding: 4px 12px 4px 0; text-align: left; }
 .voice-agent-run { padding: 6px 0; border-bottom: 1px solid var(--ob-line); }
 .voice-agent-providers { list-style: none; margin: 4px 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; }
-@media (max-width: 960px) {
+@media (max-width: 720px) {
   .voice-mode-row { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {

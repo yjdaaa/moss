@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Radio } from "lucide-react";
+import { Cloud, Cpu, Radio } from "lucide-react";
 import { getJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
@@ -461,27 +461,52 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
             <span className="ob-k">VOICE LINK</span>
           </div>
           <div className="voice-mode-row" role="radiogroup" aria-label="语音链路">
+            {/* 两条链路平分一行（2026-11-17 删除自建后由三列改两列）；卡片写清各自怎么连、有什么特点 */}
             {[
-              { key: "builtin", desc: "设备直连 MOSS，不需要外部服务端" },
-              { key: "official", desc: "设备连官方服务器，MOSS 作为工具接入" },
-            ].map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                role="radio"
-                aria-checked={mode === item.key}
-                className={`voice-mode-option${mode === item.key ? " on" : ""}`}
-                onClick={() => switchMode(item.key)}
-                disabled={Boolean(busy)}
-                id={`voice-mode-${item.key}`}
-              >
-                <span className="voice-radio" aria-hidden="true" />
-                <span>
-                  <b>{VOICE_MODE_LABEL[item.key]}</b>
-                  <small>{item.desc}</small>
-                </span>
-              </button>
-            ))}
+              {
+                key: "builtin",
+                Icon: Cpu,
+                desc: "设备直连这台电脑，语音识别、对话、合成都由 MOSS 处理",
+                traits: ["设备 OTA 指向这台电脑", "可用本地模型", "支持副屏画面与唤醒词推送"],
+              },
+              {
+                key: "official",
+                Icon: Cloud,
+                desc: "设备连小智官方服务器对话，MOSS 通过接入点提供激光工具",
+                traits: ["设备不用改 OTA", "官方云端对话", "需要官方接入点地址"],
+              },
+            ].map(({ key, Icon, desc, traits }) => {
+              const on = mode === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  className={`voice-mode-option${on ? " on" : ""}`}
+                  onClick={() => switchMode(key)}
+                  disabled={Boolean(busy)}
+                  id={`voice-mode-${key}`}
+                >
+                  <span className="voice-mode-icon" aria-hidden="true">
+                    <Icon size={20} />
+                  </span>
+                  <span className="voice-mode-body">
+                    <span className="voice-mode-title">
+                      <b>{VOICE_MODE_LABEL[key]}</b>
+                      {on ? <span className="voice-mode-current">当前使用</span> : null}
+                    </span>
+                    <small>{desc}</small>
+                    <span className="voice-mode-traits">
+                      {traits.map((trait) => (
+                        <span key={trait} className="voice-mode-trait">{trait}</span>
+                      ))}
+                    </span>
+                  </span>
+                  <span className="voice-radio" aria-hidden="true" />
+                </button>
+              );
+            })}
           </div>
           <div className="voice-statusline" id="voice-statusline">
             <Pill tone={serviceView.tone}>{serviceView.text}</Pill>
