@@ -169,12 +169,13 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     }
   }, [pending, shown?.workflow_id, failure]);
 
-  // 刀路预览图
+  // 刀路预览图：只在预览图路径变化时重新加载（同一任务的记录刷新不重复下载）
+  const shownPreviewPath = shown ? workflowDetails(shown).previewPath : null;
   useEffect(() => {
     let cancelled = false;
     let blobUrl = "";
     setPreviewUrl("");
-    const path = shown ? workflowDetails(shown).previewPath : null;
+    const path = shownPreviewPath;
     if (path) {
       (async () => {
         blobUrl = await fetchPreviewBlobUrl(path);
@@ -189,7 +190,7 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
       cancelled = true;
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [shown?.workflow_id]);
+  }, [shownPreviewPath]);
 
   const forget = useCallback((workflowId) => {
     dismissedRef.current.add(workflowId);
@@ -270,14 +271,17 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
   };
 
   // 发送进度轮询（与审批卡同一套：查询失败不等于任务失败）
+  const jobId = job?.id;
+  const jobKind = job?.kind;
+  const jobStatus = job?.status;
   useEffect(() => {
-    if (!job?.id || TERMINAL_STATUSES.has(job.status)) return undefined;
-    const { id, kind } = job;
+    if (!jobId || TERMINAL_STATUSES.has(jobStatus)) return undefined;
+    const [id, kind] = [jobId, jobKind];
     return startJobPolling(
       (signal) => postJson("/api/workflow", { action: "status", workflow_id: id }, { signal }),
       (res) => setJob((current) => applyJobPoll(current, id, kind, res)),
     );
-  }, [job?.id, job?.kind, job?.status]);
+  }, [jobId, jobKind, jobStatus]);
 
   const handleEmergencyStop = useCallback(async () => {
     const id = jobRef.current?.id;

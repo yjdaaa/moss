@@ -37,13 +37,19 @@ function BuiltinJevGroup({ builtin }) {
   const [remoteModels, setRemoteModels] = useState({ loading: false, ok: false, models: [], detail: "" });
   const comboRef = useRef(null);
 
+  // 已保存的设置内容（签名）变了才同步草稿；运行时读最新的 baseline
+  const latestBaselineRef = useRef(baseline);
+  useEffect(() => {
+    latestBaselineRef.current = baseline;
+  });
   useEffect(() => {
     const prev = prevBaselineRef.current;
-    setForm((current) => syncJevDraft(prev, baseline, current));
-    if (prev.model !== baseline.model) {
+    const next = latestBaselineRef.current;
+    setForm((current) => syncJevDraft(prev, next, current));
+    if (prev.model !== next.model) {
       setTest(null);
     }
-    prevBaselineRef.current = baseline;
+    prevBaselineRef.current = next;
   }, [baselineSig]);
 
   useEffect(() => {

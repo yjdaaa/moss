@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 前端清零 lint 警告：effect 只按原有触发条件运行，运行时读最新值（2026-11-17）
+
+- **现象**：前端 lint 剩 15 条 `react-hooks/exhaustive-deps` 警告（AI 预览、审批卡、反馈面板、设置弹窗、Agent 卡片、Jev / Colab / 本地模型分组、3D 孪生舞台、孪生页）；这些 effect 故意只依赖少数值（换审批才重载、换刀路才重建），直接补依赖会反复请求或重建 3D 场景，不补则闭包里可能是旧值。
+- **根因与修复**：不改触发条件，只改取值方式：预览路径、任务编号 / 类型 / 状态、审批编号 / 类型 / 目标、“是否在安装中”先在 effect 外算好再作依赖；只在挂载或签名变化时运行的 effect（设置草稿同步、5 秒刷新、孪生页首次拉取、3D 场景按刀路对焦 / 重建机台时摆放板材 / 重建刀路时的空移线显隐）经每次渲染后同步的 ref 读最新值；3D 舞台挂载 effect 补上两个引用不变的回调；反馈面板清理函数经局部别名作废请求计数。行为不变。
+- **验证**：`npm run lint` 0 error 0 warning，`npm test` 331 项、`npm run build`、e2e 38 项通过；3D 舞台与语音设置分组未在真实浏览器里手动点按。
+- **关联**：`frontend/src/components/{AiPreviewCenter,ApprovalCenter,FeedbackPanel,SettingsModal,TwinStage3D,VoiceAgentCard}.jsx`、`frontend/src/components/voice-builtin/{BuiltinJevGroup.jsx,ColabBridgeSection.jsx,useLocalGroup.js}`、`frontend/src/pages/TwinPage.jsx`。
+
 ### 工作台启动握手按定时器触发时的连接目标，不再用首帧旧值（2026-11-17）
 
 - **现象**：工作台打开时的挂载 effect 读的是首帧的连接方式、网络地址与串口（lint `react-hooks/exhaustive-deps` 警告）；运行配置在 600 ms 定时器触发前加载回来改了默认连接时，启动静默握手仍按旧目标探测。

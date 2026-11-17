@@ -781,7 +781,7 @@ export function TwinStage3D({
       renderer.domElement?.remove?.();
       sceneRef.current = null;
     };
-  }, []);
+  }, [applyCameraOrbit, syncStageViewport]);
 
   // 切换高对比工程亮色背景 / 深空底色
   useEffect(() => {
@@ -809,15 +809,22 @@ export function TwinStage3D({
     applyCoverVisibility(sceneRef.current, showEnclosure);
   }, [showEnclosure]);
 
+  // 下面几个 effect 只在各自的触发条件变化时运行（换刀路、重建机台、重建刀路），运行时读这里的最新值，
+  // 不因这些值变化而重跑（换视角、平移板材、切换空移线显示各有自己的 effect）
+  const latestRef = useRef(null);
+  useEffect(() => {
+    latestRef.current = { selectPreset, activePreset, offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, showRapid };
+  });
+
   // 当切换/上传新刀路时，若处于 fit 视角则自动对焦到刀路区域（调整材料坐标时保持机台视角稳定，直观看到材料与激光头在台面上移动）
   const cameraPlacedRef = useRef(false);
   useEffect(() => {
     if (!cameraPlacedRef.current) {
       // 首次挂载直接摆到默认视角，不做过渡
       cameraPlacedRef.current = Boolean(sceneRef.current);
-      selectPreset(activePreset, { instant: true });
-    } else if (activePreset === "fit") {
-      selectPreset("fit");
+      latestRef.current.selectPreset(latestRef.current.activePreset, { instant: true });
+    } else if (latestRef.current.activePreset === "fit") {
+      latestRef.current.selectPreset("fit");
     }
   }, [toolpath]);
 
@@ -1695,7 +1702,8 @@ export function TwinStage3D({
     ctx.keyLight.position.set(cx + 170, 320, cz + 200);
     ctx.rimLight.position.set(cx - 200, 200, cz - 260);
 
-    placeOffsetObjects(ctx, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick });
+    const { offsetX: ox, offsetY: oy, toolpathOffsetX: tx, toolpathOffsetY: ty } = latestRef.current;
+    placeOffsetObjects(ctx, { offsetX: ox, offsetY: oy, toolpathOffsetX: tx, toolpathOffsetY: ty, matWidth, matHeight, matThick });
     // 偏置不在依赖里：只改板材 / 雕刻起点时由下一个 effect 平移对象，不重建机台
   }, [xMax, yMax, zMax, matWidth, matHeight, matThick, matName]);
 
@@ -1840,7 +1848,7 @@ export function TwinStage3D({
         }),
       );
       rapidLine.computeLineDistances();
-      rapidLine.visible = showRapid;
+      rapidLine.visible = Boolean(latestRef.current.showRapid);
       toolpathGroup.add(rapidLine);
       ctx.rapidLine = rapidLine;
     }
@@ -1857,7 +1865,7 @@ export function TwinStage3D({
           depthWrite: false,
         }),
       );
-      arrowLine.visible = showRapid;
+      arrowLine.visible = Boolean(latestRef.current.showRapid);
       toolpathGroup.add(arrowLine);
       ctx.arrowLine = arrowLine;
     }

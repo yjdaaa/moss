@@ -103,8 +103,13 @@ export default function VoiceAgentCard() {
     }
   };
   // 小智可能随时发起任务：每 5 秒刷新一次状态（运行中的任务结束时会显示为已完成 / 已停止）。
+  // 定时器只建一次，经 ref 调用最新的 refresh
+  const refreshRef = useRef(refresh);
   useEffect(() => {
-    const timer = setInterval(() => { void refresh(); }, 5000);
+    refreshRef.current = refresh;
+  });
+  useEffect(() => {
+    const timer = setInterval(() => { void refreshRef.current(); }, 5000);
     return () => clearInterval(timer);
   }, []);
   const change = (name, value) => {

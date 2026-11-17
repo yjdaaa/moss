@@ -129,13 +129,15 @@ export function SettingsModal({
     return () => { alive = false; };
   }, [updateReport]);
 
+  // 安装进行中时每 0.5 秒刷新进度；结束（或没在安装）就停
+  const installBusy = appUpdateBusy(installProgress);
   useEffect(() => {
-    if (!appUpdateBusy(installProgress)) return;
+    if (!installBusy) return;
     const timer = setInterval(() => {
       appUpdateStatus().then(setInstallProgress).catch(() => {});
     }, 500);
     return () => clearInterval(timer);
-  }, [installProgress?.phase]);
+  }, [installBusy]);
 
   const showJevSettings = preferencesShowJev({ hasVoiceCenter: Boolean(onOpenVoice), voiceMode });
   const activeUpdateProgress = appUpdateScopeProgress(installProgress, updateReport?.latest_version);

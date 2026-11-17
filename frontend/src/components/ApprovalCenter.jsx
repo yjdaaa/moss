@@ -118,15 +118,18 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     if (!next && open) onOpenChange?.(false);
   }, [pending, shown, failure, open, onOpenChange]);
 
-  // 加工内容详情与刀路预览
+  // 加工内容详情与刀路预览：换一张审批才重新加载（同一审批的类型与目标不会变）
+  const shownApprovalId = shown?.approval_id;
+  const shownKind = shown?.kind;
+  const shownTarget = shown?.target_record;
   useEffect(() => {
     let cancelled = false;
     let blobUrl = "";
     setDetails(null);
     setPreviewUrl("");
-    if (shown?.kind === "workflow_confirm_send") {
+    if (shownApprovalId && shownKind === "workflow_confirm_send") {
       (async () => {
-        const res = await postJson("/api/workflow", { action: "status", workflow_id: shown.target_record });
+        const res = await postJson("/api/workflow", { action: "status", workflow_id: shownTarget });
         if (cancelled || !(res.ok && res.data?.success)) return;
         const info = workflowDetails(res.data.result);
         setDetails(info);
@@ -144,7 +147,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
       cancelled = true;
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [shown?.approval_id]);
+  }, [shownApprovalId, shownKind, shownTarget]);
 
   // 倒计时：每秒刷新；归零时自动关闭卡片（服务端同时把请求记为过期）
   const remaining = shown ? secondsLeft(shown.expires_at, offset) : 0;
@@ -219,16 +222,19 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
   };
 
   // 查询失败不等于任务失败；轮询互不重叠，旧请求不能覆盖新任务。
+  const jobId = job?.id;
+  const jobKind = job?.kind;
+  const jobStatus = job?.status;
   useEffect(() => {
-    if (!job?.id || TERMINAL_STATUSES.has(job.status)) return undefined;
-    const { id, kind } = job;
+    if (!jobId || TERMINAL_STATUSES.has(jobStatus)) return undefined;
+    const [id, kind] = [jobId, jobKind];
     return startJobPolling(
       (signal) => kind === "calibration"
         ? postJson("/api/material-lab/status", { calibration_id: id }, { signal })
         : postJson("/api/workflow", { action: "status", workflow_id: id }, { signal }),
       (res) => setJob((current) => applyJobPoll(current, id, kind, res)),
     );
-  }, [job?.id, job?.kind, job?.status]);
+  }, [jobId, jobKind, jobStatus]);
   const handleEmergencyStop = useCallback(async () => {
     const id = jobRef.current?.id;
     if (!id) return;

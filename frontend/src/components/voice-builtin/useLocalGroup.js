@@ -26,11 +26,17 @@ function useLocalGroup(builtin, keys, validate) {
   const [draft, setDraft] = useState(baseline);
   const prevBaselineRef = useRef(baseline);
   const [result, setResult] = useState(null);
+  // 已保存的设置内容（签名）变了才同步草稿；运行时读最新的 baseline（`keys` 是调用方的模块常量）
+  const latestBaselineRef = useRef(baseline);
+  useEffect(() => {
+    latestBaselineRef.current = baseline;
+  });
   useEffect(() => {
     const prev = prevBaselineRef.current;
-    setDraft((current) => syncLocalDraft(prev, baseline, current, keys));
-    prevBaselineRef.current = baseline;
-  }, [baselineSig]);
+    const next = latestBaselineRef.current;
+    setDraft((current) => syncLocalDraft(prev, next, current, keys));
+    prevBaselineRef.current = next;
+  }, [baselineSig, keys]);
   const merged = mergeGroup(baseline, draft, keys);
   const dirty = formDirty(baseline, draft, keys);
   const error = validate(merged, models);

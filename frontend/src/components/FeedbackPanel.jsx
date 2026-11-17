@@ -35,7 +35,9 @@ export function FeedbackPanel({ workflowId, origin = null, disabled = false, onA
         setBusy(false);
       });
     }
-    return () => { generation.current++; };
+    // 计数器不是 DOM 节点：清理时作废进行中的请求（经局部别名访问同一个 ref）
+    const counter = generation;
+    return () => { counter.current++; };
   }, [workflowId]);
 
   async function submit(event) {

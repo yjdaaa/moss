@@ -363,8 +363,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     }
   }, [selectedWorkflowId, loadWorkflowToolpath]);
 
+  // 只在打开页面时拉一次最近任务（之后由用户操作刷新）；经 ref 调用最新的函数
+  const fetchRecentRef = useRef(fetchRecentWorkflows);
   useEffect(() => {
-    void fetchRecentWorkflows();
+    fetchRecentRef.current = fetchRecentWorkflows;
+  });
+  useEffect(() => {
+    void fetchRecentRef.current();
   }, []);
 
   // 离线仿真 requestAnimationFrame 播放循环（严格 1:1 对应 G-code 解算出的物理雕刻时长；未开启循环时跑完一次立即停止）

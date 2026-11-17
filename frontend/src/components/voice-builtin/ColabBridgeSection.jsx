@@ -44,9 +44,14 @@ function ColabBridgeSection({ builtin }) {
   const refAudioConfigured = Boolean(cli.ref_audio_configured);
   const refAudioName = cli.ref_audio_name || "";
 
+  // 已保存的设置内容（签名）变了才同步表单；运行时读最新的设置
+  const latestBaselineRef = useRef(baseline);
+  useEffect(() => {
+    latestBaselineRef.current = baseline;
+  });
   useEffect(() => {
     setForm((prev) => ({
-      ...colabSettingsForm(colab),
+      ...latestBaselineRef.current,
       api_key: prev.api_key || "",
     }));
   }, [baselineSig]);
