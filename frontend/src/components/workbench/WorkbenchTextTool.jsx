@@ -5,6 +5,7 @@ import { materialLayerHint } from "../../fillOptions.js";
 import { TEXT_ORIGIN_OPTIONS, TEXT_STYLE_OPTIONS } from "../../workbenchParams.js";
 import EngraveRouteSwitch from "../EngraveRouteSwitch.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
+import { TEXT_ORIGIN_SHARED_HINT } from "../../textOrigin.js";
 
 /**
  * 雕刻工作台 ② 加工内容 · 矢量文字：文本、字高、刻法、对刀起点与填充 / 切割设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分）。
@@ -87,7 +88,7 @@ export function WorkbenchTextTool({
             ))}
           </select>
         </label>
-        <label>
+        <label title={TEXT_ORIGIN_SHARED_HINT}>
           <span>对刀起点</span>
           <select
             id="wb-text-origin"

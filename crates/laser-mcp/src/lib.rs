@@ -331,9 +331,10 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                     "type": "string", "enum": ["left", "center", "right"], "default": "center",
                     "description": "多行文字（用换行分行）的对齐方式"
                 });
+                // r48：不填按电脑工作台选的对刀起点（全局设置，默认木牌中心），用户明确说了才填
                 props["origin"] = serde_json::json!({
-                    "type": "string", "enum": ["center", "lower_left"], "default": "center",
-                    "description": "开刻前激光头对准的位置：center 木牌（图案）中心（默认），lower_left 木牌左下角"
+                    "type": "string", "enum": ["center", "lower_left"],
+                    "description": "开刻前激光头对准的位置：center 木牌（图案）中心，lower_left 木牌左下角；用户没说就不填，按电脑上工作台选的对刀起点"
                 });
                 props["width_mm"] = serde_json::json!({
                     "type": "number", "description": "文字任务：木牌宽度 mm；不给字号时自动取能放下的最大字号并居中"
@@ -1928,6 +1929,17 @@ mod tests {
         assert!(
             props(tools_list_json(false), "regenerate_text_laser_task_tool")["shapes"].is_object()
         );
+        // r48：起点不写死默认中心，没说就按电脑上的对刀起点
+        for list in [tools_list_json(false), compact_tools_list_json(false)] {
+            let origin = &props(list, "laser_workflow_tool")["origin"];
+            assert!(origin.get("default").is_none(), "{origin}");
+            assert!(
+                origin["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("没说就不填")
+            );
+        }
         assert!(
             props(
                 compact_tools_list_json(false),

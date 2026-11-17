@@ -208,15 +208,23 @@ test("只刻选中的图形：取 Excalidraw 选区里为 true 的 id，排序�
   assert.deepEqual(selectedElementIds(null), []);
 });
 
-test("矢量刻法（r46）：只有轮廓 / 填充、默认轮廓，进签名，填充查光栅参数", async () => {
+test("矢量刻法（r46 / r47）：轮廓 / 填充 / 切割、默认轮廓，进签名，填充查光栅参数、切割查切割参数", async () => {
   const {
     DRAW_VECTOR_STYLES,
     drawGenerationSignature,
+    drawIsCut,
+    drawVectorLayerFlags,
     drawRecommendEngravingMode,
     normalizeDrawVectorStyle,
     readDrawDefaultForm,
   } = await import("../src/drawConnection.js");
-  assert.deepEqual(DRAW_VECTOR_STYLES.map((o) => o.value), ["outline", "fill"]);
+  assert.deepEqual(DRAW_VECTOR_STYLES.map((o) => o.value), ["outline", "fill", "cut"]);
+  assert.equal(drawRecommendEngravingMode("vector", "cut"), "cut");
+  assert.equal(drawIsCut("vector", "cut"), true);
+  assert.equal(drawIsCut("raster", "cut"), false, "转图片不切割");
+  assert.deepEqual(drawVectorLayerFlags("cut"), { withFill: false, withCut: true });
+  assert.deepEqual(drawVectorLayerFlags("fill"), { withFill: true, withCut: false });
+  assert.deepEqual(drawVectorLayerFlags("outline"), { withFill: false, withCut: false });
   assert.equal(normalizeDrawVectorStyle(undefined), "outline");
   assert.equal(normalizeDrawVectorStyle("canvas"), "outline");
   assert.equal(normalizeDrawVectorStyle("hatch"), "outline");

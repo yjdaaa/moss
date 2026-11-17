@@ -278,3 +278,138 @@ fn draw_vector_style_chooses_outline_or_fill() {
     );
     assert_eq!(draw("hatch")["success"], false);
 }
+
+/// r47：画板矢量刻法“切割”——先内后外切穿，切缝按嵌套方向补偿，桥位默认只加在外框；必须有该厚度的切割参数。
+#[test]
+fn draw_vector_cut_cuts_inside_first_with_kerf_and_tabs() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    // 外框 200×100，里面一个 60×40 的孔
+    let scene = serde_json::json!({"elements": [
+        {"type": "rectangle", "x": 0, "y": 0, "width": 200, "height": 100, "strokeColor": "#1e1e1e",
+         "backgroundColor": "transparent", "strokeWidth": 2},
+        {"type": "rectangle", "x": 70, "y": 30, "width": 60, "height": 40, "strokeColor": "#1e1e1e",
+         "backgroundColor": "transparent", "strokeWidth": 2},
+    ]});
+    let draw = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"image_data_url": super::preview::draw_test_png(),
+            "material": "椴木", "thickness_mm": 3.0, "width_mm": 40, "mode": "vector",
+            "scene_json": scene, "vector_style": "cut"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/draw/preview", &body)
+    };
+    let plain = draw(serde_json::json!({}));
+    let artifacts = &plain["result"]["artifacts"];
+    assert_eq!(plain["success"], true, "{plain}");
+    assert_eq!(artifacts["laser_mode"], "cut");
+    assert_eq!(artifacts["vector_style"], "cut");
+    assert!(artifacts["fill_options"].is_null(), "切割不填充");
+    let gcode_of = |artifacts: &serde_json::Value| {
+        std::fs::read_to_string(
+            temp.path()
+                .join("gen")
+                .join(artifacts["gcode_file"].as_str().unwrap()),
+        )
+        .unwrap()
+    };
+    // 先内后外：第一段出光落在孔所在的中间区域
+    let gcode = gcode_of(artifacts);
+    let first_burn = gcode
+        .lines()
+        .find(|l| l.starts_with("G1 ") && !l.contains(" S0"))
+        .unwrap();
+    let x: f64 = first_burn
+        .split_whitespace()
+        .find(|w| w.starts_with('X'))
+        .and_then(|w| w[1..].parse().ok())
+        .unwrap();
+    assert!((12.0..28.0).contains(&x), "先切中间的孔：{first_burn}");
+
+    let tabbed = draw(serde_json::json!({"cut_options": {"kerf_mm": 0.1, "tab_count": 2}}));
+    let artifacts = &tabbed["result"]["artifacts"];
+    assert_eq!(tabbed["success"], true, "{tabbed}");
+    let report = &artifacts["cut_options"]["report"];
+    assert_eq!(report["tabs"], 2, "桥位默认跳过内孔：{report}");
+    assert_eq!(report["kerf_contours_before"], 2, "{report}");
+    assert_eq!(
+        report["kerf_contours_after"], 2,
+        "内孔反向补偿，没有消失或相连：{report}"
+    );
+    let e = laser_core::gcode::motion_extents(&gcode_of(artifacts))
+        .unwrap()
+        .unwrap();
+    assert!(
+        e.min_x >= -1e-6 && e.min_y >= -1e-6,
+        "左下角起点不往负方向走：{e:?}"
+    );
+
+    // 没有该厚度的切割参数不能切；切割不能带填满
+    let missing = post_json(
+        &service,
+        "/api/draw/preview",
+        &serde_json::json!({"image_data_url": super::preview::draw_test_png(), "material": "椴木",
+            "thickness_mm": 99.0, "mode": "vector", "scene_json": scene, "vector_style": "cut"}),
+    );
+    assert_eq!(missing["success"], false);
+    assert!(
+        missing["result"].as_str().unwrap().contains("切割参数"),
+        "{missing}"
+    );
+}
+
+/// r48：文字对刀起点全局设置——工作台与语音同一条，请求没写 `origin` 时按它，写了就按请求；局域网只读。
+#[test]
+fn text_origin_is_one_shared_setting_used_when_the_request_omits_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = service(&temp);
+    assert_eq!(
+        get(&service, "/api/text-origin")["result"]["origin"],
+        "center"
+    );
+    let default = text(&service, serde_json::json!({}));
+    assert_eq!(
+        default["result"]["artifacts"]["origin"], "center",
+        "{default}"
+    );
+
+    let set = post_json(
+        &service,
+        "/api/text-origin",
+        &serde_json::json!({"origin": "lower_left"}),
+    );
+    assert_eq!(set["result"]["origin"], "lower_left", "{set}");
+    let follow = text(&service, serde_json::json!({}));
+    assert_eq!(follow["result"]["artifacts"]["origin"], "lower_left");
+    assert_eq!(
+        follow["result"]["artifacts"]["origin_note"],
+        "开刻前把激光头移到木牌左下角"
+    );
+    let explicit = text(&service, serde_json::json!({"origin": "center"}));
+    assert_eq!(
+        explicit["result"]["artifacts"]["origin"], "center",
+        "说了就按说的"
+    );
+
+    let (status, _) = post_with_ctx(
+        &service,
+        "/api/text-origin",
+        &serde_json::json!({"origin": "top"}),
+        laser_contracts::CallerContext::Loopback,
+    );
+    assert_eq!(status, 400);
+    let (status, _) = post_with_ctx(
+        &service,
+        "/api/text-origin",
+        &serde_json::json!({"origin": "center"}),
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "pair-1".into(),
+        },
+    );
+    assert_eq!(status, 403, "局域网只能看不能改");
+    assert_eq!(
+        get(&service, "/api/text-origin")["result"]["origin"],
+        "lower_left"
+    );
+}

@@ -9,6 +9,8 @@ pub(crate) fn generate_text_artifacts(
     library: &laser_contracts::MaterialLibrary,
     // 全局雕刻路线（r45）：请求没写 `engrave_route` 时按它
     default_route: crate::engrave_route::EngraveRoute,
+    // 全局对刀起点（r48）：请求没写 `origin` 时按它
+    default_origin: laser_core::engine::TextOrigin,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
     let motion = parse_machine_motion(object)?;
@@ -180,9 +182,15 @@ pub(crate) fn generate_text_artifacts(
         alignment: laser_core::engine::parse_alignment(
             object.get("text_align").and_then(|v| v.as_str()),
         )?,
-        origin: laser_core::engine::TextOrigin::parse(
-            object.get("origin").and_then(|v| v.as_str()),
-        )?,
+        origin: match object
+            .get("origin")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(origin) => laser_core::engine::TextOrigin::parse(Some(origin))?,
+            None => default_origin,
+        },
         board_width_mm: optional_number(&["board_width_mm", "width_mm"])?,
         board_height_mm: optional_number(&["board_height_mm", "height_mm"])?,
         margin_mm: optional_number(&["margin_mm", "safe_margin_mm"])?

@@ -17,7 +17,6 @@ export function WorkbenchMonitorCard({
   currentWorkflow,
   dimensions,
   sendProgress,
-  gcodeLineCount,
   gcodeText,
   timeEstimate,
   fitNote,
@@ -88,7 +87,7 @@ export function WorkbenchMonitorCard({
         </div>
 
         <div className="job-dispatch-card">
-          {/* 刀路摘要：尺寸、行数、耗时、物理文件指纹集中一行（2026-11-07 合并原先重复的两组统计） */}
+          {/* 刀路摘要：尺寸与预估耗时（r47 去掉了刀路总行数与 SHA-256 这两项技术细节） */}
           <div className="toolpath-capsule" id="wb-toolpath-stats">
             <div className="toolpath-item">
               <span className="toolpath-label"><Ruler size={11} aria-hidden="true" /> 轮廓尺寸</span>
@@ -97,31 +96,9 @@ export function WorkbenchMonitorCard({
               </span>
             </div>
             <div className="toolpath-item">
-              <span className="toolpath-label">刀路总行数</span>
-              <span className="toolpath-value">
-                {sendProgress?.total
-                  ? `${sendProgress.total.toLocaleString()} 行`
-                  : currentWorkflow?.artifacts?.total_lines
-                  ? `${currentWorkflow.artifacts.total_lines.toLocaleString()} 行`
-                  : gcodeLineCount > 0
-                  ? `${gcodeLineCount.toLocaleString()} 行`
-                  : "—"}
-              </span>
-            </div>
-            <div className="toolpath-item">
               <span className="toolpath-label"><Clock size={11} aria-hidden="true" /> 预估耗时</span>
               <span className="toolpath-value wb-text-5">
                 {timeEstimate ? `${timeEstimate.estimated_seconds}s（${timeEstimate.estimated_minutes} 分钟）` : "—"}
-              </span>
-            </div>
-            <div className="toolpath-item">
-              <span className="toolpath-label">物理 SHA-256</span>
-              <span className="toolpath-value wb-text-4">
-                {currentWorkflow?.confirmation_snapshot?.gcode_sha256
-                  ? `${currentWorkflow.confirmation_snapshot.gcode_sha256.slice(0, 10)}...`
-                  : currentWorkflow?.artifacts?.gcode_sha256
-                  ? `${currentWorkflow.artifacts.gcode_sha256.slice(0, 10)}...`
-                  : "待计算比对"}
               </span>
             </div>
           </div>

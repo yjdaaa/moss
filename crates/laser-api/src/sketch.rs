@@ -24,6 +24,8 @@ pub(crate) enum VectorStyle {
     Outline,
     /// 填充：闭合图形与文字都填满并描边
     Fill,
+    /// 切割（r47）：沿闭合图形与文字轮廓切穿（先内后外，可带切缝、桥位、引线、过切），开放线条沿线切
+    Cut,
 }
 
 impl VectorStyle {
@@ -32,8 +34,9 @@ impl VectorStyle {
             None | Some("canvas") => Ok(Self::Canvas),
             Some("outline") => Ok(Self::Outline),
             Some("fill") => Ok(Self::Fill),
+            Some("cut") => Ok(Self::Cut),
             Some(other) => Err(format!(
-                "vector_style 只能是 canvas / outline / fill，收到 {other}"
+                "vector_style 只能是 canvas / outline / fill / cut，收到 {other}"
             )),
         }
     }
@@ -43,6 +46,7 @@ impl VectorStyle {
             Self::Canvas => "canvas",
             Self::Outline => "outline",
             Self::Fill => "fill",
+            Self::Cut => "cut",
         }
     }
 
@@ -51,7 +55,7 @@ impl VectorStyle {
         let visible = stroke || fill;
         match self {
             Self::Canvas => (fill, stroke),
-            Self::Outline => (false, visible),
+            Self::Outline | Self::Cut => (false, visible),
             Self::Fill => (visible, visible),
         }
     }
@@ -68,6 +72,8 @@ pub(crate) struct SketchGeometry {
     pub filled_shapes: Vec<Vec<Point>>,
     /// 要填满的文字（同一段文字的字形轮廓一起按非零规则填，字里的孔不填）
     pub filled_text: Vec<Vec<Vec<Point>>>,
+    /// 切割刻法下的文字（同一段文字的字形轮廓一组，切缝补偿按组整体做，字里的孔反向补偿）
+    pub cut_text: Vec<Vec<Vec<Point>>>,
     /// 场景里有插入的图片（矢量刻不了）
     pub has_image: bool,
 }
@@ -78,6 +84,7 @@ impl SketchGeometry {
             && self.open.is_empty()
             && self.filled_shapes.is_empty()
             && self.filled_text.is_empty()
+            && self.cut_text.is_empty()
     }
 
     /// 有要扫描填充的图形或文字（过扫描要让出位置）
@@ -94,6 +101,7 @@ impl SketchGeometry {
             .chain(&self.filled_shapes)
             .flatten()
             .chain(self.filled_text.iter().flatten().flatten())
+            .chain(self.cut_text.iter().flatten().flatten())
             .peekable();
         points.peek()?;
         Some(points.fold(
@@ -120,6 +128,7 @@ impl SketchGeometry {
             open: each(&self.open),
             filled_shapes: each(&self.filled_shapes),
             filled_text: self.filled_text.iter().map(each).collect(),
+            cut_text: self.cut_text.iter().map(each).collect(),
             has_image: self.has_image,
         }
     }
@@ -406,10 +415,15 @@ pub(crate) fn sketch_from_scene(
                         rotate(placed, center, angle)
                     })
                     .collect();
-                out.closed.extend(glyphs.iter().cloned());
-                // 轮廓刻法时文字只描边
-                if style != VectorStyle::Outline {
-                    out.filled_text.push(glyphs);
+                match style {
+                    // 切割：文字整组切（切缝补偿要按组做，字里的孔反向）
+                    VectorStyle::Cut => out.cut_text.push(glyphs),
+                    // 轮廓：文字只描边
+                    VectorStyle::Outline => out.closed.extend(glyphs),
+                    _ => {
+                        out.closed.extend(glyphs.iter().cloned());
+                        out.filled_text.push(glyphs);
+                    }
                 }
             }
             "image" => out.has_image = true,
@@ -534,6 +548,16 @@ mod tests {
         );
         assert_eq!(with_font(VectorStyle::Fill).filled_text.len(), 1);
         assert_eq!(with_font(VectorStyle::Canvas).filled_text.len(), 1);
+        // r47 切割：闭合图形都描（切），不填；文字整组放进 cut_text，不进 closed / filled_text
+        let cut = sketch_from_scene(&scene, &no_font, VectorStyle::Cut).unwrap();
+        assert_eq!(
+            (cut.filled_shapes.len(), cut.closed.len(), cut.open.len()),
+            (0, 3, 1)
+        );
+        let cut_text = with_font(VectorStyle::Cut);
+        assert_eq!(cut_text.cut_text.len(), 1);
+        assert!(cut_text.closed.is_empty() && cut_text.filled_text.is_empty());
+        assert!(!cut_text.has_fills());
         assert!(VectorStyle::parse(Some("hatch")).is_err());
         assert_eq!(VectorStyle::parse(None).unwrap(), VectorStyle::Canvas);
     }

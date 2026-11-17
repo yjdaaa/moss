@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 文字对刀起点改为全局设置，工作台与语音同步并记住（2026-11-17）
+
+- **现象**：工作台“对刀起点”只是当前页的临时选择，刷新就回到木牌中心；语音 / AI 刻字读不到它，工具说明还写死默认中心，工作台选了左下角、语音刻字仍按中心（用户 2026-11-17“那语言默认是什么还是跟app保持一致”→“就按照这么做”）。
+- **根因与修复**：新增全局设置 `laser_text_origin`（`GET/POST /api/text-origin`，默认 `center`，局域网只读），`generate_text_artifacts` 在请求没写 `origin` 时按它（文字预览与采用反馈重生成都传 `text_origin()`）；`laser_workflow_tool` 两种清单的 `origin` 去掉 `default`，说明改为“用户没说就不填，按电脑上工作台选的对刀起点”。前端工作台改用 `useTextOrigin`（读写后端、页内广播、失败回退；手机连电脑时只改本次）。创作画板与图片固定左下角不变。技术书 r48。
+- **验证**：`laser-api` 新增 1 项（默认中心、改成左下角后未写起点的任务跟随、显式起点优先、非法值 400、局域网 403），`laser-mcp` 补断言（两种清单的 `origin` 无默认值）；前端新增 1 项（`textOrigin.js` 归一化 / 响应 / 保存结果与页面接线），`npm test` 334 项。未用真实语音模型验证它会不会乱填起点。
+- **关联**：`crates/laser-api/src/{engrave_route,routes,access,feedback}.rs`、`crates/laser-api/src/generation/text.rs`、`crates/laser-mcp/src/lib.rs`、`tests/golden/mcp_tools_compact.json`、`frontend/src/{textOrigin,useTextOrigin}.js`、`frontend/src/pages/HomePage.jsx`、`frontend/src/components/workbench/WorkbenchTextTool.jsx`。
+
+### 创作画板矢量刻法新增切割，精简画板与工作台里不需要的配置项（2026-11-17）
+
+- **现象**：画板只能雕刻、不能切割；画板“预览与发送”里有刷新状态、素材预览、下载场景 JSON、诊断输出、任务编号条、弱光指示等重复或只对调试有用的项，设备卡有多余的“保存配置”，工作台监视舱摆着刀路总行数与 SHA-256（用户 2026-11-17“创作画板没有切割模式吗……有些配置项不需要的就删除即可，有些需要的保留吧”）。
+- **根因与修复**：后端 `VectorStyle::Cut`：闭合图形各自一组、同一段文字一组（`cut_text`），`plan_cut` 按嵌套层数决定切缝方向（偶数层外扩、奇数层往孔里），开放线条沿线切，先内后外规划后再 `apply_cut_options` 加桥位、引线、过切；`/api/draw/preview` 在 `vector_style=cut` 时接受 `cut_options`（合并材料库切割条目）、要求该厚度有切割参数，回显 `laser_mode` 与 `cut_options`，其他模式照旧拒绝切割设置。前端画板矢量刻法加“切割”（切割设置面板、`laser_mode=cut`、按切割档查推荐与保存到材料库）；删除上述配置项（画板走边框一律不出光，`saveConfiguration`、`rawText` 等随之移除）。急停重复但保留。**行为变更**：画板走边框不再有弱光选项。技术书 r47。
+- **验证**：`laser-api` 新增 1 项（内孔先切、桥位只在外框、切缝前后轮廓数不变、左下角不越界、无切割参数报错）并在刻法用例补切割断言；前端新增 1 项（精简项源码断言）并补切割刻法断言，`npm test` 333 项、lint 0/0；Rust 全量 1370 项、clippy 零警告、e2e 38 项通过。未实机切割。
+- **关联**：`crates/laser-api/src/sketch.rs`（`VectorStyle::Cut`、`cut_text`）、`crates/laser-api/src/generation/draw.rs`（`plan_cut`）、`frontend/src/drawConnection.js`（`drawIsCut`、`drawVectorLayerFlags`）、`frontend/src/components/draw/{DrawMaterialCard,DrawSendCard,DrawDeviceCard}.jsx`、`frontend/src/components/workbench/WorkbenchMonitorCard.jsx`、`frontend/src/pages/{DrawPage,HomePage}.jsx`。
+
 ### 刻法按模式只列能用的选项：画板矢量 / 转图片都可选轮廓或填充，工作台转图片只剩实心，扫描设置可改（2026-11-17）
 
 - **现象**：画板矢量模式没有刻法选择，描边还是填满只能逐个元素改背景色；工作台文字转图片时把用不了的描边、排线标“（仅矢量）”置灰，外框切割还摆着；转图片的照片、画板光栅用到了扫描设置（双向、扫描偏移、过扫描）却没有地方改，工作台文字转图片时又摆着分组、角度、交叉排线等用不上的项（用户 2026-11-17“我选矢量后一个刻法显示轮廓和填充……就像语音中心的 moss 内置服务只显示他有的功能……你看看别的界面或者功能有没有这种情况了吧”）。

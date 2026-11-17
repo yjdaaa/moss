@@ -30,15 +30,6 @@ pub(crate) fn generate_draw_artifacts(
         return Err("thickness_mm 必须是大于 0 的数字".into());
     }
 
-    // 画板只生成雕刻任务（laser_mode 恒为 engrave），没有切割设置（2026-11-16）
-    if !matches!(
-        object.get("cut_options"),
-        None | Some(serde_json::Value::Null)
-    ) {
-        return Err(
-            "画板生成的是雕刻任务，不支持 cut_options（切割设置只用于工作台文字的外框切割）".into(),
-        );
-    }
     let requested_mode =
         object
             .get("mode")
@@ -80,6 +71,16 @@ pub(crate) fn generate_draw_artifacts(
     // 矢量刻法（r46）：按画布颜色（默认）/ 轮廓 / 填充
     let vector_style =
         crate::sketch::VectorStyle::parse(object.get("vector_style").and_then(|v| v.as_str()))?;
+    // 切割（r47）：只在矢量刻法选“切割”时；其余画板任务都是雕刻，带切割设置直接拒绝
+    let is_cut = requested_mode == "vector" && vector_style == crate::sketch::VectorStyle::Cut;
+    if !is_cut
+        && !matches!(
+            object.get("cut_options"),
+            None | Some(serde_json::Value::Null)
+        )
+    {
+        return Err("cut_options（切割设置）只用于画板矢量刻法“切割”或工作台文字的外框切割".into());
+    }
     let (sketch, layout_sketch) = if requested_mode == "vector" {
         match object.get("scene_json") {
             Some(scene) => {
@@ -183,14 +184,16 @@ pub(crate) fn generate_draw_artifacts(
         library,
         material,
         thickness,
-        if mode == "cut" { "cut" } else { "engrave" },
-        if mode == "cut" {
-            None
-        } else {
-            Some(recommend_mode)
-        },
+        if is_cut { "cut" } else { "engrave" },
+        if is_cut { None } else { Some(recommend_mode) },
         1000.0,
     );
+    // 切割必须有该厚度的切割参数，不能拿默认值去切
+    if is_cut && recommendation.is_none() {
+        return Err(format!(
+            "材料库里还没有「{material} {thickness}mm」的切割参数，请先在材料实验室做切割标定并保存"
+        ));
+    }
     let power = recommendation
         .as_ref()
         .map(|r| r.params.laser_max_power)
@@ -252,6 +255,7 @@ pub(crate) fn generate_draw_artifacts(
     let mut path_optimization = None;
     let mut vector_details = None;
     let mut raster_details = None;
+    let mut cut_json = None;
     let gcode_str = if let (Some(sketch), "vector") = (&sketch, mode) {
         let (fill_request, fill_from_material) = merge_layer_options(
             object.get("fill_options"),
@@ -267,7 +271,21 @@ pub(crate) fn generate_draw_artifacts(
             motion.overscan_accel(),
         )?;
         fill.from_material = fill_from_material;
-        let planned = plan_sketch(
+        // 切割设置（r47）：请求没写的键取材料库切割条目随材料保存的值，同工作台文字外框切割
+        let cut_setup = if is_cut {
+            let (request, from_material) = merge_layer_options(
+                object.get("cut_options"),
+                recommendation.as_ref().and_then(|r| {
+                    r.params
+                        .layer_options(laser_contracts::MATERIAL_CUT_OPTIONS_KEY)
+                }),
+                laser_contracts::MATERIAL_CUT_OPTION_KEYS,
+            );
+            Some((parse_cut_options(request.as_ref())?, from_material))
+        } else {
+            None
+        };
+        let (planned, cut_report) = plan_sketch(
             sketch,
             layout_sketch.as_ref().unwrap_or(sketch),
             width_mm,
@@ -277,7 +295,11 @@ pub(crate) fn generate_draw_artifacts(
                 ..fill.options
             },
             &parse_path_options(object)?,
+            cut_setup.as_ref().map(|(cut, _)| cut),
         )?;
+        if let Some((cut, from_material)) = &cut_setup {
+            cut_json = Some(cut_options_json(cut, cut_report.as_ref(), from_material));
+        }
         path_optimization = Some(planned.stats.clone());
         vector_details = Some((
             sketch.has_fills().then(|| {
@@ -512,6 +534,13 @@ pub(crate) fn generate_draw_artifacts(
         );
     }
     res_map.insert(
+        "laser_mode".into(),
+        serde_json::json!(if is_cut { "cut" } else { "engrave" }),
+    );
+    if let Some(cut) = cut_json {
+        res_map.insert("cut_options".into(), cut);
+    }
+    res_map.insert(
         "engrave_route".into(),
         serde_json::json!(if mode == "vector" { "vector" } else { "image" }),
     );
@@ -556,11 +585,27 @@ fn plan_sketch(
     height_mm: f64,
     fill: laser_core::vector_plan::FillOptions,
     path_options: &laser_core::vector_plan::PlanOptions,
-) -> Result<laser_core::vector_plan::Planned, String> {
+    // 切割刻法（r47）：先内后外切穿，切缝补偿按嵌套层数决定方向，规划后再加桥位、引线、过切
+    cut: Option<&laser_core::cut::CutOptions>,
+) -> Result<
+    (
+        laser_core::vector_plan::Planned,
+        Option<laser_core::cut::CutReport>,
+    ),
+    String,
+> {
     use laser_core::vector_plan::{FillOptions, FillRule, Unit, plan_layers, scan_fill};
     const PADDING: f64 = 16.0;
     let (x0, y0, x1, y1) = layout.bounds().ok_or("画板里没有可刻的图形")?;
-    let (reach_x, reach_y) = if layout.has_fills() {
+    let (reach_x, reach_y) = if let Some(cut) = cut {
+        cut.validate().map_err(|e| e.to_string())?;
+        let reach = if cut.is_active() {
+            cut.extension_mm()
+        } else {
+            0.0
+        };
+        (reach, reach)
+    } else if layout.has_fills() {
         fill.extension_mm()
     } else {
         (0.0, 0.0)
@@ -584,6 +629,9 @@ fn plan_sketch(
             (y - y0 + PADDING) * scale + oy,
         )
     });
+    if let Some(cut) = cut {
+        return plan_cut(&mm, height_mm, path_options, cut);
+    }
     // 扫描角度按机器视角逆时针，画板坐标 y 向下时取反
     let options = |rule| FillOptions {
         rule,
@@ -608,5 +656,103 @@ fn plan_sketch(
         .chain(mm.open.iter().cloned().map(Unit::Open))
         .collect();
     // 激光头起点在左下角：y 向下坐标里是 (0, height)；规划内部自检出光总长度不变
-    plan_layers(vec![fills, strokes], (0.0, height_mm), path_options).map_err(|e| e.to_string())
+    let planned = plan_layers(vec![fills, strokes], (0.0, height_mm), path_options)
+        .map_err(|e| e.to_string())?;
+    Ok((planned, None))
+}
+
+/// 点在多边形里（射线法，首尾点可重复）。
+fn inside(p: laser_contracts::geometry::Point, ring: &[laser_contracts::geometry::Point]) -> bool {
+    let n = ring.len();
+    let mut hit = false;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        if (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0) {
+            hit = !hit;
+        }
+    }
+    hit
+}
+
+/// 画板切割（r47）：闭合图形各自一组、同一段文字一组；每组被别的组的轮廓包了几层决定是零件外框（偶数层，
+/// 切缝往外）还是孔（奇数层，切缝往孔里），切缝补偿按组做（文字组内按非零环绕合并、字里的孔自动反向）；
+/// 开放线条沿线切。先内后外规划，出光长度自检后再加桥位、引线、过切（同工作台文字外框切割）。
+fn plan_cut(
+    mm: &crate::sketch::SketchGeometry,
+    height_mm: f64,
+    path_options: &laser_core::vector_plan::PlanOptions,
+    cut: &laser_core::cut::CutOptions,
+) -> Result<
+    (
+        laser_core::vector_plan::Planned,
+        Option<laser_core::cut::CutReport>,
+    ),
+    String,
+> {
+    use laser_core::vector_plan::{PlanOptions, Unit, burn_paths, plan_layers};
+    let groups: Vec<Vec<Vec<laser_contracts::geometry::Point>>> = mm
+        .closed
+        .iter()
+        .map(|ring| vec![ring.clone()])
+        .chain(mm.cut_text.iter().cloned())
+        .filter(|group| !group.is_empty())
+        .collect();
+    let mut units: Vec<Unit> = Vec::new();
+    let (mut before, mut after) = (0, 0);
+    for (index, group) in groups.iter().enumerate() {
+        if cut.kerf_mm == 0.0 {
+            units.extend(group.iter().cloned().map(Unit::Closed));
+            continue;
+        }
+        let first = &group[0];
+        let probe = if first.len() >= 2 {
+            (
+                (first[0].0 + first[1].0) / 2.0,
+                (first[0].1 + first[1].1) / 2.0,
+            )
+        } else {
+            first[0]
+        };
+        let depth: usize = groups
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, other)| other.iter().filter(|ring| inside(probe, ring)).count())
+            .sum();
+        let kerf = if depth.is_multiple_of(2) {
+            cut.kerf_mm
+        } else {
+            -cut.kerf_mm
+        };
+        let offset = laser_core::cut::offset_contours(group, kerf).map_err(|e| e.to_string())?;
+        before += offset.before;
+        after += offset.after;
+        units.extend(offset.contours.into_iter().map(Unit::Closed));
+    }
+    units.extend(mm.open.iter().cloned().map(Unit::Open));
+    let mut planned = plan_layers(
+        vec![units],
+        (0.0, height_mm),
+        &PlanOptions {
+            inside_first: true,
+            ..*path_options
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let mut report = if cut.needs_post_processing() {
+        let (steps, report) =
+            laser_core::cut::apply_cut_options(&planned.steps, cut).map_err(|e| e.to_string())?;
+        planned.paths = burn_paths(&steps);
+        planned.steps = steps;
+        report
+    } else {
+        laser_core::cut::CutReport::default()
+    };
+    if cut.kerf_mm != 0.0 {
+        report.kerf_contours = Some((before, after));
+    }
+    if report.contours == 0 {
+        report.contours = groups.iter().map(Vec::len).sum();
+    }
+    Ok((planned, cut.is_active().then_some(report)))
 }

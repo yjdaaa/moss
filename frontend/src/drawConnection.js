@@ -20,6 +20,7 @@ export const DRAW_IMAGE_STRATEGIES = Object.freeze([
 export const DRAW_VECTOR_STYLES = Object.freeze([
   { value: "outline", label: "轮廓（闭合图形与文字只描边，默认）" },
   { value: "fill", label: "填充（闭合图形与文字都填满）" },
+  { value: "cut", label: "切割（沿闭合图形与文字切穿，先内后外）" },
 ]);
 
 /** 没存过或值无效时按轮廓（与工作台文字默认只描轮廓一致）。 */
@@ -27,11 +28,23 @@ export function normalizeDrawVectorStyle(style) {
   return DRAW_VECTOR_STYLES.some((opt) => opt.value === style) ? style : "outline";
 }
 
-/** 查材料推荐用哪一档：光栅扫描与矢量“填充”用填充（raster）参数，其余用描边（outline）参数。 */
+/** 查材料推荐用哪一档：光栅扫描与矢量“填充”用填充（raster）参数，矢量“切割”用切割参数，其余用描边参数。 */
 export function drawRecommendEngravingMode(mode, vectorStyle) {
   if (mode === "raster") return "raster";
   if (mode === "vector" && normalizeDrawVectorStyle(vectorStyle) === "fill") return "raster";
+  if (mode === "vector" && normalizeDrawVectorStyle(vectorStyle) === "cut") return "cut";
   return "outline";
+}
+
+/** 画板是不是切割任务（矢量刻法“切割”，r47）。 */
+export function drawIsCut(mode, vectorStyle) {
+  return mode === "vector" && normalizeDrawVectorStyle(vectorStyle) === "cut";
+}
+
+/** 矢量刻法对应的填充 / 切割设置开关（`fillSettingsPayload` 等的 `{ withFill, withCut }`）。 */
+export function drawVectorLayerFlags(vectorStyle) {
+  const style = normalizeDrawVectorStyle(vectorStyle);
+  return { withFill: style === "fill", withCut: style === "cut" };
 }
 
 /** 没存过或值无效时按光栅扫描。 */

@@ -191,6 +191,7 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
       customParams: false,
       setCustomParams: () => {},
     }));
+    const drawRasterNoCut = () => card({}, "raster", "image");
     const drawVector = card({}, "vector", "vector");
     assert.match(drawVector, /id="draw-engrave-route"/);
     assert.match(drawVector, /id="draw-selected-only"/, "矢量时照旧可以只刻选中的图形");
@@ -202,6 +203,11 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.match(drawVector, /<option value="fill">填充/);
     assert.doesNotMatch(drawVector, /按画布颜色/);
     assert.doesNotMatch(drawVector, /draw-fill-grouping/);
+    const drawVectorCut = card({ vector_style: "cut" }, "vector", "vector");
+    assert.match(drawVectorCut, /<option value="cut" selected="">切割/);
+    assert.match(drawVectorCut, /id="draw-cut-kerf"/, "切割时显示切缝、桥位等切割设置");
+    assert.doesNotMatch(drawVectorCut, /draw-fill-preset|draw-fill-grouping/, "切割不显示填充设置");
+    assert.doesNotMatch(drawRasterNoCut(), /value="cut"/, "转图片时没有切割");
     const drawVectorFill = card({ vector_style: "fill" }, "vector", "vector");
     assert.match(drawVectorFill, /id="draw-fill-preset"/, "填充时显示填充设置");
 
@@ -249,4 +255,44 @@ test("页面接线：工作台文字不带 engrave_route（跟随全局开关）
   assert.match(draw, /selectedOnly && modeSnapshot === "vector"/, "只刻选中的图形只在矢量下提交");
   assert.match(draw, /rasterScanPayload\(fillSettings\)/);
   assert.doesNotMatch(draw, /form\.mode\b/, "画板表单不再有生成策略字段");
+});
+
+test("r47 精简：画板发送卡、设备卡与工作台监视舱去掉重复与调试项", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+  const send = read("components/draw/DrawSendCard.jsx");
+  for (const removed of ["刷新状态", "素材预览", "下载场景 JSON", "诊断输出", "workflow-chip", "弱光指示"]) {
+    assert.ok(!send.includes(removed), `画板发送卡不再有：${removed}`);
+  }
+  assert.match(send, /取消任务/, "保留取消任务");
+  assert.match(send, /路径预览/, "保留路径预览");
+  assert.match(send, /下载 G-code/, "保留下载 G-code");
+  assert.doesNotMatch(read("components/draw/DrawDeviceCard.jsx"), /onClick=\{saveConfiguration\}|>\s*保存配置\s*</, "设备卡没有保存配置按钮（自动保存）");
+  const monitor = read("components/workbench/WorkbenchMonitorCard.jsx");
+  assert.doesNotMatch(monitor, />\s*(物理 SHA-256|刀路总行数)\s*</, "监视舱不再显示 SHA-256 与总行数");
+  assert.match(monitor, /预估耗时/);
+  const page = read("pages/DrawPage.jsx");
+  assert.match(page, /const lightOn = false;/, "画板走边框一律不出光");
+});
+
+test("r48 对刀起点：后端一个值，工作台读写、默认木牌中心，保存失败回到原值", async () => {
+  const { normalizeTextOrigin, textOriginFromResponse, textOriginSaveOutcome, TEXT_ORIGIN_SHARED_HINT } =
+    await import("../src/textOrigin.js");
+  assert.equal(normalizeTextOrigin(undefined), "center");
+  assert.equal(normalizeTextOrigin("top"), "center");
+  assert.equal(normalizeTextOrigin("lower_left"), "lower_left");
+  assert.equal(textOriginFromResponse({ ok: true, data: { success: true, result: { origin: "lower_left" } } }), "lower_left");
+  assert.equal(textOriginFromResponse({ ok: false, data: { success: false } }), null);
+  assert.deepEqual(
+    textOriginSaveOutcome({ ok: true, data: { success: true, result: { origin: "lower_left" } } }, "center"),
+    { origin: "lower_left" },
+  );
+  const failed = textOriginSaveOutcome({ ok: false, status: 403, data: { success: false, result: "lan_read_only" } }, "center");
+  assert.equal(failed.origin, "center");
+  assert.match(failed.error, /对刀起点没有保存/);
+  assert.match(TEXT_ORIGIN_SHARED_HINT, /语音/);
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/HomePage.jsx", import.meta.url), "utf8");
+  assert.match(page, /useTextOrigin\(\)/, "工作台对刀起点来自后端全局设置");
+  assert.doesNotMatch(page, /useState\("center"\)/, "不再是只在本页有效的本地状态");
 });

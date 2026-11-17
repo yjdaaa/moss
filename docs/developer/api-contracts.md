@@ -30,6 +30,7 @@
 | POST | `/api/text-task/send` | 文字任务确认发送 | §3.5 |
 | POST | `/api/workflow` | workflow 状态机 | §3.6 |
 | POST | `/api/material-lab/preview` / `send` / `status` / `select-cell` / `manage` | 材料实验室 | §3.7～3.10 |
+| GET / POST | `/api/text-origin` | 文字对刀起点全局设置（r48）：GET 读，POST `{origin:"center"\|"lower_left"}` 改；工作台与语音生成文字任务共用（局域网只读） | §3.10c |
 | GET / POST | `/api/engrave-route` | 雕刻路线全局开关（矢量 / 转图片，r45）：GET 读，POST `{route:"vector"\|"image"}` 改；工作台、画板与语音生成共用（局域网只读） | §3.10c |
 | GET / POST | `/api/time-calibration` | 工时自校准：GET 查看各台机器的校准系数与样本数；POST `{action:"reset", target?}` 清除（局域网只读，r40） | §3.10b |
 | POST | `/api/device/framing` | 走边框 | §3.12 |
@@ -309,13 +310,13 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | thickness_mm | float | 是 | >0 |
 | mode | string | 否 | `vector`（2026-11-16 起前端默认）直接把场景元素转成刀路：手绘笔画按中心线一笔、不闭合，直线 / 箭头 / 矩形 / 菱形 / 椭圆按形状描边，有填充色的闭合图形与文字元素用矢量扫描线填满（文字元素转字形轮廓后先焊接，交叠笔画合成一笔，2026-11-17 技术书 r44；`laser_core::vector_plan::scan_fill`，设置见 `fill_options`），先填充、再描轮廓与笔画，2-opt 缩短空走；场景含用户插入（上传）到画板的图片时改用 `raster` 并返回 `vector_note`，结果另含 `path_optimization`、`fill_options`（有填充时为实际设置，否则 null）、`removed_duplicates`；`raster`（转图片光栅扫描：2026-11-17 技术书 r45 起与 §3.4 图片预览同一套引擎——透明按白色、按材料线距（可乘 `line_interval_scale` 0.5～3）重采样到成品尺寸，`image_mode` 等图片模式字段同图片预览（默认 `auto`，线稿多按 Otsu 阈值），不支持 `pass_through`；过扫描、双向与扫描偏移取 `fill_options`（同图片预览）；结果另含 `image_mode`、`pixel_size_mm`、`scan_options` 等，同图片预览。此前固定 0.1 mm 点距、灰度 128 一刀切、过扫描固定 1 mm）；`outline`（导出图沿深色区域描边，`trace_grayscale` + 路径优化 + `write_outline`）；其他值 400。未传时按全局开关（§3.10c：矢量 → `vector`，转图片 → `raster`）；结果另含 `engrave_route`（`vector` 或 `image`） |
 | width_mm、height_mm | 可选正数 | 否 | 成品尺寸（2026-10-14 起生效，此前被忽略）：都填时锁定比例放进该框；只填一边按比例算另一边；缺省、空串、null 或 0 按导出图每像素 0.1 mm。2026-11-06 起按机器幅面（默认 100 × 100 mm，可用 `work_area_width_mm` / `work_area_height_mm` 覆盖；光栅模式宽度另留两侧过扫描，r45 起按实际过扫描）而不是 400 mm 画布：填写的尺寸超出返回 400；没填且按 0.1 mm/像素超出时等比缩小并返回 `auto_fitted=true` 与 `fit_note` |
-| vector_style | string | 否 | 仅 `vector`（2026-11-17 技术书 r46）：`canvas`（默认，按画布颜色：设了背景色的闭合图形填满、线条颜色可见的描边，文字填满并描边）/ `outline`（闭合图形与文字只描边，只设了背景色的图形也描边）/ `fill`（闭合图形与文字都填满并描边）；手绘、开放直线与箭头始终刻一笔。`fill` 取材料库填充（raster）参数，其余取描边参数。结果回显 `vector_style`；其他值 400。前端画板只提供 `outline`（默认）与 `fill` 并总是显式发送；缺省按 `canvas` 只为接口兼容 |
+| vector_style | string | 否 | 仅 `vector`（2026-11-17 技术书 r46 / r47）：`canvas`（按画布颜色：设了背景色的闭合图形填满、线条颜色可见的描边，文字填满并描边；缺省值，只为接口兼容）/ `outline`（闭合图形与文字只描边，只设了背景色的图形也描边）/ `fill`（闭合图形与文字都填满并描边）/ `cut`（r47：沿闭合图形与文字轮廓切穿，开放线条沿线切；先内后外规划，切缝补偿按嵌套层数定方向——偶数层是零件外框往外、奇数层是孔往孔里，同一段文字整组补偿；规划后再加桥位、引线、过切；必须有该厚度的切割参数，否则 400“材料库里还没有「…」的切割参数…”）；手绘、开放直线与箭头在非切割刻法下始终刻一笔。`fill` 取材料库填充（raster）参数，`cut` 取切割参数，其余取描边参数。结果回显 `vector_style`；其他值 400。前端画板提供 `outline`（默认）/ `fill` / `cut` 并总是显式发送 |
 | vector_simplify_factor | 可选数字 | 否 | 仅 `outline`：0.25 ~ 8，默认 3 |
 | fill_options | object | 否 | 仅 `vector`，用于有填充色的图形与文字元素（线距取材料像素间距）；有填充时成品四周再让出过扫描距离，关光滑行也不越出成品范围。2026-11-16 对齐 LightBurn Fill 模式，全部可省略：`grouping`（`all` 默认，每行横穿所有图形、图形之间 `G1 S0` 匀速滑过 / `individual` 一块块蛇形扫完）、`angle_deg`（扫描角度，按机器视角逆时针，0 横扫，±360 内）、`cross_hatch`（再转 90° 扫一遍，默认 false）、`bidirectional`（默认 true；false 时回程不出光）、`overscan_mm`（每行两头关光多走的距离；省略、null 或 `"auto"` 按 v²/(2a) 自动、取 0.1 mm 整、限 1 ~ 20；数字 0 ~ 20，0 关闭）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、`scan_offset_mm`（双向扫描错位补偿 ±2，每行逆着行进方向挪一半）、`scan_offset_table`（2026-11-16 对齐 LightBurn Scanning Offset Adjustment：`[[速度 mm/min, 偏移 mm], …]`，1 ~ 32 行，速度 > 0 且不重复、偏移 ±2，可乱序（按速度排好），按本次加工速度线性插值、低于首行 / 高于末行取端点值，给了就覆盖 `scan_offset_mm`；省略、null 或空数组不用表）；越界或类型不对 400 |
 | selected_element_ids | string[] | 否 | 仅 `vector`（2026-11-16，对齐 LightBurn“只加工选中图形”，不用选区原点）：只刻这些 Excalidraw 元素（及绑在选中容器上的文字），排版（缩放、居中、过扫描留边）仍按整幅画算，选中部分刻在它在整幅画里的位置；1 ~ 10000 个非空字符串。非矢量模式、选中图片、选中部分没有可刻内容时 400；成功时结果含 `selected_only=true` 与 `selection_note` |
 | machine_motion | object | 否 | 2026-11-16 按加速度估算工时：键名与 §3.3 `machine_limits` 相同——`x_accel_mm_s2`、`y_accel_mm_s2`（0 ~ 100000，只给一个时两轴同值）、`x_max_rate_mm_per_min`、`y_max_rate_mm_per_min`（G0 按两轴较大者走，再按方向逐轴封顶）、`junction_deviation_mm`（默认 0.01）；全部可省略，缺省按 1000 mm/s²。自动过扫描缺省时也取两轴加速度较小者。非数字或越界 400 |
 | path_options | object | 否 | 仅 `vector`。2026-11-16 对齐 LightBurn 优化设置：`prefer_corners`（闭合轮廓起刀点优先放在转角 > 45° 的尖角，默认 true）、`remove_overlaps`（整条重复的轮廓 / 线段只刻一遍，容差 0.01 mm，默认 true）；切割先内后外由刻法决定，不能在这里关 |
-| cut_options | — | 否 | 不支持（2026-11-16）：画板只生成雕刻任务（前端恒传 `laser_mode=engrave`），请求带非 null 的 `cut_options` 时 400“画板生成的是雕刻任务，不支持 cut_options…”；切割设置只用于 §3.4 文字的外框切割 |
+| cut_options | object | 否 | 2026-11-17 技术书 r47 起只用于 `vector_style=cut`（矢量切割），键与 §3.4 文字外框切割相同（`kerf_mm`、桥位、引线、过切，默认全关），请求没写的键取材料库该厚度切割条目随材料保存的值；其他模式带非 null 的 `cut_options` 时 400“cut_options（切割设置）只用于画板矢量刻法“切割”或工作台文字的外框切割”。结果另含 `laser_mode`（`cut` / `engrave`）与 `cut_options`（同 §3.4 回显，含 `report`） |
 | 连接字段 | 见 §1.5 | 否 | 只记录，不连接设备 |
 
 后端直接生成光栅或轮廓 G-code（`generate_draw_artifacts`），写入运行目录 `generated_assets/`，创建 `source_type="draw"` 的 workflow 并冻结 `confirmation_snapshot`。
@@ -347,7 +348,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | engraving_mode | string | 否 | 只用于判断是否切割（`cut`）；不再决定文字刻法（此前写 `raster` 也只描轮廓） |
 | text_fill | string | 否 | `outline`（默认，2026-11-06 用户决定）只描字的轮廓，取材料库 outline 参数；`fill` 实心填充：2026-11-16 起改为矢量扫描线（线距 `pixel_size_mm`，从轮廓精确求交，不经过位图；扫描设置见 `fill_options`，默认一次填完、双向、过扫描自动；最后描一遍轮廓），取 raster 参数；`hatch` 排线填充，线距为 `pixel_size_mm` 的 3 倍并描边，取 outline 参数；切割（`laser_mode` / `engraving_mode` 为 `cut`）时闭合轮廓先内后外。填充按非零环绕规则，字内孔不填 |
 | text_align | string | 否 | `center`（默认）/ `left` / `right`；文字里的换行即分行 |
-| origin | string | 否 | `center`（默认，用户决定）开刻前激光头对准木牌（图案）中心；`lower_left` 对准木牌左下角（无木牌为文字左下角）。只改开头 `G92` 声明的激光头位置，结束时关光回到起点 |
+| origin | string | 否 | 2026-11-17 技术书 r48 起缺省时按全局对刀起点（§3.10c `/api/text-origin`，未设置为 `center`）；`center`（用户决定的默认）开刻前激光头对准木牌（图案）中心；`lower_left` 对准木牌左下角（无木牌为文字左下角）。只改开头 `G92` 声明的激光头位置，结束时关光回到起点 |
 | width_mm / height_mm（别名 board_width_mm / board_height_mm） | float | 否 | 木牌尺寸，可只给一边；没给 `font_size_mm` 时自动取能放下的最大字号并居中，给了字号但放不下 400 `…放不进 … 的木牌` |
 | safe_margin_mm（别名 margin_mm） | float | 否 | 2；放进木牌时四周留边 |
 | pixel_size_mm | float | 否 | 材料库对应参数（0.05～1）；`fill` 的扫描行距与 `hatch` 的排线间距 |
@@ -507,6 +508,8 @@ Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickne
 - `GET`：`{route}`。
 - `POST {route:"vector"|"image"}`：保存并返回 `{route}`；其他值 400；局域网连接只读（`lan_read_only`）；语音与 AI 工具没有改它的入口。
 - 生成时的用法：§3.4 文字任务请求没写 `engrave_route` 时按它（工作台不传、始终跟开关；语音 / AI 生成同一条）；§3.2 画板请求没写 `mode` 时按它（矢量 → `vector`，转图片 → `raster`）。采用反馈建议重新生成时同样按当前开关。
+
+**文字对刀起点 `/api/text-origin`**（r48，2026-11-17 用户决定：“就按照这么做”——把对刀起点做成后端全局设置，语音没明确说起点时按它）：存运行目录 `settings.json` 的 `laser_text_origin`（`"center"` 默认 / `"lower_left"`，缺省或无效按中心）。`GET` 返回 `{origin}`；`POST {origin}` 保存并返回 `{origin}`，其他值 400，局域网只读（`lan_read_only`）。§3.4 文字任务请求没写 `origin` 时按它（工作台显式发送当前选择，即它的值；语音 / AI 没说起点就不填），写了就按请求。创作画板与图片任务固定左下角，不受影响。工具 `laser_workflow_tool` 的 `origin` 不再写死默认值，说明为“用户没说就不填”。
 
 ### 3.11 `/api/material-lab/recent`
 

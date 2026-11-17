@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
@@ -81,8 +81,10 @@ import {
   drawGenerationSignature,
   drawInkExportMode,
   drawRasterImagePayload,
+  drawIsCut,
   drawRecommendEngravingMode,
   drawRequestMode,
+  drawVectorLayerFlags,
   normalizeDrawVectorStyle,
   drawSizeValue,
   drawTargetLabel,
@@ -169,7 +171,6 @@ export function DrawPage({ onNavigate }) {
   const [customPasses, setCustomPasses] = useState("1");
   const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(safeBrowserStorage()));
   const [serialPorts, setSerialPorts] = useState([]);
-  const [framingLight, setFramingLight] = useState(false);
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与工作台共用
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
   // 只刻选中的图形（矢量模式）：选区变化计入预览签名
@@ -239,12 +240,13 @@ export function DrawPage({ onNavigate }) {
       setHasRec(false);
       return undefined;
     }
-    const query = new URLSearchParams({
-      material: mat,
-      thickness_mm: thick,
-      laser_mode: "engrave",
-      engraving_mode: drawRecommendEngravingMode(drawMode, form.vector_style),
-    });
+    // 切割查该厚度的切割参数（不带雕刻模式），其余按刻法查雕刻档
+    const recMode = drawRecommendEngravingMode(drawMode, form.vector_style);
+    const query = new URLSearchParams(
+      recMode === "cut"
+        ? { material: mat, thickness_mm: thick, laser_mode: "cut" }
+        : { material: mat, thickness_mm: thick, laser_mode: "engrave", engraving_mode: recMode },
+    );
     getJson(`/api/ui/material-recommendation?${query.toString()}`).then((res) => {
       if (cancelled) return;
       if (!res.ok || !res.data?.success || !res.data.result) {
@@ -279,7 +281,10 @@ export function DrawPage({ onNavigate }) {
   // r40：把当前填充设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
   const saveFillToMaterial = async () => {
     if (!materialLayer) return;
-    const payload = materialLayerPayload(fillSettings, { withFill: true });
+    const payload = materialLayerPayload(
+      fillSettings,
+      drawIsCut(drawMode, form.vector_style) ? { withFill: false, withCut: true } : { withFill: true },
+    );
     if (payload.error) {
       showAlert(payload.error, { title: "填充设置不对", tone: "warning" });
       return;
@@ -308,7 +313,7 @@ export function DrawPage({ onNavigate }) {
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
     // 矢量看填充设置与选区，光栅扫描看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
     fill: drawMode === "vector"
-      ? fillSettingsSignature(fillSettings) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
+      ? fillSettingsSignature(fillSettings, drawVectorLayerFlags(form.vector_style)) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
       : drawMode === "raster"
         ? rasterScanSignature(fillSettings) + JSON.stringify(motionPayload)
         : "",
@@ -321,7 +326,6 @@ export function DrawPage({ onNavigate }) {
   const web = result?.result?.web || {};
   const lab = result?.result?.draw_lab || {};
   const jobSummary = lab.job_summary || null;
-  const rawText = useMemo(() => (result ? JSON.stringify(result, null, 2) : ""), [result]);
   const canActOnWorkflow = Boolean(workflowId);
   const hostReady = drawTargetReady(form);
   const nextActions = Array.isArray(result?.result?.next_actions) ? result.result.next_actions : [];
@@ -485,22 +489,6 @@ export function DrawPage({ onNavigate }) {
       material: next.material,
       thickness_mm: next.thickness_mm,
     }));
-  }
-
-  function saveConfiguration() {
-    try {
-      const storage = safeBrowserStorage();
-      if (!storage) throw new Error("浏览器存储不可用");
-      CONFIG_KEYS.forEach((key) => {
-        const value = form[key];
-        const str = typeof value === "boolean" ? (value ? "true" : "false") : String(value ?? "");
-        persistedRef.current[key] = str;
-        storage.setItem(`laserLab.${key}`, str);
-      });
-      setStatus("配置已保存");
-    } catch (error) {
-      setStatus(`配置保存失败：${error?.message || error}（本次设置仍可使用，但不会被记住）`);
-    }
   }
 
   function pickDiscoveredController(controller) {
@@ -682,7 +670,7 @@ export function DrawPage({ onNavigate }) {
     const modeSnapshot = drawMode;
     // 矢量带整套填充设置；光栅扫描带扫描子集（过扫描、双向、扫描偏移表）与转换方式；只刻选中的图形只在矢量下可用
     const fillPayload = modeSnapshot === "vector"
-      ? fillSettingsPayload(fillSettings)
+      ? fillSettingsPayload(fillSettings, drawVectorLayerFlags(form.vector_style))
       : modeSnapshot === "raster"
         ? rasterScanPayload(fillSettings)
         : {};
@@ -725,6 +713,7 @@ export function DrawPage({ onNavigate }) {
         height_mm: drawSizeValue(form.height_mm),
         mode: modeSnapshot,
         ...(modeSnapshot === "vector" ? { vector_style: normalizeDrawVectorStyle(form.vector_style) } : {}),
+        ...(drawIsCut(modeSnapshot, form.vector_style) ? { laser_mode: "cut" } : {}),
         ...imagePayload,
         ...fillPayload,
         ...motionPayload,
@@ -865,7 +854,8 @@ export function DrawPage({ onNavigate }) {
     const { width, height, frame } = extent;
     const registered = Boolean(result?.result?.registration);
     // 走边框会实际移动机器（勾选弱光时还会低功率出光），单击不得直接执行（2026-11-05 用户决定）
-    const lightOn = framingLight;
+    // 走边框一律不出光（r47 去掉了画板的弱光选项，与工作台一致）
+    const lightOn = false;
     const outline = framingShape === "hull" ? framingOutline(result?.result?.artifacts) : null;
     const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn, outline?.length || 0, registered), {
       title: lightOn ? "确认走边框（弱光出光）" : "确认走边框（机器将移动）",
@@ -1179,7 +1169,6 @@ export function DrawPage({ onNavigate }) {
           connectionBusy={connectionBusy}
           testConnection={testConnection}
           connectionResult={connectionResult}
-          saveConfiguration={saveConfiguration}
         />
 
         <DrawSendCard
@@ -1189,15 +1178,12 @@ export function DrawPage({ onNavigate }) {
           workflowId={workflowId}
           result={result}
           web={web}
-          rawText={rawText}
           jobSummary={jobSummary}
           previewStale={previewStale}
           hostReady={hostReady}
           canActOnWorkflow={canActOnWorkflow}
           canConfirmSend={canConfirmSend}
           summaryAllowsSend={summaryAllowsSend}
-          framingLight={framingLight}
-          setFramingLight={setFramingLight}
           framingShape={framingShape}
           setFramingShape={setFramingShape}
           motionPayload={motionPayload}

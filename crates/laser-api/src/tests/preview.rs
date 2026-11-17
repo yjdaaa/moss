@@ -1226,7 +1226,7 @@ fn text_cut_options_follow_lightburn_and_are_echoed() {
     }
 }
 
-/// 2026-11-16：画板只生成雕刻任务，不接受切割设置。
+/// 2026-11-16：画板雕刻任务不接受切割设置（2026-11-17 r47 起只有矢量刻法“切割”可以带）。
 #[test]
 fn draw_rejects_cut_options() {
     let temp = tempfile::tempdir().unwrap();

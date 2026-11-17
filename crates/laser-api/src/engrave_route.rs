@@ -8,6 +8,10 @@
 //!
 //! `GET /api/engrave-route` 读，`POST /api/engrave-route {route}` 改（局域网只读，见
 //! [`crate::access::is_reference_data_write`]）；语音与 AI 工具不能改。
+//!
+//! 同样的做法还有**文字对刀起点**（2026-11-17 技术书 r48）：`settings.json` 的 `laser_text_origin`
+//! （`"center"` 默认 / `"lower_left"`），`GET/POST /api/text-origin {origin}`；工作台的“对刀起点”读写它，
+//! 文字任务（工作台、语音同一条）请求没写 `origin` 时按它。创作画板与图片固定左下角，不受影响。
 
 use crate::settings::{read_runtime_settings, update_runtime_settings};
 
@@ -68,6 +72,35 @@ impl crate::ApiService {
             settings.insert(
                 SETTINGS_KEY.into(),
                 serde_json::Value::String(route.as_str().into()),
+            );
+        })
+    }
+}
+
+pub(crate) const TEXT_ORIGIN_KEY: &str = "laser_text_origin";
+
+impl crate::ApiService {
+    /// 全局文字对刀起点；没设置过或值无效时为木牌中心。
+    pub(crate) fn text_origin(&self) -> laser_core::engine::TextOrigin {
+        read_runtime_settings(self.runtime_path.as_deref())
+            .get(TEXT_ORIGIN_KEY)
+            .and_then(|v| v.as_str())
+            .and_then(|v| laser_core::engine::TextOrigin::parse(Some(v)).ok())
+            .unwrap_or(laser_core::engine::TextOrigin::Center)
+    }
+
+    pub(crate) fn text_origin_json(&self) -> serde_json::Value {
+        serde_json::json!({ "origin": self.text_origin().as_str() })
+    }
+
+    pub(crate) fn set_text_origin(
+        &self,
+        origin: laser_core::engine::TextOrigin,
+    ) -> Result<(), String> {
+        update_runtime_settings(self.runtime_path.as_deref(), |settings| {
+            settings.insert(
+                TEXT_ORIGIN_KEY.into(),
+                serde_json::Value::String(origin.as_str().into()),
             );
         })
     }

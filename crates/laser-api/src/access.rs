@@ -142,8 +142,9 @@ pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
         | "/api/jev/reveal"
         | "/api/material-lab/select-cell"
         | "/api/time-calibration"
-        // 雕刻路线全局开关（r45）
-        | "/api/engrave-route" => true,
+        // 雕刻路线全局开关（r45）与文字对刀起点（r48）
+        | "/api/engrave-route"
+        | "/api/text-origin" => true,
         "/api/material-lab/manage" => {
             let action = serde_json::from_slice::<serde_json::Value>(body)
                 .ok()

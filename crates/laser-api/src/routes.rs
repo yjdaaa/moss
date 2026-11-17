@@ -868,6 +868,7 @@ impl ApiService {
                         .or(self.upload_root.as_deref()),
                     &effective_library,
                     self.engrave_route(),
+                    self.text_origin(),
                 ) {
                     Ok(mut artifacts) => {
                         self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
@@ -1387,6 +1388,34 @@ impl ApiService {
                 &self.material_write_lock,
                 &object,
             );
+        }
+        // 文字对刀起点全局设置（r48）：工作台与语音共用（局域网只读）
+        if route == "/api/text-origin" {
+            if method == "GET" {
+                return http_json(200, success(self.text_origin_json()));
+            }
+            if method == "POST" {
+                let object = match parse_json_object(&body[..content_length], 1024) {
+                    Ok(value) => value,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                let origin = match object.get("origin").and_then(|v| v.as_str()) {
+                    Some(value) if !value.trim().is_empty() => {
+                        laser_core::engine::TextOrigin::parse(Some(value))
+                    }
+                    _ => Err("origin 只能是 center / lower_left".to_owned()),
+                };
+                let origin = match origin {
+                    Ok(origin) => origin,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                return match self.set_text_origin(origin) {
+                    Ok(()) => http_json(200, success(self.text_origin_json())),
+                    Err(error) => {
+                        http_json(500, failure(format!("保存对刀起点失败：{error}"), None))
+                    }
+                };
+            }
         }
         // 雕刻路线全局开关（r45）：矢量 / 转图片，工作台、画板与语音共用（局域网只读）
         if route == "/api/engrave-route" {

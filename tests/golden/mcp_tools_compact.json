@@ -162,8 +162,7 @@
               "center",
               "lower_left"
             ],
-            "default": "center",
-            "description": "preview：开刻前激光头对准木牌中心（默认）还是左下角"
+            "description": "preview：开刻前激光头对准木牌中心（center）还是左下角（lower_left）；用户没说就不填，按电脑上工作台选的对刀起点"
           },
           "manual_params": {
             "type": "object",

@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertTriangle, CheckCircle2, RefreshCw, Save, Wifi } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw, Wifi } from "lucide-react";
 import { showPrompt } from "../../appDialog.js";
 import { controllerLabel } from "../../controllerDiscovery.js";
 import { isDrawConnectionOk, isSerial } from "../../drawConnection.js";
@@ -7,7 +7,7 @@ import { defaultSerialPortHint } from "../../platform.js";
 import { FoldHeader } from "../FoldHeader.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
 
-/** 创意画板 ② 设备卡：连接方式、串口 / 网络目标、局域网扫描、测试连接与保存配置。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分） */
+/** 创意画板 ② 设备卡：连接方式、串口 / 网络目标、局域网扫描、测试连接（各项修改自动保存，r47 去掉了“保存配置”按钮）。2026-11-16 自 pages/DrawPage.jsx 拆出 */
 export function DrawDeviceCard({
   form,
   updateForm,
@@ -22,7 +22,6 @@ export function DrawDeviceCard({
   connectionBusy,
   testConnection,
   connectionResult,
-  saveConfiguration,
 }) {
   return (
     <WbCard id="draw-device" className="hud-card ob-card control-panel" label="设备">
@@ -160,10 +159,6 @@ export function DrawDeviceCard({
       </button>
       <ConnectionStatus form={form} result={connectionResult} />
 
-      <button type="button" className="secondary-button" onClick={saveConfiguration} disabled={busy} title="各项修改会自动记住，也可点此立即核验本地存储">
-        <Save size={17} />
-        保存配置
-      </button>
 
     </WbCard>
   );

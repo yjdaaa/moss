@@ -34,6 +34,7 @@ import { FoldHeader } from "../components/FoldHeader.jsx";
 import { applyImagePreset } from "../qualityPresets.js";
 import { effectiveTextStyle } from "../engraveRoute.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
+import { useTextOrigin } from "../useTextOrigin.js";
 import {
   applyMaterialLayer,
   fillResultNote,
@@ -119,7 +120,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [textStyle, setTextStyle] = useState(
     () => resolveTextStyle(readLocal("laser-forge-text-style", "outline")).style
   );
-  const [textOrigin, setTextOrigin] = useState("center");
+  // 对刀起点（r48）：后端全局设置，工作台与语音共用；手机连电脑时只改本次
+  const { origin: textOrigin, setOrigin: setTextOrigin } = useTextOrigin();
   // 2026-11-16：矢量填充与走刀设置（对齐 LightBurn），与创意画板共用一份本机设置
   const [fillSettings, setFillSettings] = useState(() => readFillSettings());
   // r40：当前材料条目随材料保存的填充 / 切割设置（选材料、厚度、刻法后载入，可改，“保存到材料库”写回）
@@ -1350,7 +1352,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           currentWorkflow={currentWorkflow}
           dimensions={dimensions}
           sendProgress={sendProgress}
-          gcodeLineCount={gcodeLineCount}
           gcodeText={gcodeText}
           timeEstimate={timeEstimate}
           fitNote={fitNote}

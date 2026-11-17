@@ -683,6 +683,7 @@ impl ApiService {
                 self.generated_root.as_deref(),
                 &effective_library,
                 self.engrave_route(),
+                self.text_origin(),
             )?,
             Some("draw") => {
                 let file = workflow["artifacts"]["source_image_file"]

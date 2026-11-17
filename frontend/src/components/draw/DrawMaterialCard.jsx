@@ -201,6 +201,7 @@ export function DrawMaterialCard({
             settings={fillSettings}
             onChange={updateFillSettings}
             withFill={normalizeDrawVectorStyle(form.vector_style) === "fill"}
+            withCut={normalizeDrawVectorStyle(form.vector_style) === "cut"}
             materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
             materialEntryLabel={materialLayer?.label || ""}
             onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
