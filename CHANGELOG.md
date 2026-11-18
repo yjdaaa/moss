@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 创作画板工具栏新增一键“清空画布”，清空后可撤销（2026-11-18）
+
+- **现象**：画板想清掉全部内容只能从 Excalidraw 左上角菜单找“重置画布”，或全选后删除，不好找（用户 2026-11-18“直接帮我加一个一键画布清空的按钮放到画布显眼的位置上”）。
+- **根因与修复**：工具栏新增红色警示按钮 `#draw-clear-canvas`：空画布只提示；否则先确认（写明图形个数），确认后按 Excalidraw 删除方式把图形标记为已删除，清空前的图形记在 ref 中，按钮变为 `#draw-undo-clear`“撤销清空”可一键恢复，画了新东西后撤销失效。Excalidraw 0.18 经 `updateScene` 的改动进不了它自己的撤销历史（实测 Cmd / Ctrl + Z 找不回），因此自己保存。清空后本机保存的画布一起清掉、已生成预览标为过期（沿用画板常驻与本机保存的机制）。`.btn-ghost` 配色带 `!important`，警示色同样用 `!important`。
+- **验证**：前端新增 1 项源码断言（按钮、先确认、空画布不弹框、清空前记下画布）；Vite + Chrome 无头实测：导入含矩形的场景 → 取消不清空 → 确认清空（画布与本机保存清掉、出现“撤销清空”）→ 撤销恢复（本机保存恢复、按钮复原）→ 重新打开后（从本机恢复的画布）清空再撤销同样恢复 → 清空后重新打开为空白；工具栏截图核对按钮为红色。lint 0/0、`npm test` 336 项、e2e 38 项通过。
+- **关联**：`frontend/src/pages/DrawPage.jsx`（`clearCanvas`、`undoClearCanvas`）、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/engraveRoute.test.mjs`。
+
 ### 修复画板导出场景旧缓存与语音热生效漂移，清理下线接口、重复渲染及解析逻辑（2026-11-18）
 
 - **现象**：① 画板生成预览后修改画布，点导出场景仍拿到上次预览缓存的 `lastScene`；② `voice_local_save` 的热更新清单前后端两份漂移（前端漏 `persona_risk_notes`、多 `screen_card_style`），仅改“人设风险提示”时误报重启才生效；③ 存在已下线功能遗留（`workflowAction` 单分支、`lightOn` 死三元、无用 CSS/字段、`pollIntervalId` 重复状态、`/api/draw/preview` 重复构造与无用字段、`voice_memory_*` 四个死命令、自建链路残余、`VoiceMemoryCard` 与三个只被测试用的推屏包装，以及 5 份重复的可选数字解析闭包）。

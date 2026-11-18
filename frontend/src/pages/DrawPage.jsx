@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
+import { Excalidraw, exportToBlob, newElementWith } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Download,
   FileJson,
   Home,
+  Trash2,
+  Undo2,
   Upload,
 } from "lucide-react";
 import { prepareRasterExportElements } from "../rasterInkElements.js";
@@ -148,6 +150,9 @@ export function DrawPage({ onNavigate, active = true }) {
   const [workflowId, setWorkflowId] = useState("");
   const [result, setResult] = useState(null);
   const [sceneRev, setSceneRev] = useState(() => computeSceneRevision(initialScene?.elements));
+  // 一键清空画布后的“撤销清空”：清空前的图形，画了新东西后作废
+  const clearedSceneRef = useRef(null);
+  const [canUndoClear, setCanUndoClear] = useState(false);
   const [previewSnap, setPreviewSnap] = useState(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionResult, setConnectionResult] = useState(null);
@@ -1078,6 +1083,37 @@ export function DrawPage({ onNavigate, active = true }) {
     }
   }
 
+  // 一键清空画布（2026-11-18 用户要求）：先确认；清空前的画布记在 ref 里，按钮随即变成“撤销清空”，
+  // 在画布上画了新东西后撤销失效。（Excalidraw 0.18 经 updateScene 的改动进不了它自己的撤销历史，
+  // 实测 Cmd/Ctrl+Z 找不回，所以自己保存。）清空后本机保存的画布随 onChange 一起清掉，
+  // 已生成的预览因画布变化自动标为过期，不会误发旧刀路
+  async function clearCanvas() {
+    if (!excalidrawAPI) return;
+    const live = (excalidrawAPI.getSceneElements?.() || []).filter((el) => !el.isDeleted);
+    if (live.length === 0) {
+      setStatus("画布已经是空的");
+      return;
+    }
+    const confirmed = await showConfirm(
+      `清空画布上的全部 ${live.length} 个图形？清空后可以点工具栏的「撤销清空」找回。`,
+      { title: "清空画布", tone: "warning", danger: true, confirmText: "清空", cancelText: "取消" },
+    );
+    if (!confirmed) return;
+    clearedSceneRef.current = live;
+    excalidrawAPI.updateScene({ elements: live.map((el) => newElementWith(el, { isDeleted: true })) });
+    setCanUndoClear(true);
+    setStatus("画布已清空，点工具栏「撤销清空」可找回");
+  }
+
+  function undoClearCanvas() {
+    const cleared = clearedSceneRef.current;
+    if (!excalidrawAPI || !cleared) return;
+    clearedSceneRef.current = null;
+    setCanUndoClear(false);
+    excalidrawAPI.updateScene({ elements: cleared.map((el) => newElementWith(el, { isDeleted: false })) });
+    setStatus(`已恢复清空前的 ${cleared.length} 个图形`);
+  }
+
   async function downloadScene() {
     try {
       const { scene } = await exportScene();
@@ -1159,6 +1195,31 @@ export function DrawPage({ onNavigate, active = true }) {
                   <Download size={14} aria-hidden="true" />
                   PNG
                 </button>
+                {canUndoClear ? (
+                  <button
+                    type="button"
+                    id="draw-undo-clear"
+                    className="btn btn-ghost draw-clear-btn"
+                    onClick={undoClearCanvas}
+                    disabled={busy || !excalidrawAPI}
+                    title="恢复刚才清空的全部图形"
+                  >
+                    <Undo2 size={14} aria-hidden="true" />
+                    撤销清空
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    id="draw-clear-canvas"
+                    className="btn btn-ghost draw-clear-btn"
+                    onClick={clearCanvas}
+                    disabled={busy || !excalidrawAPI}
+                    title="清空画布上的全部图形（先确认，清空后可撤销）"
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                    清空画布
+                  </button>
+                )}
               </div>
               <div className="ob-canvasbar">
                 <span className="draw-note" role="status">{status}</span>
@@ -1180,6 +1241,11 @@ export function DrawPage({ onNavigate, active = true }) {
               } : undefined}
               onChange={(elements, appState, files) => {
                 pendingSceneRef.current = { elements, appState, files };
+                // 清空后又画了东西（或已恢复）：撤销清空作废
+                if (clearedSceneRef.current && elements.some((el) => !el.isDeleted)) {
+                  clearedSceneRef.current = null;
+                  setCanUndoClear(false);
+                }
                 clearTimeout(sceneSaveTimerRef.current);
                 sceneSaveTimerRef.current = setTimeout(() => flushSceneRef.current(), 600);
                 const nextRev = computeSceneRevision(elements);

@@ -351,3 +351,15 @@ test("r49 画板：画布与上次预览本机保存、切页面常驻、发送�
   assert.match(page, /initialData=\{initialScene \?/, "打开时恢复上次的画布");
   assert.match(page, /DRAW_LAST_PREVIEW_KEY/, "记住上次预览");
 });
+
+test("画板一键清空画布：工具栏按钮、先确认、可撤销清空", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
+  assert.match(page, /id="draw-clear-canvas"/, "工具栏有清空画布按钮");
+  assert.match(page, /id="draw-undo-clear"/, "清空后有撤销清空按钮");
+  const fn = page.slice(page.indexOf("async function clearCanvas()"), page.indexOf("function undoClearCanvas()"));
+  assert.ok(fn.indexOf("showConfirm(") > 0 && fn.indexOf("showConfirm(") < fn.indexOf("updateScene("), "清空前必须先确认");
+  assert.match(fn, /if \(!confirmed\) return;/);
+  assert.match(fn, /live\.length === 0/, "空画布不弹确认");
+  assert.match(fn, /clearedSceneRef\.current = live;/, "清空前记下画布，供撤销");
+});

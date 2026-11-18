@@ -498,3 +498,6 @@ button.conn-pill:hover {
 @media (max-width: 520px) {
   .draw-send-card .draw-send-primary { grid-template-columns: 1fr; }
 }
+/* 2026-11-18 画板工具栏“清空画布 / 撤销清空”：警示色，一眼能找到（.btn-ghost 的配色带 !important，这里同样要 !important） */
+.btn-ghost.draw-clear-btn { color: #fca5a5 !important; border-color: rgba(248, 113, 113, 0.55) !important; background: rgba(248, 113, 113, 0.12) !important; }
+.btn-ghost.draw-clear-btn:hover:not(:disabled) { color: #fee2e2 !important; border-color: rgba(248, 113, 113, 0.85) !important; background: rgba(248, 113, 113, 0.22) !important; }
