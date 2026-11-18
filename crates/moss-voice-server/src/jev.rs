@@ -296,7 +296,7 @@ impl ToolGroup {
                 "Does state.utterance (given state.recent_turns) explicitly ask to generate a laser text/image engraving preview, adjust parameters from engraving feedback, or select a calibration grid cell in this turn? Answer false for casual mentions."
             }
             Self::LaserControl => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to operate, home, unlock, frame, start, confirm, resume, calibrate, or stop the laser machine or engraving workflow in this turn? Answer false for unrelated chat."
+                "Does state.utterance (given state.recent_turns) explicitly ask to operate, home, unlock, frame, pause, start, confirm, resume, calibrate, or stop the laser machine or engraving workflow in this turn? Answer false for unrelated chat."
             }
             Self::InfoPlugin => {
                 "Does state.utterance explicitly ask to look up current weather, lunar calendar/date, news headlines, web search results, or external knowledge base documents in this turn? Answer false for general conversation."
@@ -629,9 +629,16 @@ fn recently_used_tools<'a>(text: &str, history: &'a [ChatMessage]) -> HashSet<&'
             Role::Assistant => {
                 for call in &msg.tool_calls {
                     keep.insert(call.function.name.as_str());
+                    // 刚走过边框：接着的短句“暂停 / 继续 / 不走了”要用安全动作工具（2026-11-18）
+                    if call.function.name == "laser_workflow_tool" {
+                        keep.insert("laser_safe_action_tool");
+                    }
                 }
                 if msg.content.as_deref().is_some_and(|c| {
-                    c.contains("确认") || c.contains("功率") || c.contains("开始吗")
+                    c.contains("确认")
+                        || c.contains("功率")
+                        || c.contains("开始吗")
+                        || c.contains("边框")
                 }) {
                     keep.insert("laser_workflow_tool");
                     keep.insert("laser_safe_action_tool");

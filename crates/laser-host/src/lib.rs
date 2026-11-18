@@ -447,6 +447,66 @@ pub fn voice_tools_list(api: &ApiService) -> serde_json::Value {
     list
 }
 
+/// 内置语音按预览走边框（2026-11-18，技术书 r52）：边框一开始走就先回话，不等走完，
+/// 让用户走到一半能说“暂停 / 继续 / 不走了”。没开始就结束的（未确认、门禁拒绝、严格模式待批准、
+/// 连接或预检失败）照常返回结果；走边框本身仍在后台按原流程执行，急停与停止目标不变。
+fn voice_frame_call(
+    backend: VoiceBackend,
+    arguments: &serde_json::Value,
+) -> laser_contracts::ToolCallResult {
+    use laser_api::ShortJobStart;
+    // 语音工具 30 秒超时（moss-voice-server `tool_timeout`），这里更早放弃，放弃后同一次请求不会再让机器动
+    const START_WAIT: Duration = Duration::from_secs(20);
+    let watch: laser_api::ShortJobWatch = Arc::default();
+    let arguments = arguments.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let watch = watch.clone();
+        std::thread::spawn(move || {
+            laser_api::watch_short_jobs_on_this_thread(Some(watch));
+            let result = laser_mcp::dispatch_tool_call_with(
+                "laser_workflow_tool",
+                &arguments,
+                false,
+                Some(&backend),
+            );
+            laser_api::watch_short_jobs_on_this_thread(None);
+            let _ = tx.send(result);
+        });
+    }
+    let started_reply = |job_id: &str| {
+        laser_contracts::ToolCallResult::ok(format!(
+            "已开始走边框（{job_id}）：按预览范围空走一圈、不出光，走完回到起点。\
+             途中用户说暂停用 laser_safe_action_tool 的 pause；说继续先问“确认继续走边框吗”，同意后 resume 带 confirmed=true；\
+             说不走了、取消、别走了用 stop_framing；说停或急停用 emergency_stop"
+        ))
+    };
+    let deadline = std::time::Instant::now() + START_WAIT;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return laser_contracts::ToolCallResult::err(
+                    "走边框没有执行完，结果未知，请看电脑上的 MOSS",
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let mut state = watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let ShortJobStart::Started(job_id) = &*state {
+            return started_reply(job_id);
+        }
+        if std::time::Instant::now() > deadline {
+            *state = ShortJobStart::Abandoned;
+            return laser_contracts::ToolCallResult::err(
+                "连接或检查机器太慢，这次走边框已放弃，机器不会再动；请看电脑上的 MOSS，确认机器正常后再说一次",
+            );
+        }
+    }
+}
+
 /// 以内置语音身份调用一个 MOSS 工具（同步；可能访问设备或生成文件，调用方放到阻塞线程执行）。
 pub fn voice_tool_call(
     api: &Arc<ApiService>,
@@ -480,6 +540,10 @@ pub fn voice_tool_call(
         device_id: device_id.to_owned(),
         session_id: session_id.to_owned(),
     };
+    if name == "laser_workflow_tool" && arguments["action"].as_str().map(str::trim) == Some("frame")
+    {
+        return voice_frame_call(backend, arguments);
+    }
     let result = laser_mcp::dispatch_tool_call_with(name, arguments, false, Some(&backend));
     if name == "laser_safe_action_tool" && arguments["action"] == "emergency_stop" {
         // 执行优先：审计存储失败不能阻止停止请求。不记录识别文本、设备地址或返回原文。
@@ -1188,6 +1252,119 @@ mod tests {
             voice_recent_workflows(&service, "watch-device", "watch-session").is_none(),
             "用户关掉这个工具后不再轮询"
         );
+    }
+
+    /// 内置语音按预览走边框（2026-11-18，技术书 r52）：边框一开始走就回话，不等走完；
+    /// 回话后照样能“停止走边框”，后台作业按取消收尾；未确认的不连接设备、照常返回错误。
+    #[test]
+    fn voice_frame_replies_once_framing_starts_and_can_be_stopped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct HeldGrbl {
+            responses: Mutex<std::collections::VecDeque<String>>,
+            gate: Arc<AtomicBool>,
+        }
+        impl laser_device::DeviceTransport for HeldGrbl {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                if line.starts_with('$') {
+                    let mut responses = self.responses.lock().unwrap();
+                    if line == "$$" {
+                        responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                    } else {
+                        responses.push_back("ok".into());
+                    }
+                    return Ok(());
+                }
+                // 走边框的 G-code：一直“在走”，直到测试放行
+                while !self.gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err("测试结束：模拟连接断开".into())
+            }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                if command == laser_device::RealtimeCommand::StatusQuery {
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                }
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                Ok(self.responses.lock().unwrap().pop_front())
+            }
+        }
+        let gate = Arc::new(AtomicBool::new(false));
+        let factory_gate = gate.clone();
+        let runtime = TempRuntime::new("voice-frame", serde_json::json!({}));
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let service = Arc::new(
+            plain_service()
+                .with_generated_root(runtime.0.clone())
+                .with_runtime_db(db.clone())
+                .with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(
+                    db.clone(),
+                )))
+                .with_transport_factory(Arc::new(move |_| {
+                    Ok(Box::new(HeldGrbl {
+                        responses: Mutex::default(),
+                        gate: factory_gate.clone(),
+                    })
+                        as Box<dyn laser_device::DeviceTransport>)
+                })),
+        );
+        allow_test_voice(&service, &db, "aa:bb:cc:dd:ee:01", "s-frame");
+        let body = r#"{"text":"FRAME","material":"椴木","thickness_mm":3,"font_size_mm":10}"#;
+        let raw = service.handle_http(
+            format!(
+                "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let text = String::from_utf8_lossy(&raw);
+        let json: serde_json::Value =
+            serde_json::from_str(&text[text.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        let workflow_id = json["result"]["workflow_id"].as_str().unwrap().to_owned();
+        let call = |args: serde_json::Value| {
+            voice_tool_call(
+                &service,
+                "aa:bb:cc:dd:ee:01",
+                "s-frame",
+                "laser_workflow_tool",
+                &args,
+            )
+        };
+        let unconfirmed = call(serde_json::json!({
+            "action": "frame", "workflow_id": workflow_id, "network_host": "127.0.0.1"
+        }));
+        assert!(!unconfirmed.success, "{unconfirmed:?}");
+        assert!(service.active_framing_job_ids().is_empty());
+
+        let started = std::time::Instant::now();
+        let framing = call(serde_json::json!({
+            "action": "frame", "workflow_id": workflow_id, "confirmed": true,
+            "connection_mode": "network", "network_host": "127.0.0.1"
+        }));
+        assert!(
+            framing.success && framing.result.contains("已开始走边框"),
+            "{framing:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(service.active_framing_job_ids().len(), 1, "边框还在走");
+        let stopped = voice_tool_call(
+            &service,
+            "aa:bb:cc:dd:ee:01",
+            "s-frame",
+            "laser_safe_action_tool",
+            &serde_json::json!({"action": "stop_framing"}),
+        );
+        assert!(stopped.success, "{stopped:?}");
+        gate.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while service.active_job_count() > 0 {
+            assert!(std::time::Instant::now() < deadline, "停止后作业应收尾");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn allow_test_voice(

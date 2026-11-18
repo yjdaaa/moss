@@ -220,6 +220,7 @@ fn active_job_stop_write_failure_is_not_reported_as_success() {
             progress: std::sync::Arc::new(laser_device::JobProgress::default()),
             transport: std::sync::Arc::new(FailRealtime),
             started_at: std::time::Instant::now(),
+            spec: None,
         }),
     );
     let args =
@@ -1346,4 +1347,570 @@ fn approved_job_completion_is_written_back_to_approval() {
         Some(laser_contracts::ApprovalPhase::Completed)
     );
     assert_eq!(outcome.job_id.as_deref(), Some(workflow_id.as_str()));
+}
+
+// ----- 语音按预览走边框（2026-11-18 用户决定，技术书 r51） -----
+
+fn frame_body(workflow_id: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "action": "frame", "workflow_id": workflow_id,
+        "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    body
+}
+
+/// 语音 action=frame：必须 confirmed=true、不许出光；范围只取预览记录的 frame_mm（请求里的坐标不算），
+/// 以激光头当前位置为原点空走一圈回到起点；走完 workflow 仍可 confirm_send；
+/// 刀路文件被改、任务已取消、没有这份预览都在连接设备前拒绝。
+#[test]
+fn voice_frame_follows_the_preview_range_without_light() {
+    let fixture = strict_fixture(false, true);
+    let service = &fixture.service;
+    let nothing_touched = |fixture: &StrictFixture| {
+        fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty()
+    };
+    let workflow_id = preview_workflow(service);
+    let frame = service
+        .load_record_payload(laser_runtime::RecordKind::Workflow, &workflow_id)
+        .unwrap()["artifacts"]["frame_mm"]
+        .clone();
+    let min_x = frame["min_x"].as_f64().unwrap();
+    let min_y = frame["min_y"].as_f64().unwrap();
+    assert!(min_x < 0.0 && min_y < 0.0, "文字默认以中心为原点：{frame}");
+
+    let (status, unconfirmed) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(&workflow_id, serde_json::json!({})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{unconfirmed}");
+    assert_eq!(unconfirmed["detail"]["error_code"], "confirmation_required");
+    let (status, lit) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(
+            &workflow_id,
+            serde_json::json!({"confirmed": true, "power": 1}),
+        ),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{lit}");
+    assert_eq!(lit["detail"]["error_code"], "framing_light_not_allowed");
+    let (status, missing) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body("wf-missing", serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 404, "{missing}");
+    assert!(nothing_touched(&fixture), "拒绝时不能连接设备");
+
+    // 请求里自带的坐标与轮廓一概不用，只走预览记录的范围
+    let (status, framed) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(
+            &workflow_id,
+            serde_json::json!({"confirmed": true, "min_x": -200, "max_x": 200, "outline": [[0, 0], [1, 0], [0, 1]]}),
+        ),
+        voice_ctx(),
+    );
+    assert_eq!(status, 200, "{framed}");
+    assert_eq!(framed["result"]["laser_on"], false);
+    assert_eq!(framed["result"]["workflow_id"], workflow_id.as_str());
+    let lines = fixture.written.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|l| l.starts_with("G92 X0 Y0")),
+        "{lines:?}"
+    );
+    let start = format!("G0 X{min_x:.3} Y{min_y:.3}");
+    assert!(
+        lines.iter().any(|l| l.starts_with(&start)),
+        "{start}: {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("M3") || l.starts_with("M4")),
+        "不能出光：{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("X-200")), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .rfind(|l| l.starts_with("G0") || l.starts_with("G1"))
+            .unwrap()
+            .starts_with("G0 X0 Y0"),
+        "走完回到起点：{lines:?}"
+    );
+
+    // 走边框不改 workflow 状态：之后照常确认发送
+    let (status, sent) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &confirm_send_body(&workflow_id, "127.0.0.1"),
+        voice_ctx(),
+    );
+    assert_eq!(status, 200, "{sent}");
+
+    // 等后台发送结束，后面的“拒绝时不碰设备”才有意义
+    let start = std::time::Instant::now();
+    while service.active_job_count() > 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "后台发送没有结束"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // 刀路文件被改：与发送相同的 SHA-256 门禁拒绝
+    fixture.written.lock().unwrap().clear();
+    fixture.targets.lock().unwrap().clear();
+    let tampered = preview_workflow(service);
+    let gcode_file = service
+        .load_record_payload(laser_runtime::RecordKind::Workflow, &tampered)
+        .unwrap()["artifacts"]["gcode_file"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = fixture
+        ._temp
+        .path()
+        .join(std::path::Path::new(&gcode_file).file_name().unwrap());
+    std::fs::write(&path, "G21\nG0 X500 Y500\n").unwrap();
+    let (status, rejected) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(&tampered, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{rejected}");
+    assert_eq!(rejected["detail"]["error_code"], "send_gate_rejected");
+
+    // 已取消的任务不能再走边框
+    let cancelled = preview_workflow(service);
+    let cancel = post_json(
+        service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": cancelled}),
+    );
+    assert_eq!(cancel["success"], true, "{cancel}");
+    let (status, blocked) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(&cancelled, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{blocked}");
+    assert_eq!(blocked["detail"]["error_code"], "workflow_not_sendable");
+    assert!(nothing_touched(&fixture), "拒绝时不能连接设备");
+}
+
+/// 严格模式：语音按预览走边框只生成走边框审批、不碰设备；桌面批准后按冻结的范围空走（不出光）。
+#[test]
+fn strict_mode_voice_frame_needs_desktop_approval() {
+    let fixture = strict_fixture(true, true);
+    let session = fixture.service.enable_desktop_session().unwrap();
+    let workflow_id = preview_workflow(&fixture.service);
+    let (status, pending) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 202, "{pending}");
+    assert_eq!(pending["result"]["status"], "approval_required");
+    assert!(
+        fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty()
+    );
+    let approval_id = pending["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record = fixture
+        .service
+        .approvals()
+        .unwrap()
+        .get(&approval_id)
+        .unwrap();
+    assert_eq!(record.kind, laser_contracts::ApprovalKind::Framing);
+    assert_eq!(record.source, laser_contracts::ApprovalSource::Voice);
+    let (status, approved) = desktop_request(
+        &fixture.service,
+        "POST",
+        &format!("/v1/approvals/{approval_id}/approve"),
+        Some(&serde_json::json!({"digest": record.digest})),
+        Some(&session),
+    );
+    assert_eq!(status, 200, "{approved}");
+    let lines = fixture.written.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|l| l.starts_with("G92 X0 Y0")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("M3") || l.starts_with("M4")),
+        "{lines:?}"
+    );
+}
+
+/// 走边框途中模型调了 workflow cancel（2026-11-18）：停的是走边框，预览保留、之后照样能走边框。
+#[test]
+fn workflow_cancel_during_framing_stops_framing_and_keeps_the_preview() {
+    let fixture = strict_fixture(false, true);
+    let workflow_id = preview_workflow(&fixture.service);
+    let device = laser_device::FakeGrbl::new(Vec::<String>::new());
+    fixture.service.active_jobs.lock().unwrap().insert(
+        "framing-9".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "framing-9".into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            cancel: Default::default(),
+            progress: Default::default(),
+            transport: std::sync::Arc::new(device.clone()),
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+    let (status, cancelled) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 200, "{cancelled}");
+    assert_eq!(cancelled["detail"]["framing_stopped"], "framing-9");
+    let job = fixture.service.active_jobs.lock().unwrap()["framing-9"].clone();
+    assert!(job.cancel.is_cancelled());
+    assert_eq!(device.realtime(), vec![b'!']);
+    let record = fixture
+        .service
+        .load_record_payload(laser_runtime::RecordKind::Workflow, &workflow_id)
+        .unwrap();
+    assert_eq!(
+        record["status"], "preview_ready",
+        "预览不能被作废：{record}"
+    );
+}
+
+fn insert_framing_job(
+    service: &ApiService,
+    id: &str,
+    device: &laser_device::FakeGrbl,
+) -> std::sync::Arc<ActiveJob> {
+    let job = std::sync::Arc::new(ActiveJob {
+        workflow_id: id.into(),
+        mode: "network",
+        target: "127.0.0.1:23".into(),
+        cancel: Default::default(),
+        progress: Default::default(),
+        transport: std::sync::Arc::new(device.clone()),
+        started_at: std::time::Instant::now(),
+        spec: Some(laser_device::ConnectionSpec::Tcp {
+            host: "127.0.0.1".into(),
+            port: 23,
+        }),
+    });
+    service
+        .active_jobs
+        .lock()
+        .unwrap()
+        .insert(id.into(), job.clone());
+    job
+}
+
+/// 审查修正（2026-11-18）：走边框途中只有 AI 发来、且预览确实在等待发送时，cancel 才改为停边框；
+/// 界面的“取消这个任务”、空编号、正在启动的任务照常走原来的取消，不碰走边框。
+#[test]
+fn only_ai_cancel_of_a_waiting_preview_is_redirected_to_stop_framing() {
+    let fixture = strict_fixture(false, true);
+    let service = &fixture.service;
+    let device = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let job = insert_framing_job(service, "framing-5", &device);
+
+    // 界面（本机回环）取消：照常作废预览，走边框不受影响
+    let desk = preview_workflow(service);
+    let cancelled = post_json(
+        service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": desk}),
+    );
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+    let record = service
+        .load_record_payload(laser_runtime::RecordKind::Workflow, &desk)
+        .unwrap();
+    assert_eq!(record["status"], "cancelled", "{record}");
+    assert!(!job.cancel.is_cancelled() && device.realtime().is_empty());
+
+    // 语音取消空编号：照常报错
+    let (status, empty) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": ""}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{empty}");
+    assert!(!job.cancel.is_cancelled());
+
+    // 语音取消一份正在启动的任务：照常取消那个任务（预约被取消），不去停走边框
+    let launching = preview_workflow(service);
+    service
+        .launching_workflows
+        .lock()
+        .unwrap()
+        .active
+        .insert(launching.clone(), Default::default());
+    let (_, launch_cancel) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": launching}),
+        voice_ctx(),
+    );
+    assert!(
+        launch_cancel["detail"]["framing_stopped"].is_null(),
+        "{launch_cancel}"
+    );
+    assert!(!job.cancel.is_cancelled());
+    service
+        .launching_workflows
+        .lock()
+        .unwrap()
+        .active
+        .remove(&launching);
+
+    // 语音取消一份在等待发送的预览：停的是走边框
+    let waiting = preview_workflow(service);
+    let (status, stopped) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": waiting}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 200, "{stopped}");
+    assert_eq!(stopped["detail"]["framing_stopped"], "framing-5");
+    assert!(job.cancel.is_cancelled());
+}
+
+/// 审查修正（2026-11-18）：继续走边框先确认、先找到正在走的那次边框；严格模式下审批目标与 job_id
+/// 取自这次作业（请求没带连接也能建审批），批准后 `~` 只发到那次作业；指定别的设备、已在停止都拒绝。
+#[test]
+fn framing_resume_is_bound_to_its_job_and_device() {
+    let fixture = strict_fixture(true, true);
+    let service = &fixture.service;
+    let session = service.enable_desktop_session().unwrap();
+    let approvals = service.approvals().unwrap();
+    let pending_count = || {
+        approvals
+            .list(Some(laser_contracts::ApprovalStatus::Pending), 100)
+            .unwrap()
+            .len()
+    };
+
+    // 没有边框在走、未确认：都不建审批
+    let (status, none) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "resume", "confirmed": true}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{none}");
+    assert_eq!(none["detail"]["error_code"], "no_active_framing");
+    let device = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let job = insert_framing_job(service, "framing-8", &device);
+    let (status, unconfirmed) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "resume"}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{unconfirmed}");
+    assert_eq!(pending_count(), 0, "不建废审批");
+
+    // 请求没带连接：审批目标取这次走边框的设备，摘要写“继续走边框”
+    let (status, pending) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "resume", "confirmed": true}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 202, "{pending}");
+    let approval_id = pending["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record = approvals.get(&approval_id).unwrap();
+    assert!(record.summary.contains("继续走边框"), "{}", record.summary);
+    assert_eq!(
+        record.connection,
+        Some(laser_contracts::ApprovalConnection::Network {
+            host: "127.0.0.1".into(),
+            port: 23
+        })
+    );
+    assert!(device.realtime().is_empty(), "批准前不发送");
+    let (status, approved) = desktop_request(
+        service,
+        "POST",
+        &format!("/v1/approvals/{approval_id}/approve"),
+        Some(&serde_json::json!({"digest": record.digest})),
+        Some(&session),
+    );
+    assert_eq!(status, 200, "{approved}");
+    assert_eq!(device.realtime(), vec![b'~']);
+
+    // 指定了别的设备：不发
+    let (_, mismatch) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "pause", "host": "10.0.0.9"}),
+        voice_ctx(),
+    );
+    assert_eq!(mismatch["detail"], "framing_target_mismatch", "{mismatch}");
+    // 预览 dry_run 不写字节
+    let (_, dry) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "pause", "dry_run": true}),
+        voice_ctx(),
+    );
+    assert_eq!(dry["success"], true, "{dry}");
+    assert_eq!(device.realtime(), vec![b'~']);
+    // 已在停止：不能再继续
+    job.cancel.cancel();
+    let (status, stopping) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "resume", "confirmed": true}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{stopping}");
+    assert_eq!(device.realtime(), vec![b'~']);
+}
+
+/// 审查修正（2026-11-18）：停止走边框的进给保持写不出去时如实报错、提示急停。
+#[test]
+fn stop_framing_reports_a_failed_feed_hold() {
+    struct Broken;
+    impl laser_device::DeviceTransport for Broken {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Err("断开".into())
+        }
+        fn write_realtime(&self, _command: laser_device::RealtimeCommand) -> Result<(), String> {
+            Err("断开".into())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+    }
+    let fixture = strict_fixture(false, false);
+    fixture.service.active_jobs.lock().unwrap().insert(
+        "framing-3".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "framing-3".into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            cancel: Default::default(),
+            progress: Default::default(),
+            transport: std::sync::Arc::new(Broken),
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+    let result = post_json(
+        &fixture.service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "stop_framing"}),
+    );
+    assert_eq!(result["success"], false, "{result}");
+    assert!(
+        result["result"].as_str().unwrap().contains("急停"),
+        "{result}"
+    );
+}
+
+/// 审查修正（2026-11-18）：按预览走边框与发送一样复核材料安全；`power: null` 视为没给（不出光）。
+#[test]
+fn voice_frame_checks_material_safety_and_accepts_null_power() {
+    let fixture = strict_fixture(false, true);
+    let service = &fixture.service;
+    let workflow_id = preview_workflow(service);
+    let (status, null_power) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(
+            &workflow_id,
+            serde_json::json!({"confirmed": true, "power": null}),
+        ),
+        voice_ctx(),
+    );
+    assert_eq!(status, 200, "{null_power}");
+
+    // 记录里的材料被改成 PVC（例如旧版本生成的记录）：拒绝，不连接设备
+    let store = service.store.as_deref().unwrap();
+    let mut record = store
+        .get(laser_runtime::RecordKind::Workflow, &workflow_id)
+        .unwrap()
+        .unwrap();
+    record.payload["material"] = serde_json::json!("PVC");
+    store.put(&record).unwrap();
+    fixture.targets.lock().unwrap().clear();
+    let (status, blocked) = post_with_ctx(
+        service,
+        "/api/workflow",
+        &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{blocked}");
+    assert_eq!(blocked["detail"]["error_code"], "material_safety_blocked");
+    assert!(fixture.targets.lock().unwrap().is_empty());
+}
+
+/// 审查修正（2026-11-18）：发起方（内置语音）已放弃等待后，同一次请求不再开始走边框。
+#[test]
+fn abandoned_voice_frame_never_starts_moving() {
+    let fixture = strict_fixture(false, true);
+    let workflow_id = preview_workflow(&fixture.service);
+    let watch: crate::ShortJobWatch =
+        std::sync::Arc::new(std::sync::Mutex::new(crate::ShortJobStart::Abandoned));
+    crate::watch_short_jobs_on_this_thread(Some(watch));
+    let (status, refused) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    crate::watch_short_jobs_on_this_thread(None);
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["detail"]["error_code"], "short_job_abandoned");
+    assert_eq!(fixture.service.active_job_count(), 0);
+    assert!(
+        !fixture
+            .written
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("G0") || l.starts_with("G1")),
+        "放弃后不能运动"
+    );
+    // 登记了回执、没放弃：开始时回执写入作业编号
+    let watch: crate::ShortJobWatch = std::sync::Arc::default();
+    crate::watch_short_jobs_on_this_thread(Some(watch.clone()));
+    let (status, framed) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
+        voice_ctx(),
+    );
+    crate::watch_short_jobs_on_this_thread(None);
+    assert_eq!(status, 200, "{framed}");
+    assert!(
+        matches!(&*watch.lock().unwrap(), crate::ShortJobStart::Started(id) if id.starts_with("framing-"))
+    );
 }

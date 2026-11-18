@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, OctagonX, Square } from "lucide-react";
+import { ChevronDown, Download, OctagonX, Pause, Play, Square } from "lucide-react";
 import { apiFetch, getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
@@ -10,6 +10,8 @@ import {
   cancelPayload,
   dockPillText,
   estopPayload,
+  framingControlNote,
+  framingControlPayload,
   jobGcodeUrl,
   jobsView,
 } from "../jobProgressState.js";
@@ -144,6 +146,23 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
     setNote(res?.ok && res?.data?.success ? "已请求取消，正在停止下发" : `取消失败：${res?.data?.result || "请重试"}`);
   }, []);
 
+  // 走边框（2026-11-18）：暂停 / 停止不用确认（只会让机器停下）；继续会让机器再动，先确认
+  const controlFraming = useCallback(async (view, action) => {
+    if (action === "resume") {
+      const ok = await showConfirm("激光头会从停下的地方接着沿边框走，走完回到起点（不出光）。请确认机器周围没有障碍。", {
+        title: "继续走边框？",
+        tone: "warning",
+        confirmText: "继续",
+      });
+      if (!ok) return;
+    }
+    setBusy(true);
+    setNote("");
+    const res = await postJson("/api/safe-action", framingControlPayload(view, action));
+    setBusy(false);
+    setNote(framingControlNote(action, res));
+  }, []);
+
   const estop = useCallback(async (view) => {
     if (!view.canEstop) {
       await showAlert("这条任务没有可用的 job_id，请用机器上的实体急停。", { title: "无法急停", tone: "error" });
@@ -268,12 +287,33 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
             <span className="mono" title="任务标识">{view.workflowId || view.jobId}</span>
           </div>
           <div className="job-dock-actions">
-            <button type="button" className="btn btn-ghost" disabled={busy || downloading} onClick={() => download(view)} id={`job-progress-gcode-${index}`}>
-              <Download size={13} /> G-code
-            </button>
-            <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => cancel(view)} id={`job-progress-cancel-${index}`}>
-              <Square size={13} /> 取消（记断点）
-            </button>
+            {view.framing ? (
+              view.canControlFraming && (
+                <>
+                  {view.paused ? (
+                    <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => controlFraming(view, "resume")} id={`job-progress-resume-${index}`}>
+                      <Play size={13} /> 继续
+                    </button>
+                  ) : (
+                    <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => controlFraming(view, "pause")} id={`job-progress-pause-${index}`}>
+                      <Pause size={13} /> 暂停
+                    </button>
+                  )}
+                  <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => controlFraming(view, "stop_framing")} id={`job-progress-stop-framing-${index}`}>
+                    <Square size={13} /> 停止走边框
+                  </button>
+                </>
+              )
+            ) : (
+              <>
+                <button type="button" className="btn btn-ghost" disabled={busy || downloading} onClick={() => download(view)} id={`job-progress-gcode-${index}`}>
+                  <Download size={13} /> G-code
+                </button>
+                <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => cancel(view)} id={`job-progress-cancel-${index}`}>
+                  <Square size={13} /> 取消（记断点）
+                </button>
+              </>
+            )}
             {(view.canAcknowledgeStop ?? (view.unknown && Boolean(view.jobId))) && (
               <button
                 type="button"

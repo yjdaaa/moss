@@ -1020,6 +1020,7 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         cancel: laser_device::CancellationToken::default(),
         transport: fake_transport,
         started_at: std::time::Instant::now(),
+        spec: None,
     });
     let jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::HashMap::from([("wf-done-race".to_owned(), dummy_job)]),
@@ -1108,6 +1109,7 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         cancel: active_cancel.clone(),
         transport: grbl.clone(),
         started_at: std::time::Instant::now(),
+        spec: None,
     });
     let err_jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::HashMap::from([("wf-store-err".to_owned(), err_job)]),

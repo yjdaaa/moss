@@ -878,6 +878,37 @@ impl ApiService {
                 }
             } else if route == "/api/workflow" {
                 let action = object.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                // 按预览走边框（2026-11-18）：不进 workflow 状态机，走边框完不改记录状态
+                if action == "frame" {
+                    return self.workflow_frame(&object, &ctx);
+                }
+                // 走边框途中 AI 调了 cancel（2026-11-18）：只有语音 / 小智 / 网关发来、唯一的活动作业是走边框、
+                // 且这份预览确实在等待发送（不在启动或发送中）时，停的是走边框、预览保留——
+                // 用户说“取消”是想让激光头别走了，不能把预览作废了而激光头还在走。其余一律照常取消。
+                if action == "cancel"
+                    && matches!(
+                        ctx,
+                        laser_contracts::CallerContext::Voice { .. }
+                            | laser_contracts::CallerContext::McpBridge
+                            | laser_contracts::CallerContext::Gateway { .. }
+                    )
+                    && let Some(framing_id) = self.framing_to_stop_for_cancel(&object)
+                {
+                    let stop_args = laser_contracts::LaserSafeActionArgs {
+                        action: "stop_framing".into(),
+                        ..Default::default()
+                    };
+                    let stopped =
+                        self.control_framing("stop_framing", &stop_args, Some(&framing_id));
+                    return http_json(
+                        if stopped.success { 200 } else { 400 },
+                        serde_json::json!({
+                            "success": stopped.success,
+                            "result": format!("{}（预览保留，没有作废）", stopped.result),
+                            "detail": {"framing_stopped": framing_id},
+                        }),
+                    );
+                }
                 if action == "preview" || action == "create" || action == "plan" {
                     let source_type = object
                         .get("source_type")
@@ -968,6 +999,19 @@ impl ApiService {
                     Ok(a) => a,
                     Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
                 };
+            // 继续走边框（2026-11-18）：先确认、找到正在走的那次边框，再建审批或执行——
+            // 没有边框在走、未确认都不建废审批；审批绑定这次作业的 job_id 与它的设备连接
+            if args.action.trim().eq_ignore_ascii_case("resume")
+                && !matches!(ctx, laser_contracts::CallerContext::Approval { .. })
+            {
+                if let Err(response) = self.bind_framing_resume(&mut object) {
+                    return response;
+                }
+                args = match serde_json::from_value(serde_json::Value::Object(object.clone())) {
+                    Ok(a) => a,
+                    Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
+                };
+            }
             // 严格模式检查点（技术书 §6.2）：只对 R3 动作；急停、软复位、关激光、降低倍率永不追加条件（A-27）
             let mut authority = approval::R3Authority::Unchecked;
             if laser_contracts::safe_action_requires_approval(&args.action) {
@@ -1090,74 +1134,7 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             strip_identity_fields(&mut object);
-            // 先校验整数参数，审批摘要与实际下发使用同一份已校验的值（2026-11-05）。
-            if let Err(error) = framing_feed_and_power(&object) {
-                return framing_params_invalid(error);
-            }
-            // 橡皮筋轮廓同样先校验，非法时不创建审批（与 run_framing 用同一套默认范围）
-            let number = |key: &str, default: f64| {
-                object.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
-            };
-            let bounds = (
-                number("min_x", 0.0),
-                number("min_y", 0.0),
-                number("max_x", 100.0),
-                number("max_y", 100.0),
-            );
-            if let Err(error) = crate::safe_action::framing_outline(&object, bounds) {
-                return framing_params_invalid(error);
-            }
-            // 严格模式检查点（技术书 §6.2）：走边框真实驱动机器
-            let framing_facts = approval::framing_digest_facts(&object);
-            let framing_summary = framing_approval_summary(&framing_facts);
-            let framing_authority = match self.require_r3_authority(
-                &ctx,
-                approval::R3Action {
-                    kind: laser_contracts::ApprovalKind::Framing,
-                    target_record: "framing",
-                    facts: framing_facts,
-                    request: &object,
-                    summary: framing_summary,
-                },
-            ) {
-                Ok(authority) => authority,
-                Err((status, body)) => return http_json(status, body),
-            };
-            if let approval::R3Authority::Approval(record) = &framing_authority {
-                match record.connection.as_ref() {
-                    Some(connection) => {
-                        object = approval::object_with_connection(&object, connection)
-                    }
-                    None => {
-                        let (status, body) =
-                            approval::error_response(&approval::ApprovalError::Mismatch);
-                        return http_json(status, body);
-                    }
-                }
-            }
-            let response = self.run_framing(&object, &ctx);
-            let outcome: Result<serde_json::Value, (u16, serde_json::Value)> =
-                if response.starts_with(b"HTTP/1.1 200") {
-                    Ok(serde_json::Value::Null)
-                } else {
-                    Err((400, failure("走边框未完成", None)))
-                };
-            if !response.starts_with(b"HTTP/1.1 200") {
-                let body = http_response_json(&response);
-                let message = body["result"].as_str().unwrap_or("走边框未完成").to_owned();
-                self.emit_event(LaserEvent {
-                    level: LaserEventLevel::Error,
-                    text: format!("走边框没有完成：{message}"),
-                    hint: Some(
-                        laser_failure_hint(&message)
-                            .unwrap_or("到设备旁确认机器状态，排除原因后再走边框")
-                            .to_owned(),
-                    ),
-                    detail: Some(body.to_string()),
-                });
-            }
-            self.finish_r3_authority(&framing_authority, &outcome, None);
-            return response;
+            return self.framing_with_authority(object, &ctx);
         }
         if method == "POST" && route == "/api/draw/preview" {
             let object = match parse_json_object(&body[..content_length], 10 * 1024 * 1024) {

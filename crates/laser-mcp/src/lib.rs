@@ -511,7 +511,7 @@ fn backend_result(
 
 /// AI 生成预览后给模型的固定说明（2026-11-06 统一 AI 预览流程）：预览会弹到 MOSS 桌面，
 /// 必须等用户在预览窗点“同意开刻”或（未开严格模式时）口头明确确认，才能 confirm_send。
-pub const DESKTOP_PREVIEW_HINT: &str = "预览已弹到 MOSS 电脑屏幕上。请把尺寸、材料和预计时间告诉用户，让用户在预览窗核对后点「同意开刻」；未开启严格模式时，用户也可以口头明确说确认，你再调用 laser_workflow_tool(action=confirm_send, confirmed=true)。用户确认前不要发送。";
+pub const DESKTOP_PREVIEW_HINT: &str = "预览已弹到 MOSS 电脑屏幕上。请把尺寸、材料和预计时间告诉用户，让用户在预览窗核对后点「同意开刻」；未开启严格模式时，用户也可以口头明确说确认，你再调用 laser_workflow_tool(action=confirm_send, confirmed=true)。用户想先看位置时，可以在用户确认走边框后用 action=frame 带同一个 workflow_id 空走一圈边框（不出光）。用户确认前不要发送。";
 
 fn with_desktop_preview_hint(
     result: laser_contracts::ToolCallResult,
@@ -1022,9 +1022,14 @@ fn dispatch_allowed(
             let action = arg_str(arguments, "action").unwrap_or("status");
             let workflow_id = arg_str(arguments, "workflow_id");
             let confirmed = arg_bool(arguments, "confirmed");
-            if matches!(action, "confirm_send" | "send" | "resume") {
+            // frame（按预览走边框，2026-11-18）同样会让机器运动：与发送一样先确认、带编号、补连接
+            if matches!(action, "confirm_send" | "send" | "resume" | "frame") {
                 if !confirmed {
-                    return ToolCallResult::err("发送动作未确认 (confirmed=false)");
+                    return ToolCallResult::err(if action == "frame" {
+                        "走边框未确认 (confirmed=false)：先问用户“确认走边框吗”"
+                    } else {
+                        "发送动作未确认 (confirmed=false)"
+                    });
                 }
                 if workflow_id.is_none() {
                     return ToolCallResult::err(format!("{action} 缺少 workflow_id"));
@@ -1047,7 +1052,7 @@ fn dispatch_allowed(
             } else {
                 "/api/workflow"
             };
-            let body = if matches!(action, "confirm_send" | "send" | "resume") {
+            let body = if matches!(action, "confirm_send" | "send" | "resume" | "frame") {
                 with_connection_fields(arguments, body)
             } else {
                 body
@@ -2556,6 +2561,47 @@ mod tests {
         assert_eq!(calls[1].1, "/api/workflow");
         assert_eq!(calls[1].2["image_mode"], "jarvis");
         assert_eq!(calls[1].2["line_interval_scale"], 0.8);
+    }
+
+    /// 按预览走边框（2026-11-18）：未确认或缺编号不触达后端；确认后带连接字段转发 /api/workflow。
+    #[test]
+    fn workflow_frame_requires_confirmation_and_forwards_with_connection() {
+        for args in [
+            serde_json::json!({"action": "frame", "workflow_id": "wf-9"}),
+            serde_json::json!({"action": "frame", "confirmed": true}),
+        ] {
+            let backend = FakeBackend::new(vec![]);
+            let refused =
+                dispatch_tool_call_with("laser_workflow_tool", &args, false, Some(&backend));
+            assert!(!refused.success, "{args}");
+            assert!(backend.calls().is_empty(), "{args}");
+        }
+        let backend = FakeBackend::new(vec![(
+            200,
+            serde_json::json!({"success": true, "result": {"message": "走边框完成", "workflow_id": "wf-9", "laser_on": false}}),
+        )]);
+        let framed = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "frame", "workflow_id": "wf-9", "confirmed": true, "network_host": "10.0.0.5"}),
+            false,
+            Some(&backend),
+        );
+        assert!(framed.success, "{framed:?}");
+        let calls = backend.calls();
+        assert_eq!(calls[0].1, "/api/workflow");
+        assert_eq!(calls[0].2["action"], "frame");
+        assert_eq!(calls[0].2["connection_mode"], "network");
+        // 无 host 后端：不伪造结果
+        let offline = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "frame", "workflow_id": "wf-9", "confirmed": true}),
+            false,
+            None,
+        );
+        assert!(
+            !offline.success && offline.result.contains("moss-host"),
+            "{offline:?}"
+        );
     }
 
     #[test]

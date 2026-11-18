@@ -550,3 +550,58 @@ fn sd_hash_verification_reports_unverified_when_hashfs_missing() {
             .unwrap()
     );
 }
+
+/// 2026-11-18：等待完成时控制器一直处于保持（用户暂停走边框去摆木板），时间超过无进展超时也要接着等，
+/// 恢复后正常完成；暂停状态跟着控制器报告走（保持 → paused，恢复运行 → 不再 paused）。
+#[test]
+fn wait_until_idle_keeps_waiting_through_a_long_hold() {
+    struct HoldThenIdle {
+        started: Instant,
+    }
+    impl DeviceTransport for HoldThenIdle {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, _command: RealtimeCommand) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            std::thread::sleep(Duration::from_millis(10));
+            let elapsed = self.started.elapsed();
+            Ok(Some(if elapsed < Duration::from_millis(400) {
+                "<Hold:0|MPos:1,2,0>".into()
+            } else {
+                "<Idle|MPos:0,0,0>".into()
+            }))
+        }
+    }
+    let progress = Arc::new(crate::JobProgress::default());
+    let mut device = DeviceConnection::new(HoldThenIdle {
+        started: Instant::now(),
+    });
+    device.progress_sink = Some(progress.clone());
+    device.state = DeviceState::Ready;
+    let watcher = {
+        let progress = progress.clone();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(350) {
+                if progress.paused.load(std::sync::atomic::Ordering::Acquire) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        })
+    };
+    // 无进展超时只有 100 ms，保持持续 400 ms
+    device
+        .wait_until_idle(Duration::from_millis(100), None)
+        .expect("保持期间不能判超时");
+    assert_eq!(device.state(), DeviceState::Ready);
+    assert!(watcher.join().unwrap(), "保持期间应显示已暂停");
+    assert!(
+        !progress.paused.load(std::sync::atomic::Ordering::Acquire),
+        "恢复后不再显示暂停"
+    );
+}

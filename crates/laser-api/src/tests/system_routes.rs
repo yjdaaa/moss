@@ -642,6 +642,7 @@ fn lan_discovery_lists_only_devices_that_answer_like_grbl() {
             progress: Default::default(),
             transport: std::sync::Arc::new(laser_device::FakeGrbl::new(Vec::<String>::new())),
             started_at: std::time::Instant::now(),
+            spec: None,
         }),
     );
     let response = service.handle("POST", "/api/ui/discover-controllers", b"{}");

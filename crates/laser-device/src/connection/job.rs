@@ -25,6 +25,8 @@ pub struct JobProgress {
     pub updated_at_millis: AtomicU64,
     pub awaiting_completion: AtomicBool,
     pub last_status_report: std::sync::Mutex<Option<String>>,
+    /// 走边框被暂停（进给保持 `!`）还没继续：只用于界面显示（2026-11-18）
+    pub paused: AtomicBool,
 }
 
 impl JobProgress {

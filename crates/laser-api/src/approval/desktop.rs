@@ -95,7 +95,8 @@ pub(crate) fn safe_action_digest_facts(object: &Map<String, Value>) -> Map<Strin
         .trim()
         .to_owned();
     facts.insert("action".into(), Value::String(action));
-    for key in ["x", "y", "z", "feed_rate", "power"] {
+    // job_id（2026-11-18）：继续走边框绑定到具体作业，批准的就是执行的那一次
+    for key in ["x", "y", "z", "feed_rate", "power", "job_id"] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
             facts.insert(key.into(), value.clone());
         }

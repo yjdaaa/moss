@@ -19,6 +19,8 @@ pub struct ActiveJob {
     pub progress: std::sync::Arc<laser_device::JobProgress>,
     pub transport: std::sync::Arc<dyn laser_device::DeviceTransport>,
     pub started_at: std::time::Instant,
+    /// 打开这次作业用的连接（走边框“继续”在严格模式下据此建审批目标，2026-11-18）；测试桩可为空
+    pub spec: Option<laser_device::ConnectionSpec>,
 }
 
 impl ActiveJob {
@@ -33,12 +35,40 @@ impl ActiveJob {
             "lines_sent": self.progress.lines_sent.load(Ordering::Relaxed),
             "total_lines": self.progress.total_lines.load(Ordering::Relaxed),
             "elapsed_ms": self.started_at.elapsed().as_millis() as u64,
+            "paused": self.progress.paused.load(Ordering::Acquire),
         });
         if let (Some(raw), Some(map)) = (self.progress.status_report(), val.as_object_mut()) {
             map.insert("last_status_report".into(), serde_json::json!(raw));
         }
         val
     }
+}
+
+/// 短作业（走边框）的开始回执（2026-11-18，技术书 r52）：内置语音在后台线程里发起走边框，
+/// 等到“这一次”真正开始就先回话；等不及放弃后，同一次请求不得再让机器动。
+/// 由发起请求的线程登记（[`watch_short_jobs_on_this_thread`]），`run_short_device_job` 在登记活动作业的同一把锁内读写。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ShortJobStart {
+    #[default]
+    Waiting,
+    Started(String),
+    Abandoned,
+}
+
+pub type ShortJobWatch = std::sync::Arc<std::sync::Mutex<ShortJobStart>>;
+
+thread_local! {
+    static SHORT_JOB_WATCH: std::cell::RefCell<Option<ShortJobWatch>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 为当前线程接下来发起的短作业登记开始回执（`None` 取消登记）。
+pub fn watch_short_jobs_on_this_thread(watch: Option<ShortJobWatch>) {
+    SHORT_JOB_WATCH.with(|slot| *slot.borrow_mut() = watch);
+}
+
+pub(crate) fn current_short_job_watch() -> Option<ShortJobWatch> {
+    SHORT_JOB_WATCH.with(|slot| slot.borrow().clone())
 }
 
 pub type ActiveJobs = std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<ActiveJob>>>>;
@@ -252,6 +282,19 @@ pub(crate) fn default_transport_factory() -> TransportFactory {
 
 impl ApiService {
     /// 当前正在下发的作业数量。
+    /// 正在进行的走边框作业编号（`framing-…`）。内置语音据此在边框开始走时先回话（2026-11-18）。
+    pub fn active_framing_job_ids(&self) -> Vec<String> {
+        self.active_jobs
+            .lock()
+            .map(|jobs| {
+                jobs.values()
+                    .filter(|job| job.workflow_id.starts_with("framing-"))
+                    .map(|job| job.workflow_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn active_job_count(&self) -> usize {
         self.active_jobs.lock().map(|jobs| jobs.len()).unwrap_or(0)
     }

@@ -155,6 +155,27 @@ try {
   state.hangCancel = false;
   state.releaseCancel?.();
 
+  // 8. 走边框（2026-11-18）：没有 G-code 与“取消（记断点）”，改为暂停 / 继续 / 停止走边框；继续先确认
+  await page.locator("#job-progress-note").filter({ hasText: "已请求取消" }).waitFor();
+  state.jobs = [{ job_id: "framing-7", workflow_id: "framing-7", state: "running", phase: "streaming", mode: "network", target: "127.0.0.1:2301", lines_sent: 3, total_lines: 8, elapsed_ms: 2_000, paused: false }];
+  await page.locator("#job-progress-pause-0").waitFor({ timeout: 10_000 });
+  assert.match(await dock.innerText(), /正在走边框（不出光）/);
+  assert.equal(await page.locator("#job-progress-cancel-0").count(), 0, "走边框没有记断点取消");
+  assert.equal(await page.locator("#job-progress-gcode-0").count(), 0, "走边框没有 G-code 下载");
+  await page.locator("#job-progress-pause-0").click();
+  await page.locator("#job-progress-note").filter({ hasText: "走边框已暂停" }).waitFor();
+  assert.deepEqual(posts.at(-1), { path: "/api/safe-action", body: { action: "pause", job_id: "framing-7" } }, "暂停不弹确认");
+  state.jobs = [{ ...state.jobs[0], paused: true }];
+  await page.locator("#job-progress-resume-0").waitFor({ timeout: 10_000 });
+  assert.match(await dock.innerText(), /走边框已暂停（不出光）/);
+  await page.locator("#job-progress-resume-0").click();
+  await confirmDialog("继续");
+  await page.locator("#job-progress-note").filter({ hasText: "走边框继续" }).waitFor();
+  assert.deepEqual(posts.at(-1).body, { action: "resume", job_id: "framing-7", confirmed: true }, "继续须确认并带 confirmed");
+  await page.locator("#job-progress-stop-framing-0").click();
+  await page.locator("#job-progress-note").filter({ hasText: "已停止走边框" }).waitFor();
+  assert.deepEqual(posts.at(-1).body, { action: "stop_framing", job_id: "framing-7" });
+
   assert.deepEqual(errors, [], "页面运行期无异常");
   console.log(`JOB_DOCK_BROWSER_TEST=PASS posts=${posts.length}`);
 } finally {

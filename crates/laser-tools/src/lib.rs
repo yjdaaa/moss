@@ -415,6 +415,11 @@ pub fn execute_laser_safe_action_with_gate(
             ],
             format!("相对安全移动 ({x:+.3}, {y:+.3}) F{feed:.0}（激光关闭）"),
         ),
+        "pause" | "resume" | "stop_framing" => {
+            return ToolCallResult::err(
+                "走边框的暂停、继续、停止要作用在 MOSS 后台（moss-host）正在走的边框上，当前没有连上后台",
+            );
+        }
         unknown => return ToolCallResult::err(format!("不支持的安全动作: {unknown}")),
     };
     let is_read_or_override = matches!(
@@ -1003,7 +1008,7 @@ pub fn execute_laser_workflow_with_preflight(
 ) -> ToolCallResult {
     let act = action.unwrap_or("status");
     match act {
-        "status" | "preview" | "cancel" | "recent" | "feedback" | "regenerate" => {
+        "status" | "preview" | "frame" | "cancel" | "recent" | "feedback" | "regenerate" => {
             ToolCallResult::err(format!(
                 "workflow {act} 需要 moss-host 后端（workflow_id: {}），当前 MCP 会话未连接 host",
                 workflow_id.unwrap_or("none")
@@ -1039,6 +1044,25 @@ pub fn validate_confirm_send(preflight: &SendPreflight) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没有 host 后端时，走边框的暂停 / 继续 / 停止明确说明需要后台，不当成未知动作（2026-11-18）
+    #[test]
+    fn framing_controls_without_host_explain_backend_is_needed() {
+        for action in ["pause", "resume", "stop_framing"] {
+            let args = laser_contracts::LaserSafeActionArgs {
+                action: action.into(),
+                confirmed: Some(true),
+                ..Default::default()
+            };
+            let result = execute_laser_safe_action(&args);
+            assert!(!result.success, "{action}");
+            assert!(
+                result.result.contains("moss-host"),
+                "{action}: {}",
+                result.result
+            );
+        }
+    }
     use laser_device::FakeGrbl;
     use std::sync::Mutex;
 

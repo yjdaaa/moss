@@ -43,9 +43,16 @@ export function jobRemainingText(job) {
 /** 阶段文案：后端 phase 只有 streaming / awaiting_completion，未知态明确写“进度未知”。 */
 export function jobPhaseText(job) {
   if (!job || job.state === "unknown") return "进度未知（连接异常，可试急停并在机器旁确认）";
+  if (isFramingJob(job)) return job.paused === true ? "走边框已暂停（不出光）" : "正在走边框（不出光）";
   if (job.phase === "awaiting_completion") return "代码已发完，等待设备完成";
   if (job.phase === "streaming") return "正在发送 G-code";
   return "运行中";
+}
+
+/** 走边框作业（`framing-…`，2026-11-18）：可以暂停 / 继续 / 停止，没有断点可记、没有 G-code 可下载。 */
+export function isFramingJob(job) {
+  const id = typeof job?.job_id === "string" ? job.job_id : typeof job?.workflow_id === "string" ? job.workflow_id : "";
+  return id.trim().startsWith("framing-");
 }
 
 /** 单条任务的展示视图。停不掉的字段一律为 null，界面据此隐藏按钮。 */
@@ -56,7 +63,12 @@ export function jobView(job) {
   const sent = Number(job?.lines_sent) || 0;
   const total = Number(job?.total_lines) || 0;
   const unknown = job?.state === "unknown" || percent === null;
+  const framing = isFramingJob(job);
   return {
+    framing,
+    paused: framing && job?.paused === true,
+    // 暂停 / 继续 / 停止走边框只对还在走的边框；未知态只剩急停与确认停稳
+    canControlFraming: framing && Boolean(jobId) && job?.state !== "unknown",
     jobId,
     workflowId,
     unknown,
@@ -68,11 +80,13 @@ export function jobView(job) {
     phaseText: jobPhaseText(job),
     target: typeof job?.target === "string" ? job.target : "",
     mode: job?.mode === "serial" ? "串口" : job?.mode === "network" ? "网络" : "",
-    canCancel: Boolean(workflowId) && job?.state !== "unknown",
+    canCancel: !framing && Boolean(workflowId) && job?.state !== "unknown",
     canEstop: Boolean(jobId),
     canAcknowledgeStop: Boolean(jobId) && job?.state === "unknown",
     // 「取消」只在知道 workflow_id 且非未知态时可用；未知态保留软急停重试入口，但须在机器旁确认。
-    cancelHint: !workflowId
+    cancelHint: framing
+      ? ""
+      : !workflowId
       ? "这条任务缺少 workflow_id，无法温和取消，只能用急停"
       : job?.state === "unknown"
         ? "连接状态未知，无法温和取消，请用急停并在机器旁确认"
@@ -105,6 +119,28 @@ export function cancelPayload(view) {
 /** 急停：走既有 `/api/safe-action` 的实时 0x18 通道，必须显式 confirmed。 */
 export function estopPayload(view) {
   return { action: "emergency_stop", confirmed: true, job_id: view?.jobId || "" };
+}
+
+/** 走边框控制：走既有 `/api/safe-action`，带 job_id 只作用于这次走边框；继续会让机器再动，须显式 confirmed。 */
+export function framingControlPayload(view, action) {
+  const payload = { action, job_id: view?.jobId || "" };
+  if (action === "resume") payload.confirmed = true;
+  return payload;
+}
+
+/** 走边框控制请求的结果提示：严格模式下“继续”返回 202 待批准，不能显示成已经继续（2026-11-18）。 */
+export function framingControlNote(action, res) {
+  if (res?.status === 202 || res?.data?.result?.status === "approval_required") {
+    return "已发到电脑等待批准：在电脑上的 MOSS 批准后才会继续走";
+  }
+  if (!res?.ok || !res?.data?.success) {
+    return `操作失败：${res?.data?.result || "请重试，要停下请用急停"}`;
+  }
+  return {
+    pause: "走边框已暂停，激光头停在原地",
+    resume: "走边框继续",
+    stop_framing: "已停止走边框：激光头停在半路，开刻前请挪回起点或重新走边框",
+  }[action] || "已发送";
 }
 
 /** 未知态人工现场核对停稳后移除卡片：走 `/api/jobs/acknowledge-stop`，必须显式 confirmed。 */

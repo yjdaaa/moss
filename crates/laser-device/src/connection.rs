@@ -502,6 +502,18 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             }
             if let Some(prog) = &self.progress_sink {
                 prog.record_status_report(&report.raw);
+                // 暂停状态以控制器报告为准（2026-11-18）：门开或实体保持也算暂停，`~` 被忽略时不误显示“在走”
+                match report.activity {
+                    MachineActivity::Held | MachineActivity::DoorOpen => {
+                        prog.paused
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    MachineActivity::Busy | MachineActivity::Idle => {
+                        prog.paused
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    _ => {}
+                }
             }
             return Ok(Some(report));
         }
@@ -666,7 +678,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             continue;
                         }
                         MachineActivity::Held | MachineActivity::DoorOpen => {
+                            // 保持 / 门开是人为的暂停，控制器仍在回报：不算“无进展”，一直等到恢复
+                            // （2026-11-18：走边框暂停去摆木板超过 30 秒曾被判超时并自动 0x18；硬上限 30 分钟兜底）
                             self.state = DeviceState::Hold;
+                            last_activity_at = Instant::now();
                             std::thread::sleep(Duration::from_millis(50));
                             continue;
                         }

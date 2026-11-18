@@ -58,7 +58,7 @@
     },
     {
       "annotations": null,
-      "description": "\n激光雕刻机安全语义动作工具，只封装现有串口/网络单命令安全发送路径。\n\naction 支持:\n- 状态与急停: status, emergency_stop, soft_reset\n- 实时倍率微调（支持边刻边调，不停机即时生效，无需 confirmed）: feed_plus_10, feed_minus_10, feed_reset, feed_plus_1, feed_minus_1, power_plus_10, power_minus_10, power_reset, power_plus_1, power_minus_1\n- 顺序运动与控制（改变机床状态，空闲时生效，必须 confirmed=true）: unlock, home, set_origin, laser_off, absolute_move, relative_move\n网络模式必须提供 host 或配置 LASER_NETWORK_HOST。未指定 connection_mode 时按 LASER_DEFAULT_CONNECTION_MODE 路由。\n",
+      "description": "\n激光雕刻机安全语义动作工具，只封装现有串口/网络单命令安全发送路径。\n\naction 支持:\n- 状态与急停: status, emergency_stop, soft_reset\n- 实时倍率微调（支持边刻边调，不停机即时生效，无需 confirmed）: feed_plus_10, feed_minus_10, feed_reset, feed_plus_1, feed_minus_1, power_plus_10, power_minus_10, power_reset, power_plus_1, power_minus_1\n- 顺序运动与控制（改变机床状态，空闲时生效，必须 confirmed=true）: unlock, home, set_origin, laser_off, absolute_move, relative_move\n- 走边框途中（只作用于正在走的边框）: pause 暂停、stop_framing 停止（无需 confirmed）；resume 继续（必须 confirmed=true）\n网络模式必须提供 host 或配置 LASER_NETWORK_HOST。未指定 connection_mode 时按 LASER_DEFAULT_CONNECTION_MODE 路由。\n",
       "execution": null,
       "icons": null,
       "inputSchema": {
@@ -156,7 +156,7 @@
     },
     {
       "annotations": null,
-      "description": "\n统一激光 workflow 状态入口：预览、确认发送、状态、取消、反馈和重生成。\npreview/feedback/regenerate 不连接真实设备；confirm_send 只委托现有 sender 门禁。\n仅当 manual_params_confirmed=true 时，页面/请求中的功率、速度、点距、次数等才会覆盖材料库。\n",
+      "description": "\n统一激光 workflow 状态入口：预览、按预览走边框、确认发送、状态、取消、反馈和重生成。\npreview/feedback/regenerate 不连接真实设备；frame 按预览范围空走边框（不出光，需 confirmed=true）；confirm_send 只委托现有 sender 门禁。\n仅当 manual_params_confirmed=true 时，页面/请求中的功率、速度、点距、次数等才会覆盖材料库。\n",
       "execution": null,
       "icons": null,
       "inputSchema": {

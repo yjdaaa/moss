@@ -25,13 +25,14 @@ pub fn approval_ttl_seconds(raw: Option<&str>) -> u64 {
 }
 
 /// `laser_safe_action_tool` / `/api/safe-action` 的动作是否属于 R3（运动、解锁、提高功率或速度，技术书 §6.1）。
-/// 只有明确的降低风险或只读动作返回 `false`：查询状态、急停、软复位、关激光、倍率复位与降低。
+/// 只有明确的降低风险或只读动作返回 `false`：查询状态、急停、软复位、关激光、倍率复位与降低、
+/// 暂停走边框与停止走边框（2026-11-18）；继续走边框（`resume`）会让机器再动，仍是 R3。
 /// 其他一律按 R3 处理（含未来新增的动作），严格模式下需要桌面授权。
 pub fn safe_action_requires_approval(action: &str) -> bool {
     let action = action.trim().to_ascii_lowercase();
     let lowers_risk = matches!(
         action.as_str(),
-        "status" | "emergency_stop" | "soft_reset" | "laser_off"
+        "status" | "emergency_stop" | "soft_reset" | "laser_off" | "pause" | "stop_framing"
     ) || action.ends_with("_reset")
         || action.ends_with("_100")
         || action.contains("minus")

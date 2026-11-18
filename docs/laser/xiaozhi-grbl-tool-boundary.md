@@ -25,6 +25,8 @@
 | "帮我刻 xxx、刻名字、刻一段文字" | `laser_workflow_tool` `action="preview"` 带 `text`、`material`、`thickness_mm` | `xxx` 是文字内容；缺材料或厚度先问；默认不发送 |
 | "文字效果太焦/太浅/切不透/毛边/断线" | `refine_laser_params_from_feedback_tool`，必要时 `regenerate_text_laser_task_tool` | 先给建议或重新生成文件，不控制硬件 |
 | "先调参、打测试矩阵、找参数" | `run_calibration_grid_tool`，再 `select_calibration_cell_tool` | 生成不发送；`calibration_id + confirmed=true` 才发送 |
+| "先走个边框看看位置" | `laser_workflow_tool` `action="frame"` + 预览的 `workflow_id` | 机器会动：先问“确认走边框吗”，用户同意后 `confirmed=true`；按预览范围空走一圈不出光，走完回起点；不算开始加工（2026-11-18） |
+| 走边框途中“暂停 / 继续 / 不走了” | `laser_safe_action_tool` `action="pause"` / `"resume"` / `"stop_framing"` | 暂停、停止不用问；继续会让机器再动，先问“确认继续走边框吗”再 `confirmed=true`；不要用 workflow `cancel`（2026-11-18） |
 | "开始正式雕刻/切割这个任务" | `laser_workflow_tool` `action="confirm_send"`，或 `start_tuned_job_tool` | 必须 `confirmed=true`；`dry_run=true` 只返回状态；改过材料、厚度、文件或参数必须重新预览 |
 | "现在到哪了 / 还在跑吗" | `laser_workflow_tool` `action="status"`（无 id 取最近一条）或 `recent` | 只读 |
 | "停止 / 取消" | `laser_workflow_tool` `action="cancel"` | 停止后续发送，不等于物理急停；急停走 `laser_safe_action_tool` |

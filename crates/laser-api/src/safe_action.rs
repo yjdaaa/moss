@@ -27,6 +27,9 @@ impl ApiService {
         // 与 laser-tools 一致：动作名大小写不敏感，避免 "Emergency_Stop" 落空而不发 0x18（2026-11-05）。
         let action_owned = args.action.trim().to_ascii_lowercase();
         let action = action_owned.as_str();
+        if matches!(action, "pause" | "resume" | "stop_framing") {
+            return self.control_framing(action, args, job_id);
+        }
         if job_id.is_some() && !matches!(action, "emergency_stop" | "soft_reset" | "status") {
             return laser_contracts::ToolCallResult::err(
                 "job_id 只用于查询或停止任务，不能改变其他动作的目标",
@@ -332,6 +335,463 @@ impl ApiService {
         })
     }
 
+    /// 走边框途中的暂停 / 继续 / 停止（2026-11-18 用户决定，技术书 r52）。只作用于正在走的边框
+    /// （活动作业 `framing-…`；不带 `job_id` 时取唯一的活动作业），正式加工不支持：
+    /// - `pause`：进给保持 `!`，激光头原地停住（走边框本来就不出光），不需要确认；
+    /// - `resume`：恢复 `~`，机器会再动，必须 `confirmed=true`（严格模式下路由层已按 R3 授权）；
+    /// - `stop_framing`：取消这次走边框并立即进给保持，作业线程等停稳后再发 0x18（比直接急停不易丢步），
+    ///   激光头停在半路、不回起点，与急停一样转为待确认停止。
+    pub(crate) fn control_framing(
+        &self,
+        action: &str,
+        args: &laser_contracts::LaserSafeActionArgs,
+        job_id: Option<&str>,
+    ) -> laser_contracts::ToolCallResult {
+        use std::sync::atomic::Ordering;
+        let confirmed = args.confirmed == Some(true);
+        let job = {
+            let Ok(jobs) = self.active_jobs.lock() else {
+                return laser_contracts::ToolCallResult::err("无法读取设备任务，请使用实体急停");
+            };
+            match job_id {
+                Some(id) => jobs.values().find(|job| job.workflow_id == id).cloned(),
+                None if jobs.len() > 1 => {
+                    return laser_contracts::ToolCallResult::err(
+                        "存在多个设备任务，请指定 job_id；紧急情况请使用急停",
+                    );
+                }
+                None => jobs.values().next().cloned(),
+            }
+        };
+        let Some(job) = job else {
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "现在没有正在走的边框",
+                "no_active_framing",
+            );
+        };
+        if !job.workflow_id.starts_with("framing-") {
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "暂停、继续、停止走边框只用于走边框；正式加工要停下请用急停，或取消（记断点）",
+                "framing_control_not_supported",
+            );
+        }
+        // 显式连接目标（含审批保存的目标）必须就是这次走边框的设备，不能把 `~` 发给别的机器
+        if let Some(target) = explicit_safe_action_target(args)
+            && target != job.target
+        {
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "指定的设备不是正在走边框的那台，没有发送",
+                "framing_target_mismatch",
+            );
+        }
+        // 已在停止收尾的走边框不能再暂停或继续（减速停稳期间写 `~` 会让电机重新加速）
+        if job.cancel.is_cancelled() && action != "stop_framing" {
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "走边框正在停止，不能再暂停或继续",
+                "no_active_framing",
+            );
+        }
+        if args.dry_run == Some(true) {
+            return laser_contracts::ToolCallResult::ok(format!(
+                "仅预览：{action}（{}）；未向设备发送",
+                job.workflow_id
+            ));
+        }
+        match action {
+            "pause" => match job
+                .transport
+                .write_realtime(laser_device::RealtimeCommand::FeedHold)
+            {
+                Ok(()) => {
+                    job.progress.paused.store(true, Ordering::Release);
+                    laser_contracts::ToolCallResult::ok(
+                        "走边框已暂停，激光头停在原地（不出光）。要继续先问用户“确认继续走边框吗”；不走了用 stop_framing",
+                    )
+                }
+                Err(error) => laser_contracts::ToolCallResult::err(format!(
+                    "暂停没有发出去：{error}；要停下请用急停"
+                )),
+            },
+            "resume" => {
+                if !confirmed {
+                    return laser_contracts::ToolCallResult::with_detail(
+                        false,
+                        "继续走边框会让机器运动：先问用户“确认继续走边框吗”，同意后再带 confirmed=true",
+                        "confirmation_required",
+                    );
+                }
+                match job
+                    .transport
+                    .write_realtime(laser_device::RealtimeCommand::Resume)
+                {
+                    Ok(()) => {
+                        job.progress.paused.store(false, Ordering::Release);
+                        laser_contracts::ToolCallResult::ok("走边框继续，走完回到起点（不出光）")
+                    }
+                    Err(error) => {
+                        laser_contracts::ToolCallResult::err(format!("继续没有发出去：{error}"))
+                    }
+                }
+            }
+            _ => {
+                // 先取消再进给保持：作业线程据取消令牌收尾（等停稳后 0x18），`!` 让机器立即开始减速
+                job.cancel.cancel();
+                job.progress.paused.store(false, Ordering::Release);
+                if let Err(error) = job
+                    .transport
+                    .write_realtime(laser_device::RealtimeCommand::FeedHold)
+                {
+                    return laser_contracts::ToolCallResult::err(format!(
+                        "停止走边框的减速指令没发出去（{error}），请立即用急停或机器上的急停按钮"
+                    ));
+                }
+                laser_contracts::ToolCallResult::ok(
+                    "已停止走边框：激光头先减速停稳再复位，停在半路、不回起点。开始加工前请把激光头挪回起点，或重新走一遍边框",
+                )
+            }
+        }
+    }
+
+    /// AI 在走边框途中对 workflow 调 cancel 时，应当停下的走边框作业（见 `/api/workflow` 路由）：
+    /// 唯一的活动作业是还没在停止的走边框，且这份 workflow 存在、在等待发送、不在启动或发送中。
+    pub(crate) fn framing_to_stop_for_cancel(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<String> {
+        let requested = object
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?;
+        let framing_id = {
+            let jobs = self.active_jobs.lock().ok()?;
+            if jobs.len() != 1 {
+                return None;
+            }
+            let job = jobs.values().next()?;
+            if !job.workflow_id.starts_with("framing-") || job.cancel.is_cancelled() {
+                return None;
+            }
+            job.workflow_id.clone()
+        };
+        let launching = self
+            .launching_workflows
+            .lock()
+            .map(|state| state.active.contains_key(requested))
+            .unwrap_or(true);
+        if launching {
+            return None;
+        }
+        let stored = self
+            .with_effective_store(|store| store.get(laser_runtime::RecordKind::Workflow, requested))
+            .ok()
+            .flatten()?;
+        let status = stored
+            .status
+            .as_deref()
+            .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()));
+        crate::workflow::workflow_send_blocked_reason(status)
+            .is_none()
+            .then_some(framing_id)
+    }
+
+    /// `/api/safe-action resume` 在授权之前的绑定：必须 `confirmed=true`；找到正在走（未在停止）的走边框作业，
+    /// 把它的 `job_id` 写进请求；请求没带连接时补上这次作业的连接，严格模式审批目标因此就是那台设备。
+    pub(crate) fn bind_framing_resume(
+        &self,
+        object: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), Vec<u8>> {
+        let refuse = |message: &str, code: &str| {
+            http_json(
+                400,
+                failure(message, Some(serde_json::json!({"error_code": code}))),
+            )
+        };
+        if object.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(refuse(
+                "继续走边框会让机器运动：先问用户“确认继续走边框吗”，同意后再带 confirmed=true",
+                "confirmation_required",
+            ));
+        }
+        let requested = object
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let job = {
+            let Ok(jobs) = self.active_jobs.lock() else {
+                return Err(refuse("无法读取设备任务", "no_active_framing"));
+            };
+            match requested.as_deref() {
+                Some(id) => jobs.values().find(|job| job.workflow_id == id).cloned(),
+                None if jobs.len() > 1 => {
+                    return Err(refuse(
+                        "存在多个设备任务，请指定 job_id",
+                        "no_active_framing",
+                    ));
+                }
+                None => jobs.values().next().cloned(),
+            }
+        };
+        let Some(job) =
+            job.filter(|job| job.workflow_id.starts_with("framing-") && !job.cancel.is_cancelled())
+        else {
+            return Err(refuse("现在没有可以继续的走边框", "no_active_framing"));
+        };
+        object.insert("job_id".into(), serde_json::json!(job.workflow_id));
+        let has_target = ["port", "serial_port", "network_host", "host"]
+            .iter()
+            .any(|key| {
+                object
+                    .get(*key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty())
+            });
+        if !has_target {
+            match &job.spec {
+                Some(laser_device::ConnectionSpec::Tcp { host, port }) => {
+                    object.insert("connection_mode".into(), serde_json::json!("network"));
+                    object.insert("network_host".into(), serde_json::json!(host));
+                    object.insert("network_telnet_port".into(), serde_json::json!(port));
+                }
+                Some(laser_device::ConnectionSpec::Serial { port, baud_rate }) => {
+                    object.insert("connection_mode".into(), serde_json::json!("serial"));
+                    object.insert("port".into(), serde_json::json!(port));
+                    object.insert("baudrate".into(), serde_json::json!(baud_rate));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// `/api/device/framing` 的完整处理（参数校验 → 严格模式授权 → 执行 → 诊断事件 → 结束授权），
+    /// 工作台按钮与语音“按预览走边框”（`/api/workflow` action=frame）共用。
+    pub(crate) fn framing_with_authority(
+        &self,
+        mut object: serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
+    ) -> Vec<u8> {
+        // 先校验整数参数，审批摘要与实际下发使用同一份已校验的值（2026-11-05）。
+        if let Err(error) = framing_feed_and_power(&object) {
+            return framing_params_invalid(error);
+        }
+        // 橡皮筋轮廓同样先校验，非法时不创建审批（与 run_framing 用同一套默认范围）
+        let number =
+            |key: &str, default: f64| object.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
+        let bounds = (
+            number("min_x", 0.0),
+            number("min_y", 0.0),
+            number("max_x", 100.0),
+            number("max_y", 100.0),
+        );
+        if let Err(error) = crate::safe_action::framing_outline(&object, bounds) {
+            return framing_params_invalid(error);
+        }
+        // 严格模式检查点（技术书 §6.2）：走边框真实驱动机器
+        let framing_facts = approval::framing_digest_facts(&object);
+        let framing_summary = framing_approval_summary(&framing_facts);
+        let framing_authority = match self.require_r3_authority(
+            ctx,
+            approval::R3Action {
+                kind: laser_contracts::ApprovalKind::Framing,
+                target_record: "framing",
+                facts: framing_facts,
+                request: &object,
+                summary: framing_summary,
+            },
+        ) {
+            Ok(authority) => authority,
+            Err((status, body)) => return http_json(status, body),
+        };
+        if let approval::R3Authority::Approval(record) = &framing_authority {
+            match record.connection.as_ref() {
+                Some(connection) => object = approval::object_with_connection(&object, connection),
+                None => {
+                    let (status, body) =
+                        approval::error_response(&approval::ApprovalError::Mismatch);
+                    return http_json(status, body);
+                }
+            }
+        }
+        let response = self.run_framing(&object, ctx);
+        let outcome: Result<serde_json::Value, (u16, serde_json::Value)> =
+            if response.starts_with(b"HTTP/1.1 200") {
+                Ok(serde_json::Value::Null)
+            } else {
+                Err((400, failure("走边框未完成", None)))
+            };
+        if !response.starts_with(b"HTTP/1.1 200") {
+            let body = http_response_json(&response);
+            let message = body["result"].as_str().unwrap_or("走边框未完成").to_owned();
+            self.emit_event(LaserEvent {
+                level: LaserEventLevel::Error,
+                text: format!("走边框没有完成：{message}"),
+                hint: Some(
+                    laser_failure_hint(&message)
+                        .unwrap_or("到设备旁确认机器状态，排除原因后再走边框")
+                        .to_owned(),
+                ),
+                detail: Some(body.to_string()),
+            });
+        }
+        self.finish_r3_authority(&framing_authority, &outcome, None);
+        response
+    }
+
+    /// 语音 / 小智按预览走边框（2026-11-18 用户决定，技术书 r51）：`/api/workflow` action=frame。
+    /// 范围只取这份预览记录的 `artifacts.frame_mm`，与预览窗“先走边框”同一参照（以激光头当前位置为原点、
+    /// 走完回到起点）；功率固定 0 只空走不出光、速度 2000 mm/min。请求里的坐标 / 轮廓 / 速度一概不用，
+    /// 带了非 0 功率直接拒绝。先过与 confirm_send 相同的状态与刀路 SHA-256 门禁，保证走的就是之后要刻的那份；
+    /// 必须 `confirmed=true`；严格模式审批、语音授权、设备占用与急停沿用 `/api/device/framing`。
+    /// 走完不改 workflow 状态：挪好材料后可再走一次，或在用户确认开始后 confirm_send。
+    pub(crate) fn workflow_frame(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
+    ) -> Vec<u8> {
+        let Some(workflow_id) = object
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+        else {
+            return http_json(400, failure("workflow_id 不能为空", None));
+        };
+        if object.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+            return http_json(
+                400,
+                failure(
+                    "走边框会让机器运动：先向用户说明并得到明确确认，再带 confirmed=true",
+                    Some(serde_json::json!({"error_code": "confirmation_required"})),
+                ),
+            );
+        }
+        if object
+            .get("power")
+            .filter(|power| !power.is_null())
+            .is_some_and(|power| power.as_f64() != Some(0.0))
+        {
+            return http_json(
+                400,
+                failure(
+                    "按预览走边框只空走、不出光；需要弱光指示请在电脑工作台操作",
+                    Some(serde_json::json!({"error_code": "framing_light_not_allowed"})),
+                ),
+            );
+        }
+        let stored = match self.with_effective_store(|store| {
+            store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
+        }) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => {
+                return http_json(
+                    404,
+                    failure(
+                        "找不到这份预览，请先生成预览",
+                        Some(serde_json::json!({"error_code": "workflow_not_found"})),
+                    ),
+                );
+            }
+            Err(_) => return http_json(500, failure("读取 workflow 失败", None)),
+        };
+        let status = stored
+            .status
+            .as_deref()
+            .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()));
+        if let Some(reason) = crate::workflow::workflow_send_blocked_reason(status) {
+            return http_json(
+                400,
+                failure(
+                    reason,
+                    Some(serde_json::json!({"error_code": "workflow_not_sendable"})),
+                ),
+            );
+        }
+        // 与 confirm_send / resume 相同的材料安全复核（PVC 等直接拒绝）
+        if let Err(error) = crate::materials::validate_material_safety_in_payload(&stored.payload) {
+            return http_json(
+                400,
+                failure(
+                    error,
+                    Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                ),
+            );
+        }
+        let gate = crate::workflow::build_send_preflight(&stored.payload, &self.send_gcode_roots())
+            .and_then(|(preflight, _, _)| {
+                laser_device::authorize_send(&preflight).map_err(|error| error.to_string())
+            });
+        if let Err(error) = gate {
+            return http_json(
+                400,
+                failure(
+                    format!("走边框安全门禁未通过: {error}"),
+                    Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                ),
+            );
+        }
+        let frame = &stored.payload["artifacts"]["frame_mm"];
+        let value = |key: &str| {
+            frame
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+        };
+        let (Some(min_x), Some(max_x), Some(min_y), Some(max_y)) = (
+            value("min_x"),
+            value("max_x"),
+            value("min_y"),
+            value("max_y"),
+        ) else {
+            return http_json(
+                400,
+                failure(
+                    "这份预览没有记录加工范围（例如导入的 G-code 起点由文件决定），不能按预览走边框",
+                    Some(serde_json::json!({"error_code": "framing_not_available"})),
+                ),
+            );
+        };
+        if max_x <= min_x || max_y <= min_y {
+            return http_json(
+                400,
+                failure(
+                    "这份预览的加工范围为空，不能走边框",
+                    Some(serde_json::json!({"error_code": "framing_not_available"})),
+                ),
+            );
+        }
+        let round = |v: f64| (v * 1000.0).round() / 1000.0;
+        let mut framing = object.clone();
+        for key in ["action", "workflow_id", "outline", "feed_rate", "power"] {
+            framing.remove(key);
+        }
+        framing.insert("relative_to_head".into(), serde_json::Value::Bool(true));
+        framing.insert("min_x".into(), serde_json::json!(round(min_x)));
+        framing.insert("max_x".into(), serde_json::json!(round(max_x)));
+        framing.insert("min_y".into(), serde_json::json!(round(min_y)));
+        framing.insert("max_y".into(), serde_json::json!(round(max_y)));
+        framing.insert("feed_rate".into(), serde_json::json!(2000));
+        framing.insert("power".into(), serde_json::json!(0));
+        let response = self.framing_with_authority(framing, ctx);
+        if !response.starts_with(b"HTTP/1.1 200") {
+            return response;
+        }
+        let mut body = http_response_json(&response);
+        body["result"]["workflow_id"] = serde_json::Value::String(workflow_id);
+        body["result"]["next_actions"] = serde_json::json!(["frame", "confirm_send", "cancel"]);
+        body["result"]["hint"] = serde_json::Value::String(
+            "边框已空走一圈（未出光），激光头已回到起点。请用户核对材料位置；挪好后可再走一次，用户明确说确认开始后再 confirm_send".into(),
+        );
+        http_json(200, body)
+    }
+
     /// 走边框：真实驱动机器沿外接矩形运动，按发送链路对待（2026-10-14）。
     /// 与完整发送相同的设备占用检查、握手与 Idle 预检；运行期间登记为活动作业（`framing-…`），
     /// 顶栏 / 页面急停与取消都能找到它。默认不出光（`power` 缺省 0），弱光指示需显式传 `power`。
@@ -599,6 +1059,7 @@ impl ApiService {
             progress: progress.clone(),
             transport: transport.clone(),
             started_at: std::time::Instant::now(),
+            spec: Some(spec.clone()),
         });
         let cleared_uncertain = {
             let mut jobs = self
@@ -620,6 +1081,23 @@ impl ApiService {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut dropped = Vec::new();
+            // 发起方（内置语音）已放弃等待：这次不再开始；否则在同一把锁内登记并回执作业编号
+            let watch = crate::jobs::current_short_job_watch();
+            let mut watch_state = watch.as_ref().map(|watch| {
+                watch
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            });
+            if watch_state
+                .as_deref()
+                .is_some_and(|state| *state == crate::jobs::ShortJobStart::Abandoned)
+            {
+                return failed(
+                    409,
+                    format!("语音那边已不再等待，未开始{label}"),
+                    "short_job_abandoned",
+                );
+            }
             uncertain.retain(|_, old| {
                 if old.target == target {
                     dropped.push(old.clone());
@@ -629,6 +1107,10 @@ impl ApiService {
                 }
             });
             jobs.insert(job_id.clone(), job.clone());
+            if let Some(state) = watch_state.as_deref_mut() {
+                *state = crate::jobs::ShortJobStart::Started(job_id.clone());
+            }
+            drop(watch_state);
             dropped
         };
         drop(cleared_uncertain);
@@ -647,7 +1129,8 @@ impl ApiService {
             }
             result => {
                 // 取消或失败都不能证明机器已停：在同锁对内原子完成 active -> uncertain 交接，杜绝急停空窗。
-                if !cancel.is_cancelled() {
+                // 失败，或取消后收尾也出错（停止指令未必送达）：都补发一次 0x18
+                if !cancel.is_cancelled() || result.is_err() {
                     let _ = transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
                 }
                 let uncertain_entry = UncertainJob::from_active(&job, Some(spec));
@@ -683,6 +1166,17 @@ impl ApiService {
                             format!("{label}执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
                             Some(
                                 serde_json::json!({"error_code": job_spec.failed_code, "job_id": job_id}),
+                            ),
+                        ),
+                    )),
+                    Err(e) => Err(http_json(
+                        409,
+                        failure(
+                            format!(
+                                "{label}已取消，但收尾时出错（{e}），已补发急停 0x18，请到设备旁确认机器已停"
+                            ),
+                            Some(
+                                serde_json::json!({"error_code": job_spec.cancelled_code, "job_id": job_id}),
                             ),
                         ),
                     )),
@@ -771,6 +1265,7 @@ pub(crate) fn safe_action_approval_summary(
         "set_origin" => "设置工作原点",
         "absolute_move" => "移动到绝对坐标",
         "relative_move" => "相对移动",
+        "resume" => "继续走边框",
         other if other.contains("plus") || other.contains('+') => "提高进给或功率倍率",
         _ => "设备动作",
     };
@@ -891,6 +1386,24 @@ pub(crate) fn framing_approval_summary(
 }
 
 /// 经审批执行安全动作时，用审批保存的连接参数覆盖请求中的连接字段。
+/// 安全动作请求里显式给出的连接目标（与活动作业的 `target` 同一写法）；没给或解析不了为 `None`。
+fn explicit_safe_action_target(args: &laser_contracts::LaserSafeActionArgs) -> Option<String> {
+    let has_host = args.host.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let has_port = args.port.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if !has_host && !has_port {
+        return None;
+    }
+    laser_tools::resolve_connection_spec(
+        args.port.as_deref(),
+        args.host.as_deref(),
+        args.baudrate,
+        args.telnet_port,
+        args.connection_mode.as_deref(),
+    )
+    .ok()
+    .map(|spec| spec.describe())
+}
+
 pub(crate) fn apply_connection_to_safe_action(
     args: &mut laser_contracts::LaserSafeActionArgs,
     connection: &laser_contracts::ApprovalConnection,

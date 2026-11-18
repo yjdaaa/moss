@@ -97,6 +97,8 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
             "status" | "recent" | "list" => R0,
             "preview" => R1,
             "cancel" => R2,
+            // frame（按预览走边框）让机器运动，与发送同级
+            "frame" => R3,
             // confirm_send / send / resume 以及不认识的 action：按 R3 处理（不认识的由后端拒绝）
             _ => R3,
         },
@@ -178,6 +180,11 @@ mod tests {
                 R3,
             ),
             ("laser_workflow_tool", json!({"action": "resume"}), R3),
+            (
+                "laser_workflow_tool",
+                json!({"action": "frame", "confirmed": true}),
+                R3,
+            ),
             ("laser_workflow_tool", json!({"action": "SEND"}), R3),
             ("laser_safe_action_tool", json!({"action": "status"}), R0),
             (

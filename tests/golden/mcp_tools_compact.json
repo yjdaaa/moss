@@ -24,7 +24,7 @@
     },
     {
       "name": "laser_safe_action_tool",
-      "description": "机器的即时控制。用户说“停”“急停”时立即调用 emergency_stop 并带 confirmed=true，不要先问用户。查状态、边刻边调快慢和功率不用带 confirmed。解锁、回零、设原点、关激光、移动激光头会让机器动：先说清要做什么，用户明确说确认后再带 confirmed=true。",
+      "description": "机器的即时控制。用户说“停”“急停”时立即调用 emergency_stop 并带 confirmed=true，不要先问用户。查状态、边刻边调快慢和功率不用带 confirmed。解锁、回零、设原点、关激光、移动激光头会让机器动：先说清要做什么，用户明确说确认后再带 confirmed=true。走边框途中：用户说暂停用 pause，说不走了、取消、别走了用 stop_framing（都不用问）；说继续先问“确认继续走边框吗”，同意后 resume 带 confirmed=true。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -49,14 +49,17 @@
               "set_origin",
               "laser_off",
               "absolute_move",
-              "relative_move"
+              "relative_move",
+              "pause",
+              "resume",
+              "stop_framing"
             ],
-            "description": "status 查状态；emergency_stop 急停；soft_reset 软复位；feed_*/power_* 加工中把速度或功率调高、调低 10% 或 1%，*_reset 恢复 100%；unlock 解除报警锁定；home 回零；set_origin 把当前位置设为原点；laser_off 关激光；absolute_move / relative_move 移动激光头（不出光）"
+            "description": "status 查状态；emergency_stop 急停；soft_reset 软复位；feed_*/power_* 加工中把速度或功率调高、调低 10% 或 1%，*_reset 恢复 100%；unlock 解除报警锁定；home 回零；set_origin 把当前位置设为原点；laser_off 关激光；absolute_move / relative_move 移动激光头（不出光）；pause / resume / stop_framing 暂停、继续、停止正在走的边框"
           },
           "confirmed": {
             "type": "boolean",
             "default": false,
-            "description": "emergency_stop、soft_reset 一律设 true（不用问用户）；unlock、home、set_origin、laser_off、移动要用户明确确认后才设 true；status 和调速调功率不用设"
+            "description": "emergency_stop、soft_reset 一律设 true（不用问用户）；unlock、home、set_origin、laser_off、移动、resume 要用户明确确认后才设 true；status 和调速调功率不用设"
           },
           "x": {
             "type": "number",
@@ -90,7 +93,7 @@
     },
     {
       "name": "laser_workflow_tool",
-      "description": "刻文字和基础图形（圆、星形、爱心、边框等）从预览到加工的全过程（照片、图片说不出文件，请用户在电脑工作台上传，在“转换方式”里选 Jarvis 等抖动或快速 / 均衡 / 精细）。preview：按文字、图形、材料、厚度生成刀路预览并弹到电脑屏幕，不让机器动；功率、速度、遍数默认按材料库推荐；用户明确说了就放进 manual_params，预览里会如实显示。confirm_send：用户核对预览后明确说确认，再带 preview 返回的 workflow_id 和 confirmed=true 开始加工。status 查进度（不带 workflow_id 看最近的任务）；recent 列最近任务；cancel 取消正在发送的任务；resume 从中断的地方继续刻（同样要用户确认）。",
+      "description": "刻文字和基础图形（圆、星形、爱心、边框等）从预览到加工的全过程（照片、图片说不出文件，请用户在电脑工作台上传，在“转换方式”里选 Jarvis 等抖动或快速 / 均衡 / 精细）。preview：按文字、图形、材料、厚度生成刀路预览并弹到电脑屏幕，不让机器动；功率、速度、遍数默认按材料库推荐；用户明确说了就放进 manual_params，预览里会如实显示。frame：按这份预览的范围带 workflow_id 空走一圈边框（不出光，走完回起点），方便用户挪正材料；机器会动，先问“确认走边框吗”，用户明确同意再带 confirmed=true，走完不算开始加工。confirm_send：用户核对预览后明确说确认，再带 preview 返回的 workflow_id 和 confirmed=true 开始加工。status 查进度（不带 workflow_id 看最近的任务）；recent 列最近任务；cancel 取消正在发送的任务；resume 从中断的地方继续刻（同样要用户确认）。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -98,6 +101,7 @@
             "type": "string",
             "enum": [
               "preview",
+              "frame",
               "confirm_send",
               "status",
               "recent",
@@ -190,20 +194,20 @@
           },
           "workflow_id": {
             "type": "string",
-            "description": "confirm_send / status / cancel / resume：preview 返回的任务编号"
+            "description": "frame / confirm_send / status / cancel / resume：preview 返回的任务编号"
           },
           "confirmed": {
             "type": "boolean",
             "default": false,
-            "description": "confirm_send / resume：只有用户核对后明确说确认才设 true"
+            "description": "frame / confirm_send / resume：只有用户明确确认这一个动作才设 true"
           },
           "port": {
             "type": "string",
-            "description": "confirm_send / resume：串口号。用户没说就不填，用 MOSS 的默认连接；默认连接没设置时会报错，再问用户"
+            "description": "frame / confirm_send / resume：串口号。用户没说就不填，用 MOSS 的默认连接；默认连接没设置时会报错，再问用户"
           },
           "network_host": {
             "type": "string",
-            "description": "confirm_send / resume：网络连接的机器的 IP。用户没说就不填"
+            "description": "frame / confirm_send / resume：网络连接的机器的 IP。用户没说就不填"
           }
         }
       }

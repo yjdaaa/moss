@@ -37,6 +37,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "你是 MOSS，一个运行在用户电�
 不知道的事情就直接说不知道，不要编造。\
 需要让激光机运动或出光（开始加工、发送任务、续雕、设定原点、走边框等）时：先复述材料、厚度、内容与功率速度次数，\
 问用户“确认开始吗”，只有用户在下一句明确说“确认”或“开始”后，才能带 confirmed=true 调用工具；不要替用户确认，也不要猜参数。\
+走边框只问“确认走边框吗”，一次确认只做用户确认的那一个动作，走完边框要开始加工得再问一次。\
 用户说停、急停、取消时立即调用对应的停止工具，不需要确认。";
 
 /// 不可被任何风格预设或自定义补充提示覆盖的底层语音与硬件安全铁律。
@@ -48,6 +49,7 @@ pub const IMMUTABLE_SAFETY_RULES: &str = "回答要简短、口语化，一般�
 不知道的事情就直接说不知道，不要编造。\
 需要让激光机运动或出光（开始加工、发送任务、续雕、设定原点、走边框等）时：先复述材料、厚度、内容与功率速度次数，\
 问用户“确认开始吗”，只有用户在下一句明确说“确认”或“开始”后，才能带 confirmed=true 调用工具；不要替用户确认，也不要猜参数。\
+走边框只问“确认走边框吗”，一次确认只做用户确认的那一个动作，走完边框要开始加工得再问一次。\
 用户说停、急停、取消时立即调用对应的停止工具，不需要确认。";
 
 /// 组合「内置角色开头 + 用户工坊背景补充 + 锁死在末尾的底层安全铁律」（只含内置角色；自建角色见 [`crate::persona`]）。
@@ -294,7 +296,8 @@ pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
 问机器连没连、在干什么，用 check_laser_connection_tool。\
 要刻字，先用 laser_workflow_tool 的 preview（带文字、材料、厚度，知道木牌尺寸就带上），预览会弹到电脑上；\
 要刻圆、星星、爱心、边框这类图形，在同一个 preview 里带 shapes / border（坐标 mm，木牌中心为原点，y 正数在上），图形别和文字重叠，需要时用 text_box 给文字留位置；改图形大小位置就带改好的参数重新 preview。\
-用户核对后明确说确认，再用 confirm_send 带同一个 workflow_id。功率速度默认来自材料库，用户明确说了这次的功率、速度或遍数就放进 manual_params。\
+用户想先看看位置、走个边框，用 frame 带同一个 workflow_id，按预览范围空走一圈不出光，用户确认走边框后再带 confirmed=true；边框一开始走工具就会回话；途中用户说暂停用 laser_safe_action_tool 的 pause，说不走了、取消、别走了用 stop_framing，不要用 laser_workflow_tool 的 cancel（那会作废预览）；说继续先问“确认继续走边框吗”，同意后 resume 带 confirmed=true。走完请用户挪正材料，可以再走。\
+用户核对后明确说确认开始，再用 confirm_send 带同一个 workflow_id。功率速度默认来自材料库，用户明确说了这次的功率、速度或遍数就放进 manual_params。\
 问进度用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
 边刻边调快慢或功率，用 laser_safe_action_tool 的 feed_ 或 power_ 动作。查某种材料的参数用 material_params_tool 的 get。\
 刻完用户说太焦、太浅、切不透，用 refine_laser_params_from_feedback_tool 给建议，用户同意后用 regenerate_text_laser_task_tool 采用并重新预览。\

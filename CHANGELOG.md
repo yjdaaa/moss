@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 修正走边框暂停 / 继续 / 停止的审查问题：暂停超过 30 秒不再被自动急停，“取消”改道收窄（2026-11-18）
+
+- **现象**：agy 审查本日走边框改动发现：① FluidNC 收尾等待阶段暂停超过 30 秒会被判“空闲超时”并自动发 0x18；② 走边框途中任何来源的 workflow 取消都会改成停边框，会吞掉另一台设备正在启动的加工取消、让界面“取消这个任务”假成功；③ 严格模式下“继续”缺默认连接时建不起审批，批准的设备与实际收到 `~` 的作业可能不一致，局域网把 202 待批准显示成“走边框继续”；④ 停止走边框的进给保持写失败仍报“已停止”，停稳收尾期间能被“继续”重新加速；⑤ 内置语音等待开始的 60 秒长于语音工具 30 秒超时，放弃后机器仍可能动，且会把别处同时开始的走边框当成自己的；⑥ 按预览走边框漏了材料安全复核，`power: null` 被误拒；⑦ 提示词修改记录、安全文档、无后台兜底文案与 Jev 筛选遗漏。
+- **根因与修复**：`wait_until_idle` 遇 `Hold` / `Door` 刷新无进展计时（硬上限 30 分钟不变），停止目标的 `paused` 以控制器报告为准；cancel 改道只限语音 / 小智 / 网关、唯一活动作业是未在停止的走边框、预览在等待发送且不在启动中；`ActiveJob` 记下连接 `spec`，`resume` 先确认并绑定 `job_id`（进审批摘要）与作业连接后再授权，三个动作核对显式目标、支持 `dry_run`，已在停止时拒绝暂停 / 继续；`stop_framing` 先取消再写 `!` 并检查结果，取消后收尾出错时补发 0x18 并如实说明；内置语音用每次请求的开始回执（`ShortJobWatch`，在登记活动作业的同一把锁内写）精确识别自己的作业，20 秒没开始就放弃且放弃后不再开始（409 `short_job_abandoned`）；按预览走边框补材料安全复核、`power: null` 视为没给；任务浮层对 202 显示“已发到电脑等待批准”。行为变更：`/api/safe-action` 审批摘要要素加入 `job_id`；等待完成阶段的保持 / 门开（含正式加工）不再 30 秒判超时。
+- **验证**：`laser-device` 新增长时间保持仍等待并同步暂停态 1 项；`laser-api` 新增 5 项（cancel 改道限定、继续绑定作业与设备、停止写失败报错、材料复核与 null 功率、放弃后不再开始），并修正 1 项原有测试等待后台发送结束；`laser-tools` 新增无后台兜底 1 项；前端新增 202 提示 1 项。未实机验证保持与恢复。
+- **关联**：`crates/laser-device/src/connection.rs`（`wait_until_idle`、`classify_line`）、`crates/laser-api/src/safe_action.rs`（`control_framing`、`bind_framing_resume`、`framing_to_stop_for_cancel`、`run_short_device_job`）、`crates/laser-api/src/jobs.rs`（`ShortJobWatch`、`ActiveJob::spec`）、`crates/laser-api/src/routes.rs`、`crates/laser-api/src/approval/desktop.rs`、`crates/laser-host/src/lib.rs`（`voice_frame_call`）、`crates/laser-tools/src/lib.rs`、`crates/moss-voice-server/src/jev.rs`、`frontend/src/jobProgressState.js`。
+
+### 走边框可以暂停、继续、停止：语音说“暂停 / 继续 / 不走了”，任务浮层也有按钮（2026-11-18）
+
+- **现象**：语音走边框要等整圈走完才回话，途中只能说“停”急停（0x18 直接复位、可能丢步）；说“取消”时模型可能把预览作废而激光头还在走；任务浮层对走边框只有急停，“取消（记断点）”是灰的（用户 2026-11-18“语音走边框能不能暂停呢，或者走一半不想走了直接结束呢，以及在app中暂停和取消可以吗”）。
+- **根因与修复**：内置语音按预览走边框改为边框一开始走就回话（`laser_host::voice_frame_call`，后台照常执行）；`/api/safe-action` 新增 `pause`（`!`，不用确认）、`resume`（`~`，须 `confirmed=true`，严格模式 R3）、`stop_framing`（先 `!` 再取消作业、停稳后 0x18），只作用于走边框作业，正式加工返回 `framing_control_not_supported`；停止目标带 `paused`；走边框途中对没在发送的预览调 workflow `cancel` 改为停止走边框、预览保留。任务浮层对走边框显示暂停 / 继续 / 停止走边框（继续先确认）。语音工具说明与提示词同步。行为变更：新增三个安全动作；`pause` / `stop_framing` 归为降低风险动作；官方小智接入点的走边框仍等走完。
+- **验证**：`laser-api` 新增 3 项（暂停 / 继续 / 停止只碰走边框作业、未确认不继续、正式加工与无边框拒绝；真实走边框途中停止按取消收尾；走边框途中 workflow cancel 停边框保预览）；`laser-host` 新增 1 项（边框一开始走就回话、回话后能停止、未确认不连接设备）；前端 `jobProgressState` 新增 1 项，浏览器测试 `job-dock.browser.mjs` 增加走边框按钮用例（暂停不弹确认、继续须确认带 confirmed、停止）。未实机验证进给保持与恢复。
+- **关联**：`crates/laser-api/src/safe_action.rs`（`control_framing`）、`crates/laser-api/src/routes.rs`、`crates/laser-api/src/jobs.rs`（`active_framing_job_ids`、`paused`）、`crates/laser-host/src/lib.rs`（`voice_frame_call`）、`crates/laser-contracts/src/approval.rs`、`crates/laser-device/src/connection/job.rs`、`frontend/src/components/JobProgressDock.jsx`、`frontend/src/jobProgressState.js`、`tests/golden/mcp_tools_compact.json`。
+
+### 语音可以按预览走边框：说“走个边框看看”，确认后按预览范围空走一圈、不出光（2026-11-18）
+
+- **现象**：系统提示词把“走边框”列为可做的动作，后端也有现成的走边框与审批，但语音 / 小智的工具里没有走边框，用户只能回电脑上点“先走边框”，模型还可能拿相对移动去凑（用户 2026-11-18 转来的提议，确认“语言走边框就行”）。
+- **根因与修复**：`laser_workflow_tool` 新增 `action=frame`（R3）：只带预览的 `workflow_id` 与 `confirmed=true`；后端先过与 `confirm_send` 相同的状态与物理刀路 SHA-256 门禁，范围只取预览记录的 `frame_mm`（请求自带的坐标、轮廓、速度不用），固定以激光头当前位置为原点、`power=0` 不出光（带非 0 功率 400 `framing_light_not_allowed`）、速度 2000，再交给 `/api/device/framing` 同一套处理（严格模式建走边框审批）；走完不改任务状态，可再走或接着确认开始。未确认 400 `confirmation_required`，没有范围（如导入 G-code）400 `framing_not_available`。内置语音提示词与工具用法、小智控制台提示词（1992 / 2000 字）同步：走边框只问“确认走边框吗”，一次确认只做一个动作。行为变更：新增一个 R3 工具动作，默认值与既有接口不变。
+- **验证**：`laser-api` 新增 2 项（按预览范围空走不出光、自带坐标被忽略、走完仍可发送、刀路被改 / 已取消 / 无预览在连接设备前拒绝；严格模式只建审批、批准后执行）；`laser-mcp` 新增 1 项（未确认或缺编号不触达后端、确认后带连接转发）；`laser-contracts` 分级断言。未实机走边框。
+- **关联**：`crates/laser-api/src/safe_action.rs`（`workflow_frame`、`framing_with_authority`）、`crates/laser-api/src/routes.rs`、`crates/laser-mcp/src/lib.rs`、`crates/laser-contracts/src/risk.rs`、`crates/laser-tools/src/lib.rs`、`crates/moss-voice-server/src/conversation.rs`、`tests/golden/mcp_tools_compact.json`、`docs/integration/xiaozhi-prompts/latest.md`。
+
 ### 创作画板工具栏新增一键“清空画布”，清空后可撤销（2026-11-18）
 
 - **现象**：画板想清掉全部内容只能从 Excalidraw 左上角菜单找“重置画布”，或全选后删除，不好找（用户 2026-11-18“直接帮我加一个一键画布清空的按钮放到画布显眼的位置上”）。

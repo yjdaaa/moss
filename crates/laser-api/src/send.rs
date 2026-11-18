@@ -453,6 +453,7 @@ impl ApiService {
             progress: progress.clone(),
             transport: transport.clone(),
             started_at: std::time::Instant::now(),
+            spec: Some(spec.clone()),
         });
         let target_for_thread = target.clone();
         let spec_for_thread = spec.clone();

@@ -111,3 +111,34 @@ test("激光任务浮层：接口载荷转视图，坏数据不炸也不编造",
   assert.equal(dockPillText(jobsView({ jobs: [{ job_id: "j", state: "unknown" }] })), "进行中");
   assert.equal(dockPillText([]), "");
 });
+
+test("走边框作业：暂停 / 继续 / 停止，没有温和取消与 G-code", async () => {
+  const { jobView, framingControlPayload } = await import("../src/jobProgressState.js");
+  const running = jobView({ job_id: "framing-1", workflow_id: "framing-1", state: "running", lines_sent: 3, total_lines: 8 });
+  assert.equal(running.framing, true);
+  assert.equal(running.paused, false);
+  assert.equal(running.canControlFraming, true);
+  assert.equal(running.canCancel, false);
+  assert.equal(running.cancelHint, "");
+  assert.equal(running.phaseText, "正在走边框（不出光）");
+  const paused = jobView({ job_id: "framing-1", workflow_id: "framing-1", state: "running", paused: true });
+  assert.equal(paused.paused, true);
+  assert.equal(paused.phaseText, "走边框已暂停（不出光）");
+  assert.deepEqual(framingControlPayload(paused, "resume"), { action: "resume", job_id: "framing-1", confirmed: true });
+  assert.deepEqual(framingControlPayload(running, "pause"), { action: "pause", job_id: "framing-1" });
+  const unknown = jobView({ job_id: "framing-1", state: "unknown" });
+  assert.equal(unknown.canControlFraming, false, "未知态只剩急停与确认停稳");
+  const engraving = jobView({ job_id: "job-1", workflow_id: "wf-1", state: "running" });
+  assert.equal(engraving.framing, false);
+  assert.equal(engraving.canCancel, true);
+});
+
+test("走边框控制提示：202 待批准不能说成已经继续", async () => {
+  const { framingControlNote } = await import("../src/jobProgressState.js");
+  assert.match(
+    framingControlNote("resume", { ok: true, status: 202, data: { success: true, result: { status: "approval_required" } } }),
+    /等待批准/,
+  );
+  assert.equal(framingControlNote("resume", { ok: true, status: 200, data: { success: true } }), "走边框继续");
+  assert.match(framingControlNote("pause", { ok: false, status: 400, data: { success: false, result: "现在没有正在走的边框" } }), /现在没有正在走的边框/);
+});

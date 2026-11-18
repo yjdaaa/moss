@@ -21,6 +21,7 @@ fn unknown_stop_state_keeps_exact_transport_for_retry() {
                 progress: Default::default(),
                 transport: std::sync::Arc::new(fake.clone()),
                 started_at: std::time::Instant::now(),
+                spec: None,
             },
             None,
         ),
@@ -72,6 +73,7 @@ fn emergency_stop_targets_only_requested_job_and_dry_run_never_writes() {
                 progress: Default::default(),
                 transport: std::sync::Arc::new(device.clone()),
                 started_at: std::time::Instant::now(),
+                spec: None,
             }),
         );
     }
@@ -128,6 +130,7 @@ fn stop_targets_exposes_read_only_progress_for_the_global_panel() {
             progress: progress.clone(),
             transport: std::sync::Arc::new(device.clone()),
             started_at: std::time::Instant::now(),
+            spec: None,
         }),
     );
     let res =
@@ -179,6 +182,7 @@ fn safe_action_route_overrides_running_job_without_reopening_transport() {
     let active_job = std::sync::Arc::new(ActiveJob {
         workflow_id: "test-job-1".into(),
         started_at: std::time::Instant::now(),
+        spec: None,
         target: "127.0.0.1:8080".into(),
         mode: "network",
         cancel: cancel.clone(),
@@ -267,6 +271,7 @@ fn status_during_active_job_reports_progress_without_ending_the_job() {
     let job = std::sync::Arc::new(ActiveJob {
         workflow_id: "wf-status".into(),
         started_at: std::time::Instant::now(),
+        spec: None,
         target: "127.0.0.1:8080".into(),
         mode: "network",
         cancel: laser_device::CancellationToken::default(),
@@ -1069,6 +1074,7 @@ fn exclusive_serial_transport_keeps_uncertain_for_voice_stop_and_releases_before
                 progress: Default::default(),
                 transport: std::sync::Arc::new(dummy),
                 started_at: std::time::Instant::now(),
+                spec: None,
             },
             None,
         ),
@@ -1340,4 +1346,125 @@ fn resume_reconstructs_g92_offset_modals_and_rejects_sd_offline() {
     );
     assert_eq!(rejected["success"], false);
     assert_eq!(rejected["detail"]["error_code"], "workflow_not_resumable");
+}
+
+/// 走边框途中暂停 / 继续 / 停止（2026-11-18，技术书 r52）：暂停发 `!` 并在停止目标里显示 paused；
+/// 继续必须 confirmed=true 才发 `~`；停止走边框取消作业并先进给保持；正式加工、没有边框时拒绝。
+#[test]
+fn framing_pause_resume_and_stop_only_touch_the_framing_job() {
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(std::sync::Arc::new(|_| {
+        panic!("必须复用走边框作业的原通道")
+    }));
+    let safe = |args: serde_json::Value| post_json(&service, "/api/safe-action", &args);
+    let none = safe(serde_json::json!({"action": "pause"}));
+    assert_eq!(none["detail"], "no_active_framing", "{none}");
+
+    let device = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let insert = |id: &str| {
+        service.active_jobs.lock().unwrap().insert(
+            id.into(),
+            std::sync::Arc::new(ActiveJob {
+                workflow_id: id.into(),
+                mode: "network",
+                target: "127.0.0.1:23".into(),
+                cancel: Default::default(),
+                progress: Default::default(),
+                transport: std::sync::Arc::new(device.clone()),
+                started_at: std::time::Instant::now(),
+                spec: None,
+            }),
+        )
+    };
+    insert("wf-engrave");
+    let engraving = safe(serde_json::json!({"action": "pause"}));
+    assert_eq!(
+        engraving["detail"], "framing_control_not_supported",
+        "{engraving}"
+    );
+    assert!(device.realtime().is_empty(), "正式加工不能被暂停");
+    service.active_jobs.lock().unwrap().clear();
+
+    insert("framing-1");
+    let paused = safe(serde_json::json!({"action": "pause"}));
+    assert_eq!(paused["success"], true, "{paused}");
+    assert_eq!(device.realtime(), vec![b'!']);
+    let targets = parse_json_response(
+        &service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    assert_eq!(targets["result"]["jobs"][0]["paused"], true, "{targets}");
+
+    let unconfirmed = safe(serde_json::json!({"action": "resume"}));
+    assert_eq!(
+        unconfirmed["detail"]["error_code"], "confirmation_required",
+        "{unconfirmed}"
+    );
+    assert_eq!(device.realtime(), vec![b'!'], "未确认不能继续");
+    let resumed = safe(serde_json::json!({"action": "resume", "confirmed": true}));
+    assert_eq!(resumed["success"], true, "{resumed}");
+    assert_eq!(device.realtime(), vec![b'!', b'~']);
+
+    let stopped = safe(serde_json::json!({"action": "stop_framing", "job_id": "framing-1"}));
+    assert_eq!(stopped["success"], true, "{stopped}");
+    let job = service.active_jobs.lock().unwrap()["framing-1"].clone();
+    assert!(job.cancel.is_cancelled(), "停止走边框要取消作业");
+    assert_eq!(
+        device.realtime(),
+        vec![b'!', b'~', b'!'],
+        "先进给保持再由作业线程复位"
+    );
+    assert!(
+        !laser_contracts::safe_action_requires_approval("pause")
+            && !laser_contracts::safe_action_requires_approval("stop_framing")
+            && laser_contracts::safe_action_requires_approval("resume")
+    );
+}
+
+/// 真实走边框途中“停止走边框”：作业线程按取消收尾，返回 framing_cancelled，转为待确认停止。
+#[test]
+fn stop_framing_cancels_a_running_framing_job() {
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let service = std::sync::Arc::new(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(gated_transport_factory(gate.clone())),
+    );
+    let runner = {
+        let service = service.clone();
+        std::thread::spawn(move || {
+            post_json(
+                &service,
+                "/api/device/framing",
+                &serde_json::json!({
+                    "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+                }),
+            )
+        })
+    };
+    let start = std::time::Instant::now();
+    while service.active_framing_job_ids().is_empty() {
+        if runner.is_finished() || start.elapsed() > std::time::Duration::from_secs(5) {
+            gate.store(true, std::sync::atomic::Ordering::SeqCst);
+            panic!("走边框没有开始: {}", runner.join().unwrap());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stop = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "stop_framing"}),
+    );
+    assert_eq!(stop["success"], true, "{stop}");
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = runner.join().unwrap();
+    assert_eq!(
+        result["detail"]["error_code"], "framing_cancelled",
+        "{result}"
+    );
+    assert_eq!(service.active_job_count(), 0);
 }
