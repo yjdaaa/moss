@@ -41,7 +41,6 @@ import { LabConnectionBar } from "../components/material-lab/LabConnectionBar.js
 import { LabMatrixGrid } from "../components/material-lab/LabMatrixGrid.jsx";
 
 export function MaterialLabPage({ onNavigate }) {
-  const [, setBootstrapData] = useState(null);
   const [materials, setMaterials] = useState({});
   const [sourcePath, setSourcePath] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -157,7 +156,6 @@ export function MaterialLabPage({ onNavigate }) {
     const res = await getJson("/v1/material-lab/bootstrap");
     if (res.ok && res.data?.success) {
       const result = res.data.result || {};
-      setBootstrapData(result);
       setSourcePath(result.source_path || "");
       const mats = result.materials?.materials || {};
       setMaterials(mats);

@@ -202,23 +202,31 @@ pub fn parse_bool(value: Option<&serde_json::Value>, default: bool) -> bool {
     }
 }
 
-pub fn parse_float(
+pub fn parse_optional_float(
     value: Option<&serde_json::Value>,
     key: &str,
-    default: f64,
-) -> Result<f64, String> {
+) -> Result<Option<f64>, String> {
     let Some(value) = value else {
-        return Ok(default);
+        return Ok(None);
     };
     if value.is_null() || value.as_str().is_some_and(|v| v.trim().is_empty()) {
-        return Ok(default);
+        return Ok(None);
     }
     let parsed = value
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok());
     parsed
         .filter(|v: &f64| v.is_finite())
+        .map(Some)
         .ok_or_else(|| format!("{key} 必须是数字"))
+}
+
+pub fn parse_float(
+    value: Option<&serde_json::Value>,
+    key: &str,
+    default: f64,
+) -> Result<f64, String> {
+    Ok(parse_optional_float(value, key)?.unwrap_or(default))
 }
 
 pub fn parse_int(
@@ -245,5 +253,52 @@ pub fn parse_optional_positive(
         Ok(None)
     } else {
         Ok(Some(number))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_optional_float;
+    use serde_json::json;
+
+    #[test]
+    fn parse_optional_float_handles_empty_numbers_strings_and_invalid_values() {
+        assert_eq!(parse_optional_float(None, "x").unwrap(), None);
+        assert_eq!(parse_optional_float(Some(&json!(null)), "x").unwrap(), None);
+        assert_eq!(parse_optional_float(Some(&json!("")), "x").unwrap(), None);
+        assert_eq!(
+            parse_optional_float(Some(&json!("   ")), "x").unwrap(),
+            None
+        );
+
+        assert_eq!(
+            parse_optional_float(Some(&json!(0)), "x").unwrap(),
+            Some(0.0)
+        );
+        assert_eq!(
+            parse_optional_float(Some(&json!(-3.5)), "x").unwrap(),
+            Some(-3.5)
+        );
+        assert_eq!(
+            parse_optional_float(Some(&json!(" 12.25 ")), "x").unwrap(),
+            Some(12.25)
+        );
+
+        assert_eq!(
+            parse_optional_float(Some(&json!("abc")), "fill_options.angle_deg"),
+            Err("fill_options.angle_deg 必须是数字".into())
+        );
+        assert_eq!(
+            parse_optional_float(Some(&json!(true)), "x"),
+            Err("x 必须是数字".into())
+        );
+        assert_eq!(
+            parse_optional_float(Some(&json!("NaN")), "x"),
+            Err("x 必须是数字".into())
+        );
+        assert_eq!(
+            parse_optional_float(Some(&json!("inf")), "x"),
+            Err("x 必须是数字".into())
+        );
     }
 }

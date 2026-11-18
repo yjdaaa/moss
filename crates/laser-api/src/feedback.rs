@@ -847,12 +847,9 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
             "mode": actual_mode, "task_type": task_type, "vector_style": artifacts["vector_style"],
             "pixel_size_mm": artifacts["pixel_size_mm"]
         },
-        "content_fingerprint": artifacts["fingerprint"], "uploaded_image_file": image,
-        "scene_file": artifacts["scene_file"]
+        "content_fingerprint": artifacts["fingerprint"]
     });
     let web = json!({
-        "material_preview_url": format!("/preview?path={image}"),
-        "uploaded_image_url": format!("/preview?path={image}"),
         "gcode_preview_url": format!("/preview?path={preview}"),
         "image_preview_url": format!("/preview?path={preview}"),
         "gcode_download_url": format!("/preview?path={gcode}&download=1"),

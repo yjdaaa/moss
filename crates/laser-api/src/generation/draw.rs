@@ -395,18 +395,7 @@ pub(crate) fn generate_draw_artifacts(
         // 成品尺寸，图片模式默认自动识别（画板线稿多为 Otsu 阈值，也可选 Jarvis 等抖动、灰度变功率），
         // 过扫描按速度自动、双向扫描偏移
         let scan = raster_scan.as_ref().expect("光栅模式已解析扫描设置");
-        let number = |key: &str| -> Result<Option<f64>, String> {
-            match object.get(key) {
-                None | Some(serde_json::Value::Null) => Ok(None),
-                Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
-                Some(value) => value
-                    .as_f64()
-                    .or_else(|| value.as_str().and_then(|t| t.trim().parse::<f64>().ok()))
-                    .filter(|v| v.is_finite())
-                    .map(Some)
-                    .ok_or_else(|| format!("{key} 必须是数字")),
-            }
-        };
+        let number = |key: &str| crate::http::parse_optional_float(object.get(key), key);
         let extras = super::image_upload::ImageModeExtras::parse(object, &number)?;
         if extras.pass_through {
             return Err("画板转图片不支持直通（pass_through），请去掉".into());

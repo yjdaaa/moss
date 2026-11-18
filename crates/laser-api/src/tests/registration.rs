@@ -418,9 +418,13 @@ fn registered_draw_preview_keeps_a_draw_view_linked_to_the_source_job() {
         "{summary}"
     );
     assert_eq!(
-        record["web"]["material_preview_url"],
-        source["web"]["material_preview_url"]
+        record["web"]["scene_download_url"],
+        source["web"]["scene_download_url"]
     );
+    assert!(record["web"].get("material_preview_url").is_none());
+    assert!(record["web"].get("uploaded_image_url").is_none());
+    assert!(lab.get("uploaded_image_file").is_none());
+    assert!(lab.get("scene_file").is_none());
     assert_eq!(record["artifacts"]["origin"], "registration_mark_2");
 
     // 非画板来源不带画板视图

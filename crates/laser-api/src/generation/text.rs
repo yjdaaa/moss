@@ -113,21 +113,8 @@ pub(crate) fn generate_text_artifacts(
     // 默认激光头对准木牌（图案）中心（用户决定）
     let optional_number = |keys: &[&str]| -> Result<Option<f64>, String> {
         for key in keys {
-            match object.get(*key) {
-                None | Some(serde_json::Value::Null) => continue,
-                Some(serde_json::Value::String(text)) if text.trim().is_empty() => continue,
-                Some(value) => {
-                    return value
-                        .as_f64()
-                        .or_else(|| {
-                            value
-                                .as_str()
-                                .and_then(|text| text.trim().parse::<f64>().ok())
-                        })
-                        .filter(|v| v.is_finite())
-                        .map(Some)
-                        .ok_or_else(|| format!("{key} 必须是数字"));
-                }
+            if let Some(value) = crate::http::parse_optional_float(object.get(*key), key)? {
+                return Ok(Some(value));
             }
         }
         Ok(None)

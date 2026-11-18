@@ -96,7 +96,6 @@ test("画板默认表单：存储被禁用时退回默认值；未存画板设�
   assert.equal(form.image_strategy, "raster", "转图片方式默认光栅扫描");
   assert.equal(form.image_mode, "auto");
   assert.equal(form.line_interval_scale, "");
-  assert.equal(form.output_format, "gcode");
   assert.deepEqual(readDrawDefaultForm(null), form);
 
   const saved = { getItem: (key) => ({ "laserLab.material": "亚克力", "laserLab.connection_mode": "serial", "laserLab.port": "COM7", "laserLab.mode": "outline" })[key] ?? null };
@@ -122,25 +121,21 @@ test("画板默认表单：存储被禁用时退回默认值；未存画板设�
 
 test("走边框确认文案与载荷：统一附带 relative_to_head 与正式雕刻同起点；串口连接判断看 serial_connected", () => {
   const form = { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: "23" };
-  const dark = framingConfirmText(form, 80, 50, false);
+  const dark = framingConfirmText(form, 80, 50);
   assert.match(dark, /机器会实际移动/);
   assert.match(dark, /80\.0 × 50\.0 mm/);
   assert.match(dark, /激光保持关闭/);
+  assert.match(dark, /<device-ip>:23/);
   assert.doesNotMatch(dark, /出光/);
-  const lit = framingConfirmText(form, 80, 50, true);
-  assert.match(lit, /机器会实际移动/);
-  assert.match(lit, /低功率出光/);
-  assert.match(lit, /<device-ip>:23/);
 
-  const payload = buildDrawFramingPayload(form, 80, 50, false);
+  const payload = buildDrawFramingPayload(form, 80, 50);
   assert.equal(payload.relative_to_head, true, "画板走边框必须与 G92 X0 Y0 正式雕刻共用当前激光头起点");
   assert.equal(payload.power, 0);
-  assert.equal(buildDrawFramingPayload(form, 80, 50, true).power, 1);
   // 橡皮筋：带轮廓时附带 outline，确认文案写明沿外轮廓
   const outline = [[0, 0], [80, 0], [40, 50]];
-  assert.deepEqual(buildDrawFramingPayload(form, 80, 50, false, outline).outline, outline);
-  assert.equal(buildDrawFramingPayload(form, 80, 50, false, null).outline, undefined);
-  assert.match(framingConfirmText(form, 80, 50, false, 3), /图形外轮廓（3 个点/);
+  assert.deepEqual(buildDrawFramingPayload(form, 80, 50, outline).outline, outline);
+  assert.equal(buildDrawFramingPayload(form, 80, 50, null).outline, undefined);
+  assert.match(framingConfirmText(form, 80, 50, 3), /图形外轮廓（3 个点/);
 
   const serialForm = { connection_mode: "serial", port: "COM5", baudrate: "115200" };
   assert.equal(

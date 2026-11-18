@@ -343,10 +343,6 @@ pub fn run() {
             voice_builtin::voice_vision_test,
             voice_builtin::voice_plugins_status,
             voice_builtin::voice_plugins_save,
-            voice_builtin::voice_memory_list,
-            voice_builtin::voice_memory_set_enabled,
-            voice_builtin::voice_memory_save,
-            voice_builtin::voice_memory_clear,
             voice_context::voice_context_manage,
             voice_context::voice_context_pick_folder,
             voice_builtin::voice_builtin_status,
@@ -604,10 +600,6 @@ mod tests {
     #[test]
     fn sensitive_voice_settings_are_trusted_main_window_only() {
         const SENSITIVE: &[&str] = &[
-            "allow-voice-memory-list",
-            "allow-voice-memory-set-enabled",
-            "allow-voice-memory-save",
-            "allow-voice-memory-clear",
             "allow-voice-speaker-manage",
             "allow-voice-plugins-status",
             "allow-voice-plugins-save",
@@ -662,10 +654,6 @@ mod tests {
             (
                 include_str!("voice_builtin.rs"),
                 &[
-                    "voice_memory_list",
-                    "voice_memory_set_enabled",
-                    "voice_memory_save",
-                    "voice_memory_clear",
                     "voice_speaker_manage",
                     "voice_plugins_status",
                     "voice_plugins_save",
@@ -718,7 +706,7 @@ mod tests {
         // 卡片都挂在主窗口语音中心
         let builtin_card = include_str!("../../../../frontend/src/components/VoiceBuiltinCard.jsx");
         for card in [
-            "<VoiceMemoryCard",
+            "<VoiceContextCard",
             "<VoicePluginsCard",
             "<VoiceSpeakerCard",
             "<VoiceHomeCard",
@@ -853,7 +841,6 @@ mod tests {
                         < body
                             .find("imp::run")
                             .or(body.find("spawn_blocking"))
-                            .or(body.find("imp::detect_python"))
                             .or(body.find("if !confirmed"))
                             .unwrap(),
                     "{command} 须先校验来源"

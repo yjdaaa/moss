@@ -147,7 +147,6 @@ export function DrawPage({ onNavigate, active = true }) {
   const [status, setStatus] = useState("准备就绪");
   const [workflowId, setWorkflowId] = useState("");
   const [result, setResult] = useState(null);
-  const [lastScene, setLastScene] = useState(null);
   const [sceneRev, setSceneRev] = useState(() => computeSceneRevision(initialScene?.elements));
   const [previewSnap, setPreviewSnap] = useState(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
@@ -715,7 +714,6 @@ export function DrawPage({ onNavigate, active = true }) {
       },
       files,
     };
-    setLastScene(scene);
     return { blob, scene, activeElements };
   }
 
@@ -931,15 +929,12 @@ export function DrawPage({ onNavigate, active = true }) {
     }
     const { width, height, frame } = extent;
     const registered = Boolean(result?.result?.registration);
-    // 走边框会实际移动机器（勾选弱光时还会低功率出光），单击不得直接执行（2026-11-05 用户决定）
-    // 走边框一律不出光（r47 去掉了画板的弱光选项，与工作台一致）
-    const lightOn = false;
+    // 走边框会实际移动机器，单击不得直接执行（2026-11-05 用户决定）；一律不出光（r47）
     const outline = framingShape === "hull" ? framingOutline(result?.result?.artifacts) : null;
-    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn, outline?.length || 0, registered), {
-      title: lightOn ? "确认走边框（弱光出光）" : "确认走边框（机器将移动）",
+    const confirmed = await showConfirm(framingConfirmText(form, width, height, outline?.length || 0, registered), {
+      title: "确认走边框（机器将移动）",
       tone: "warning",
-      danger: lightOn,
-      confirmText: lightOn ? "移动并弱光走边框" : "开始走边框",
+      confirmText: "开始走边框",
       cancelText: "取消",
     });
     if (!confirmed) {
@@ -947,11 +942,11 @@ export function DrawPage({ onNavigate, active = true }) {
       return;
     }
     setBusy(true);
-    setStatus(lightOn ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
+    setStatus("正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
     try {
       // 默认不出光；附带 relative_to_head: true 以当前激光头位置为左下角起点（与正式雕刻同一参照）
-      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, lightOn, outline, frame));
-      setStatus(formatFramingStatus(res, width, height, lightOn));
+      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, outline, frame));
+      setStatus(formatFramingStatus(res, width, height));
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
     } finally {
@@ -1041,24 +1036,22 @@ export function DrawPage({ onNavigate, active = true }) {
     setStatus(adopted.status);
   }
 
-  async function workflowAction(action) {
+  async function cancelWorkflow() {
     if (!workflowId) return;
-    if (action === "cancel") {
-      const confirmed = await showConfirm(
-        "确认取消当前画板任务吗？若设备正在雕刻，将停止后续发送并请求安全停机（紧急情况请直接按顶栏红色「急停 0x18」或机器实体急停）。",
-        {
-          title: "确认取消任务",
-          tone: "warning",
-          confirmText: "取消任务",
-          cancelText: "保留",
-        },
-      );
-      if (!confirmed) return;
-    }
+    const confirmed = await showConfirm(
+      "确认取消当前画板任务吗？若设备正在雕刻，将停止后续发送并请求安全停机（紧急情况请直接按顶栏红色「急停 0x18」或机器实体急停）。",
+      {
+        title: "确认取消任务",
+        tone: "warning",
+        confirmText: "取消任务",
+        cancelText: "保留",
+      },
+    );
+    if (!confirmed) return;
     setBusy(true);
-    setStatus(action === "status" ? "查询状态..." : "提交取消...");
+    setStatus("提交取消...");
     try {
-      const res = await postJson("/api/workflow", { action, workflow_id: workflowId });
+      const res = await postJson("/api/workflow", { action: "cancel", workflow_id: workflowId });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setResult(data);
       setStatus(
@@ -1087,7 +1080,7 @@ export function DrawPage({ onNavigate, active = true }) {
 
   async function downloadScene() {
     try {
-      const { scene } = lastScene ? { scene: lastScene } : await exportScene();
+      const { scene } = await exportScene();
       const blob = new Blob([JSON.stringify(scene, null, 2)], { type: "application/json" });
       const saved = await exportFile(blob, "excalidraw-laser-lab.excalidraw.json", "场景 JSON ");
       setStatus(savedMessage("场景 JSON ", saved));
@@ -1277,7 +1270,7 @@ export function DrawPage({ onNavigate, active = true }) {
           generatePreview={generatePreview}
           openSendConfirmation={openSendConfirmation}
           runFraming={runFraming}
-          workflowAction={workflowAction}
+          cancelWorkflow={cancelWorkflow}
           adoptRegistered={adoptRegistered}
           adoptFeedbackWorkflow={adoptFeedbackWorkflow}
           downloadFromUrl={downloadFromUrl}

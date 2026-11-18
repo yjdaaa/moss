@@ -60,7 +60,7 @@ export function DrawSendCard({
   generatePreview,
   openSendConfirmation,
   runFraming,
-  workflowAction,
+  cancelWorkflow,
   adoptRegistered,
   adoptFeedbackWorkflow,
   downloadFromUrl,
@@ -150,7 +150,7 @@ export function DrawSendCard({
           <button
             type="button"
             className="btn btn-ghost wb-sec-btn is-warn"
-            onClick={() => workflowAction("cancel")}
+            onClick={cancelWorkflow}
             disabled={busy}
             title="停止后续发送并请求安全停机；紧急情况请按顶栏急停"
           >

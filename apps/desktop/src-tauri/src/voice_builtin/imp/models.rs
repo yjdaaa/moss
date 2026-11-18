@@ -67,6 +67,7 @@ impl BuiltinVoice {
             if only_cli {
                 let mut status = self.status();
                 status["restarted"] = Value::Bool(false);
+                status["hot_applied"] = Value::Bool(false);
                 return Ok(status);
             }
         }
@@ -123,6 +124,7 @@ impl BuiltinVoice {
             if only_debug {
                 let mut status = self.status();
                 status["restarted"] = Value::Bool(false);
+                status["hot_applied"] = Value::Bool(true);
                 return Ok(status);
             }
         }
@@ -651,6 +653,7 @@ impl BuiltinVoice {
         };
         let mut status = self.status();
         status["restarted"] = Value::Bool(restarted);
+        status["hot_applied"] = Value::Bool(hot_only);
         Ok(status)
     }
 

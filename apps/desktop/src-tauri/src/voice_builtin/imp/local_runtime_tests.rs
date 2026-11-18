@@ -65,11 +65,14 @@ fn n59_role_settings_apply_without_restart_and_spoken_switch_is_saved() {
     let saved = builtin
         .local_save(&serde_json::json!({"persona_risk_notes": true}))
         .unwrap();
+    assert_eq!(saved["hot_applied"], true);
+    assert_eq!(saved["restarted"], false);
     assert_eq!(saved["local"]["settings"]["persona_risk_notes"], true);
     assert!(builtin.persona.system_prompt().contains("把握较大"));
-    builtin
+    let cleared_risk = builtin
         .local_save(&serde_json::json!({"persona_risk_notes": false}))
         .unwrap();
+    assert_eq!(cleared_risk["hot_applied"], true);
     assert!(!builtin.persona.system_prompt().contains("把握较大"));
 
     // Deleting the active custom role falls back to the default role.
@@ -487,6 +490,7 @@ fn local_laya_device_selection_lifecycle_and_jev_save_preserve_local_routing() {
         .local_save(&serde_json::json!({ "tts_speed": 1.25 }))
         .unwrap();
     assert_eq!(saved_speed["local"]["settings"]["tts_speed"], 1.25);
+    assert_eq!(saved_speed["hot_applied"], false);
 
     builtin
         .precheck_jev_save_input(

@@ -1,7 +1,5 @@
 import { gotoVoiceGroup } from "../VoiceLayout.jsx";
-import {
-  builtinModeView,
-} from "../../voiceState.js";
+import { restartEffect } from "../../voiceState.js";
 
 /** Jev 云端配置分组的标题：顶部混搭栏的提示与对话体验里的跳转文字都引用它，改名时只改这里。 */
 const JEV_GROUP_TITLE = "Jev 前置粗筛 · OpenRouter 云端（高级）";
@@ -17,11 +15,6 @@ const LAYA_HINT_CLASS = { ok: "voice-hint--ok", warn: "voice-hint--warn", bad: "
 function formatTime(seconds) {
   if (!seconds) return "—";
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
-function restartEffect(next) {
-  const mode = builtinModeView(next);
-  return next?.restarted ? `内置服务已重启（${mode.text}模式）` : `下次启动内置服务时生效（${mode.text}模式）`;
 }
 
 export { JEV_GROUP_TITLE, focusJevSwitch, TONE_CLASS, LAYA_HINT_CLASS, formatTime, restartEffect };

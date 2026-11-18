@@ -275,7 +275,9 @@ test("r47 精简：画板发送卡、设备卡与工作台监视舱去掉重复�
   assert.doesNotMatch(monitor, />\s*(物理 SHA-256|刀路总行数)\s*</, "监视舱不再显示 SHA-256 与总行数");
   assert.match(monitor, /预估耗时/);
   const page = read("pages/DrawPage.jsx");
-  assert.match(page, /const lightOn = false;/, "画板走边框一律不出光");
+  assert.doesNotMatch(page, /\blightOn\b|弱光/, "画板走边框一律不出光");
+  assert.match(page, /正在走边框（激光关闭，只移动激光头）/);
+  assert.doesNotMatch(page, /\blastScene\b/, "导出场景不再读缓存的 lastScene");
 });
 
 test("r48 对刀起点：后端一个值，工作台读写、默认木牌中心，保存失败回到原值", async () => {

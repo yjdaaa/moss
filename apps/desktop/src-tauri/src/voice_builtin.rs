@@ -1343,74 +1343,9 @@ pub async fn voice_plugins_save(
     result
 }
 
-#[tauri::command]
-pub async fn voice_memory_list(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
-    #[cfg(desktop)]
-    require_private_settings_window(&window)?;
-    #[cfg(desktop)]
-    let result = imp::run(app, |voice| voice.memory_list()).await;
-    #[cfg(mobile)]
-    let result = desktop_only(app);
-    result
-}
-
-#[tauri::command]
-pub async fn voice_memory_set_enabled(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    enabled: bool,
-) -> CmdResult {
-    #[cfg(desktop)]
-    require_private_settings_window(&window)?;
-    #[cfg(desktop)]
-    let result = imp::run(app, move |voice| voice.memory_enable(enabled)).await;
-    #[cfg(mobile)]
-    let result = desktop_only((app, enabled));
-    result
-}
-
-#[tauri::command]
-pub async fn voice_memory_save(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    device_id: String,
-    expected_revision: i64,
-    summary: String,
-) -> CmdResult {
-    #[cfg(desktop)]
-    require_private_settings_window(&window)?;
-    #[cfg(desktop)]
-    let result = imp::run(app, move |voice| {
-        voice.memory_edit(&device_id, expected_revision, &summary)
-    })
-    .await;
-    #[cfg(mobile)]
-    let result = desktop_only((app, device_id, expected_revision, summary));
-    result
-}
-
-#[tauri::command]
-pub async fn voice_memory_clear(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    device_id: String,
-    expected_revision: i64,
-) -> CmdResult {
-    #[cfg(desktop)]
-    require_private_settings_window(&window)?;
-    #[cfg(desktop)]
-    let result = imp::run(app, move |voice| {
-        voice.memory_edit(&device_id, expected_revision, "")
-    })
-    .await;
-    #[cfg(mobile)]
-    let result = desktop_only((app, device_id, expected_revision));
-    result
-}
-
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 48] = [
+pub const COMMANDS: [&str; 44] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -1438,10 +1373,6 @@ pub const COMMANDS: [&str; 48] = [
     "voice_vision_test",
     "voice_plugins_status",
     "voice_plugins_save",
-    "voice_memory_list",
-    "voice_memory_set_enabled",
-    "voice_memory_save",
-    "voice_memory_clear",
     "voice_builtin_status",
     "voice_builtin_start",
     "voice_builtin_stop",

@@ -124,7 +124,7 @@ export function isDrawConnectionOk(form, result) {
  * 构造创作画板走边框请求载荷：统一附带 `relative_to_head: true`，
  * 与画板正式雕刻刀路开头的 `G92 X0 Y0 Z0`（以激光头当前位置为左下角起点）保持同一参照系。
  */
-export function buildDrawFramingPayload(form, width, height, framingLight = false, outline = null, frame = null) {
+export function buildDrawFramingPayload(form, width, height, outline = null, frame = null) {
   // 2026-11-16 两点对位结果：范围相对第 2 个标记点，取变换后的 frame_mm（可为负）
   const box = frame
     ? { min_x: frame.min_x, min_y: frame.min_y, max_x: frame.max_x, max_y: frame.max_y }
@@ -134,16 +134,16 @@ export function buildDrawFramingPayload(form, width, height, framingLight = fals
     relative_to_head: true,
     ...box,
     feed_rate: 2000,
-    power: framingLight ? 1 : 0,
+    power: 0,
     // 2026-11-16 橡皮筋走边框：沿出光点外轮廓走（来自预览 frame_hull_mm）
     ...(Array.isArray(outline) && outline.length >= 3 ? { outline } : {}),
   };
 }
 
 /** 走边框响应（按 client.js `{ status, ok, data }` 契约）转界面状态文案。 */
-export function formatFramingStatus(res, width, height, framingLight) {
+export function formatFramingStatus(res, width, height) {
   if (res?.ok && res?.data?.success) {
-    return `走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm${framingLight ? "，弱光" : "，未出光"})`;
+    return `走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm，未出光)`;
   }
   const errMsg = typeof res?.data?.result === "string" && res.data.result ? res.data.result : "未知错误";
   return `走边框未完成：${errMsg}`;
@@ -194,7 +194,6 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
     port,
     baudrate,
     vector_simplify_factor: read("laserLab.vector_simplify_factor") || "3",
-    output_format: "gcode",
   };
 }
 
@@ -208,17 +207,14 @@ export function safeBrowserStorage() {
 }
 
 /**
- * 走边框确认文案（2026-11-05 用户决定：走边框会移动机器，必须先确认；勾选弱光时说明会低功率出光）。
+ * 走边框确认文案（2026-11-05 用户决定：走边框会移动机器，必须先确认；r47 起一律不出光）。
  */
-export function framingConfirmText(form, width, height, framingLight, outlinePoints = 0, registered = false) {
+export function framingConfirmText(form, width, height, outlinePoints = 0, registered = false) {
   const size = outlinePoints >= 3
     ? `图形外轮廓（${outlinePoints} 个点，范围 ${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm）`
     : `${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm 的边框`;
-  const light = framingLight
-    ? "已勾选“弱光指示”：走边框期间激光会以 S1（约 0.1%）低功率出光，请佩戴护目镜、确认材料与周围无易燃物。"
-    : "激光保持关闭，只移动激光头。";
   const start = registered ? "第 2 个对位标记" : "左下角起点";
-  return `将连接 ${drawTargetLabel(form)}，机器会实际移动，从激光头当前位置（${start}）沿 ${size}走一圈再回到原处。${light}\n请确认行程内无遮挡、手已离开机台；随时可按顶栏急停。`;
+  return `将连接 ${drawTargetLabel(form)}，机器会实际移动，从激光头当前位置（${start}）沿 ${size}走一圈再回到原处。激光保持关闭，只移动激光头。\n请确认行程内无遮挡、手已离开机台；随时可按顶栏急停。`;
 }
 
 /** 计算当前 Excalidraw 画布有效元素的轻量修订签名，用于感知增删改笔迹而无需整图重导出。 */

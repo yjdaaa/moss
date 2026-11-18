@@ -907,24 +907,6 @@ impl VoiceServer {
         Ok(pushed)
     }
 
-    /// 兼容固定按 `GoggleBot` 画风投送小机器人姿态卡。
-    pub fn push_goggle_bot_pose(
-        &self,
-        pose: BotPose,
-        target_device: Option<&str>,
-    ) -> Result<usize, String> {
-        self.push_scene_card(pose, Some(ScreenCardStyle::GoggleBot), target_device)
-    }
-    /// 将预览图与文字摘要自适应推送给指定设备或全部在线设备（彩屏按设备屏幕尺寸生成 1:1 点对点 PNG，单色 OLED 发文字卡）。
-    pub fn push_preview_adaptive(
-        &self,
-        source_bytes: Option<&[u8]>,
-        summary: &str,
-        target_device: Option<&str>,
-    ) -> Result<usize, String> {
-        self.push_preview_adaptive_with_ruler(source_bytes, summary, None, target_device)
-    }
-
     /// 带底部 5×7 ASCII 尺寸/功率标尺的自适应预览推送入口。
     pub fn push_preview_adaptive_with_ruler(
         &self,
@@ -1001,15 +983,6 @@ impl VoiceServer {
             }
         }
         Ok(pushed)
-    }
-
-    /// 兼容只传 PNG 字节的预览推送入口（不额外改写底部参数字幕）。
-    pub fn push_preview_png(
-        &self,
-        source_bytes: &[u8],
-        target_device: Option<&str>,
-    ) -> Result<usize, String> {
-        self.push_preview_adaptive_with_ruler(Some(source_bytes), "", None, target_device)
     }
 
     /// 后台异步预热高频固定话术与慢工具过渡垫音缓存（不阻塞启动，服务关闭时自动中止）。

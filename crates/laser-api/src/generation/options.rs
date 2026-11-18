@@ -175,17 +175,8 @@ pub(crate) fn parse_fill_options(
         Some(serde_json::Value::Object(map)) => map,
         Some(_) => return Err("fill_options 必须是对象".into()),
     };
-    let number = |key: &str| -> Result<Option<f64>, String> {
-        match fill.get(key) {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
-            Some(value) => value
-                .as_f64()
-                .or_else(|| value.as_str().and_then(|t| t.trim().parse().ok()))
-                .filter(|v: &f64| v.is_finite())
-                .map(Some)
-                .ok_or_else(|| format!("fill_options.{key} 必须是数字")),
-        }
+    let number = |key: &str| {
+        crate::http::parse_optional_float(fill.get(key), &format!("fill_options.{key}"))
     };
     let flag = |key: &str, default: bool| -> Result<bool, String> {
         match fill.get(key) {
@@ -312,15 +303,13 @@ pub(crate) fn parse_cut_options(
         Some(_) => return Err("cut_options 必须是对象".into()),
     };
     let number = |key: &str, lo: f64, hi: f64| -> Result<Option<f64>, String> {
-        match cut.get(key) {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
-            Some(value) => value
-                .as_f64()
-                .or_else(|| value.as_str().and_then(|t| t.trim().parse().ok()))
-                .filter(|v: &f64| v.is_finite() && (lo..=hi).contains(v))
-                .map(Some)
-                .ok_or_else(|| format!("cut_options.{key} 须在 {lo} ~ {hi} 之间")),
+        let range_err = || format!("cut_options.{key} 须在 {lo} ~ {hi} 之间");
+        let parsed =
+            crate::http::parse_optional_float(cut.get(key), key).map_err(|_| range_err())?;
+        match parsed {
+            None => Ok(None),
+            Some(v) if (lo..=hi).contains(&v) => Ok(Some(v)),
+            Some(_) => Err(range_err()),
         }
     };
     let defaults = CutOptions::default();

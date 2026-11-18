@@ -65,17 +65,17 @@ test("画板走边框：对位结果按 frame_mm（相对第 2 个标记点，�
   assert.deepEqual(registered.frame, { min_x: -40.123, max_x: 0.5, min_y: -3, max_y: 20 });
   assert.ok(Math.abs(registered.width - 40.623) < 1e-9);
   assert.equal(registered.height, 23);
-  const payload = buildDrawFramingPayload(form, registered.width, registered.height, false, null, registered.frame);
+  const payload = buildDrawFramingPayload(form, registered.width, registered.height, null, registered.frame);
   assert.equal(payload.relative_to_head, true);
   assert.equal(payload.min_x, -40.123);
   assert.equal(payload.max_y, 20);
   assert.equal(payload.power, 0, "默认不出光");
-  assert.match(framingConfirmText(form, registered.width, registered.height, false, 0, true), /第 2 个对位标记/);
-  assert.match(framingConfirmText(form, 80, 50, false), /左下角起点/);
+  assert.match(framingConfirmText(form, registered.width, registered.height, 0, true), /第 2 个对位标记/);
+  assert.match(framingConfirmText(form, 80, 50), /左下角起点/);
 
   const plain = drawFramingExtent({ draw_lab: { job_summary: { actual_width_mm: 80, actual_height_mm: 50 } } });
   assert.deepEqual(plain, { frame: null, width: 80, height: 50 });
-  const plainPayload = buildDrawFramingPayload(form, plain.width, plain.height, false, null, plain.frame);
+  const plainPayload = buildDrawFramingPayload(form, plain.width, plain.height, null, plain.frame);
   assert.deepEqual([plainPayload.min_x, plainPayload.min_y, plainPayload.max_x, plainPayload.max_y], [0, 0, 80, 50]);
   assert.equal(drawFramingExtent(registeredRecord({ artifacts: {} })), null, "对位结果没有范围时不走边框");
   assert.equal(
@@ -148,7 +148,7 @@ test("点射默认关闭、先确认再请求；画板复用对位面板并单�
   assert.match(draw, /<RegistrationPanel[\s\S]*?sessionKey=\{REGISTRATION_DRAW_SESSION_KEY\}/);
   assert.match(draw, /idPrefix="draw-reg"/);
   assert.match(draw, /onRegistered=\{adoptRegistered\}/);
-  const adopt = draw.slice(draw.indexOf("function adoptRegistered(record)"), draw.indexOf("async function workflowAction("));
+  const adopt = draw.slice(draw.indexOf("function adoptRegistered(record)"), draw.indexOf("async function cancelWorkflow("));
   assert.match(
     adopt,
     /adoptRegisteredDrawRecord\(record, registrationSourceRef\.current\)/,

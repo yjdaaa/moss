@@ -109,6 +109,7 @@ import {
   builtinJevForm,
   builtinJevSavePayload,
   preferencesShowJev,
+  restartEffect,
 } from "../src/voiceState.js";
 
 test("语音中心只在桌面端（有 invoke、有桌面会话、非手机远程模式）可用（A-69）", () => {
@@ -1884,4 +1885,11 @@ test("偏好设置里的 Jev 加工反馈判断：除内置链路外都显示，
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "official" }), true, "官方链路没有“模型”标签，只能在这里配");
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "builtin" }), false, "内置链路由“模型 → Jev”统一管理，不重复");
   assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: null }), false, "链路未读到时先不显示，避免闪烁");
+});
+
+test("voice_local_save 生效提示以后端 hot_applied 与 restarted 为准，不再靠前端猜测清单", () => {
+  assert.equal(restartEffect({ hot_applied: true, restarted: false, mode: "chat" }), "已立即生效，无需重启");
+  assert.equal(restartEffect({ hot_applied: false, restarted: true, mode: "chat" }), "内置服务已重启（对话模式）");
+  assert.equal(restartEffect({ hot_applied: false, restarted: false, mode: "echo" }), "下次启动内置服务时生效（回声测试模式）");
+  assert.equal(restartEffect({ restarted: false, mode: "chat" }), "下次启动内置服务时生效（对话模式）");
 });

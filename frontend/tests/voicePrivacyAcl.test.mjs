@@ -14,7 +14,6 @@ const fnBody = (source, command) => {
 
 // 敏感语音设置的全部权限：n26（2026-10-18）四项就地展开 + n67（2026-11-07）唤醒词与固件放进语音中心
 const SENSITIVE_COMMANDS = [
-  "voice_memory_list", "voice_memory_set_enabled", "voice_memory_save", "voice_memory_clear",
   "voice_speaker_manage", "voice_plugins_status", "voice_plugins_save",
   "voice_home_status", "voice_home_save", "voice_home_backup_export", "voice_home_backup_audit",
   "voice_home_backup_restore", "voice_home_token_save", "voice_home_voice_consent", "voice_home_discover",
@@ -64,12 +63,12 @@ test("n67：敏感语音设置只授权给主窗口，通配 / 远程 default ca
 
 test("四项私密设置在主语音页“隐私与家居”就地展开", () => {
   const main = frontend("src/components/VoiceBuiltinCard.jsx");
-  for (const card of ["<VoiceMemoryCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard", "<VoiceHomeApprovalCard"]) {
+  for (const card of ["<VoiceContextCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard", "<VoiceHomeApprovalCard"]) {
     assert.match(main, new RegExp(card), card);
   }
   assert.match(frontend("src/pages/VoicePage.jsx"), /<VoiceTabPanel tab="privacy"/);
   assert.doesNotMatch(frontend("src/pages/VoicePage.jsx").split('<VoiceTabPanel tab="features"')[1].split("</VoiceTabPanel>")[0], /PrivateSettingsEntry/);
-  assert.match(frontend("src/components/VoiceMemoryCard.jsx"), /<VoiceContextCard\b/, "记忆面板收口为单一无感记忆卡");
+  assert.equal(frontendExists("src/components/VoiceMemoryCard.jsx"), false, "薄壳 VoiceMemoryCard 已删除");
   assert.doesNotMatch(frontend("src/pages/VoicePage.jsx"), /VoiceContextCard|contextManage|contextPickFolder/, "长期记忆不挂到整页顶层");
 });
 

@@ -16,15 +16,15 @@ test("DrawPage 统一复用 client.js postJson 契约，走边框成功不再误
   assert.match(drawSource, /import\s*\{[^}]*\bpostJson\b[^}]*\}\s*from\s*["']\.\.\/api\/client\.js["']/);
 
   assert.equal(
-    formatFramingStatus({ status: 200, ok: true, data: { success: true, result: { framed: true } } }, 80, 50, false),
+    formatFramingStatus({ status: 200, ok: true, data: { success: true, result: { framed: true } } }, 80, 50),
     "走边框完成 (80.0 x 50.0 mm，未出光)",
   );
   assert.equal(
-    formatFramingStatus({ status: 200, ok: true, data: { success: true } }, 45.25, 30, true),
-    "走边框完成 (45.3 x 30.0 mm，弱光)",
+    formatFramingStatus({ status: 200, ok: true, data: { success: true } }, 45.25, 30),
+    "走边框完成 (45.3 x 30.0 mm，未出光)",
   );
   assert.equal(
-    formatFramingStatus({ status: 400, ok: false, data: { success: false, result: "控制器忙" } }, 80, 50, false),
+    formatFramingStatus({ status: 400, ok: false, data: { success: false, result: "控制器忙" } }, 80, 50),
     "走边框未完成：控制器忙",
   );
 });

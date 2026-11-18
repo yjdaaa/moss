@@ -393,7 +393,9 @@ fn user_only_device_tools_are_hidden_from_llm_but_usable_by_host_and_preview_pus
     let mut png_bytes = Vec::new();
     img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
         .unwrap();
-    let pushed = server.push_preview_png(&png_bytes, None).unwrap();
+    let pushed = server
+        .push_preview_adaptive_with_ruler(Some(&png_bytes), "", None, None)
+        .unwrap();
     assert_eq!(pushed, 1);
     let preview_call = read_mcp(&mut device);
     assert_eq!(preview_call["params"]["name"], "self.screen.preview_image");

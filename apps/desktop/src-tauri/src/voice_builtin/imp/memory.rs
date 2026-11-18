@@ -146,27 +146,6 @@ impl BuiltinVoice {
             .map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
     }
 
-    pub fn memory_list(&self) -> Result<Value, CenterError> {
-        serde_json::to_value(self.memory.list().map_err(internal)?)
-            .map_err(|_| internal("记忆列表序列化失败"))
-    }
-    pub fn memory_edit(
-        &self,
-        device_id: &str,
-        revision: i64,
-        summary: &str,
-    ) -> Result<Value, CenterError> {
-        let updated = self
-            .memory
-            .edit(device_id, revision, summary)
-            .map_err(|e| CenterError::new("memory_invalid", 400, e))?;
-        serde_json::to_value(
-            updated.ok_or_else(|| {
-                CenterError::new("memory_conflict", 409, "记忆已更新，请刷新后重试")
-            })?,
-        )
-        .map_err(|_| internal("保存结果序列化失败"))
-    }
     pub fn memory_enable(&self, enabled: bool) -> Result<Value, CenterError> {
         self.memory
             .configure(enabled, || {

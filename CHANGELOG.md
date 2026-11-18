@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复画板导出场景旧缓存与语音热生效漂移，清理下线接口、重复渲染及解析逻辑（2026-11-18）
+
+- **现象**：① 画板生成预览后修改画布，点导出场景仍拿到上次预览缓存的 `lastScene`；② `voice_local_save` 的热更新清单前后端两份漂移（前端漏 `persona_risk_notes`、多 `screen_card_style`），仅改“人设风险提示”时误报重启才生效；③ 存在已下线功能遗留（`workflowAction` 单分支、`lightOn` 死三元、无用 CSS/字段、`pollIntervalId` 重复状态、`/api/draw/preview` 重复构造与无用字段、`voice_memory_*` 四个死命令、自建链路残余、`VoiceMemoryCard` 与三个只被测试用的推屏包装，以及 5 份重复的可选数字解析闭包）。
+- **根因与修复**：① `DrawPage::downloadScene` 改为每次 `await exportScene()` 并删除 `lastScene`，同步删去 `workflowAction` 状态分支（改名 `cancelWorkflow`）、`lightOn` / `framingLight` 参数与无用 CSS/字段/重复 `pollIntervalId`；② `/api/draw/preview` 删去内联重复构造、`add_draw_view` 与 `registration` 移除未使用的 `material_preview_url` / `uploaded_image_url` / `uploaded_image_file` / `scene_file`（保留 `scene_download_url`），移除上传图无用哈希；③ 删除四个 `voice_memory_*` Tauri 命令及能力/schema 声明、`save_with_endpoint`、`imp::detect_python` 测试分支、`VoiceMemoryCard` 薄壳和三个测试专用推屏包装；④ 后端 `local_save` 返回 `hot_applied` 字段，前端 `restartEffect` 据此提示并删去 `HOT_LOCAL_KEYS`；⑤ `http::parse_optional_float` 收口 5 处数字解析（`cut_options` 保持原报错文案；`shapes` / `machine_motion` / `manual_params` 保持不改）。同步更新 `api-contracts.md` 与 `frontend-behavior.md`。
+- **验证**：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 零警告、`cargo test --workspace --no-fail-fast` 1351 通过 / 0 失败 / 21 忽略；前端 `npm run lint` 0 错 0 警告、`npm test` 335 通过、`npm run build` 通过、`voice-center.browser.mjs` 通过（106 次桥调用）；`check-repo-hygiene`、`check-crate-layers` 与 `scripts/tests`（32 通过）全部通过。未跑 `npm run test:e2e`、`quick-update-desktop` 与真机实测。
+- **关联**：`frontend/src/pages/{DrawPage,HomePage,MaterialLabPage}.jsx`、`frontend/src/{drawConnection,fillOptions,voiceApi}.js`、`frontend/src/voiceState/settings.js`、`frontend/src/components/voice-builtin/{useLocalGroup,shared}.js`、`crates/laser-api/src/{http,routes,feedback,registration}.rs`、`crates/laser-api/src/generation/{image_upload,draw,text,options}.rs`、`apps/desktop/src-tauri/src/{lib,voice_builtin}.rs`、`apps/desktop/src-tauri/src/voice_builtin/imp/{memory,models}.rs`、`crates/moss-voice/src/settings.rs`、`crates/moss-voice-server/src/lib.rs`。
+
 ### 语音中心“语音链路”选择改版：两张卡平分一行并写清各自特点（2026-11-17）
 
 - **现象**：删除自建服务端链路后，“语音链路”仍按三列排，MOSS 内置服务与官方小智两张卡只占左边三分之二、右侧空一列；卡片只有一句说明，看不出两者区别，当前用哪条也不够醒目（用户 2026-11-17“语音链路选择moss内置和官方小智这个ui你调整一下”）。

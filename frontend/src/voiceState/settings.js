@@ -1,5 +1,6 @@
 // 语音中心设置：接入点与工具开关、标签页、设置分组的脏检查与保存载荷。
 
+import { builtinModeView } from "./devices.js";
 import { localSettingsPayload } from "./localModels.js";
 
 // ---------- NV8 接入点与工具 ----------
@@ -369,6 +370,13 @@ function clock(at) {
 /** 保存成功后按钮旁的一行结果：保存了什么、几点、什么时候生效。 */
 export function savedNoteText(target, effect, at = new Date()) {
   return [`已保存${target}`, clock(at), effect].filter(Boolean).join(" · ");
+}
+
+/** 保存成功后按钮旁的生效说明：后端热应用即写“已立即生效”，否则按是否重启给出提示。 */
+export function restartEffect(next) {
+  if (next?.hot_applied) return "已立即生效，无需重启";
+  const mode = builtinModeView(next);
+  return next?.restarted ? `内置服务已重启（${mode.text}模式）` : `下次启动内置服务时生效（${mode.text}模式）`;
 }
 
 /** 有未保存改动的分组所在的标签（显示标签上的提示点）。`dirty` 为 {分组 id: 标签 key}。 */

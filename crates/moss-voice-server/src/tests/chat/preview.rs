@@ -54,7 +54,9 @@ fn monochrome_oled_official_firmware_auto_detects_screen_info_and_pushes_text_pr
 
     // 1. 空闲态推送预览：识别为单色 OLED 后不发无效 PNG，自动改为向 OLED 下发 Alert 滚动文字预览卡
     let summary = "3mm椴木雕刻 ·「福」· 40×40mm · S600 F1200 ×1遍";
-    let pushed = server.push_preview_adaptive(None, summary, None).unwrap();
+    let pushed = server
+        .push_preview_adaptive_with_ruler(None, summary, None, None)
+        .unwrap();
     assert_eq!(pushed, 1);
     let alert = read_json(&mut oled);
     assert_eq!(alert["type"], "alert");
@@ -65,7 +67,7 @@ fn monochrome_oled_official_firmware_auto_detects_screen_info_and_pushes_text_pr
     speak_manual(&mut oled, 1, 600);
     assert_eq!(read_json(&mut oled)["text"], "刻一个福字");
     server
-        .push_preview_adaptive(None, "3mm椴木雕刻 ·「福」· S600 F1200", None)
+        .push_preview_adaptive_with_ruler(None, "3mm椴木雕刻 ·「福」· S600 F1200", None, None)
         .unwrap();
     let _ = collect_items(&mut oled);
     let post_tts_card = read_json(&mut oled);
@@ -587,7 +589,11 @@ fn zero_flash_cards_approval_alert_terminal_badge_music_deck_style_switch_and_go
 
     // 5. 桌面语音中心一键推屏小机器人姿态预览
     let pushed = server
-        .push_goggle_bot_pose(crate::BotPose::GogglesEngrave, Some(DEVICE))
+        .push_scene_card(
+            crate::BotPose::GogglesEngrave,
+            Some(crate::ScreenCardStyle::GoggleBot),
+            Some(DEVICE),
+        )
         .unwrap();
     assert_eq!(pushed, 1);
     let pose_mcp = read_mcp(&mut szpi);

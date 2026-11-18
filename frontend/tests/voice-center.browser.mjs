@@ -126,7 +126,6 @@ try {
     voice_builtin_status: () => structuredClone(state.builtin),
     voice_diagnostics_export: () => ({ saved: true, file_name: "moss-voice-diagnostics-1790000000.json", bytes: 4096, events: state.builtin.events.length }),
     voice_mcp_status: () => ({ servers: [], connections: [], audit: [], revision: "r1", max_servers: 8 }),
-    voice_memory_list: () => [],
     voice_context_pick_folder: () => {
       const added = { id: "kr-1", label: "椴木工艺笔记", enabled: true, revision: 1, indexed_at: 1_790_000_000, directories: 1, files: 3 };
       state.kbRoots = [added];
@@ -299,7 +298,19 @@ try {
         state.builtin.debug_enabled = Boolean(nextFlag);
       }
       if (settings.clear_debug_traces) state.builtin.debug_traces = [];
-      return { ...structuredClone(state.builtin), restarted: false };
+      const keys = Object.keys(settings || {});
+      const hotOnly = keys.length > 0 && keys.every((k) => [
+        "screen_card_style",
+        "debug_trace_enabled",
+        "chat_log_enabled",
+        "clear_debug_traces",
+        "persona_style",
+        "persona_prompt",
+        "custom_personas",
+        "persona_risk_notes",
+        "screen_pack_auto_keep",
+      ].includes(k));
+      return { ...structuredClone(state.builtin), restarted: false, hot_applied: hotOnly };
     },
     // 2026-11-07：下载请求故意慢一点，验证等待期间其他模型的按钮不被锁住
     voice_local_model_download: async ({ id }) => {
@@ -725,6 +736,15 @@ try {
   const deletePatch = last("voice_local_save").args.settings;
   assert.deepEqual(deletePatch.custom_personas, []);
   assert.equal(deletePatch.persona_style, "workshop");
+  // 6e-2. 单独改人设风险提示（hot_applied=true），提示“已立即生效，无需重启”
+  await page.locator("#voice-persona-risk-notes").check();
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已立即生效，无需重启" }).waitFor();
+  assert.deepEqual(last("voice_local_save").args.settings, { persona_risk_notes: true });
+  await page.locator("#voice-persona-risk-notes").uncheck();
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已立即生效，无需重启" }).waitFor();
+  assert.deepEqual(last("voice_local_save").args.settings, { persona_risk_notes: false });
   // 6f. n74：视觉理解可选本地视觉模型——云端地址与密钥栏隐藏，未下载给出去下载入口，保存只提交本地模型编号
   await openGroup("vision");
   assert.equal(await page.locator("#voice-vision-source").inputValue(), "cloud", "旧配置（无本地模型、未用对话模型）显示为云端");

@@ -1197,35 +1197,14 @@ impl ApiService {
                 .get("thickness_mm")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            let img_name = artifacts
-                .get("image_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
             let gcode_name = artifacts
                 .get("gcode_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let scene_name = artifacts
-                .get("scene_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let path_preview_name = artifacts
-                .get("path_preview_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or(img_name);
-            let fingerprint = artifacts
-                .get("fingerprint")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let gcode_sha = artifacts
                 .get("gcode_sha256")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let est_secs = artifacts
-                .get("time_estimate")
-                .and_then(|t| t.get("estimated_seconds"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
 
             let mut input = object.clone();
             input.remove("image_data_url");
@@ -1242,20 +1221,6 @@ impl ApiService {
                     "gcode_sha256": gcode_sha,
                     "material": material,
                     "thickness_mm": thickness_mm,
-                },
-                "draw_lab": {
-                    "job_summary": format!("画板任务就绪 · 预估 {:.1} 秒", est_secs),
-                    "content_fingerprint": fingerprint,
-                    "uploaded_image_file": img_name,
-                    "scene_file": scene_name,
-                },
-                "web": {
-                    "material_preview_url": format!("/preview?path={img_name}"),
-                    "uploaded_image_url": format!("/preview?path={img_name}"),
-                    "gcode_preview_url": format!("/preview?path={path_preview_name}"),
-                    "image_preview_url": format!("/preview?path={path_preview_name}"),
-                    "gcode_download_url": format!("/preview?path={gcode_name}&download=1"),
-                    "scene_download_url": if scene_name.is_empty() { "".into() } else { format!("/preview?path={scene_name}&download=1") }
                 },
                 "next_actions": ["status", "cancel", "confirm_send"],
                 "created_at": unix_seconds(),

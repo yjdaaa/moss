@@ -77,19 +77,10 @@ fn registered_draw_view(
         summary["estimated_display"] = serde_json::json!(format!("{seconds:.1} 秒"));
     }
     summary["registered"] = serde_json::json!(true);
-    let source_lab = source.get("draw_lab");
-    let field = |key: &str| {
-        source_lab
-            .and_then(|lab| lab.get(key))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
-    };
     serde_json::json!({
         "job_summary": summary,
         "content_fingerprint": new_sha,
         "registered_from": source_id,
-        "uploaded_image_file": field("uploaded_image_file"),
-        "scene_file": field("scene_file"),
     })
 }
 
@@ -499,14 +490,8 @@ impl ApiService {
         // 画板任务对位（2026-11-16）：带上画板视图，画板页沿用自己的作业摘要、重复发送防呆与确认框
         let draw_lab =
             (source.get("source_type").and_then(|v| v.as_str()) == Some("draw")).then(|| {
-                for key in [
-                    "material_preview_url",
-                    "uploaded_image_url",
-                    "scene_download_url",
-                ] {
-                    if let Some(url) = source.pointer(&format!("/web/{key}")) {
-                        web[key] = url.clone();
-                    }
+                if let Some(url) = source.pointer("/web/scene_download_url") {
+                    web["scene_download_url"] = url.clone();
                 }
                 registered_draw_view(&source, source_id, &artifacts, frame, &new_sha)
             });

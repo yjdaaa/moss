@@ -799,6 +799,8 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
     let toggled = restarted
         .local_save(&serde_json::json!({"chat_log_enabled": false}))
         .unwrap();
+    assert_eq!(toggled["hot_applied"], true);
+    assert_eq!(toggled["restarted"], false);
     assert_eq!(toggled["debug_enabled"], false);
     assert_eq!(toggled["debug_traces"].as_array().unwrap().len(), 1);
     let bundle = restarted.diagnostics_bundle();
@@ -808,6 +810,8 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
     let cleared = restarted
         .local_save(&serde_json::json!({"clear_debug_traces": true}))
         .unwrap();
+    assert_eq!(cleared["hot_applied"], true);
+    assert_eq!(cleared["restarted"], false);
     assert_eq!(cleared["debug_traces"].as_array().unwrap().len(), 0);
 }
 

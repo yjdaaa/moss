@@ -11,10 +11,6 @@
     ]
   },
   "permissions": [
-    "allow-voice-memory-list",
-    "allow-voice-memory-set-enabled",
-    "allow-voice-memory-save",
-    "allow-voice-memory-clear",
     "allow-voice-speaker-manage",
     "allow-voice-plugins-status",
     "allow-voice-plugins-save",

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Lock, ChevronDown } from "lucide-react";
-import VoiceMemoryCard from "./VoiceMemoryCard.jsx";
+import VoiceContextCard from "./VoiceContextCard.jsx";
 import VoicePluginsCard from "./VoicePluginsCard.jsx";
 import VoiceSpeakerCard from "./VoiceSpeakerCard.jsx";
 import VoiceHomeCard from "./VoiceHomeCard.jsx";
@@ -79,7 +79,7 @@ export function PrivateSettingsEntry({ status }) {
               <small>{description}</small>
             </summary>
             <div className="voice-private-item-body">
-              {key === "memory" && opened.has("memory") && <VoiceMemoryCard status={status} />}
+              {key === "memory" && opened.has("memory") && <VoiceContextCard status={status} />}
               {key === "plugins" && opened.has("plugins") && <VoicePluginsCard />}
               {key === "speaker" && opened.has("speaker") && <VoiceSpeakerCard />}
               {key === "home" && opened.has("home") && (

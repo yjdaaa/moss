@@ -285,10 +285,6 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             .map_err(|e| e.to_string())?;
 
         let image_bytes = std::fs::read(&image_path).map_err(|e| format!("读取素材失败: {e}"))?;
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest;
-        hasher.update(&image_bytes);
-        let _fingerprint = hex::encode(hasher.finalize());
 
         let decoded =
             image::load_from_memory(&image_bytes).map_err(|e| format!("解析图片格式失败: {e}"))?;
@@ -346,22 +342,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         let overscan_mm = scan.options.overscan_mm;
 
         // 成品尺寸、机器幅面、材料像素间距与灰度处理（laser_core::image_job）
-        let optional_number = |key: &str| -> Result<Option<f64>, String> {
-            match object.get(key) {
-                None | Some(serde_json::Value::Null) => Ok(None),
-                Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
-                Some(value) => value
-                    .as_f64()
-                    .or_else(|| {
-                        value
-                            .as_str()
-                            .and_then(|text| text.trim().parse::<f64>().ok())
-                    })
-                    .filter(|v| v.is_finite())
-                    .map(Some)
-                    .ok_or_else(|| format!("{key} 必须是数字")),
-            }
-        };
+        let optional_number = |key: &str| crate::http::parse_optional_float(object.get(key), key);
         let threshold = match optional_number("threshold")? {
             None => None,
             Some(v) if (0.0..=255.0).contains(&v) => Some(v.round() as u8),
@@ -445,6 +426,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
 
         let img_name = format!("{id}.png");
         let gcode_name = format!("{id}.gcode");
+        use sha2::Digest;
         let gcode_sha = hex::encode(sha2::Sha256::digest(gcode_str.as_bytes()));
 
         let mut res = serde_json::Map::new();

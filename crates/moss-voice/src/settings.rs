@@ -1484,15 +1484,6 @@ pub fn migrate_legacy_self_hosted(settings_file: &Path) -> Result<bool, String> 
     })
 }
 
-/// 一次写入顶层 `mcp_endpoint` 与 `voice`（链路切换用，避免中途状态）。`None` 表示删除 `mcp_endpoint`。
-pub fn save_with_endpoint(
-    settings_file: &Path,
-    voice: &VoiceSettings,
-    endpoint: Option<&str>,
-) -> Result<(), String> {
-    save_all(settings_file, voice, Some(endpoint), None, None)
-}
-
 /// 附加接入点（顶层 `mcp_extra_endpoints`，NV8）。
 pub fn extra_mcp_endpoints(settings_file: &Path) -> Vec<String> {
     string_list(&read_root(settings_file), "mcp_extra_endpoints")
@@ -2462,12 +2453,19 @@ mod tests {
         );
         assert!(old.selected(ModelKind::Tts).is_none(), "开关关闭");
 
-        save_with_endpoint(&file, &voice, Some("wss://official.test/?token=b")).unwrap();
+        save_all(
+            &file,
+            &voice,
+            Some(Some("wss://official.test/?token=b")),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             mcp_endpoint(&file).as_deref(),
             Some("wss://official.test/?token=b")
         );
-        save_with_endpoint(&file, &VoiceSettings::default(), None).unwrap();
+        save_all(&file, &VoiceSettings::default(), Some(None), None, None).unwrap();
         assert_eq!(mcp_endpoint(&file), None);
         assert_eq!(load(&file), VoiceSettings::default());
         assert!(!dir.path().join("settings.json.tmp").exists());

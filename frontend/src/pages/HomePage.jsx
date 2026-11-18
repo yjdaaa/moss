@@ -268,7 +268,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   // Overlay & Modals
   const [overlayStatus, setOverlayStatus] = useState("pending");
   const [sendProgress, setSendProgress] = useState(null);
-  const [pollIntervalId, setPollIntervalId] = useState(null);
   const [pollSafetyNotice, setPollSafetyNotice] = useState("");
   const pollingCleanupRef = useRef(null);
   useEffect(() => () => pollingCleanupRef.current?.(), []);
@@ -758,8 +757,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       setBusy(false);
       if (res?.ok && res.data?.success) {
         const wf = res.data.result;
-        if (pollIntervalId) pollIntervalId();
-        setPollIntervalId(null);
+        pollingCleanupRef.current?.();
+        pollingCleanupRef.current = null;
         setOverlayStatus("pending");
         setSendProgress(null);
         setPollSafetyNotice("");
@@ -826,8 +825,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
   // 采用调参建议、两点对位生成的新预览：都是独立的新 workflow（新 SHA），换成当前任务、尚未发送
   const adoptDerivedWorkflow = async (workflow, label) => {
-    if (pollIntervalId) pollIntervalId();
-    setPollIntervalId(null);
+    pollingCleanupRef.current?.();
+    pollingCleanupRef.current = null;
     setCurrentWorkflow(workflow);
     setPreviewSignature(currentSignature);
     setOverlayStatus("pending");
@@ -1170,7 +1169,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         }
         setOverlayStatus(state.status);
         if (TERMINAL_STATUSES.has(state.status)) {
-          stop(); setPollIntervalId(null);
+          stop();
+          if (pollingCleanupRef.current === stop) pollingCleanupRef.current = null;
           if (state.status === "completed") {
             addLog("SUCCESS", `[成功] ${sr.total_lines || state.progress?.total || 0} 行已确认，控制器完成状态已核验`, "ok");
           } else {
@@ -1180,7 +1180,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       },
     );
     pollingCleanupRef.current = stop;
-    setPollIntervalId(() => stop);
   };
 
   const estopTarget = () => estopTargetArgs({

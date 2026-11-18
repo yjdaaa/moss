@@ -396,9 +396,6 @@ export function timeEstimateNote(estimate) {
 // 扫描角度、分组、交叉、双向、过扫描与切割设置跟着材料走，存进材料库条目；
 // 双向扫描偏移（含速度表）、机器加速度与走刀偏好跟机器 / 本人走，仍只存在本机。
 
-export const MATERIAL_FILL_SETTING_KEYS = Object.freeze(["grouping", "angleDeg", "crossHatch", "bidirectional", "overscanAuto", "overscanMm"]);
-export const MATERIAL_CUT_SETTING_KEYS = Object.freeze([...CUT_KEYS]);
-
 const SETTING_LABELS = {
   grouping: "填充分组",
   angleDeg: "扫描角度",

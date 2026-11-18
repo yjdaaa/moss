@@ -465,30 +465,6 @@
           "markdownDescription": "Enables the voice_mcp_status command without any pre-configured scope."
         },
         {
-          "description": "Enables the voice_memory_clear command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-memory-clear",
-          "markdownDescription": "Enables the voice_memory_clear command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_memory_list command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-memory-list",
-          "markdownDescription": "Enables the voice_memory_list command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_memory_save command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-memory-save",
-          "markdownDescription": "Enables the voice_memory_save command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the voice_memory_set_enabled command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voice-memory-set-enabled",
-          "markdownDescription": "Enables the voice_memory_set_enabled command without any pre-configured scope."
-        },
-        {
           "description": "Enables the voice_mode_changes command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-mode-changes",
@@ -859,30 +835,6 @@
           "type": "string",
           "const": "deny-voice-mcp-status",
           "markdownDescription": "Denies the voice_mcp_status command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_memory_clear command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-memory-clear",
-          "markdownDescription": "Denies the voice_memory_clear command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_memory_list command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-memory-list",
-          "markdownDescription": "Denies the voice_memory_list command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_memory_save command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-memory-save",
-          "markdownDescription": "Denies the voice_memory_save command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voice_memory_set_enabled command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voice-memory-set-enabled",
-          "markdownDescription": "Denies the voice_memory_set_enabled command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_mode_changes command without any pre-configured scope.",
