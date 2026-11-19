@@ -1,11 +1,12 @@
 # MOSS 自建小智语音链路与多项目融合技术书
 
-状态：技术书 r15（2026-10-14），修订记录续至 r52（2026-11-18）。r50 起自建服务端链路已连代码删除，本文有关自建链路、外部服务端进程管理与模型配置向导的章节只作历史记录。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
+状态：技术书 r15（2026-10-14），修订记录续至 r53（2026-11-19）。r50 起自建服务端链路已连代码删除，本文有关自建链路、外部服务端进程管理与模型配置向导的章节只作历史记录。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
 
 修订记录：
 
 | 版本 | 变更 |
 | --- | --- |
+| r53 | 2026-11-19：设计原型已在提交 `1e77350` 移出仓库。可用 `git show 1e77350^:frontend/prototypes/forge-v2.html` 取回画板和工作台改版原型，用 `git show 1e77350^:frontend/prototypes/voice-center.html` 取回语音中心原型。当前设计以现行代码与文档为准。 |
 | r1 | 初稿 |
 | r2 | 可实施性审查后修订：①新增调用方上下文 `CallerContext`（D10、§6.4），严格模式改为依赖它而非回环判断；②补充现有 CORS `*` + 回环免鉴权的跨站触发风险及收紧方案（D11、§6.5）；③更正回滚结论——旧版程序可直接打开 v4 库（§9.3）；④P2 拆分，先走 MCP 接入点零代码验证 R0/R1（D2、§10）；⑤审批绑定显式解析后的连接目标并保存连接参数（§5.4、§7.1）；⑥“停”只映射 `cancel` / `emergency_stop`（§6.1）；⑦按上游 README 更新上游事实 |
 | r3 | 用户决定：①自有模型为**云端部署**，同时提供 OpenAI 与 Anthropic 协议（地址 + 密钥），P0-1 由本机硬件评估改为端点能力与延迟验证，xiaozhi-server 侧统一走 OpenAI 协议（§2、D7、§9.1、§10）；②**不允许任意来源访问**：CORS 收紧与来源校验改为默认始终生效，不再依赖严格模式，并拆为可先行交付的独立工作包 S1（D11、§6.5、§10） |
@@ -618,7 +619,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 ### 9.5 桌面端前端改造（r6）
 
-交互原型：`frontend/prototypes/voice-center.html`（演示数据，不连后端；含 8 个测试场景 TC-01..TC-08）。原型只表达布局与交互，实施时以本节与 [前端行为契约](../developer/frontend-behavior.md) 为准。
+历史交互原型可用 `git show 1e77350^:frontend/prototypes/voice-center.html` 取回（含测试场景 TC-01..TC-08）。现行布局与交互见前端代码及 [前端行为契约](../developer/frontend-behavior.md)。
 
 #### 9.5.1 新增“语音中心”页 `/voice`（P4-6）
 
@@ -684,7 +685,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 **实施状态**：令牌与基础组件、左侧导航与顶栏（含常驻急停）、雕刻工作台三栏、创作画板、材料库表格、弹窗、可折叠卡片与偏好设置分区、桌面端导出（`save_export_file`）均已实施，用户本机测试与构建通过；视觉基线见 `frontend/tests/visual-baseline/`。需实机的重复发送防呆与顶栏急停见[实机验证手册](moss-hardware-acceptance-plan.md)（HW-01、HW-02，2026-11-15 不再排期）。Geist / Geist Mono 字体已自托管（`frontend/public/fonts/`，OFL）；组件内联样式迁移为类名作为后续重构。
 
-原型：`frontend/prototypes/forge-v2.html`（演示数据，不连后端）。顶部“功能对照清单”列出原前端 83 项按钮与功能（其中 2 项改了位置或显示方式）+ 5 项新增，可逐项“定位”高亮验证。该原型是当前讨论的设计基线，**用户已明确后续还要修改**：实施前以用户最终确认的原型版本为准，本节随原型更新。
+历史原型可用 `git show 1e77350^:frontend/prototypes/forge-v2.html` 取回。顶部“功能对照清单”列出改版时的按钮与功能，可逐项定位。当前设计以现行代码与 [前端行为契约](../developer/frontend-behavior.md) 为准。
 
 **A. 不变的约束**
 
@@ -854,7 +855,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 | 工作包 | 内容 |
 | --- | --- |
-| UI-2a | 用户确认最终原型版本（`frontend/prototypes/forge-v2.html` 的某一版），冻结视觉规范 |
+| UI-2a | 用户已确认最终设计。历史原型可用 `git show 1e77350^:frontend/prototypes/forge-v2.html` 取回 |
 | UI-2b | 令牌与基础组件：`styles.css` 令牌、按钮、输入、分段、卡片、表格、胶囊、弹窗；迁移内联样式 |
 | UI-2c | 外壳：左侧导航、顶栏（含常驻急停、审批按钮占位）、WebGL 等离子流体背景（含 CSS 回退）、字体本地化 |
 | UI-2d | 逐页改版：雕刻工作台 → 创作画板 → 材料实验室；每页完成后按功能对照清单核对 |

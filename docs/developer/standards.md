@@ -26,7 +26,7 @@
 | `apps/moss-host` | 命令行宿主 `serve` / `migrate` |
 | `apps/desktop` | Tauri 2 桌面与 Android 外壳 |
 | `apps/moss-voice-local` | 本地模型 helper（GPL-3.0，独立 Cargo 工作区，不在根 workspace） |
-| `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端；`prototypes/` 已定稿的静态设计原型（演示数据，不参与构建） |
+| `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端 |
 | `tests/golden/` | 黄金样本；`mcp_tools.json` 被 `laser-mcp` 编译期嵌入 |
 | `tests/fixtures/` | 字体（编译期嵌入）与示例图片 |
 | `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成等开发工具 |

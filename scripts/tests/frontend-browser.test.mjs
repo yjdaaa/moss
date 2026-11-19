@@ -2,9 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { REPO_ROOT, discoverBrowserTests, parseArgs, resolvePlaywrightChannel } from "../test-frontend-browser.mjs";
+import { REPO_ROOT, discoverBrowserTests, parseArgs, resolvePlaywrightChannel, runBrowserTest } from "../test-frontend-browser.mjs";
 
 test("发现仓库全部前端浏览器交互测试文件且无硬编码 Windows 路径", () => {
   const files = discoverBrowserTests();
@@ -43,6 +45,29 @@ test("解析 --list 与 --filter 参数", () => {
     listOnly: true,
   });
   assert.throws(() => parseArgs(["--unknown"]), /未知参数/);
+});
+
+test("浏览器子测试超时后先允许退出清理，失去响应时强制结束", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "moss-browser-test-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const cleanup = join(dir, "cleanup.mjs");
+  const hanging = join(dir, "hanging.mjs");
+  await Promise.all([
+    writeFile(cleanup, 'import { writeSync } from "node:fs"; process.on("SIGTERM", () => { writeSync(1, "已清理"); process.exit(0); }); setInterval(() => {}, 1000);'),
+    writeFile(hanging, 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'),
+  ]);
+
+  const [cleaned, killed] = await Promise.all([
+    runBrowserTest(cleanup, process.env, 1000),
+    runBrowserTest(hanging, process.env, 1000),
+  ]);
+  assert.equal(cleaned.timedOut, true, "即使清理后正常退出，仍应报告超时");
+  assert.equal(killed.timedOut, true);
+  if (process.platform !== "win32") {
+    assert.equal(cleaned.stdout, "已清理");
+    assert.equal(cleaned.error, null);
+    assert.equal(killed.error.signal, "SIGKILL");
+  }
 });
 
 test("Playwright 内置 Chromium 探测脚本显式声明 --input-type=module 以兼容 Node 20", () => {

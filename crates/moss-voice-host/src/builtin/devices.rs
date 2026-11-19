@@ -82,11 +82,14 @@ impl DeviceRegistry for DbRegistry {
     }
 
     fn sessions_changed(&self, count: usize) {
-        laser_host::set_voice_device_sessions(Some(u32::try_from(count).unwrap_or(u32::MAX)));
+        laser_host::set_voice_device_sessions(
+            &self.host.api_service,
+            Some(u32::try_from(count).unwrap_or(u32::MAX)),
+        );
     }
 
     fn pulse_changed(&self, phase: Option<&str>, level: u8) {
-        laser_host::set_voice_pulse(phase, level);
+        laser_host::set_voice_pulse(&self.host.api_service, phase, level);
     }
     /// 2026-11-02：设备快照（开机 OTA 上报 / hello / 实时状态）只存原始 JSON，
     /// 固件字段变化时不改表结构。

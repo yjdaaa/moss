@@ -2,10 +2,8 @@ import { fetchWithDesktopSession, readAuthToken, storeAuthToken, clearAuthToken,
 
 export { readAuthToken, storeAuthToken, clearAuthToken, resolveApiUrl, getApiBaseUrl };
 
-/** 常用有界超时常数（供轮询与交互请求显式传入，避免后端挂起拖死界面） */
+/** 查询超时（供轮询显式传入，避免后端挂起拖死界面） */
 export const DEFAULT_READ_TIMEOUT_MS = 15_000;
-export const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
-export const ESTOP_TIMEOUT_MS = 3_000;
 
 /**
  * 统一 API fetch 客户端：自动注入 Bearer Token 与桌面会话，拦截 401；

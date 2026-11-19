@@ -124,7 +124,97 @@ impl ShortJobWatch {
     }
 }
 
-pub type ActiveJobs = std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<ActiveJob>>>>;
+thread_local! {
+    // 按锁地址记录，避免同一线程持有另一个 ApiService 的作业表时误判。
+    static HELD_JOB_REGISTRIES: std::cell::RefCell<Vec<*const ()>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub struct JobRegistry<T>(std::sync::Mutex<HashMap<String, std::sync::Arc<T>>>);
+
+impl<T> Default for JobRegistry<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(HashMap::new()))
+    }
+}
+
+pub struct JobRegistryGuard<'a, T> {
+    inner: std::sync::MutexGuard<'a, HashMap<String, std::sync::Arc<T>>>,
+    registry: *const (),
+}
+
+impl<T> std::ops::Deref for JobRegistryGuard<'_, T> {
+    type Target = HashMap<String, std::sync::Arc<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for JobRegistryGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> Drop for JobRegistryGuard<'_, T> {
+    fn drop(&mut self) {
+        let _ = HELD_JOB_REGISTRIES.try_with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(index) = held.iter().position(|&registry| registry == self.registry) {
+                held.swap_remove(index);
+            }
+        });
+    }
+}
+
+impl<T> JobRegistry<T> {
+    pub fn lock(&self) -> std::sync::LockResult<JobRegistryGuard<'_, T>> {
+        let track = |inner| {
+            let registry = std::ptr::from_ref(self).cast();
+            let _ = HELD_JOB_REGISTRIES.try_with(|held| held.borrow_mut().push(registry));
+            JobRegistryGuard { inner, registry }
+        };
+        self.0
+            .lock()
+            .map(track)
+            .map_err(|poisoned| std::sync::PoisonError::new(track(poisoned.into_inner())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.0.is_poisoned()
+    }
+
+    fn snapshot_for_panic(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<Vec<std::sync::Arc<T>>, ()> {
+        let registry = std::ptr::from_ref(self).cast();
+        if HELD_JOB_REGISTRIES
+            .try_with(|held| held.borrow().contains(&registry))
+            .unwrap_or(false)
+        {
+            return Ok(Vec::new());
+        }
+        loop {
+            match self.0.try_lock() {
+                Ok(guard) => return Ok(guard.values().cloned().collect()),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Ok(poisoned.into_inner().values().cloned().collect());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(());
+                    }
+                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+                }
+            }
+        }
+    }
+}
+
+pub type ActiveJobs = std::sync::Arc<JobRegistry<ActiveJob>>;
 
 /// 已退出活动发送但尚未确认物理停稳的任务记录：允许为重连/探测先行释放底层串口句柄，
 /// 同时持续保留 `job_id`、`target` 与 `spec`，直到新作业通过 Idle 预检启动或操作者显式确认停稳。
@@ -254,8 +344,7 @@ impl UncertainJob {
     }
 }
 
-pub type UncertainJobs =
-    std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<UncertainJob>>>>;
+pub type UncertainJobs = std::sync::Arc<JobRegistry<UncertainJob>>;
 pub(crate) type TargetOpenLocks =
     std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>>;
 
@@ -415,23 +504,10 @@ impl ApiService {
         }
     }
 
-    /// Panic Hook 专用非阻塞急停：使用 `try_lock` 避免持锁线程 panic 时自死锁，
-    /// 锁中毒时恢复读取并优先走无锁裸句柄写 0x18，不在崩溃现场阻塞重连。
+    /// Panic Hook 专用急停：跳过本线程持有的作业表，其他线程持锁时最多等待约 50 毫秒。
+    /// 锁中毒时恢复读取，只走无锁裸句柄写 0x18，不在崩溃现场阻塞重连。
     pub fn abort_all_active_jobs_nonblocking(&self) -> Result<(), String> {
-        let jobs = match self.active_jobs.try_lock() {
-            Ok(guard) => guard.values().cloned().collect::<Vec<_>>(),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                poisoned.into_inner().values().cloned().collect::<Vec<_>>()
-            }
-            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
-        };
-        let uncertain = match self.uncertain_jobs.try_lock() {
-            Ok(guard) => guard.values().cloned().collect::<Vec<_>>(),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                poisoned.into_inner().values().cloned().collect::<Vec<_>>()
-            }
-            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
-        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         match self.launching_workflows.try_lock() {
             Ok(launching) => {
                 for token in launching.active.values() {
@@ -445,8 +521,13 @@ impl ApiService {
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
+        // 先按活动表、待确认表的顺序取快照，避免裸句柄写入拖延另一张表的读取。
+        let jobs = self.active_jobs.snapshot_for_panic(deadline);
+        let uncertain = self.uncertain_jobs.snapshot_for_panic(deadline);
+        let active_timed_out = jobs.is_err();
+        let uncertain_timed_out = uncertain.is_err();
         let mut first_error = None;
-        for job in jobs {
+        for job in jobs.unwrap_or_default() {
             job.cancel.cancel();
             // Panic 现场绝不回退阻塞的 write_realtime，只走非阻塞裸句柄
             if let Some(raw) = job.transport.raw_abort_handle()
@@ -455,7 +536,7 @@ impl ApiService {
                 first_error.get_or_insert(e);
             }
         }
-        for job in uncertain {
+        for job in uncertain.unwrap_or_default() {
             job.cancel.cancel();
             if let Some(transport) = job.try_current_handle()
                 && let Some(raw) = transport.raw_abort_handle()
@@ -463,6 +544,19 @@ impl ApiService {
             {
                 first_error.get_or_insert(e);
             }
+        }
+        let timed_out = match (active_timed_out, uncertain_timed_out) {
+            (true, true) => Some("活动作业表和待确认停止作业表"),
+            (true, false) => Some("活动作业表"),
+            (false, true) => Some("待确认停止作业表"),
+            (false, false) => None,
+        };
+        if let Some(registries) = timed_out {
+            use std::io::Write as _;
+            let error = format!("崩溃急停读取{registries}超时，无法向表中作业发送急停");
+            // 先尝试所有可读作业。崩溃钩子里写日志失败时也要返回原始错误。
+            let _ = writeln!(std::io::stderr(), "{error}");
+            return Err(error);
         }
         match first_error {
             Some(e) => Err(e),

@@ -89,11 +89,13 @@ try {
 
   // 2. 滚轮缩放视角时要出帧
   const box = await stage.boundingBox();
-  const zoomed = await clearsDuring(400, async () => {
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.wheel(0, 240);
-  });
-  assert.ok(zoomed > 0, "滚轮缩放后应重画");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const clearsBeforeZoom = (await gl()).clears;
+  await page.mouse.wheel(0, 240);
+  await page.waitForFunction(function zoomTriggersRedraw(before) {
+    return window.__gl.clears > before;
+  }, clearsBeforeZoom, { timeout: 5000 });
+  const zoomed = (await gl()).clears - clearsBeforeZoom;
 
   // 3. 拖动旋转视角时要出帧
   const dragged = await clearsDuring(300, async () => {

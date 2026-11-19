@@ -1,11 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const frontend = (file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const desktop = (file) => readFileSync(new URL(`../../apps/desktop/src-tauri/${file}`, import.meta.url), "utf8");
 const desktopExists = (file) => existsSync(new URL(`../../apps/desktop/src-tauri/${file}`, import.meta.url));
 const frontendExists = (file) => existsSync(new URL(`../${file}`, import.meta.url));
+function rustSourceFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) return rustSourceFiles(file);
+    return entry.isFile() && entry.name.endsWith(".rs") ? [file] : [];
+  });
+}
 const fnBody = (source, command) => {
   const found = source.match(new RegExp(`pub async fn ${command}\\b[\\s\\S]*?(?=\\n}\\n)`));
   assert.ok(found, command);
@@ -37,6 +46,12 @@ test("n67：独立安全窗口已取消，页面、入口与打开窗口的命�
     assert.equal(desktopExists(`capabilities/${name}.json`), false, `${name}.json 只授给已取消的窗口，应删除`);
   }
   assert.doesNotMatch(desktop("src/voice_builtin.rs"), /is_voice_private_asset|require_voice_private_asset/);
+  const voiceHostSrc = fileURLToPath(new URL("../../crates/moss-voice-host/src/", import.meta.url));
+  const rustFiles = rustSourceFiles(voiceHostSrc);
+  assert.ok(rustFiles.length > 0, "语音宿主源码必须参与扫描");
+  for (const file of rustFiles) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /is_voice_private_asset|require_voice_private_asset/, file);
+  }
   // 主窗口仍导航到本进程回环后端（来源判定依赖它）
   assert.match(lib, /window\.navigate\(parsed\)/);
 });

@@ -77,11 +77,11 @@ mod imp {
         }
 
         fn bridge_connected(&self) -> bool {
-            laser_host::mcp_bridge_connected()
+            laser_host::mcp_bridge_connected(&self.host.api_service)
         }
 
         fn set_device_sessions(&self, sessions: Option<u32>) {
-            laser_host::set_voice_device_sessions(sessions);
+            laser_host::set_voice_device_sessions(&self.host.api_service, sessions);
         }
 
         fn builtin_start(&self) -> Result<(), String> {

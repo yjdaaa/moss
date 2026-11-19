@@ -2453,9 +2453,9 @@ fn shutdown_during_open_drops_unwritten_transport_for_send_framing_and_home() {
 }
 
 #[test]
-fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips_held_lock() {
+fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_bounds_lock_wait() {
     struct RawFirstTransport {
-        raw_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fake: laser_device::FakeGrbl,
         rt_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
     impl laser_device::DeviceTransport for RawFirstTransport {
@@ -2471,15 +2471,11 @@ fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips
             Ok(None)
         }
         fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
-            let hits = self.raw_hits.clone();
-            Some(Box::new(move || {
-                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }))
+            self.fake.raw_abort_handle()
         }
     }
 
-    let raw_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fake = laser_device::FakeGrbl::new([]);
     let rt_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let service = ApiService::new(
         test_loopback_settings(),
@@ -2487,7 +2483,7 @@ fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips
     );
     let transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
         std::sync::Arc::new(RawFirstTransport {
-            raw_hits: raw_hits.clone(),
+            fake: fake.clone(),
             rt_hits: rt_hits.clone(),
         });
     service.active_jobs.lock().unwrap().insert(
@@ -2511,16 +2507,53 @@ fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips
         &serde_json::json!({"action": "emergency_stop", "confirmed": true}),
     );
     assert_eq!(res["success"], true, "{res}");
-    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(fake.realtime(), vec![0x18]);
     assert_eq!(rt_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     // 2. 持锁线程触发 panic hook 非阻塞急停时不得自死锁
     {
         let _held = service.active_jobs.lock().unwrap();
+        let _uncertain = service.uncertain_jobs.lock().unwrap();
         assert!(service.abort_all_active_jobs_nonblocking().is_ok());
+        assert_eq!(fake.realtime(), vec![0x18]);
     }
 
-    // 3. 即使 active_jobs 锁中毒，abort_all_active_jobs 与非阻塞版仍必须恢复锁并刷出 0x18
+    // 3. 另一线程短暂持锁时，重试能拿到作业并写出 0x18。
+    std::thread::scope(|scope| {
+        let (ready, held) = std::sync::mpsc::sync_channel(0);
+        let api = &service;
+        scope.spawn(move || {
+            let _guard = api.active_jobs.lock().unwrap();
+            ready.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        });
+        held.recv().unwrap();
+        service.abort_all_active_jobs_nonblocking().unwrap();
+    });
+    assert_eq!(fake.realtime(), vec![0x18; 2]);
+
+    // 4. 等不到活动作业表时要明确失败，仍向可读取的待确认目标写出 0x18。
+    std::thread::scope(|scope| {
+        let guard = service.active_jobs.lock().unwrap();
+        service.uncertain_jobs.lock().unwrap().insert(
+            "wf-estop-raw".into(),
+            UncertainJob::from_active(&guard["wf-estop-raw"], None),
+        );
+        let (result, done) = std::sync::mpsc::channel();
+        let api = &service;
+        scope.spawn(move || {
+            result
+                .send(api.abort_all_active_jobs_nonblocking())
+                .unwrap();
+        });
+        let reply = done.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        assert!(reply.unwrap().unwrap_err().contains("活动作业表超时"));
+    });
+    assert_eq!(fake.realtime(), vec![0x18; 3]);
+    service.uncertain_jobs.lock().unwrap().clear();
+
+    // 5. 即使 active_jobs 锁中毒，两条退出路径仍须恢复锁并写出 0x18。
     let jobs_arc = service.active_jobs.clone();
     let _ = std::thread::spawn(move || {
         let _guard = jobs_arc.lock().unwrap();
@@ -2529,9 +2562,9 @@ fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips
     .join();
     assert!(service.active_jobs.is_poisoned());
     assert!(service.abort_all_active_jobs().is_ok());
-    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(fake.realtime(), vec![0x18; 4]);
     assert!(service.abort_all_active_jobs_nonblocking().is_ok());
-    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(fake.realtime(), vec![0x18; 5]);
 }
 
 #[test]

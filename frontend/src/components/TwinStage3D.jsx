@@ -577,7 +577,6 @@ export function TwinStage3D({
   }, [toolpath]);
 
   // 按《B站【大鱼DIY】激光雕刻机_翼宿 V1.0 图纸包》构建真实机台、导轨、电机、外壳与激光头打印件总成
-  // 按《B站【大鱼DIY】激光雕刻机_翼宿 V1.0 图纸包》构建真实机台、导轨、电机、外壳与激光头打印件总成
   useEffect(() => {
     rebuildMachineScene(sceneRef.current, {
       xMax,

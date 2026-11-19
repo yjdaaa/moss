@@ -5,7 +5,7 @@
 // 环境变量：
 //   PLAYWRIGHT_CHANNEL=chrome|msedge  显式指定浏览器通道；未设置时 Windows 用 msedge，
 //                                     macOS 若未安装 Playwright 内置 Chromium 则自动回退本机 Chrome。
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND_DIR = join(REPO_ROOT, "frontend");
 const TESTS_DIR = join(FRONTEND_DIR, "tests");
+const BROWSER_TEST_TIMEOUT_MS = 300_000;
+const BROWSER_CLEANUP_GRACE_MS = 2000;
 
 /** 发现 frontend/tests 下按字母序排列的全部浏览器交互测试文件（返回相对 frontend/ 的路径）。 */
 export function discoverBrowserTests(testsDir = TESTS_DIR, filters = []) {
@@ -51,7 +53,7 @@ function checkBundledChromium(env) {
         "-e",
         'import { chromium } from "playwright"; import { existsSync } from "node:fs"; process.exit(existsSync(chromium.executablePath()) ? 0 : 1);',
       ],
-      { cwd: FRONTEND_DIR, env, stdio: "ignore" },
+      { cwd: FRONTEND_DIR, env, stdio: "ignore", timeout: 10_000, killSignal: "SIGKILL" },
     );
     return probe.status === 0;
   } catch {
@@ -81,7 +83,25 @@ export function parseArgs(argv) {
   return { help: false, filters, listOnly };
 }
 
-function main() {
+export function runBrowserTest(file, env, timeoutMs = BROWSER_TEST_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    let forceKill;
+    const child = execFile(process.execPath, [file], { cwd: FRONTEND_DIR, env, encoding: "utf8" }, (error, stdout, stderr) => {
+      clearTimeout(deadline);
+      clearTimeout(forceKill);
+      resolve({ error, stdout, stderr, timedOut });
+    });
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      // Unix 上先让 Playwright 的退出处理关闭浏览器，失去响应时再强制结束子测试。
+      child.kill("SIGTERM");
+      forceKill = setTimeout(() => child.kill("SIGKILL"), BROWSER_CLEANUP_GRACE_MS);
+    }, timeoutMs);
+  });
+}
+
+async function main() {
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -117,19 +137,18 @@ function main() {
   const startedAll = Date.now();
   for (const rel of files) {
     const t0 = Date.now();
-    const res = spawnSync(process.execPath, [rel], {
-      cwd: FRONTEND_DIR,
-      env: childEnv,
-      encoding: "utf8",
-    });
+    const res = await runBrowserTest(rel, childEnv);
     const elapsedMs = Date.now() - t0;
-    if (res.status === 0) {
+    if (!res.timedOut && !res.error) {
       console.log(`  PASS ${rel} (${elapsedMs} ms)`);
     } else {
-      console.error(`  FAIL ${rel} (exit=${res.status ?? "err"}, ${elapsedMs} ms)`);
+      const reason = res.timedOut
+        ? `超时，上限 ${BROWSER_TEST_TIMEOUT_MS / 1000} 秒`
+        : `exit=${res.error.code ?? res.error.signal ?? "err"}`;
+      console.error(`  FAIL ${rel} (${reason}, ${elapsedMs} ms)`);
       if (res.stdout?.trim()) console.error(res.stdout.trim());
       if (res.stderr?.trim()) console.error(res.stderr.trim());
-      if (res.error) console.error(res.error.message);
+      else if (res.error) console.error(res.error.message);
       failures.push(rel);
     }
   }
@@ -144,5 +163,5 @@ function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  await main();
 }

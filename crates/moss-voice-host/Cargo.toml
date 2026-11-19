@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "MOSS 内置语音与长期记忆宿主编排层"
 
 [dependencies]
 laser-host = { path = "../laser-host" }
@@ -20,7 +21,7 @@ moss-usb-provision = { path = "../moss-usb-provision" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
 image = { workspace = true, features = ["png"] }
 getrandom.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
@@ -28,7 +29,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 [dev-dependencies]
 laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store", "test-sql-access"] }
 tempfile.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 flate2.workspace = true
 tar.workspace = true
 

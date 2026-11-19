@@ -43,8 +43,8 @@ impl ApiService {
             generated_root: None,
             actual_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             runtime_path: None,
-            active_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            uncertain_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_jobs: Default::default(),
+            uncertain_jobs: Default::default(),
             launching_workflows: std::sync::Arc::new(std::sync::Mutex::new(
                 LaunchReservationState::default(),
             )),

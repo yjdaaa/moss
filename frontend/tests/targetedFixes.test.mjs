@@ -10,6 +10,18 @@ import { readPageSource } from "./pageSource.mjs";
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
 const srcRoot = path.resolve(testsDir, "../src");
 
+test("画板同步失败或恢复时更新独立告警，保留撤销清空等操作提示", () => {
+  const source = readPageSource("pages/DrawPage.jsx");
+  const sync = source.slice(source.indexOf("const syncDrawStateToBackend"), source.indexOf("const applyRemoteSceneToBoard"));
+  assert.match(sync, /if \(res\.ok\)\s*\{\s*setDrawSyncWarning\(""\)/);
+  assert.match(sync, /setDrawSyncWarning\([^\n]+同步到本机服务失败/);
+  assert.match(sync, /setDrawSyncWarning\([^\n]+暂未同步到本机服务/);
+  assert.doesNotMatch(sync, /setStatus\(/);
+  assert.match(source, /role="status">\{status\}/);
+  assert.match(source, /role="alert">\{drawSyncWarning\}/);
+  assert.match(source, /setStatus\([^\n]+撤销清空/);
+});
+
 test("DrawPage 统一复用 client.js postJson 契约，走边框成功不再误报未知错误", () => {
   const drawSource = readPageSource("pages/DrawPage.jsx");
   assert.doesNotMatch(drawSource, /async\s+function\s+postJson\s*\(/, "不得再维护重复解包版 postJson");

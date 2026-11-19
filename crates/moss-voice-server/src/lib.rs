@@ -465,6 +465,9 @@ pub(crate) fn unix_now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+/// 内置语音服务专用 Tokio 线程名，供同步宿主入口检查调用上下文。
+pub const VOICE_SERVER_RUNTIME_THREAD_NAME: &str = "moss-voice";
+
 /// 运行中的内置语音服务。丢弃或调用 [`stop`](Self::stop) 时关闭。
 pub struct VoiceServer {
     runtime: Option<tokio::runtime::Runtime>,
@@ -548,7 +551,7 @@ impl VoiceServer {
             .port();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("moss-voice")
+            .thread_name(VOICE_SERVER_RUNTIME_THREAD_NAME)
             .enable_all()
             .build()
             .map_err(|error| format!("创建语音服务运行时失败：{error}"))?;

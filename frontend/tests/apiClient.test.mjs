@@ -1,15 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEFAULT_ACTION_TIMEOUT_MS,
   DEFAULT_READ_TIMEOUT_MS,
-  ESTOP_TIMEOUT_MS,
   fetchPreviewBlobUrl,
   fetchPreviewText,
   getJson,
   postJson,
   previewResourcePath,
 } from "../src/api/client.js";
+import { ESTOP_LOOKUP_TIMEOUT_MS, ESTOP_SEND_TIMEOUT_MS } from "../src/globalEstop.js";
 
 function withFetch(impl, run) {
   const original = globalThis.fetch;
@@ -85,9 +84,13 @@ test("fetchPreviewText：非 2xx 不把错误页当正文；成功时返回文�
   assert.equal((await fetchPreviewText("")).ok, false);
 });
 
-test("fetchPreviewText/fetchPreviewBlobUrl 支持有界超时，超时常数合理分层", async () => {
-  assert.ok(ESTOP_TIMEOUT_MS > 0 && ESTOP_TIMEOUT_MS < DEFAULT_READ_TIMEOUT_MS);
-  assert.ok(DEFAULT_READ_TIMEOUT_MS < DEFAULT_ACTION_TIMEOUT_MS);
+test("急停查询、急停发送和普通查询使用递增且有界的时限", () => {
+  assert.ok(ESTOP_LOOKUP_TIMEOUT_MS > 0 && ESTOP_LOOKUP_TIMEOUT_MS < ESTOP_SEND_TIMEOUT_MS);
+  assert.ok(ESTOP_SEND_TIMEOUT_MS < DEFAULT_READ_TIMEOUT_MS);
+  assert.equal(DEFAULT_READ_TIMEOUT_MS, 15_000);
+});
+
+test("fetchPreviewText/fetchPreviewBlobUrl 支持有界超时", async () => {
   await withFetch(hangingFetch([]), async () => {
     const started = Date.now();
     const textRes = await fetchPreviewText("slow.gcode", { timeoutMs: 25 });

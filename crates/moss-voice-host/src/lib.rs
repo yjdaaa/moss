@@ -22,7 +22,8 @@ fn fallback_runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// 在同步调用上下文中驱动短生命周期异步任务：
-/// - 若当前线程处于多线程 Tokio 运行时（含 `spawn_blocking` 阻塞池与异步工作线程），经 `block_in_place` 安全复用当前运行时句柄；
+/// - 禁止在 `moss-voice-server` 的异步工作线程内调用。调试构建按专用线程名检查，该名称也覆盖服务自己的阻塞池；桌面命令使用桌面运行时的阻塞池。
+/// - 若当前线程处于其他多线程 Tokio 运行时，经 `block_in_place` 复用当前运行时句柄；
 /// - 若处于单线程 Tokio 运行时（`CurrentThread`），在作用域线程中转交共享多线程运行时执行，避免重入 panic 或 `tokio::spawn` 死锁；
 /// - 否则（普通 OS 线程 / 独立测试）直接使用共享轻量多线程运行时。
 pub(crate) fn block_on<F>(future: F) -> F::Output
@@ -31,6 +32,11 @@ where
     F::Output: Send,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        debug_assert_ne!(
+            std::thread::current().name(),
+            Some(moss_voice_server::VOICE_SERVER_RUNTIME_THREAD_NAME),
+            "语音宿主 block_on 禁止在内置语音服务运行时线程内调用"
+        );
         return match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| handle.block_on(future))
@@ -66,9 +72,10 @@ mod runtime_tests {
             .enable_all()
             .build()
             .unwrap();
-        let from_worker = rt.block_on(async {
+        let from_worker = rt.block_on(rt.spawn(async {
             block_on(async { tokio::spawn(async { "worker-ok" }).await.unwrap() })
-        });
+        }));
+        let from_worker = from_worker.unwrap();
         assert_eq!(from_worker, "worker-ok");
 
         let from_blocking = rt.block_on(async {
@@ -79,6 +86,21 @@ mod runtime_tests {
             .unwrap()
         });
         assert_eq!(from_blocking, "blocking-ok");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn block_on_rejects_voice_server_async_worker() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name(moss_voice_server::VOICE_SERVER_RUNTIME_THREAD_NAME)
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(rt.spawn(async { block_on(async {}) }))
+            .unwrap_err();
+        assert!(err.is_panic(), "{err}");
     }
 
     #[test]

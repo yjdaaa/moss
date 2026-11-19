@@ -170,6 +170,8 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
       React.createElement(SettingsModal, { visible: true, onClose: () => {} }),
     );
     assert.match(settingsHtml, /系统偏好设置/);
+    const { version } = JSON.parse(fs.readFileSync(path.join(TEST_DIR, "../package.json"), "utf8"));
+    assert.ok(settingsHtml.includes(`MOSS v${version}</strong>`), "缺少构建注入时使用包版本");
 
     const ttsVoicesHtml = renderToStaticMarkup(
       React.createElement(LocalTtsVoicesModal, {

@@ -131,19 +131,6 @@ impl ShutdownCoordinator {
         Self::invoke_handles(&handles);
     }
 
-    /// 非阻塞停机：先 `try_lock` 快照句柄并立即释放锁，再在锁外刷出 `0x18`，不阻塞等待 SQLite 锁。
-    pub fn trigger_shutdown_from_signal(&self) -> bool {
-        if self.requested.swap(true, Ordering::SeqCst) {
-            return false;
-        }
-        let Some(_guard) = enter_raw_abort() else {
-            return true;
-        };
-        let handles = self.try_snapshot_panic_handles();
-        Self::invoke_handles(&handles);
-        true
-    }
-
     /// 核心退出激光安全兜底（规格 §16 & §22）:
     /// 1. 触发后第一步快照并释放 `raw_handles` 锁，向每个打开连接通过同步裸句柄写出 0x18；
     /// 2. 进行中任务标为 failed，注明 "host 退出中断"；
@@ -542,6 +529,7 @@ fn voice_frame_call(
     use laser_api::ShortJobStart;
     // 语音工具 30 秒超时（moss-voice-server `tool_timeout`），这里更早放弃，放弃后同一次请求不会再让机器动
     const START_WAIT: Duration = Duration::from_secs(20);
+    let deadline = Instant::now() + START_WAIT;
     let watch = laser_api::ShortJobWatch::new();
     backend.short_job_watch = Some(watch.clone());
     let arguments = arguments.clone();
@@ -572,18 +560,19 @@ fn voice_frame_call(
              说不走了、取消、别走了用 stop_framing；说停或急停用 emergency_stop"
         ))
     };
-    let deadline = std::time::Instant::now() + START_WAIT;
     match watch.wait_until_settled(deadline) {
         ShortJobStart::Started(job_id) => started_reply(&job_id),
         ShortJobStart::Abandoned => laser_contracts::ToolCallResult::err(
             "连接或检查机器太慢，这次走边框已放弃，机器不会再动；请看电脑上的 MOSS，确认机器正常后再说一次",
         ),
-        ShortJobStart::Finished | ShortJobStart::Waiting => match rx.recv() {
-            Ok(result) => result,
-            Err(_) => laser_contracts::ToolCallResult::err(
-                "走边框没有执行完，结果未知，请看电脑上的 MOSS",
-            ),
-        },
+        ShortJobStart::Finished | ShortJobStart::Waiting => {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(result) => result,
+                Err(_) => laser_contracts::ToolCallResult::err(
+                    "走边框没有执行完，结果未知，请看电脑上的 MOSS",
+                ),
+            }
+        }
     }
 }
 
@@ -776,8 +765,8 @@ struct BridgeControl {
 }
 
 /// 小智桥当前是否已与接入点握手（语音中心状态卡用；多接入点时任一已连接即为真）。
-pub fn mcp_bridge_connected() -> bool {
-    laser_contracts::global_mcp_telemetry().snapshot().connected
+pub fn mcp_bridge_connected(api: &ApiService) -> bool {
+    api.mcp_telemetry().snapshot().connected
 }
 
 fn read_runtime_settings(
@@ -826,13 +815,13 @@ pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, S
 }
 
 /// 内置语音服务写入的设备会话数（`/api/system/info` 的 `voice.device_sessions`，`None` 为未知）。
-pub fn set_voice_device_sessions(sessions: Option<u32>) {
-    laser_contracts::global_voice_telemetry().set_device_sessions(sessions);
+pub fn set_voice_device_sessions(api: &ApiService, sessions: Option<u32>) {
+    api.voice_telemetry().set_device_sessions(sessions);
 }
 
 /// 内置语音服务写入的实时会话主状态（`idle`/`listening`/`thinking`/`speaking`）与归一化音量（0..=100）。
-pub fn set_voice_pulse(phase: Option<&str>, level: u8) {
-    laser_contracts::global_voice_telemetry().set_pulse(phase, level);
+pub fn set_voice_pulse(api: &ApiService, phase: Option<&str>, level: u8) {
+    api.voice_telemetry().set_pulse(phase, level);
 }
 /// 语音中心“接入点与工具”卡片的数据（NV8）：各接入点的状态与身份、每个工具的开关与调用统计。地址均已脱敏。
 pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_json::Value {
@@ -1834,27 +1823,6 @@ mod tests {
     }
 
     #[test]
-    fn signal_shutdown_is_non_blocking_when_db_lock_is_already_held() {
-        use laser_device::{DeviceTransport, FakeGrbl};
-
-        let fake = FakeGrbl::new(["$32=1".to_string()]);
-        let abort_handle = fake.raw_abort_handle().expect("raw handle must exist");
-
-        let coordinator = ShutdownCoordinator::new();
-        coordinator.register_raw_abort(abort_handle);
-
-        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
-        coordinator.register_db(db.clone());
-
-        // Simulate an async signal arriving while the interrupted thread already holds `db` lock
-        let _held_db_guard = db.lock().unwrap();
-        assert!(coordinator.trigger_shutdown_from_signal());
-        assert!(coordinator.is_shutdown_requested());
-        assert_eq!(fake.realtime(), vec![0x18]);
-        assert!(!coordinator.trigger_shutdown_from_signal());
-    }
-
-    #[test]
     fn panicking_raw_abort_callback_never_self_deadlocks_and_runs_remaining_handles() {
         use laser_device::{DeviceTransport, FakeGrbl};
 
@@ -1924,5 +1892,27 @@ mod tests {
             .and_then(|arr| arr.iter().find(|t| t["name"] == "material_params_tool"))
             .expect("material_params_tool in overview");
         assert_eq!(mat_tool["calls"], 1);
+    }
+
+    #[test]
+    fn bridge_and_voice_status_use_injected_telemetry() {
+        let make_api = || {
+            plain_service()
+                .with_mcp_telemetry(Arc::new(laser_contracts::McpTelemetry::new()))
+                .with_voice_telemetry(Arc::new(laser_contracts::VoiceTelemetry::new()))
+        };
+        let api = make_api();
+        let other = make_api();
+
+        api.mcp_telemetry().set_connected(true);
+        assert!(mcp_bridge_connected(&api));
+        assert!(!mcp_bridge_connected(&other));
+
+        set_voice_device_sessions(&api, Some(2));
+        set_voice_pulse(&api, Some("speaking"), 42);
+        assert_eq!(api.voice_telemetry().device_sessions(), Some(2));
+        assert_eq!(api.voice_telemetry().pulse(), (Some("speaking"), 42));
+        assert_eq!(other.voice_telemetry().device_sessions(), None);
+        assert_eq!(other.voice_telemetry().pulse(), (None, 0));
     }
 }

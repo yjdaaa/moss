@@ -159,6 +159,7 @@ export function DrawPage({ onNavigate, active = true }) {
   const drawMode = drawRequestMode(engraveRoute, form.image_strategy);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("准备就绪");
+  const [drawSyncWarning, setDrawSyncWarning] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [result, setResult] = useState(null);
   const [sceneRev, setSceneRev] = useState(() => computeSceneRevision(initialScene?.elements));
@@ -246,7 +247,6 @@ export function DrawPage({ onNavigate, active = true }) {
     };
   }, []);
 
-  const drawSyncWarnedRef = useRef(false);
   const syncDrawStateToBackend = (patch, { keepalive = false } = {}) => {
     if (!patch || typeof patch !== "object" || Object.keys(patch).length === 0) return;
     const body = JSON.stringify(patch);
@@ -261,30 +261,21 @@ export function DrawPage({ onNavigate, active = true }) {
       ...(useKeepalive ? { keepalive: true } : {}),
     })
       .then((res) => {
+        if (keepalive) return;
         if (res.ok) {
-          const wasWarned = drawSyncWarnedRef.current;
-          drawSyncWarnedRef.current = false;
-          if (wasWarned && !keepalive) {
-            setStatus((prev) => (prev.startsWith("画布已保存在本地浏览器，但") ? "画布已同步到本机服务" : prev));
-          }
+          setDrawSyncWarning("");
           return;
         }
-        // 403（如局域网只读模式）或窗口退出阶段的 keepalive 不打断用户，其余写入失败显式提示
-        if (keepalive || res.status === 403) return;
+        // 局域网只读等 403 响应不打断用户，其余写入失败显式提示。
+        if (res.status === 403) return;
         console.warn(`[draw-state] 后端保存返回 HTTP ${res.status}`);
-        if (!drawSyncWarnedRef.current) {
-          drawSyncWarnedRef.current = true;
-          setStatus(`画布已保存在本地浏览器，但同步到本机服务失败（HTTP ${res.status}）`);
-        }
+        setDrawSyncWarning((prev) => prev || `画布已保存在本地浏览器，但同步到本机服务失败（HTTP ${res.status}）`);
       })
       .catch((error) => {
         if (keepalive) return;
         const msg = error instanceof Error ? error.message : String(error);
         console.warn(`[draw-state] 同步到本机服务失败: ${msg}`);
-        if (!drawSyncWarnedRef.current) {
-          drawSyncWarnedRef.current = true;
-          setStatus("画布已保存在本地浏览器，但暂未同步到本机服务（请确认服务运行正常）");
-        }
+        setDrawSyncWarning((prev) => prev || "画布已保存在本地浏览器，但暂未同步到本机服务（请确认服务运行正常）");
       });
   };
 
@@ -1522,6 +1513,7 @@ export function DrawPage({ onNavigate, active = true }) {
               <div className="ob-canvasbar">
                 <span className="draw-note" role="status">{status}</span>
               </div>
+              {drawSyncWarning && <p className="draw-note" role="alert">{drawSyncWarning}</p>}
             </>
           }
         >

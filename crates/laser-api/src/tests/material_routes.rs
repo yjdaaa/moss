@@ -1016,9 +1016,10 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         started_at: std::time::Instant::now(),
         spec: None,
     });
-    let jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
-        std::collections::HashMap::from([("wf-done-race".to_owned(), dummy_job)]),
-    ));
+    let jobs = ActiveJobs::default();
+    jobs.lock()
+        .unwrap()
+        .insert("wf-done-race".into(), dummy_job);
     let reservations: LaunchReservations =
         std::sync::Arc::new(std::sync::Mutex::new(LaunchReservationState::default()));
     let cancel_bytes = handle_workflow_store_request(
@@ -1109,9 +1110,11 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         started_at: std::time::Instant::now(),
         spec: None,
     });
-    let err_jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
-        std::collections::HashMap::from([("wf-store-err".to_owned(), err_job)]),
-    ));
+    let err_jobs = ActiveJobs::default();
+    err_jobs
+        .lock()
+        .unwrap()
+        .insert("wf-store-err".into(), err_job);
     let err_reservations: LaunchReservations =
         std::sync::Arc::new(std::sync::Mutex::new(LaunchReservationState::default()));
     let err_bytes = handle_workflow_store_request(

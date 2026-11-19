@@ -537,8 +537,8 @@ impl BuiltinVoice {
                 *slot = next_music_warning;
             }
             // 顶栏：服务已运行、还没有设备连接
-            laser_host::set_voice_device_sessions(Some(0));
-            laser_host::set_voice_pulse(None, 0);
+            laser_host::set_voice_device_sessions(&self.host.api_service, Some(0));
+            laser_host::set_voice_pulse(&self.host.api_service, None, 0);
             if let Ok(mut last) = self.last_error.lock() {
                 *last = None;
             }
@@ -580,8 +580,8 @@ impl BuiltinVoice {
             .take();
         if let Some(server) = server {
             server.stop();
-            laser_host::set_voice_device_sessions(None);
-            laser_host::set_voice_pulse(None, 0);
+            laser_host::set_voice_device_sessions(&self.host.api_service, None);
+            laser_host::set_voice_pulse(&self.host.api_service, None, 0);
         }
         // 结束辅助程序、判停子进程、本地兜底句柄与 Qwen3-TTS 子进程
         if let Ok(mut slot) = self.running_local.lock() {

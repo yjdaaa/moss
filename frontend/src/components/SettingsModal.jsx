@@ -14,11 +14,12 @@ import { preferencesShowJev } from "../voiceState.js";
 import { readHideTopPills, writeHideTopPills } from "../foldState.js";
 import { trayActionCopy } from "../platform.js";
 import { appUpdateActionLabel, appUpdateAvailable, appUpdateBusy, appUpdateInstall, appUpdateProgressView, appUpdateScopeProgress, appUpdateStatus } from "../appUpdate.js";
+import { version as packageVersion } from "../../package.json";
 
 const FALLBACK_APP_VERSION =
   typeof __MOSS_FRONTEND_VERSION__ === "string" && __MOSS_FRONTEND_VERSION__
     ? __MOSS_FRONTEND_VERSION__
-    : "0.3.7";
+    : packageVersion;
 
 export function SettingsModal({
   visible,
