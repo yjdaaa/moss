@@ -348,7 +348,7 @@ function App() {
   }, []);
 
   // 创作画板常驻（2026-11-17 r49 用户要求“切到主工作台再回去不要刷新掉”）：第一次打开后一直挂着，
-  // 切到别的页面只是隐藏，画布、撤销记录、预览结果与所有设置原样保留；后台的急停响应照常在线
+  // 切页只隐藏画板并保留界面状态。隐藏时只为在途作业认领急停目标，当前可见页面仍可处理自己的设备。
   const [drawMounted, setDrawMounted] = useState(currentPath === "/draw");
   useEffect(() => {
     if (currentPath === "/draw") setDrawMounted(true);

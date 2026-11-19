@@ -5,6 +5,8 @@ import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert } from "../appDialog.js";
 import { onEmergencyStop } from "../estopBus.js";
+import { claimEstopContext, estopTargetFromDescription, stopPageTarget } from "../globalEstop.js";
+import { sendEstopRequest } from "../usePageEstop.js";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
   APPROVAL_POLL_MS,
@@ -196,9 +198,9 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     const result = res.data.result?.result;
     if (approval.kind === "workflow_confirm_send") {
       const info = extractWorkflowInfo(result);
-      setJob({ kind: "workflow", id: approval.target_record, status: info.status || "sending", progress: null });
+      setJob({ kind: "workflow", id: approval.target_record, status: info.status || "sending", progress: null, target: result?.send_result?.target });
     } else if (approval.kind === "calibration_send") {
-      setJob({ kind: "calibration", id: approval.target_record, status: "sending", progress: null });
+      setJob({ kind: "calibration", id: approval.target_record, status: "sending", progress: null, target: result?.send_result?.target });
     } else {
       const message = typeof result === "string" ? result : approval.summary;
       void showAlert(message || "已执行", { title: `已批准：${kindLabel(approval.kind)}`, tone: "success" });
@@ -236,11 +238,13 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     );
   }, [jobId, jobKind, jobStatus]);
   const handleEmergencyStop = useCallback(async () => {
-    const id = jobRef.current?.id;
-    if (!id) return;
-    const res = await postJson("/api/safe-action", { action: "emergency_stop", confirmed: true, job_id: id });
-    const text = typeof res.data?.result === "string" ? res.data.result : "";
-    if (res.ok && res.data?.success) {
+    const current = jobRef.current;
+    if (!current?.id) return;
+    const id = current.id;
+    const { kind, message: text } = await stopPageTarget(sendEstopRequest, {
+      jobId: id, target: estopTargetFromDescription(current.target),
+    });
+    if (kind === "sent") {
       setJob((current) => markStopRequested(current, id));
       void showAlert(`${text || "0x18 已发送"}。0x18 不代替控制器上的硬件急停按钮，请确认设备已停止。`, {
         title: "已发送急停 0x18",
@@ -268,17 +272,18 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     }
   }, [job, handleEmergencyStop]);
 
-  // 顶栏急停在审批执行期间也有效（发送覆盖层盖住顶栏时用覆盖层里的按钮）
-  const estopRef = useRef(null);
-  estopRef.current = job ? handleEmergencyStop : null;
+  // 顶栏急停在审批执行期间也有效（发送覆盖层盖住顶栏时用覆盖层里的按钮）；按 job:<id> 登记，不拦截不同设备目标的页面急停
   useEffect(
     () =>
-      onEmergencyStop(() => {
-        if (!estopRef.current) return false;
-        void estopRef.current();
-        return true;
-      }),
-    [],
+      onEmergencyStop((detail) => {
+        const current = jobRef.current;
+        if (!current?.id || current.status === "completed") return false;
+        if (claimEstopContext(detail, { jobId: current.id, target: estopTargetFromDescription(current.target) })) {
+          void handleEmergencyStop();
+        }
+        return false;
+      }, globalThis.window, { byTarget: true }),
+    [handleEmergencyStop],
   );
 
   if (!enabled) return null;

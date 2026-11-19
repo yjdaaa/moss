@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { estopTargetArgs } from "../globalEstop.js";
+import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import { drawConnectionPayload, drawTargetLabel, drawTargetReady } from "../drawConnection.js";
 import {
   JOG_STEPS_MM,
@@ -102,7 +103,11 @@ export default function RegistrationPanel({
     setWorking("jog");
     try {
       const res = await postJson("/api/safe-action", req);
-      if (!(res.ok && res.data?.success)) {
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, "点动");
+        log(msg, "warn");
+        showAlert(msg, { title: "等待桌面审批", tone: "info" });
+      } else if (!(res.ok && res.data?.success)) {
         const reason = (typeof res.data?.result === "string" && res.data.result) || "点动没有完成";
         log(`点动没有完成：${reason}`, "error");
         showAlert(reason, { title: "点动没有完成", tone: "error" });

@@ -86,12 +86,27 @@ test("nested sender acceptance requires send_result.success and sending/complete
     true,
   );
   assert.equal(isNestedSenderAccepted({ success: true, result: { status: "sending" } }), false);
+  assert.equal(
+    isNestedSenderAccepted({
+      success: true,
+      result: { status: "approval_required", approval_id: "apr-1", send_result: { success: true } },
+    }),
+    false,
+  );
 });
 
 test("only nested acceptance persists last fingerprint; failures keep previous", () => {
   const storage = memoryStorage({ [LAST_ACCEPTED_FINGERPRINT_KEY]: FP_A });
   let state = createRepeatSendState(storage);
   state = applyPreviewFingerprintSuccess(state, FP_B);
+
+  state = applyConfirmSendResponse(
+    state,
+    { success: true, result: { status: "approval_required", approval_id: "apr-9" } },
+    storage,
+  );
+  assert.equal(state.lastAcceptedFingerprint, FP_A);
+  assert.equal(storage.getItem(LAST_ACCEPTED_FINGERPRINT_KEY), FP_A);
 
   state = applyConfirmSendResponse(
     state,

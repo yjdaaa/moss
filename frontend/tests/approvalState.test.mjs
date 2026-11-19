@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   approvalErrorText,
+  approvalPendingMessage,
   canApprove,
   clockOffsetSeconds,
+  isApprovalRequiredResponse,
   newPendingIds,
   orderPending,
   secondsLeft,
@@ -160,4 +162,35 @@ test("Agent 审批徽标与任务预览字段及家居审批拒绝优先撤销�
   );
   assert.equal(fallbackOutcome.ok, true);
   assert.equal(fallbackUrl, "/v1/approvals/apr-home-2/reject");
+});
+
+test("#17 严格模式 HTTP 202 approval_required：即使 success=true 也必须识别为待审批", () => {
+  const res202 = {
+    status: 202,
+    ok: true,
+    data: {
+      success: true,
+      result: {
+        status: "approval_required",
+        approval_id: "apr-strict-1",
+        speech: "已提交桌面严格模式审批",
+      },
+    },
+  };
+  assert.equal(isApprovalRequiredResponse(res202), true);
+  assert.equal(approvalPendingMessage(res202, "走边框"), "已提交桌面严格模式审批");
+
+  const statusOnly = {
+    status: 200,
+    ok: true,
+    data: { success: true, result: { status: "approval_required", approval_id: "apr-strict-2" } },
+  };
+  assert.equal(isApprovalRequiredResponse(statusOnly), true);
+  assert.match(approvalPendingMessage(statusOnly, "走边框"), /审批/);
+
+  assert.equal(
+    isApprovalRequiredResponse({ status: 200, ok: true, data: { success: true, result: { status: "sending" } } }),
+    false,
+  );
+  assert.equal(isApprovalRequiredResponse(null), false);
 });

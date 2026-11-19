@@ -360,7 +360,7 @@ test("被撤销过的设备要自动允许必须显式解除撤销", () => {
   const inspectData = {
     device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33" },
     nvs: { wifi_slots: [], ota_url: "" },
-    known_device: { device_id: "dc:da:0c:11:22:33", status: "revoked" },
+    known_device: { device_id: "dc:da:0c:11:22:33", status: "revoked", status_revision: 4 },
   };
   const status = { ota_ip_url: "http://192.168.1.50:9666/xiaozhi/ota/", ws_port: 9667 };
   assert.equal(isRevokedInMoss(inspectData), true);
@@ -368,6 +368,7 @@ test("被撤销过的设备要自动允许必须显式解除撤销", () => {
   const wsUrl = deriveWsUrlForMoss(draft.otaUrl, status);
   const plain = buildUsbProvisionWritePayload({ port: "/dev/cu.usbmodem1", inspectData, draft, wsUrl });
   assert.equal(plain.unrevoke, false);
+  assert.equal(plain.expected_status_revision, 4);
   const confirmed = buildUsbProvisionWritePayload({
     port: "/dev/cu.usbmodem1",
     inspectData,
@@ -375,6 +376,7 @@ test("被撤销过的设备要自动允许必须显式解除撤销", () => {
     wsUrl,
   });
   assert.equal(confirmed.unrevoke, true);
+  assert.equal(confirmed.expected_status_revision, 4);
   assert.match(
     formatUsbWriteConfirmText({ port: "/dev/cu.usbmodem1", inspectData, payload: confirmed }),
     /解除撤销/,

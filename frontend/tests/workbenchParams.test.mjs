@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   actualParamsText,
+  checkDerivedWorkbenchAdoption,
   DEFAULT_IMAGE_EXTRAS,
   IMAGE_MODE_OPTIONS,
   imageModeFields,
@@ -11,6 +12,7 @@ import {
   materialRecommendationModes,
   resolveTextStyle,
   workbenchConfirmSendPrompt,
+  workbenchFeedbackInputs,
   workbenchInputSignature,
   workbenchResumeSendPrompt,
   workbenchStatusLabel,
@@ -257,4 +259,70 @@ test("断点续雕二次确认文案、异步 showPrompt 输入弹窗与前端�
   assert.match(appDialogSrc, /action === "cancel"/, "AppDialog 聚焦取消按钮按回车不得误判为确认");
   assert.match(homeSrc, /workbenchResumeSendPrompt\(/, "断点续雕必须先经二次确认");
   assert.match(voiceBuiltinSrc.split('id="voice-colab-cli-install"')[0].slice(-700), /showConfirm\(/, "安装外部 Colab CLI 必须先经二次确认");
+
+  const staleAdopt = checkDerivedWorkbenchAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-1" },
+    currentWorkflowId: "wf-1",
+    previewSignature: "sig-old",
+    previewStale: true,
+  });
+  assert.equal(staleAdopt.ok, false);
+
+  const mismatchAdopt = checkDerivedWorkbenchAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-old" },
+    currentWorkflowId: "wf-cur",
+    previewSignature: "sig-old",
+    previewStale: false,
+  });
+  assert.equal(mismatchAdopt.ok, false);
+
+  const okAdopt = checkDerivedWorkbenchAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-1" },
+    currentWorkflowId: "wf-1",
+    previewSignature: "sig-old",
+    previewStale: false,
+  });
+  assert.equal(okAdopt.ok, true);
+  assert.equal(okAdopt.inheritedSignature, "sig-old");
+
+  assert.match(homeSrc, /framingBusy \|\| previewStale/, "工作台预览过期时必须禁用反馈调参");
+  assert.match(homeSrc, /isApprovalRequiredResponse\(res\)/, "工作台走边框与发送必须拦截严格模式 202 待审批");
+  const aiPreviewSrc = readPageSource("components/AiPreviewCenter.jsx");
+  assert.match(aiPreviewSrc, /isApprovalRequiredResponse\(res\)/, "AI 预览启动/走边框必须拦截严格模式 202 待审批");
+});
+
+test("工作台重复两点对位仍匹配原任务，反馈调参仍要匹配本次预览", () => {
+  const currentWorkflow = { workflow_id: "reg-1", registration: {}, registered_from: "source" };
+  const check = (workflow) => checkDerivedWorkbenchAdoption({
+    workflow, currentWorkflow, previewSignature: "sig-original", previewStale: false,
+  });
+  assert.equal(check({ workflow_id: "reg-2", registered_from: "source" }).ok, true);
+  assert.equal(check({ workflow_id: "reg-3", registered_from: "other" }).ok, false);
+  assert.equal(check({ workflow_id: "tune-1", regenerated_from: "source" }).ok, false);
+  assert.equal(check({ workflow_id: "tune-2", regenerated_from: "reg-1" }).ok, true);
+});
+
+test("采用调参按 actual_params 回填功率、速度、遍数，签名与下一次生成一致", () => {
+  const inputs = { textContent: "测试", presetParams: "44/1500/1" };
+  const adopted = workbenchFeedbackInputs({
+    regenerated_from: "source",
+    artifacts: { actual_params: { laser_max_power: 150, power_scale: 400, feed_rate: 910, passes: 2 } },
+  }, inputs);
+  const { customParams, customPower, customFeed, customPasses, signature } = adopted;
+  assert.deepEqual(manualParamsPayload({ enabled: customParams, powerPercent: customPower,
+    feedRate: customFeed, passes: customPasses }), { power_percent: 37.5, feed_rate: 910, passes: 2 });
+  assert.equal(isWorkbenchPreviewStale(signature, workbenchInputSignature({ ...inputs, ...adopted })), false);
+  assert.equal(isWorkbenchPreviewStale(signature, workbenchInputSignature({ ...inputs, ...adopted, customFeed: "911" })), true);
+  assert.equal(workbenchFeedbackInputs({ registered_from: "source" }, inputs), null);
+});
+
+test("旧调参预览的低功率如实回填，后续生成走手动范围校验", () => {
+  const workflow = { regenerated_from: "source",
+    artifacts: { actual_params: { laser_max_power: 9, feed_rate: 910 } } };
+  const adopted = workbenchFeedbackInputs(workflow, {});
+  assert.match(actualParamsText(workflow), /功率 0.9%.*反馈调参/);
+  assert.equal(adopted.customPower, "0.9");
+  assert.equal(adopted.customFeed, "910");
+  assert.match(manualParamsPayload({ enabled: true, powerPercent: adopted.customPower,
+    feedRate: adopted.customFeed, passes: adopted.customPasses }).error, /功率/);
 });

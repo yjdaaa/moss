@@ -1,4 +1,4 @@
-import { estopTargetArgs } from "./globalEstop.js";
+import { estopTargetArgs, visibleEstopContext } from "./globalEstop.js";
 // 数字孪生核心纯逻辑：
 // 1. G-code 刀路解析（模态跟踪 G0/G1/G90/G91/M3/M4/M5/F/S、三维线段、包络、行号索引与连续进度插值）
 // 2. GRBL / FluidNC <State|MPos|WPos|Bf|FS|Pn|Ov|SD> 实时遥测报文解析
@@ -985,7 +985,8 @@ export function twinEstopContext({
   isJobRunning,
   selectedWorkflowId,
   connectionPayload,
+  recordedTarget,
 } = {}) {
   const jobId = isJobRunning && typeof selectedWorkflowId === "string" ? selectedWorkflowId.trim() : "";
-  return { jobId, target: estopTargetArgs(connectionPayload) };
+  return visibleEstopContext(jobId, estopTargetArgs(connectionPayload), recordedTarget);
 }

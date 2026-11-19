@@ -10,9 +10,11 @@ import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
+import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
   DEFAULT_IMAGE_EXTRAS,
+  checkDerivedWorkbenchAdoption,
   imageModeFields,
   imageParamsPayload,
   isWorkbenchPreviewStale,
@@ -20,6 +22,7 @@ import {
   materialRecommendationModes,
   resolveTextStyle,
   workbenchConfirmSendPrompt,
+  workbenchFeedbackInputs,
   workbenchInputSignature,
   workbenchResumeSendPrompt,
 } from "../workbenchParams.js";
@@ -27,7 +30,7 @@ import { framingRequest, framingShapeText, readFramingShape } from "../aiPreview
 import { drawConnectionPayload, drawTargetLabel, drawTargetReady } from "../drawConnection.js";
 import { exportFile } from "../saveFile.js";
 import { showAlert, showConfirm } from "../appDialog.js";
-import { estopTargetArgs } from "../globalEstop.js";
+import { estopTargetArgs, visibleEstopContext } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
@@ -210,7 +213,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [busy, setBusy] = useState(false);
   const [framingBusy, setFramingBusy] = useState(false);
 
-  const currentSignature = workbenchInputSignature({
+  const signatureInputs = {
     activeTool,
     textContent,
     fontSizeMm,
@@ -235,8 +238,18 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     customFeed,
     customPasses,
     presetParams: hasRecommendation ? `${powerPercent}/${recommendedFeedRate}/${recommendedPasses}` : "",
-  });
+  };
+  const currentSignature = workbenchInputSignature(signatureInputs);
   const previewStale = Boolean(currentWorkflow?.workflow_id) && isWorkbenchPreviewStale(previewSignature, currentSignature);
+
+  const signatureInputsRef = useRef(signatureInputs);
+  signatureInputsRef.current = signatureInputs;
+  const currentWorkflowRef = useRef(currentWorkflow);
+  const previewSignatureRef = useRef(previewSignature);
+  const previewStaleRef = useRef(previewStale);
+  currentWorkflowRef.current = currentWorkflow;
+  previewSignatureRef.current = previewSignature;
+  previewStaleRef.current = previewStale;
 
   const mountedRef = useRef(true);
   const previewBlobUrlRef = useRef("");
@@ -823,12 +836,31 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }
   };
 
-  // 采用调参建议、两点对位生成的新预览：都是独立的新 workflow（新 SHA），换成当前任务、尚未发送
+  // 采用调参建议、两点对位生成的新预览：都是独立的新 workflow（新 SHA），沿用原预览输入签名并在过期时拦截
   const adoptDerivedWorkflow = async (workflow, label) => {
+    const check = checkDerivedWorkbenchAdoption({
+      workflow,
+      currentWorkflow: currentWorkflowRef.current,
+      previewSignature: previewSignatureRef.current,
+      previewStale: previewStaleRef.current,
+      label,
+    });
+    if (!check.ok) {
+      addLog("PREVIEW", check.reason, "warn");
+      showAlert(check.reason, { title: "预览已过期 · 已拦截派生结果", tone: "warning" });
+      return;
+    }
+    const feedbackInputs = workbenchFeedbackInputs(workflow, signatureInputsRef.current);
+    if (feedbackInputs) {
+      setCustomParams(feedbackInputs.customParams);
+      setCustomPower(feedbackInputs.customPower);
+      setCustomFeed(feedbackInputs.customFeed);
+      setCustomPasses(feedbackInputs.customPasses);
+    }
+    setPreviewSignature(feedbackInputs?.signature || check.inheritedSignature);
     pollingCleanupRef.current?.();
     pollingCleanupRef.current = null;
     setCurrentWorkflow(workflow);
-    setPreviewSignature(currentSignature);
     setOverlayStatus("pending");
     setSendProgress(null);
     setPollSafetyNotice("");
@@ -840,18 +872,16 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         resolveUrl: resolveApiUrl,
       }),
     );
+    if (!mountedRef.current) return;
     setGcodeText("");
     if (artifacts.gcode_file) {
       const preview = await fetchPreviewText(artifacts.gcode_file);
+      if (!mountedRef.current) return;
       if (preview.ok) {
         setGcodeText(preview.text);
       } else {
         addLog("PREVIEW", `${label}已生成，但刀路资源加载失败（${preview.error}），请重新打开任务`, "error");
       }
-    }
-    if (artifacts.actual_params) {
-      setPowerPercent(artifacts.actual_params.laser_max_power / artifacts.actual_params.power_scale * 100);
-      setSpeedMms(artifacts.actual_params.feed_rate / 60);
     }
     setTimeEstimate(artifacts.time_estimate || null);
     setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
@@ -905,7 +935,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     addLog("FRAMING", `正在向 ${targetName} 请求走边框（${w} × ${h} mm，不出光）...`, "info");
     try {
       const res = await postJson("/api/device/framing", req);
-      if (res.ok && res.data?.success) {
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, "走边框");
+        addLog("FRAMING", msg, "warn");
+        showAlert(msg, { title: "等待桌面审批", tone: "info" });
+      } else if (res.ok && res.data?.success) {
         addLog("FRAMING", `走边框完成（${w} × ${h} mm，未出光），确认木牌位置无误后可点击【开始雕刻】`, "ok");
       } else {
         const reason = (typeof res.data?.result === "string" && res.data.result) || "走边框未完成";
@@ -1036,7 +1070,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
     try {
       const res = await postJson("/api/workflow", payload);
-      if (res.ok && res.data?.success) {
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, "开始雕刻");
+        setOverlayStatus("pending");
+        addLog("DISPATCH", msg, "warn");
+        showAlert(msg, { title: "等待桌面审批", tone: "info" });
+      } else if (res.ok && res.data?.success) {
         if (prompt.sha256) {
           setLastSentSha256(prompt.sha256);
           writeLocal("laser-forge-last-sent-sha256", prompt.sha256);
@@ -1108,6 +1147,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       return;
     }
 
+    const prevOverlayStatus = overlayStatus;
     addLog("DISPATCH", `正在从第 ${startLine} 行发起断点续雕，剩余代码即将继续流式下发...`, "info");
     setOverlayStatus("preparing");
 
@@ -1124,7 +1164,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
     try {
       const res = await postJson("/api/workflow", payload);
-      if (res.ok && res.data?.success) {
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, "断点续雕");
+        setOverlayStatus(prevOverlayStatus);
+        addLog("DISPATCH", msg, "warn");
+        showAlert(msg, { title: "等待桌面审批", tone: "info" });
+      } else if (res.ok && res.data?.success) {
         const sr = res.data.result?.send_result || {};
         const total = sr.total_lines || sendProgress?.total || 0;
         const sent = sr.lines_sent || sendProgress?.sent || 0;
@@ -1193,7 +1238,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   // 改按本页设备目标新开连接写 0x18，不再只提示失败。顶栏常驻急停若未停掉本页同一 running 设备任务
   // （如后端仅停了 unknown 旧记录或其他设备），同样由 `usePageEmergencyStop` 向本页设备目标补发。
   const handleEStop = usePageEmergencyStop(
-    () => ({ jobId: currentWorkflow?.workflow_id, target: estopTarget() }),
+    () => visibleEstopContext(currentWorkflow?.workflow_id, estopTarget(), sendProgress?.target),
     (outcome) => {
       const sent = outcome.kind === "sent";
       const message = sent
@@ -1381,7 +1426,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           )}
             {/* 数控中控台与实时调参反馈卡片 */}
             <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
-              disabled={busy || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
+              disabled={busy || framingBusy || previewStale || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
               onAdopt={(workflow) => adoptDerivedWorkflow(workflow, "调参预览")} />
         </WbCard>
 

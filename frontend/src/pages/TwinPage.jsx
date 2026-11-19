@@ -684,6 +684,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
       isJobRunning,
       selectedWorkflowId,
       connectionPayload: getConnectionPayload(),
+      recordedTarget: jobSendResult?.target || "",
     }),
     async (outcome) => {
       const sent = outcome.kind === "sent";

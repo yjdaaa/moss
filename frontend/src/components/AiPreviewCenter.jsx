@@ -4,8 +4,10 @@ import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { onEmergencyStop } from "../estopBus.js";
+import { claimEstopContext, estopTargetFromDescription, stopPageTarget } from "../globalEstop.js";
+import { sendEstopRequest } from "../usePageEstop.js";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
-import { SITE_CHECK_TEXT, workflowDetails } from "../approvalState.js";
+import { SITE_CHECK_TEXT, approvalPendingMessage, isApprovalRequiredResponse, workflowDetails } from "../approvalState.js";
 import {
   AI_PREVIEW_LOOKBACK_SECONDS,
   AI_PREVIEW_POLL_MS,
@@ -107,7 +109,7 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
         if (aiWorkflowStarted(record)) {
           const info = extractWorkflowInfo(record);
           watchedRef.current.delete(record.workflow_id);
-          setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null });
+          setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null, target: record.send_result?.target });
         } else if (record.status !== "preview_ready") {
           watchedRef.current.delete(record.workflow_id);
         }
@@ -219,6 +221,10 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
       ...liveConn.payload,
     });
     setBusy(false);
+    if (isApprovalRequiredResponse(res)) {
+      setFailure(approvalPendingMessage(res, "开始加工"));
+      return;
+    }
     if (!(res.ok && res.data?.success)) {
       setFailure(typeof res.data?.result === "string" && res.data.result ? res.data.result : "没有开始加工，请检查设备连接后重试");
       return;
@@ -226,7 +232,7 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     watchedRef.current.delete(record.workflow_id);
     forget(record.workflow_id);
     const info = extractWorkflowInfo(res.data.result);
-    setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null });
+    setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null, target: res.data.result?.send_result?.target });
   };
 
   // 先走边框（2026-11-06）：激光头从当前位置沿刀路范围绕一圈再回到起点，默认不出光；会移动机器，先确认
@@ -247,7 +253,9 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     setFramingStatus("正在走边框（不出光）…顶栏急停可随时停止");
     const res = await postJson("/api/device/framing", request);
     setBusy(false);
-    if (res.ok && res.data?.success) {
+    if (isApprovalRequiredResponse(res)) {
+      setFramingStatus(approvalPendingMessage(res, "走边框"));
+    } else if (res.ok && res.data?.success) {
       setFramingStatus("走边框完成：确认范围在木牌上后再开刻");
     } else {
       setFramingStatus("");
@@ -284,11 +292,13 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
   }, [jobId, jobKind, jobStatus]);
 
   const handleEmergencyStop = useCallback(async () => {
-    const id = jobRef.current?.id;
-    if (!id) return;
-    const res = await postJson("/api/safe-action", { action: "emergency_stop", confirmed: true, job_id: id });
-    const text = typeof res.data?.result === "string" ? res.data.result : "";
-    if (res.ok && res.data?.success) {
+    const current = jobRef.current;
+    if (!current?.id) return;
+    const id = current.id;
+    const { kind, message: text } = await stopPageTarget(sendEstopRequest, {
+      jobId: id, target: estopTargetFromDescription(current.target),
+    });
+    if (kind === "sent") {
       setJob((current) => markStopRequested(current, id));
       void showAlert(`${text || "0x18 已发送"}。0x18 不代替控制器上的硬件急停按钮，请确认设备已停止。`, { title: "已发送急停 0x18", tone: "warning" });
     } else {
@@ -307,17 +317,18 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     }
   }, []);
 
-  // 顶栏急停在发送覆盖层期间也交给本窗口的任务
-  const estopRef = useRef(null);
-  estopRef.current = job ? handleEmergencyStop : null;
+  // 顶栏急停在发送覆盖层期间也交给本窗口的任务；按 job:<id> 登记，不拦截不同设备目标的页面急停
   useEffect(
     () =>
-      onEmergencyStop(() => {
-        if (!estopRef.current) return false;
-        void estopRef.current();
-        return true;
-      }),
-    [],
+      onEmergencyStop((detail) => {
+        const current = jobRef.current;
+        if (!current?.id || current.status === "completed") return false;
+        if (claimEstopContext(detail, { jobId: current.id, target: estopTargetFromDescription(current.target) })) {
+          void handleEmergencyStop();
+        }
+        return false;
+      }, globalThis.window, { byTarget: true }),
+    [handleEmergencyStop],
   );
 
   // 告诉全局悬浮小窗有几个预览被收起在后台；它只负责把本窗口重新叫出来

@@ -178,7 +178,7 @@ export function DrawSendCard({
         <FeedbackPanel
           workflowId={workflowId}
           origin={result?.result?.feedback_origin}
-          disabled={busy || jobActive}
+          disabled={busy || previewStale || jobActive}
           onAdopt={adoptFeedbackWorkflow}
         />
       ) : null}

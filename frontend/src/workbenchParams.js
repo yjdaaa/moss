@@ -209,8 +209,9 @@ export function actualParamsText(workflow) {
   if (!Number.isFinite(power) || !Number.isFinite(feed)) return "";
   const scale = Number(params?.power_scale) > 0 ? Number(params.power_scale) : 1000;
   const passes = Number(params?.passes) || 1;
-  const source = workflow?.input?.manual_params ? "本次自定义" : "材料库推荐";
-  const base = `功率 ${Math.round((power / scale) * 100)}% · ${Math.round(feed)} mm/min · ${passes} 遍（${source}）`;
+  const source = workflow?.regenerated_from ? "反馈调参" : workflow?.input?.manual_params ? "本次自定义" : "材料库推荐";
+  const percent = Number((power * 100 / scale).toFixed(3));
+  const base = `功率 ${percent}% · ${Math.round(feed)} mm/min · ${passes} 遍（${source}）`;
   const fillLabel = TEXT_FILL_LABELS[workflow?.artifacts?.text_fill];
   return fillLabel ? `${fillLabel} · ${base}` : base;
 }
@@ -307,6 +308,49 @@ function imageExtrasSignature(imageMode, extras = {}) {
 export function isWorkbenchPreviewStale(previewSignature, currentSignature) {
   if (!previewSignature) return false;
   return previewSignature !== currentSignature;
+}
+
+/** 按反馈实际采用的参数回填自定义表单，并按这些输入保存预览签名。 */
+export function workbenchFeedbackInputs(workflow, inputs) {
+  if (!workflow?.regenerated_from || inputs.activeTool === "gcode") return null;
+  const actual = workflow.artifacts?.actual_params;
+  const scale = Number(actual?.power_scale) > 0 ? Number(actual.power_scale) : 1000;
+  const power = Number(actual?.laser_max_power) * 100 / scale;
+  const feed = Number(actual?.feed_rate);
+  const passes = Number(actual?.passes ?? 1);
+  if (![power, feed, passes].every(Number.isFinite) || power <= 0 || feed <= 0 || passes <= 0) return null;
+  // 旧建议也要如实显示。若功率低于手动范围，下一次生成由表单的现有校验明示。
+  const fields = { customParams: true, customPower: String(power), customFeed: String(feed), customPasses: String(passes) };
+  return { ...fields, signature: workbenchInputSignature({ ...inputs, ...fields }) };
+}
+
+/**
+ * 工作台采用派生任务（调参反馈 / 两点对位）前的门禁校验：
+ * 必须匹配当前任务且原预览未过期；通过时沿用原 `previewSignature`，不得用当前新输入给旧快照盖章。
+ */
+export function checkDerivedWorkbenchAdoption({
+  workflow,
+  currentWorkflowId,
+  currentWorkflow,
+  previewSignature,
+  previewStale,
+  label = "派生预览",
+}) {
+  if (!workflow?.workflow_id) return { ok: false, reason: `${label}记录无效` };
+  const parentId = workflow.regenerated_from || workflow.registered_from || "";
+  const expectedParent = workflow.registered_from && currentWorkflow?.registration
+    ? currentWorkflow.registered_from || currentWorkflow.workflow_id
+    : currentWorkflow?.workflow_id || currentWorkflowId;
+  if (parentId && expectedParent && parentId !== expectedParent) {
+    return { ok: false, reason: `${label}不是当前任务生成的，已忽略` };
+  }
+  if (previewStale || !previewSignature) {
+    return {
+      ok: false,
+      reason: `输入、材料或参数已改动，旧预览已过期，已拦截采用${label}；请先重新生成轨迹。`,
+    };
+  }
+  return { ok: true, inheritedSignature: previewSignature };
 }
 
 /** 加工监视舱进度栏右侧的大白话状态文案（替代原先裸露的英文大写）。 */

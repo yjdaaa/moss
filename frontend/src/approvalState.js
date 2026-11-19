@@ -5,6 +5,23 @@
 
 export const APPROVAL_POLL_MS = 4000;
 export const SITE_CHECK_TEXT = "我在机器旁，材料已放好、原点已确认，排风已开启";
+
+/**
+ * 判断响应是否为严格模式 HTTP 202 待桌面审批（`status === 202` 或 `result.status === "approval_required"`）。
+ * 后端此时 `success` 仍为 `true`（供小智朗读 `speech`），但动作尚未执行，前端不得推进执行态或写入防重发记录。
+ */
+export function isApprovalRequiredResponse(resOrData) {
+  if (!resOrData || typeof resOrData !== "object") return false;
+  if (resOrData.status === 202) return true;
+  const data = "data" in resOrData ? resOrData.data : resOrData;
+  return data?.result?.status === "approval_required";
+}
+
+export function approvalPendingMessage(resOrData, actionLabel = "操作") {
+  const data = resOrData && "data" in resOrData ? resOrData.data : resOrData;
+  const speech = typeof data?.result?.speech === "string" ? data.result.speech.trim() : "";
+  return speech || `已提交桌面严格模式审批，请在电脑端 MOSS 批准后再执行${actionLabel}。`;
+}
 export function approvalCheckText(kind) {
   if (kind === "external_tool") return "我已核对第三方工具、参数及数据访问范围，同意本次执行";
   if (kind === "agent_run") return "我看过这个任务，同意在本机工作目录里运行 Agent（可能产生模型费用）";

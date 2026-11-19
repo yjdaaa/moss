@@ -13,20 +13,27 @@ export function requestEmergencyStop(targetOrOptions = globalThis.window, maybeO
     targetOrOptions && typeof targetOrOptions.dispatchEvent === "function";
   const target = isEventTarget ? targetOrOptions : globalThis.window;
   const options = isEventTarget ? maybeOptions : targetOrOptions || {};
+  const claimedTargets = new Set();
   const detail = {
     handled: false,
     stoppedJob: options?.stoppedJob || null,
+    isTargetHandled: (key) => claimedTargets.has(key),
+    claimTarget(key) {
+      if (!key || claimedTargets.has(key)) return false;
+      claimedTargets.add(key);
+      return true;
+    },
   };
   if (target?.dispatchEvent) {
     target.dispatchEvent(new CustomEvent(ESTOP_EVENT, { detail }));
   }
-  return detail.handled;
+  return detail.handled || claimedTargets.size > 0;
 }
 
-export function onEmergencyStop(handler, target = globalThis.window) {
+export function onEmergencyStop(handler, target = globalThis.window, { byTarget = false } = {}) {
   if (!target?.addEventListener) return () => {};
   const listener = (event) => {
-    if (event.detail?.handled) return;
+    if (event.detail?.handled && !byTarget) return;
     if (handler(event.detail) === true) event.detail.handled = true;
   };
   target.addEventListener(ESTOP_EVENT, listener);

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDrawFramingPayload,
+  checkDerivedDrawAdoption,
   computeSceneRevision,
   drawConnectionPayload,
   drawGenerationSignature,
@@ -12,6 +13,7 @@ import {
   drawTargetLabel,
   drawTargetMissingText,
   drawTargetReady,
+  formatFramingStatus,
   framingConfirmText,
   isDrawConnectionOk,
   isDrawPreviewStale,
@@ -240,4 +242,54 @@ test("矢量刻法（r46 / r47）：轮廓 / 填充 / 切割、默认轮廓，�
   assert.equal(drawRecommendEngravingMode("vector", "outline"), "outline");
   assert.equal(drawRecommendEngravingMode("raster", "outline"), "raster");
   assert.equal(drawRecommendEngravingMode("outline", "fill"), "outline");
+});
+
+test("#16/#17 画板派生预览沿用原快照、拦截过期采用，且严格模式 202 走边框不误报完成", async () => {
+  const framingPending = formatFramingStatus(
+    {
+      status: 202,
+      ok: true,
+      data: { success: true, result: { status: "approval_required", approval_id: "apr-f1", speech: "请在桌面批准走边框" } },
+    },
+    30,
+    20,
+  );
+  assert.equal(framingPending, "请在桌面批准走边框");
+  assert.doesNotMatch(framingPending, /走边框完成/);
+
+  const framingDone = formatFramingStatus({ status: 200, ok: true, data: { success: true, result: {} } }, 30, 20);
+  assert.match(framingDone, /走边框完成/);
+
+  const snap = { sceneRev: "r1:1:1", formSig: "{\"material\":\"椴木\"}" };
+  const blockedStale = checkDerivedDrawAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-1" },
+    currentWorkflowId: "wf-1",
+    previewSnap: snap,
+    previewStale: true,
+  });
+  assert.equal(blockedStale.ok, false);
+
+  const blockedMismatch = checkDerivedDrawAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-old" },
+    currentWorkflowId: "wf-new",
+    previewSnap: snap,
+    previewStale: false,
+  });
+  assert.equal(blockedMismatch.ok, false);
+
+  const accepted = checkDerivedDrawAdoption({
+    workflow: { workflow_id: "wf-2", regenerated_from: "wf-1" },
+    currentWorkflowId: "wf-1",
+    previewSnap: snap,
+    previewStale: false,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.inheritedSnap, snap);
+
+  const { readFileSync } = await import("node:fs");
+  const drawPageSrc = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
+  const drawSendCardSrc = readFileSync(new URL("../src/components/draw/DrawSendCard.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(drawPageSrc, /setSceneRev\(revSnapshot\)/, "异步导出画板后不得回写旧 sceneRev 盖掉实时改动");
+  assert.match(drawPageSrc, /isApprovalRequiredResponse\(res\)/, "画板发送前必须识别 202 待审批");
+  assert.match(drawSendCardSrc, /disabled=\{busy \|\| previewStale \|\| jobActive\}/, "画板预览过期时必须禁用反馈调参");
 });

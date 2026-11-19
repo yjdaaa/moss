@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
 import { startRecordingGrbl } from "./recordingGrbl.mjs";
 
 if (!process.env.TEST_API_BASE || !process.env.TEST_GRBL_PORT) {
@@ -711,65 +712,191 @@ test("[BTN-41] 雕刻工作台: 发送中点击「取消任务」真实触发 ! 
   }
 });
 
-test("[BTN-42] 雕刻工作台: 急停停机后记录断点，通过 /api/workflow (action: resume) 成功续雕剩余代码至终态", async () => {
-  // 1. 生成一段长任务刀路
-  const gen = await apiPost("/api/text-task/generate", {
-    text: "MOSS-RESUME", // 约 80 mm 宽，须在 100 mm 幅面内
-    material: "椴木",
-    thickness_mm: 3,
-    font_size_mm: 11,
-    engraving_mode: "raster",
+test("[BTN-42a] 雕刻工作台: 设备未证实已执行行边界时，取消停机置 can_resume=false 并拒绝续雕", async () => {
+  const rec = await startRecordingGrbl({ ackDelayMs: 12 });
+  try {
+    const gen = await apiPost("/api/text-task/generate", {
+      text: "NO-RESUME", // 短于 100 mm 幅面，避免生成超宽 400
+      material: "椴木",
+      thickness_mm: 3,
+      font_size_mm: 11,
+      engraving_mode: "raster",
+    });
+    assert.equal(gen.status, 200, JSON.stringify(gen.data));
+    const wfId = gen.data?.result?.workflow_id;
+    assert.ok(wfId);
+
+    const send = await apiPost("/api/workflow", {
+      action: "confirm_send",
+      workflow_id: wfId,
+      confirmed: true,
+      connection_mode: "network",
+      network_host: GRBL_HOST,
+      network_telnet_port: rec.port,
+    });
+    assert.equal(send.status, 200, JSON.stringify(send.data));
+    const total = send.data?.result?.send_result?.total_lines || 0;
+    assert.ok(total > 30, `刀路总行数必须充足以便发送中取消: ${total}`);
+
+    const started = Date.now();
+    while (!rec.events.includes("line") && Date.now() - started < 5000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(rec.events.includes("line"), "取消前设备必须已开始接收刀路行");
+
+    const cancel = await apiPost("/api/workflow", { action: "cancel", workflow_id: wfId });
+    assert.equal(cancel.status, 200, JSON.stringify(cancel.data));
+
+    const stopped = await pollWorkflowUntil(
+      wfId,
+      ["cancelled", "completed", "failed"],
+      15000,
+      (record) => record.status !== "cancelled" || record.send_result?.can_resume !== undefined,
+    );
+    assert.equal(stopped.data?.result?.status, "cancelled", JSON.stringify(stopped.data?.result));
+    const sr = stopped.data?.result?.send_result || {};
+    assert.equal(sr.can_resume, false, `无行号证明时禁止标为可续雕: ${JSON.stringify(sr)}`);
+    assert.equal(sr.resumable_from_line, 0);
+    assert.equal(sr.lines_completed, 0);
+
+    const rejected = await apiPost("/api/workflow", {
+      action: "resume",
+      workflow_id: wfId,
+      confirmed: true,
+      connection_mode: "network",
+      network_host: GRBL_HOST,
+      network_telnet_port: rec.port,
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(
+      rejected.data?.error_code || rejected.data?.detail?.error_code || rejected.data?.result?.error_code,
+      "workflow_not_resumable",
+    );
+  } finally {
+    rec.close();
+  }
+});
+
+test("[BTN-42] 雕刻工作台: 启用行号并由 Hold:0|Ln 证实已完成边界后，按完成行续雕至终态", async () => {
+  // 带 use_line_numbers: true 的受控模拟设备：首轮由后端实际 lines_sent >= 10 后再取消，Hold:0|Ln 固定回报 Ln:3
+  let phase = "first";
+  let held = false;
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      for (const b of chunk) {
+        if (b === 0x18) { held = false; socket.write("\r\nGrbl 3.7 [FluidNC '$' for help]\r\n"); continue; }
+        if (b === 0x21) { held = true; continue; }
+        if (b === 0x3f) {
+          if (held && phase === "first") {
+            socket.write("<Hold:0|MPos:0.000,0.000,0.000|FS:0,0|Ln:3>\r\n");
+          } else {
+            socket.write("<Idle|MPos:0.000,0.000,0.000|FS:0,0>\r\n");
+          }
+          continue;
+        }
+        if (b === 0x7e || b === 0x85) continue;
+        buffer += String.fromCharCode(b);
+      }
+      let idx;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).replace(/\r$/, "").trim();
+        buffer = buffer.slice(idx + 1);
+        if (line === "$$") socket.write("$0=10\r\n$30=1000\r\n$32=1\r\nok\r\n");
+        else if (line === "$CD") socket.write("name: \"E2E Ln Sim\"\r\nplanner_blocks: 16\r\nuse_line_numbers: true\r\nok\r\n");
+        else if (/^\$RI=\d+$/.test(line) || line === "$X" || line === "G4 P0") socket.write("ok\r\n");
+        else if (/^(?:N\d+\s+)?(?:[GMTS]\d+)/i.test(line) || line.startsWith("$")) {
+          setTimeout(() => { if (!socket.destroyed) socket.write("ok\r\n"); }, phase === "first" ? 12 : 0);
+        } else if (line.length > 0) socket.write("error:3\r\n");
+      }
+    });
+    socket.on("error", () => {});
   });
-  assert.equal(gen.status, 200);
-  const wfId = gen.data?.result?.workflow_id;
-  assert.ok(wfId);
-
-  // 2. 首次下发
-  const send = await apiPost("/api/workflow", {
-    action: "confirm_send",
-    workflow_id: wfId,
-    confirmed: true,
-    connection_mode: "network",
-    network_host: GRBL_HOST,
-    network_telnet_port: GRBL_PORT,
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
   });
-  assert.equal(send.status, 200);
-  const total = send.data?.result?.send_result?.total_lines || 0;
-  assert.ok(total > 30, `刀路总行数必须充足: ${total}`);
+  const simPort = server.address().port;
+  try {
+    const gen = await apiPost("/api/text-task/generate", {
+      text: "MOSS-RESUME", // 约 80 mm 宽，须在 100 mm 幅面内
+      material: "椴木",
+      thickness_mm: 3,
+      font_size_mm: 11,
+      engraving_mode: "raster",
+    });
+    assert.equal(gen.status, 200);
+    const wfId = gen.data?.result?.workflow_id;
+    assert.ok(wfId);
 
-  // 3. 在发送中下发急停/取消
-  const cancel = await apiPost("/api/workflow", { action: "cancel", workflow_id: wfId });
-  assert.equal(cancel.status, 200);
+    const send = await apiPost("/api/workflow", {
+      action: "confirm_send",
+      workflow_id: wfId,
+      confirmed: true,
+      connection_mode: "network",
+      network_host: GRBL_HOST,
+      network_telnet_port: simPort,
+    });
+    assert.equal(send.status, 200);
+    const total = send.data?.result?.send_result?.total_lines || 0;
+    assert.ok(total > 30, `刀路总行数必须充足: ${total}`);
 
-  // 轮询直到进入 cancelled 终态并记录断点
-  const stopped = await pollWorkflowUntil(
-    wfId,
-    ["cancelled", "completed", "failed"],
-    15000,
-    (record) => record.status !== "cancelled" || record.send_result?.can_resume !== undefined,
-  );
-  const sr = stopped.data?.result?.send_result || {};
-  const breakpoint = sr.lines_sent || 0;
+    const progressed = await pollWorkflowUntil(
+      wfId,
+      ["sending", "completed", "failed", "cancelled"],
+      8000,
+      (record) => record.status !== "sending" || (record.send_result?.lines_sent || 0) >= 10,
+    );
+    assert.equal(
+      progressed.data?.result?.status,
+      "sending",
+      `首轮取消前任务必须仍在发送中: ${JSON.stringify(progressed.data?.result)}`,
+    );
+    assert.ok(
+      (progressed.data?.result?.send_result?.lines_sent || 0) >= 10,
+      `首轮发送必须先达到 lines_sent >= 10: ${JSON.stringify(progressed.data?.result?.send_result)}`,
+    );
 
-  assert.ok(breakpoint > 0 && breakpoint < total, `必须在发送中形成有效断点: ${breakpoint}/${total}`);
-  assert.equal(sr.can_resume, true, "断点停机必须标明支持断点续雕");
-  assert.equal(sr.resumable_from_line, breakpoint);
+    const cancel = await apiPost("/api/workflow", { action: "cancel", workflow_id: wfId });
+    assert.equal(cancel.status, 200);
 
-  const resumeRes = await apiPost("/api/workflow", {
-    action: "resume",
-    workflow_id: wfId,
-    confirmed: true,
-    connection_mode: "network",
-    network_host: GRBL_HOST,
-    network_telnet_port: GRBL_PORT,
-  });
-  assert.equal(resumeRes.status, 200, `断点续雕请求必须成功: ${JSON.stringify(resumeRes.data)}`);
-  assert.equal(resumeRes.data?.result?.status, "sending");
-  assert.equal(resumeRes.data?.result?.send_result?.lines_sent, breakpoint, "续雕初始行必须精确对齐断点");
+    const stopped = await pollWorkflowUntil(
+      wfId,
+      ["cancelled", "completed", "failed"],
+      15000,
+      (record) => record.status !== "cancelled" || record.send_result?.can_resume !== undefined,
+    );
+    assert.equal(stopped.data?.result?.status, "cancelled");
+    const sr = stopped.data?.result?.send_result || {};
+    assert.equal(sr.can_resume, true, `设备已由 Hold:0|Ln 证实断点时必须可续雕: ${JSON.stringify(sr)}`);
+    assert.equal(sr.lines_completed, 2, `Hold:0|Ln:3 证实完成边界后 lines_completed 必须为 2: ${JSON.stringify(sr)}`);
+    assert.ok(sr.lines_completed > 0 && sr.lines_completed < sr.lines_sent,
+      `可信断点 (${sr.lines_completed}) 必须严格低于入队 ACK (${sr.lines_sent})，绝不能用 ACK 充当断点`);
+    assert.equal(sr.resumable_from_line, sr.lines_completed);
 
-  const final = await pollWorkflowUntil(wfId, ["completed", "failed", "cancelled"], 15000);
-  assert.equal(final.data?.result?.status, "completed", "断点续雕必须最终顺利完成");
-  assert.equal(final.data?.result?.send_result?.lines_sent, total, "断点续雕完成后总行数必须达到 100%");
+    phase = "resume";
+    const resumeRes = await apiPost("/api/workflow", {
+      action: "resume",
+      workflow_id: wfId,
+      confirmed: true,
+      connection_mode: "network",
+      network_host: GRBL_HOST,
+      network_telnet_port: simPort,
+    });
+    assert.equal(resumeRes.status, 200, `断点续雕请求必须成功: ${JSON.stringify(resumeRes.data)}`);
+    assert.equal(resumeRes.data?.result?.status, "sending");
+    assert.equal(resumeRes.data?.result?.send_result?.lines_sent, sr.resumable_from_line, "续雕必须从设备证实完成行启动");
+
+    const final = await pollWorkflowUntil(wfId, ["completed", "failed", "cancelled"], 15000);
+    assert.equal(final.data?.result?.status, "completed", "断点续雕必须最终顺利完成");
+    assert.equal(final.data?.result?.send_result?.lines_sent, total, "断点续雕完成后总行数必须达到 100%");
+  } finally {
+    for (const s of sockets) s.destroy();
+    server.close();
+  }
 });
 
 // -----------------------------------------------------------------------------

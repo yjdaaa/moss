@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Excalidraw, exportToBlob, newElementWith } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
@@ -14,10 +14,17 @@ import {
   DRAW_LAST_PREVIEW_KEY,
   DRAW_SCENE_KEY,
   parseDrawScene,
+  drawSceneChanges,
+  drawSceneToRestore,
+  snapshotDrawScene,
+  takePendingDrawScene,
   parseLastPreview,
+  planDrawHydration,
   readStored,
   serializeDrawScene,
   serializeLastPreview,
+  shouldApplyRestoredPreview,
+  shouldPersistLastPreview,
   writeStored,
 } from "../drawScenePersist.js";
 import {
@@ -35,17 +42,20 @@ import {
 } from "../materialSelectState.js";
 import { getLaserExportDimensions } from "../laserExportDimensions.js";
 import {
+  LAST_ACCEPTED_FINGERPRINT_KEY,
   applyConfirmSendResponse,
   applyPreviewFingerprintSuccess,
   canSubmitConfirmSend,
   createRepeatSendState,
+  isNestedSenderAccepted,
   requiresMovedMaterialAcknowledgement,
   setMovedMaterialAcknowledged,
 } from "../repeatSendGuard.js";
 import { apiFetch, getJson, postJson } from "../api/client.js";
+import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
-import { estopTargetArgs } from "../globalEstop.js";
+import { drawEstopContexts, estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
@@ -87,6 +97,7 @@ import { SendConfirmDialog } from "../components/draw/SendConfirmDialog.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
   buildDrawFramingPayload,
+  checkDerivedDrawAdoption,
   selectedElementIds,
   computeSceneRevision,
   drawConnectionPayload,
@@ -111,7 +122,7 @@ import {
   safeBrowserStorage,
 } from "../drawConnection.js";
 
-const CONFIG_KEYS = [
+const BACKEND_CONFIG_KEYS = [
   "material",
   "thickness_mm",
   "width_mm",
@@ -120,12 +131,14 @@ const CONFIG_KEYS = [
   "vector_style",
   "image_mode",
   "line_interval_scale",
+  "vector_simplify_factor",
+];
+const CONFIG_KEYS = [...BACKEND_CONFIG_KEYS,
   "connection_mode",
   "network_host",
   "network_telnet_port",
   "port",
   "baudrate",
-  "vector_simplify_factor",
 ];
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 const MATERIAL_CHANNEL_NAME = MATERIAL_LIBRARY_CHANNEL;
@@ -196,33 +209,100 @@ export function DrawPage({ onNavigate, active = true }) {
   const materialModeRef = useRef(materialMode);
   const formRef = useRef(form);
   const persistedRef = useRef({});
-  const pollingCleanupRef = useRef(null);
+  const inFlightJobsRef = useRef(new Map());
+  const workflowIdRef = useRef(workflowId);
+  workflowIdRef.current = workflowId;
   const importInputRef = useRef(null);
   const materialLoadedOnceRef = useRef(false);
   const materialRefreshGenerationRef = useRef(0);
   const boardStageRef = useRef(null);
+  const excalidrawApiRef = useRef(null);
   // 两点对位的原画板任务：当前任务本身，或（已换成对位结果时）它指回的原任务
   const registrationSourceRef = useRef("");
+  // #23 / #24：保护挂载恢复期，不清空上次预览指针、不被旧响应覆写，并同步到后端应用数据目录
+  const previewActionSeqRef = useRef(0);
+  const [lastPreviewHydrated, setLastPreviewHydrated] = useState(false);
+  const appliedSceneRef = useRef(null);
+  if (!appliedSceneRef.current) {
+    appliedSceneRef.current = snapshotDrawScene(initialScene?.elements, initialScene?.appState, initialScene?.files);
+  }
+  const applyingRemoteSceneRef = useRef(false);
+  const canvasReadyRef = useRef(false);
+  const sceneDirtyRef = useRef(false);
+  const pendingRemoteSceneRef = useRef(null);
+  const dirtyFormKeysRef = useRef(new Set());
+  const formHydratedRef = useRef(false);
+  const localSessionAcceptedRef = useRef(false);
+  const lastPersistedPreviewRef = useRef(undefined);
 
-  useEffect(() => () => pollingCleanupRef.current?.(), []);
+  useEffect(() => {
+    excalidrawApiRef.current = excalidrawAPI;
+  }, [excalidrawAPI]);
 
-  // 画布保存：内容变化后 0.6 秒写入本机；关窗口 / 页面隐藏前把还没写的补上
+  useEffect(() => {
+    const jobs = inFlightJobsRef.current;
+    return () => {
+      for (const job of jobs.values()) job.stop?.();
+      jobs.clear();
+    };
+  }, []);
+
+  const syncDrawStateToBackend = (patch, { keepalive = false } = {}) => {
+    if (!patch || typeof patch !== "object" || Object.keys(patch).length === 0) return;
+    const body = JSON.stringify(patch);
+    const useKeepalive = Boolean(keepalive && body.length <= 60_000);
+    apiFetch("/api/draw/state", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body,
+      ...(useKeepalive ? { keepalive: true } : {}),
+    }).catch(() => {});
+  };
+
+  const applyRemoteSceneToBoard = useCallback((api, parsed) => {
+    if (!api || !parsed) return false;
+    const fileEntries = Object.values(parsed.files || {}).filter((item) => item && typeof item === "object");
+    // 恢复时 0.6 秒内排队的旧视图和同步触发的回调都不能写回去。
+    pendingSceneRef.current = null;
+    applyingRemoteSceneRef.current = true;
+    try {
+      if (fileEntries.length > 0) api.addFiles?.(fileEntries);
+      api.updateScene({ elements: parsed.elements, appState: parsed.appState });
+      appliedSceneRef.current = snapshotDrawScene(api.getSceneElements(), api.getAppState(), api.getFiles());
+    } finally {
+      applyingRemoteSceneRef.current = false;
+    }
+    setSceneRev(appliedSceneRef.current.sceneRev);
+    setStatus(
+      parsed.filesDropped
+        ? "已恢复上次的画布；插入的图片太大没有存进本机，需要重新插入"
+        : "已恢复上次的画布",
+    );
+    return true;
+  }, []);
+
+  // 画布保存：内容变化后 0.6 秒写入本机并同步后端；关窗口 / 页面隐藏前把还没写的补上
   const pendingSceneRef = useRef(null);
   const sceneSaveTimerRef = useRef(null);
-  const flushScene = () => {
+  const flushScene = ({ keepalive = false } = {}) => {
     clearTimeout(sceneSaveTimerRef.current);
     sceneSaveTimerRef.current = null;
     const pending = pendingSceneRef.current;
     if (!pending) return;
     pendingSceneRef.current = null;
-    writeStored(safeBrowserStorage(), DRAW_SCENE_KEY, serializeDrawScene(pending.elements, pending.appState, pending.files));
+    const serialized = serializeDrawScene(pending.elements, pending.appState, pending.files);
+    writeStored(safeBrowserStorage(), DRAW_SCENE_KEY, serialized);
+    if (pending.syncRemote) syncDrawStateToBackend({ scene: serialized }, { keepalive });
   };
   const flushSceneRef = useRef(flushScene);
   useEffect(() => {
     flushSceneRef.current = flushScene;
   });
   useEffect(() => {
-    const onHide = () => flushSceneRef.current();
+    const onHide = () => flushSceneRef.current({ keepalive: true });
     window.addEventListener("pagehide", onHide);
     window.addEventListener("beforeunload", onHide);
     return () => {
@@ -239,33 +319,182 @@ export function DrawPage({ onNavigate, active = true }) {
     }
   }, [initialScene]);
 
-  // 上次成功的预览：打开时按任务编号重新读回来；画布与参数没变就不算过期（r49）
+  const applyPendingRemoteScene = useCallback((api) => {
+    const pending = takePendingDrawScene(pendingRemoteSceneRef.current, {
+      apiReady: Boolean(api), canvasReady: canvasReadyRef.current, sceneDirty: sceneDirtyRef.current,
+    });
+    if (!pending) return false;
+    pendingRemoteSceneRef.current = null;
+    return applyRemoteSceneToBoard(api, pending);
+  }, [applyRemoteSceneToBoard]);
+
   useEffect(() => {
-    const stored = parseLastPreview(readStored(safeBrowserStorage(), DRAW_LAST_PREVIEW_KEY));
-    if (!stored) return undefined;
+    applyPendingRemoteScene(excalidrawAPI);
+  }, [excalidrawAPI, applyPendingRemoteScene]);
+
+
+  // 上次画布、表单与成功预览恢复（#23/#24）：从后端应用数据目录读取并与本地 localStorage 对齐；
+  // 恢复查询返回前跳过清空存储，且用户期间新建/采纳预览时丢弃迟到的旧查询结果
+  useEffect(() => {
     let cancelled = false;
-    postJson("/api/workflow", { action: "status", workflow_id: stored.workflowId })
-      .then((res) => {
+    const storage = safeBrowserStorage();
+    const restoreSeq = previewActionSeqRef.current;
+
+    const restoreWorkflow = async (rawLastPreview) => {
+      const stored = parseLastPreview(rawLastPreview);
+      if (!stored) return;
+      try {
+        const res = await postJson("/api/workflow", { action: "status", workflow_id: stored.workflowId });
         const record = res.ok && res.data?.success ? res.data.result : null;
-        if (cancelled || !record?.workflow_id) return;
+        if (
+          !record?.workflow_id
+          || !shouldApplyRestoredPreview({
+            cancelled,
+            requestSeq: restoreSeq,
+            currentSeq: previewActionSeqRef.current,
+          })
+        ) {
+          return;
+        }
         setResult(res.data);
         setWorkflowId(stored.workflowId);
         setPreviewSnap(stored.snap);
         const fingerprint = record.draw_lab?.content_fingerprint || "";
         setRepeatSend((current) => applyPreviewFingerprintSuccess(current, fingerprint));
-      })
-      .catch(() => {});
+      } catch {
+        // 忽略旧预览恢复请求失败
+      }
+    };
+
+    (async () => {
+      const localSceneRaw = readStored(storage, DRAW_SCENE_KEY);
+      const localLastPreviewRaw = readStored(storage, DRAW_LAST_PREVIEW_KEY);
+      const localFormSnapshot = {};
+      for (const key of BACKEND_CONFIG_KEYS) {
+        const storedVal = readStored(storage, `laserLab.${key}`);
+        if (typeof storedVal === "string" && storedVal !== "") {
+          localFormSnapshot[key] = storedVal;
+        }
+      }
+      const localFingerprint = readStored(storage, LAST_ACCEPTED_FINGERPRINT_KEY) || "";
+
+      let remoteState = null;
+      try {
+        const stateRes = await getJson("/api/draw/state");
+        if (cancelled) return;
+        if (stateRes.ok && stateRes.data?.success && stateRes.data.result) {
+          remoteState = stateRes.data.result;
+        }
+      } catch {
+        remoteState = null;
+      }
+      if (cancelled) return;
+
+      if (typeof remoteState?.last_preview === "string") {
+        lastPersistedPreviewRef.current = remoteState.last_preview;
+      }
+
+      const plan = planDrawHydration({
+        remoteState,
+        localSceneRaw: pendingSceneRef.current
+          ? serializeDrawScene(pendingSceneRef.current.elements, pendingSceneRef.current.appState, pendingSceneRef.current.files)
+          : readStored(storage, DRAW_SCENE_KEY) ?? localSceneRaw,
+        localLastPreviewRaw,
+        localForm: localFormSnapshot,
+        localFingerprint,
+        configKeys: BACKEND_CONFIG_KEYS,
+        sceneDirty: sceneDirtyRef.current,
+        dirtyFormKeys: dirtyFormKeysRef.current,
+        previewActionSeq: previewActionSeqRef.current,
+      });
+
+      if (plan.sceneToApply !== null && !sceneDirtyRef.current) {
+        writeStored(storage, DRAW_SCENE_KEY, plan.sceneToApply);
+        pendingRemoteSceneRef.current = drawSceneToRestore(plan.sceneToApply);
+        applyPendingRemoteScene(excalidrawApiRef.current);
+      }
+
+      if (Object.keys(plan.formUpdates).length > 0) {
+        for (const [key, val] of Object.entries(plan.formUpdates)) {
+          persistedRef.current[key] = val;
+        }
+        setForm((current) => {
+          const next = { ...current };
+          for (const [key, val] of Object.entries(plan.formUpdates)) {
+            if (!dirtyFormKeysRef.current.has(key)) next[key] = val;
+          }
+          return next;
+        });
+        if (
+          ("material" in plan.formUpdates || "thickness_mm" in plan.formUpdates)
+          && Array.isArray(materialLibraryRef.current)
+          && materialLibraryRef.current.length > 0
+        ) {
+          const mergedMat = !dirtyFormKeysRef.current.has("material") && "material" in plan.formUpdates
+            ? plan.formUpdates.material
+            : formRef.current.material;
+          const mergedThick = !dirtyFormKeysRef.current.has("thickness_mm") && "thickness_mm" in plan.formUpdates
+            ? plan.formUpdates.thickness_mm
+            : formRef.current.thickness_mm;
+          const restoredMat = restoreMaterialSelectState({
+            materials: materialLibraryRef.current,
+            savedMaterial: mergedMat,
+            savedThickness: mergedThick,
+          });
+          setMaterialLibrary(restoredMat.materials);
+          setMaterialMode(restoredMat.mode);
+          setMaterialSelectValue(restoredMat.selectValue);
+        }
+      } else {
+        for (const key of CONFIG_KEYS) {
+          const raw = formRef.current[key];
+          persistedRef.current[key] = typeof raw === "boolean" ? (raw ? "true" : "false") : String(raw ?? "");
+        }
+      }
+      formHydratedRef.current = true;
+
+      if (plan.fingerprintUpdate !== null && !localSessionAcceptedRef.current) {
+        writeStored(storage, LAST_ACCEPTED_FINGERPRINT_KEY, plan.fingerprintUpdate);
+        setRepeatSend((current) => ({
+          ...current,
+          lastAcceptedFingerprint: plan.fingerprintUpdate,
+        }));
+      }
+
+      const initialPatch = { ...plan.backfill };
+      if (dirtyFormKeysRef.current.size > 0) {
+        const dirtyFormPatch = { ...(initialPatch.form || {}) };
+        for (const key of dirtyFormKeysRef.current) {
+          const raw = formRef.current[key];
+          dirtyFormPatch[key] = typeof raw === "boolean" ? (raw ? "true" : "false") : String(raw ?? "");
+        }
+        initialPatch.form = dirtyFormPatch;
+      }
+      if (Object.keys(initialPatch).length > 0) {
+        syncDrawStateToBackend(initialPatch);
+      }
+
+      await restoreWorkflow(plan.lastPreviewRaw);
+      if (!cancelled) {
+        setLastPreviewHydrated(true);
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyPendingRemoteScene]);
   useEffect(() => {
-    writeStored(
-      safeBrowserStorage(),
-      DRAW_LAST_PREVIEW_KEY,
-      workflowId && previewSnap ? serializeLastPreview(workflowId, previewSnap) : "",
-    );
-  }, [workflowId, previewSnap]);
+    if (!shouldPersistLastPreview({ workflowId, previewSnap, lastPreviewHydrated })) {
+      return;
+    }
+    const serialized = workflowId && previewSnap ? serializeLastPreview(workflowId, previewSnap) : "";
+    writeStored(safeBrowserStorage(), DRAW_LAST_PREVIEW_KEY, serialized);
+    if (lastPersistedPreviewRef.current !== serialized) {
+      lastPersistedPreviewRef.current = serialized;
+      syncDrawStateToBackend({ last_preview: serialized });
+    }
+  }, [workflowId, previewSnap, lastPreviewHydrated]);
 
   // 常驻页面（r49）重新显示时让画布重新量一次尺寸
   useEffect(() => {
@@ -295,21 +524,29 @@ export function DrawPage({ onNavigate, active = true }) {
     registrationSourceRef.current = result?.result?.registered_from || workflowId || "";
   }, [result, workflowId]);
 
-  // 自动按需持久化修改过的配置键（切页面不再丢失填写；存储受限时静默退回当前会话）
+  // 自动按需持久化修改过的配置键（非连接设置在换端口后也可恢复，设备连接只保存在当前浏览器）
   useEffect(() => {
     const storage = safeBrowserStorage();
-    if (!storage) return;
+    const backendPatch = {};
     for (const key of CONFIG_KEYS) {
       const raw = form[key];
       const val = typeof raw === "boolean" ? (raw ? "true" : "false") : String(raw ?? "");
       if (persistedRef.current[key] !== val) {
         persistedRef.current[key] = val;
-        try {
-          storage.setItem(`laserLab.${key}`, val);
-        } catch {
-          // 存储受限时保留内存态
+        if (storage) {
+          try {
+            storage.setItem(`laserLab.${key}`, val);
+          } catch {
+            // 存储受限时保留内存态
+          }
+        }
+        if (formHydratedRef.current && BACKEND_CONFIG_KEYS.includes(key)) {
+          backendPatch[key] = val;
         }
       }
+    }
+    if (Object.keys(backendPatch).length > 0) {
+      syncDrawStateToBackend({ form: backendPatch });
     }
   }, [form]);
 
@@ -415,6 +652,7 @@ export function DrawPage({ onNavigate, active = true }) {
   const canConfirmSend = canActOnWorkflow && !previewStale && hostReady && summaryAllowsSend;
 
   function updateForm(key, value) {
+    dirtyFormKeysRef.current.add(key);
     if (
       key === "connection_mode" ||
       key === "port" ||
@@ -537,6 +775,8 @@ export function DrawPage({ onNavigate, active = true }) {
   }, []);
 
   function handleMaterialSelectChange(selectValue) {
+    dirtyFormKeysRef.current.add("material");
+    dirtyFormKeysRef.current.add("thickness_mm");
     const next = applyMaterialSelectChange({
       materials: materialLibrary,
       currentThickness: form.thickness_mm,
@@ -558,6 +798,8 @@ export function DrawPage({ onNavigate, active = true }) {
   }
 
   function handleReturnToLibrary() {
+    dirtyFormKeysRef.current.add("material");
+    dirtyFormKeysRef.current.add("thickness_mm");
     const next = returnToLibrary({
       materials: materialLibrary,
       preferredMaterial: form.material,
@@ -574,6 +816,8 @@ export function DrawPage({ onNavigate, active = true }) {
   }
 
   function pickDiscoveredController(controller) {
+    dirtyFormKeysRef.current.add("network_host");
+    dirtyFormKeysRef.current.add("network_telnet_port");
     setConnectionResult(null);
     setForm((current) => ({
       ...current,
@@ -620,6 +864,7 @@ export function DrawPage({ onNavigate, active = true }) {
         const fileEntries = Object.values(parsed.files).filter((item) => item && typeof item === "object");
         if (fileEntries.length > 0) excalidrawAPI.addFiles?.(fileEntries);
       }
+      sceneDirtyRef.current = true;
       excalidrawAPI.updateScene({
         elements: parsed.elements,
         appState: parsed.appState,
@@ -634,13 +879,19 @@ export function DrawPage({ onNavigate, active = true }) {
     }
   }
 
-  function startDrawJobPolling(targetWorkflowId) {
-    pollingCleanupRef.current?.();
+  function startDrawJobPolling(targetWorkflowId, inFlight) {
     let pollState = { id: targetWorkflowId, kind: "workflow", status: "sending", progress: null };
     const stop = startJobPolling(
       (signal) => postJson("/api/workflow", { action: "status", workflow_id: targetWorkflowId }, { signal }),
       (res) => {
         pollState = applyJobPoll(pollState, targetWorkflowId, "workflow", res);
+        const terminal = TERMINAL_STATUSES.has(pollState.status);
+        if (terminal) {
+          stop();
+          inFlightJobsRef.current.delete(targetWorkflowId);
+        }
+        // 换预览只切换展示，原作业仍跟踪到终态，供隐藏画板急停。
+        if (workflowIdRef.current !== targetWorkflowId) return;
         if (pollState.connectionLost) {
           setStatus("状态未知：无法查询设备，机器可能仍在运行（请到设备旁确认，顶栏急停随时可用）");
           return;
@@ -661,9 +912,7 @@ export function DrawPage({ onNavigate, active = true }) {
             );
           }
         }
-        if (TERMINAL_STATUSES.has(pollState.status)) {
-          stop();
-          pollingCleanupRef.current = null;
+        if (terminal) {
           if (pollState.status === "completed") {
             setStatus("雕刻已完成（控制器空闲状态已核验）");
           } else if (pollState.status === "cancelled") {
@@ -675,7 +924,7 @@ export function DrawPage({ onNavigate, active = true }) {
         }
       },
     );
-    pollingCleanupRef.current = stop;
+    inFlight.stop = stop;
   }
 
   async function exportScene({ forLaser = false } = {}) {
@@ -777,12 +1026,12 @@ export function DrawPage({ onNavigate, active = true }) {
       void showAlert(fillPayload.error, { title: "填充设置不对", tone: "warning" });
       return;
     }
+    previewActionSeqRef.current += 1;
     setBusy(true);
     setStatus("导出画板中...");
     try {
       const { blob, scene, activeElements } = await exportScene({ forLaser: true });
       const revSnapshot = computeSceneRevision(activeElements);
-      setSceneRev(revSnapshot);
       const imageDataUrl = await blobToDataUrl(blob);
       setStatus("上传并生成预览中...");
       const payload = {
@@ -808,8 +1057,6 @@ export function DrawPage({ onNavigate, active = true }) {
       }
       const res = await postJson("/api/draw/preview", payload);
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
-      pollingCleanupRef.current?.();
-      pollingCleanupRef.current = null;
       setResult(data);
       const nextWorkflowId = res.ok && data.success
         ? data?.result?.workflow_id || data?.result?.workflow?.workflow_id || ""
@@ -885,8 +1132,11 @@ export function DrawPage({ onNavigate, active = true }) {
       setStatus("相同图案再次发送前，请勾选“已移动材料或原点”");
       return;
     }
+    if (inFlightJobsRef.current.has(workflowId)) return;
     setBusy(true);
     setStatus(offlineSd ? "提交脱机离线加工..." : "提交确认发送...");
+    const inFlight = { jobId: workflowId, target: estopTargetArgs(form) };
+    inFlightJobsRef.current.set(workflowId, inFlight);
     try {
       const res = await postJson("/api/workflow", {
         action: "confirm_send",
@@ -898,20 +1148,36 @@ export function DrawPage({ onNavigate, active = true }) {
         wait_for_response: true,
       });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
+      if (isApprovalRequiredResponse(res)) {
+        setResult(data);
+        setConfirmOpen(false);
+        setStatus(approvalPendingMessage(res, "发送任务"));
+        return;
+      }
       setResult(data);
       setConfirmOpen(false);
-      setRepeatSend((current) =>
-        applyConfirmSendResponse(current, res.ok ? data : { ...data, success: false }, safeBrowserStorage()),
-      );
+      const safeData = res.ok ? data : { ...data, success: false };
+      setRepeatSend((current) => applyConfirmSendResponse(current, safeData, safeBrowserStorage()));
+      if (isNestedSenderAccepted(safeData)) {
+        const fp = String(result?.result?.draw_lab?.content_fingerprint || repeatSend.currentFingerprint || "").trim().toLowerCase();
+        if (/^[0-9a-f]{64}$/.test(fp)) {
+          localSessionAcceptedRef.current = true;
+          syncDrawStateToBackend({ last_accepted_fingerprint: fp });
+        }
+      }
       if (res.ok && data.success) {
         setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度..."));
-        startDrawJobPolling(workflowId);
+        startDrawJobPolling(workflowId, inFlight);
+      } else if (res.status === 0) {
+        setStatus("发送结果未知，正在查询原任务。顶栏急停仍可按原设备发送。");
+        startDrawJobPolling(workflowId, inFlight);
       } else {
         setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
       }
     } catch (error) {
       setStatus(`请求失败：${error.message || error}`);
     } finally {
+      if (!inFlight.stop) inFlightJobsRef.current.delete(workflowId);
       setBusy(false);
     }
   }
@@ -1011,8 +1277,9 @@ export function DrawPage({ onNavigate, active = true }) {
   // 顶栏常驻急停（2026-11-05）：只走 `/api/safe-action` 实时 0x18，绝不退化为 workflow cancel。
   // 顶栏已先停后端登记的任务；轮到本页说明任务已不在登记表（如刚全量发送完、GRBL 仍在执行缓冲）
   // 或任务通道挂起，此时按任务编号失败后改用本页设备目标新开连接写 0x18（`usePageEmergencyStop`）。
+  // 隐藏画板只补发给尚在提交或跟踪中的原设备，当前页面仍可同时处理自己的设备。
   usePageEmergencyStop(
-    () => ({ jobId: workflowId, target: estopTargetArgs(form) }),
+    () => drawEstopContexts({ active, target: estopTargetArgs(form), inFlight: inFlightJobsRef.current.values() }),
     (outcome) => {
       const message = outcome.kind === "sent"
         ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请到设备旁确认；必要时按实体急停。`
@@ -1032,10 +1299,21 @@ export function DrawPage({ onNavigate, active = true }) {
       void showAlert(adopted.error, { title: "对位结果不能用于画板", tone: "warning" });
       return;
     }
-    pollingCleanupRef.current?.();
-    pollingCleanupRef.current = null;
+    const guard = checkDerivedDrawAdoption({
+      workflow: record,
+      currentWorkflowId: registrationSourceRef.current || workflowId,
+      previewSnap,
+      previewStale,
+    });
+    if (!guard.ok) {
+      setStatus(guard.reason);
+      void showAlert(guard.reason, { title: "对位结果已过期", tone: "warning" });
+      return;
+    }
+    previewActionSeqRef.current += 1;
     setWorkflowId(adopted.workflowId);
     setResult(adopted.result);
+    setPreviewSnap(guard.inheritedSnap);
     setConfirmOpen(false);
     setRepeatSend((current) => applyPreviewFingerprintSuccess(current, adopted.fingerprint));
     setStatus(adopted.status);
@@ -1100,6 +1378,7 @@ export function DrawPage({ onNavigate, active = true }) {
     );
     if (!confirmed) return;
     clearedSceneRef.current = live;
+    sceneDirtyRef.current = true;
     excalidrawAPI.updateScene({ elements: live.map((el) => newElementWith(el, { isDeleted: true })) });
     setCanUndoClear(true);
     setStatus("画布已清空，点工具栏「撤销清空」可找回");
@@ -1109,6 +1388,7 @@ export function DrawPage({ onNavigate, active = true }) {
     const cleared = clearedSceneRef.current;
     if (!excalidrawAPI || !cleared) return;
     clearedSceneRef.current = null;
+    sceneDirtyRef.current = true;
     setCanUndoClear(false);
     excalidrawAPI.updateScene({ elements: cleared.map((el) => newElementWith(el, { isDeleted: false })) });
     setStatus(`已恢复清空前的 ${cleared.length} 个图形`);
@@ -1142,13 +1422,23 @@ export function DrawPage({ onNavigate, active = true }) {
     }
   }
 
-  // 采用加工反馈的调参建议：换成新生成的预览任务，尚未发送
+  // 采用加工反馈的调参建议：换成新生成的预览任务，尚未发送（若画布或参数已改，拦截并用原快照沿用签名）
   const adoptFeedbackWorkflow = (workflow) => {
-    pollingCleanupRef.current?.();
-    pollingCleanupRef.current = null;
+    const guard = checkDerivedDrawAdoption({
+      workflow,
+      currentWorkflowId: workflowId,
+      previewSnap,
+      previewStale,
+    });
+    if (!guard.ok) {
+      setStatus(guard.reason);
+      void showAlert(guard.reason, { title: "不能采用反馈调参", tone: "warning" });
+      return;
+    }
+    previewActionSeqRef.current += 1;
     setWorkflowId(workflow.workflow_id);
     setResult({ success: true, result: workflow });
-    setPreviewSnap({ sceneRev, formSig: currentFormSig });
+    setPreviewSnap(guard.inheritedSnap);
     setConfirmOpen(false);
     setRepeatSend((current) => applyPreviewFingerprintSuccess(current, workflow.draw_lab?.content_fingerprint || ""));
     setStatus("调参预览已生成，尚未发送");
@@ -1240,15 +1530,32 @@ export function DrawPage({ onNavigate, active = true }) {
                 files: initialScene.files,
               } : undefined}
               onChange={(elements, appState, files) => {
-                pendingSceneRef.current = { elements, appState, files };
+                if (applyingRemoteSceneRef.current) return;
+                const next = snapshotDrawScene(elements, appState, files);
+                // Excalidraw 先给 API，initialData 恢复后才发第一次 onChange。
+                if (!canvasReadyRef.current) {
+                  canvasReadyRef.current = true;
+                  appliedSceneRef.current = next;
+                  if (applyPendingRemoteScene(excalidrawApiRef.current)) return;
+                }
+                if (pendingRemoteSceneRef.current) return;
+                const changes = drawSceneChanges(appliedSceneRef.current, next);
+                appliedSceneRef.current = next;
+                if (changes.content) sceneDirtyRef.current = true;
+                if (changes.content || changes.view) {
+                  pendingSceneRef.current = {
+                    elements, appState, files,
+                    syncRemote: changes.content || Boolean(pendingSceneRef.current?.syncRemote),
+                  };
+                  clearTimeout(sceneSaveTimerRef.current);
+                  sceneSaveTimerRef.current = setTimeout(() => flushSceneRef.current(), 600);
+                }
+                const nextRev = next.sceneRev;
                 // 清空后又画了东西（或已恢复）：撤销清空作废
                 if (clearedSceneRef.current && elements.some((el) => !el.isDeleted)) {
                   clearedSceneRef.current = null;
                   setCanUndoClear(false);
                 }
-                clearTimeout(sceneSaveTimerRef.current);
-                sceneSaveTimerRef.current = setTimeout(() => flushSceneRef.current(), 600);
-                const nextRev = computeSceneRevision(elements);
                 setSceneRev((prev) => (prev === nextRev ? prev : nextRev));
                 const nextSelection = selectedElementIds(appState).join(",");
                 setSelectionKey((prev) => (prev === nextSelection ? prev : nextSelection));
@@ -1268,6 +1575,8 @@ export function DrawPage({ onNavigate, active = true }) {
           applyImageQualityPreset={(key) => {
             const next = applyImagePreset(key);
             if (!next) return;
+            dirtyFormKeysRef.current.add("image_mode");
+            dirtyFormKeysRef.current.add("line_interval_scale");
             setForm((current) => ({ ...current, image_mode: next.imageMode, line_interval_scale: next.intervalScale }));
           }}
           materialLibrary={materialLibrary}

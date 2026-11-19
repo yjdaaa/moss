@@ -11,7 +11,7 @@ export function applyJobPoll(current, id, kind, response) {
   }
   const send = record?.send_result || {};
   const valid = Number.isFinite(send.total_lines) && send.total_lines > 0 && Number.isFinite(send.lines_sent) && send.lines_sent >= 0 && send.lines_sent <= send.total_lines;
-  return { ...current, status, connectionLost: false, pollFailures: 0,
+  return { ...current, status, connectionLost: false, pollFailures: 0, target: send.target || current.target,
     progress: valid ? { sent: send.lines_sent, total: send.total_lines, target: "" } : current.progress };
 }
 export function markStopRequested(current, id) {

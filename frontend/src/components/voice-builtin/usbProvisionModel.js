@@ -298,7 +298,7 @@ export function buildUsbProvisionWritePayload({
   // 清除 OTA、改填外部服务地址或取消自动放行时一并清掉旧 websocket:url，防止板子继续连回旧地址
   patch.ws_url = autoAllow ? wsUrl : "";
 
-  return {
+  const payload = {
     action: "write",
     port,
     expected_mac: inspectData?.device?.mac_address || "",
@@ -307,6 +307,10 @@ export function buildUsbProvisionWritePayload({
     unrevoke: Boolean(autoAllow && draft.unrevoke),
     patch,
   };
+  if (typeof inspectData?.known_device?.status_revision === "number") {
+    payload.expected_status_revision = inspectData.known_device.status_revision;
+  }
+  return payload;
 }
 
 /** 读取到的设备在 MOSS 里是否被撤销过（此时自动允许需要单独确认“解除撤销”）。 */

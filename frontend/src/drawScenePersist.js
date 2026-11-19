@@ -1,3 +1,5 @@
+import { computeSceneRevision } from "./drawConnection.js";
+
 // 创作画板的画布与上次预览本机保存（2026-11-17 用户决定，技术书 r49：“我希望我做的这些设置以及画板文字这些东西
 // 都要保持上一次”）。切页面时画板常驻（main.jsx），这里负责关掉 MOSS 再打开也能接着画：
 // - 画布：未删除的元素、插入图片的数据（总量不超过 MAX_FILES_CHARS，超了只存元素并标记）与视图位置；
@@ -57,6 +59,42 @@ export function parseDrawScene(raw) {
   }
 }
 
+/** 区分“后端没有存档”和“后端保存了清空”，两者到画布就绪后才应用。 */
+export function drawSceneToRestore(raw) {
+  if (raw === "") return { elements: [], appState: {}, files: {} };
+  return parseDrawScene(raw);
+}
+
+export function takePendingDrawScene(pending, { apiReady, canvasReady, sceneDirty }) {
+  return apiReady && canvasReady && !sceneDirty ? pending : null;
+}
+
+export function snapshotDrawScene(elements, appState = {}, files = {}) {
+  const referencedFiles = new Map();
+  for (const element of elements || []) {
+    if (element?.isDeleted || !element?.fileId) continue;
+    const file = files?.[element.fileId];
+    if (typeof file?.dataURL === "string") {
+      referencedFiles.set(element.fileId, { dataURL: file.dataURL, mimeType: file.mimeType });
+    }
+  }
+  return {
+    sceneRev: computeSceneRevision(elements),
+    referencedFiles,
+    view: APP_STATE_KEYS.map((key) => key === "zoom" ? appState?.zoom?.value : appState?.[key]),
+  };
+}
+
+export function drawSceneChanges(previous, next) {
+  const content = previous.sceneRev !== next.sceneRev
+    || previous.referencedFiles.size !== next.referencedFiles.size
+    || [...next.referencedFiles].some(([id, file]) => {
+      const old = previous.referencedFiles.get(id);
+      return old?.dataURL !== file.dataURL || old.mimeType !== file.mimeType;
+    });
+  return { content, view: next.view.some((value, index) => value !== previous.view[index]) };
+}
+
 /** 上次成功预览 → 字符串。 */
 export function serializeLastPreview(workflowId, snap) {
   if (!workflowId || !snap) return "";
@@ -94,4 +132,100 @@ export function writeStored(storage, key, value) {
   } catch {
     return false;
   }
+}
+
+/**
+ * 判断是否应当持久化 `DRAW_LAST_PREVIEW_KEY`（#23）：
+ * 恢复查询尚未落定前，`workflowId` 与 `previewSnap` 仍是初始空值，不得提前把旧指针写空；
+ * 一旦恢复完成，或用户主动生成/采纳了新预览，才写入或清空。
+ */
+export function shouldPersistLastPreview({ workflowId, previewSnap, lastPreviewHydrated }) {
+  if (workflowId && previewSnap) return true;
+  return Boolean(lastPreviewHydrated);
+}
+
+/**
+ * 判断迟到的恢复查询结果是否仍可写入实时状态（#23）：
+ * 组件已卸载或期间用户已新建/采纳预览时丢弃。
+ */
+export function shouldApplyRestoredPreview({ cancelled, requestSeq, currentSeq }) {
+  return !cancelled && requestSeq === currentSeq;
+}
+
+/**
+ * 合并后端持久化的画板状态（`GET /api/draw/state`）与当前 origin 的 `localStorage`（#24）：
+ * 后端已保存时以应用数据目录为准（不覆盖本轮用户已主动改动的画布/表单/预览），
+ * 后端为空而本地 `localStorage` 有旧数据时安排一次性回填。
+ */
+export function planDrawHydration({
+  remoteState = null,
+  localSceneRaw = null,
+  localLastPreviewRaw = null,
+  localForm = {},
+  localFingerprint = "",
+  configKeys = [],
+  sceneDirty = false,
+  dirtyFormKeys = new Set(),
+  previewActionSeq = 0,
+} = {}) {
+  const remote = remoteState && typeof remoteState === "object" ? remoteState : null;
+  const backfill = {};
+
+  let sceneToApply = null;
+  if (!sceneDirty) {
+    if (typeof remote?.scene === "string") {
+      sceneToApply = remote.scene;
+      const remoteScene = parseDrawScene(remote.scene);
+      const localScene = parseDrawScene(localSceneRaw);
+      if (remoteScene && localScene && !drawSceneChanges(
+        snapshotDrawScene(remoteScene.elements, remoteScene.appState, remoteScene.files),
+        snapshotDrawScene(localScene.elements, localScene.appState, localScene.files),
+      ).content) {
+        sceneToApply = localSceneRaw;
+      }
+    } else if (typeof localSceneRaw === "string" && localSceneRaw) {
+      backfill.scene = localSceneRaw;
+    }
+  }
+
+  let lastPreviewRaw = null;
+  if (previewActionSeq === 0) {
+    if (typeof remote?.last_preview === "string") {
+      lastPreviewRaw = remote.last_preview;
+    } else if (typeof localLastPreviewRaw === "string" && localLastPreviewRaw) {
+      lastPreviewRaw = localLastPreviewRaw;
+      backfill.last_preview = localLastPreviewRaw;
+    }
+  }
+
+  const remoteForm = remote?.form && typeof remote.form === "object" ? remote.form : {};
+  const formUpdates = {};
+  const backfillForm = {};
+  for (const key of configKeys) {
+    if (typeof remoteForm[key] === "string") {
+      if (!dirtyFormKeys.has(key)) {
+        formUpdates[key] = remoteForm[key];
+      }
+    } else if (typeof localForm?.[key] === "string" && localForm[key] !== "") {
+      backfillForm[key] = localForm[key];
+    }
+  }
+  if (Object.keys(backfillForm).length > 0) {
+    backfill.form = backfillForm;
+  }
+
+  let fingerprintUpdate = null;
+  if (typeof remote?.last_accepted_fingerprint === "string") {
+    fingerprintUpdate = remote.last_accepted_fingerprint;
+  } else if (typeof localFingerprint === "string" && localFingerprint) {
+    backfill.last_accepted_fingerprint = localFingerprint;
+  }
+
+  return {
+    sceneToApply,
+    lastPreviewRaw,
+    formUpdates,
+    fingerprintUpdate,
+    backfill,
+  };
 }

@@ -3,6 +3,8 @@
  * Does not replace backend confirmed=true / material freeze / gcode SHA gates.
  */
 
+import { isApprovalRequiredResponse } from "./approvalState.js";
+
 export const LAST_ACCEPTED_FINGERPRINT_KEY = "laserLab.repeatSend.v1.lastAcceptedFingerprint";
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -57,7 +59,9 @@ export function canSubmitConfirmSend(state) {
  * Require send_result.success === true and workflow status sending|completed.
  */
 export function isNestedSenderAccepted(confirmResponse) {
-  if (!confirmResponse || confirmResponse.success !== true) return false;
+  if (!confirmResponse || confirmResponse.success !== true || isApprovalRequiredResponse(confirmResponse)) {
+    return false;
+  }
   const result = confirmResponse.result || {};
   const sendResult = result.send_result || result.sendResult || {};
   if (sendResult.success !== true) return false;

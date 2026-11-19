@@ -26,7 +26,7 @@ export function usePageEmergencyStop(getContext, report) {
   }, []);
 
   useEffect(
-    () => onEmergencyStop(createPageEstopResponder(() => latest.current.getContext?.(), run)),
+    () => onEmergencyStop(createPageEstopResponder(() => latest.current.getContext?.(), run), globalThis.window, { byTarget: true }),
     [run],
   );
 

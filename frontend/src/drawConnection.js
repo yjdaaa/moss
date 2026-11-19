@@ -3,6 +3,7 @@
 // 2026-11-17（技术书 r45）：“生成策略”不再有矢量一项，改由雕刻路线全局开关（矢量 / 转图片，与工作台、语音
 // 同一个值）决定；转图片时再选“转图片方式”：光栅扫描（默认，与工作台图片同一套引擎）或轮廓描边。
 
+import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
 import { normalizeEngraveRoute } from "./engraveRoute.js";
 import { intervalScaleValue } from "./qualityPresets.js";
 import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
@@ -142,6 +143,9 @@ export function buildDrawFramingPayload(form, width, height, outline = null, fra
 
 /** 走边框响应（按 client.js `{ status, ok, data }` 契约）转界面状态文案。 */
 export function formatFramingStatus(res, width, height) {
+  if (isApprovalRequiredResponse(res)) {
+    return approvalPendingMessage(res, "走边框");
+  }
   if (res?.ok && res?.data?.success) {
     return `走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm，未出光)`;
   }
@@ -272,6 +276,25 @@ export function isDrawPreviewStale(savedSnapshot, currentSnapshot) {
     savedSnapshot.formSig !== currentSnapshot?.formSig
     || savedSnapshot.sceneRev !== currentSnapshot?.sceneRev
   );
+}
+
+/**
+ * 画板采用反馈调参或派生预览前的门禁校验：
+ * 必须关联当前画板任务，且当前预览未过期；通过时沿用原快照签名（不按当前已改动状态重新盖章）。
+ */
+export function checkDerivedDrawAdoption({ workflow, currentWorkflowId, previewSnap, previewStale }) {
+  if (!workflow?.workflow_id) return { ok: false, reason: "派生预览记录无效" };
+  const parentId = workflow.regenerated_from || workflow.registered_from || "";
+  if (parentId && currentWorkflowId && parentId !== currentWorkflowId) {
+    return { ok: false, reason: "派生预览不是当前画板任务生成的，已忽略" };
+  }
+  if (previewStale || !previewSnap?.formSig) {
+    return {
+      ok: false,
+      reason: "画布或左侧参数已改动，当前预览已过期，已拦截采用旧任务派生结果；请先重新生成预览。",
+    };
+  }
+  return { ok: true, inheritedSnap: previewSnap };
 }
 
 /** 校验并提取导入的 `.excalidraw` / `.json` 场景数据。 */

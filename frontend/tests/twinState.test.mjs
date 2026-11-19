@@ -283,6 +283,7 @@ test("数字孪生：连接参数按模式隔离，页面内急停在非运行�
       isJobRunning: true,
       selectedWorkflowId: " wf-live-1 ",
       connectionPayload: netConn,
+      recordedTarget: "192.168.1.50:2323",
     }),
     { jobId: "wf-live-1", target: { connection_mode: "network", host: "192.168.1.50", telnet_port: 2323 } },
   );
@@ -310,6 +311,7 @@ test("数字孪生急停：任务通道失败时按页面连接目标补发 0x18
   const context = twinEstopContext({
     isJobRunning: true,
     selectedWorkflowId: "wf-live-2",
+    recordedTarget: "127.0.0.1:2302",
     connectionPayload: buildTwinConnectionPayload({ mode: "network", networkHost: "127.0.0.1", telnetPort: 2302 }),
   });
   const outcome = await stopPageTarget(async (path, body) => {
@@ -321,7 +323,7 @@ test("数字孪生急停：任务通道失败时按页面连接目标补发 0x18
   assert.equal(outcome.kind, "sent");
   assert.equal(outcome.via, "target");
   assert.deepEqual(calls, [
-    { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, job_id: "wf-live-2" } },
+    { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, job_id: "wf-live-2", connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
     { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
   ]);
 });

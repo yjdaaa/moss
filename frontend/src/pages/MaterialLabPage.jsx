@@ -1,4 +1,5 @@
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
+import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Bookmark,
@@ -17,7 +18,7 @@ import { exportFile, savedMessage } from "../saveFile.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { CalibrationWizard } from "../components/CalibrationWizard.jsx";
 import { markWizardStep, readWizardState, wizardMaterialKey, writeWizardState } from "../calibrationWizard.js";
-import { estopTargetArgs } from "../globalEstop.js";
+import { estopTargetArgs, visibleEstopContext } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated } from "../materialSelectState.js";
 import {
@@ -213,16 +214,17 @@ export function MaterialLabPage({ onNavigate }) {
     || matrixSendState?.status === "sending"
     || matrixSendState?.status === "running";
   const handleStopMatrix = usePageEmergencyStop(
-    () => ({
-      jobId: isMatrixRunning ? matrixId : "",
-      target: estopTargetArgs({
+    () => visibleEstopContext(
+      isMatrixRunning ? matrixId : "",
+      estopTargetArgs({
         connection_mode: connectionMode,
         port: serialPort,
         baudrate,
         network_host: matrixHost,
         network_telnet_port: telnetPort,
       }),
-    }),
+      matrixSendState?.target,
+    ),
     (outcome) => {
       const msg = outcome.kind === "sent"
         ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请现场核实机器状态；必要时按实体急停。`
@@ -619,13 +621,13 @@ export function MaterialLabPage({ onNavigate }) {
     try {
       const res = await postJson("/api/material-lab/send", built.payload);
       setMatrixBusy(false);
-      if (res.status === 202 || res.data?.result?.status === "approval_required") {
-        setMatrixStatus("已提交桌面严格模式审批，请在电脑端审批卡确认后开始出光测试。");
+      if (isApprovalRequiredResponse(res)) {
+        setMatrixStatus(approvalPendingMessage(res, "发送标定矩阵"));
         return;
       }
       const sendResult = res.data?.result?.send_result;
       if (res.ok && res.data?.success && sendResult?.running) {
-        setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: sendResult.total_lines || 0 });
+        setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: sendResult.total_lines || 0, target: sendResult.target });
         setMatrixStatus(`握手通过，正在逐行下发 (0/${sendResult.total_lines || 0} 行)…`);
         startMatrixPolling(matrixId);
       } else {
@@ -653,6 +655,7 @@ export function MaterialLabPage({ onNavigate }) {
         setMatrixSendState((previous) => ({
           ...previous,
           status: state.status,
+          target: sr.target || previous?.target,
           lines_sent: state.progress?.sent ?? previous?.lines_sent ?? 0,
           total_lines: state.progress?.total ?? previous?.total_lines ?? 0,
           error: sr.error,

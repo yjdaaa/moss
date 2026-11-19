@@ -44,6 +44,7 @@ export async function stopKnownJob(getTargets, sendStop) {
   }
   const response = await sendStop("/api/safe-action", {
     action: "emergency_stop", confirmed: true, job_id: job.job_id,
+    ...estopTargetFromDescription(job.target),
   });
   return {
     kind: response?.ok && response?.data?.success ? "sent" : "failed",
@@ -74,7 +75,7 @@ export function estopTargetArgs(form) {
 export async function stopPageTarget(sendStop, { jobId, target } = {}) {
   const attempts = [];
   if (typeof jobId === "string" && jobId.trim()) {
-    attempts.push({ action: "emergency_stop", confirmed: true, job_id: jobId.trim() });
+    attempts.push({ action: "emergency_stop", confirmed: true, job_id: jobId.trim(), ...target });
   }
   if (target) attempts.push({ action: "emergency_stop", confirmed: true, ...target });
   if (attempts.length === 0) return { kind: "no_target" };
@@ -90,53 +91,82 @@ export async function stopPageTarget(sendStop, { jobId, target } = {}) {
   return { kind: "failed", message: messages.join("；") };
 }
 
-/**
- * 判断页面显式设备目标是否与后端任务记录的 target 描述指向同一设备。
- */
+function estopAddressKey(target) {
+  if (target?.connection_mode === "serial") {
+    const port = /^com\d+$/i.test(target.port) ? target.port.toLowerCase() : target.port;
+    return `serial:${port}@${target.baudrate}`;
+  }
+  if (target?.connection_mode === "network") {
+    const host = target.host.toLowerCase().replace(/^\[|\]$/g, "");
+    return `tcp:${host}:${target.telnet_port}`;
+  }
+  return "";
+}
+
+/** 活动作业返回的设备描述供页面识别设备和补发。 */
+export function estopTargetFromDescription(value) {
+  if (typeof value !== "string") return null;
+  const raw = value.trim().replace(/^tcp:\/\//i, "");
+  const serial = raw.match(/^(.+)@(\d+)$/);
+  if (serial) return estopTargetArgs({ connection_mode: "serial", port: serial[1], baudrate: serial[2] });
+  const tcp = raw.match(/^(?:\[([^\]]+)\]|([^:\s/]+)):(\d+)$/);
+  return tcp ? estopTargetArgs({ connection_mode: "network", network_host: tcp[1] || tcp[2], network_telnet_port: tcp[3] }) : null;
+}
+
 export function isSameEstopTarget(target, jobTarget) {
-  if (!target || typeof jobTarget !== "string" || !jobTarget.trim()) return false;
-  const normalized = jobTarget.trim().toLowerCase();
+  if (!target || typeof jobTarget !== "string") return false;
+  const raw = jobTarget.trim();
+  const known = estopTargetFromDescription(raw);
+  if (known) return estopAddressKey(target) === estopAddressKey(known);
   if (target.connection_mode === "serial") {
-    const port = String(target.port || "").trim().toLowerCase();
-    const baud = Number(target.baudrate) || 115200;
-    if (!port) return false;
-    return normalized === port || normalized.includes(`${port}@${baud}`) || normalized.endsWith(`/${port}`);
+    return /^com\d+$/i.test(target.port) ? raw.toLowerCase() === target.port.toLowerCase() : raw === target.port;
   }
-  if (target.connection_mode === "network") {
-    const host = String(target.host || "").trim().toLowerCase();
-    const port = Number(target.telnet_port) || 23;
-    if (!host) return false;
-    return normalized === `${host}:${port}` || normalized.endsWith(`://${host}:${port}`);
-  }
-  return false;
+  const host = target.host.toLowerCase().replace(/^\[|\]$/g, "");
+  return raw.toLowerCase() === `${host}:${target.telnet_port}`;
 }
 
-/**
- * 判断后端刚刚通过 stopKnownJob 停掉的任务是否已经覆盖当前页面的设备目标。
- * 注意：若后端记录处于 `unknown`（待确认停止的旧记录，对应连接或模拟设备可能已关闭），
- * 绝不视为已覆盖当前页面设备，必须继续向当前页面的设备目标发送一次 0x18。
- */
+/** 旧的 unknown 记录与同一作业编号的其他设备都不能算已覆盖。 */
 export function isJobCoveringPageTarget(stoppedJob, { jobId, target } = {}) {
-  if (!stoppedJob || stoppedJob.state !== "running") return false;
+  if (stoppedJob?.state !== "running") return false;
+  if (isSameEstopTarget(target, stoppedJob.target)) return true;
+  if (target && estopTargetFromDescription(stoppedJob.target)) return false;
   const trimmedJobId = typeof jobId === "string" ? jobId.trim() : "";
-  if (trimmedJobId && stoppedJob.job_id === trimmedJobId) return true;
-  return isSameEstopTarget(target, stoppedJob.target);
+  return Boolean(trimmedJobId && stoppedJob.job_id === trimmedJobId);
 }
 
-/**
- * 页面急停响应（2026-11-05，工作台 / 画板 / 数字孪生共用）：返回顶栏急停事件的处理函数。
- * `getContext()` 返回 `{ jobId, target }`；两者都没有时不处理（交还顶栏提示）；顶栏已停掉
- * 覆盖本页的 running 任务时不重复发送；否则异步执行 `run(context)` 并返回 true。
- */
+export function claimEstopContext(detail, { jobId, target }) {
+  if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
+  const jobKey = jobId && `job:${jobId}`;
+  const key = estopAddressKey(target) || jobKey;
+  if (detail?.isTargetHandled?.(key)) return false;
+  detail?.claimTarget?.(key);
+  if (jobKey) detail?.claimTarget?.(jobKey);
+  return true;
+}
+
+export function visibleEstopContext(jobId, target, recordedTarget) {
+  return { jobId: !target || isSameEstopTarget(target, recordedTarget) ? jobId : "", target };
+}
+
+export function drawEstopContexts({ active, target, inFlight = [] }) {
+  const contexts = Array.from(inFlight, ({ jobId, target }) => ({ jobId, target, consume: active }));
+  if (active && target) contexts.push({ target });
+  return contexts;
+}
+
+/** 逐个认领并向页面已知设备发急停，同一次操作中每个设备只请求一次。 */
 export function createPageEstopResponder(getContext, run) {
   return (detail) => {
-    const context = (typeof getContext === "function" ? getContext() : null) || {};
-    const jobId = typeof context.jobId === "string" ? context.jobId.trim() : "";
-    const target = context.target || null;
-    if (!jobId && !target) return false;
-    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
-    void run({ jobId, target });
-    return true;
+    let handled = false;
+    for (const context of [getContext()].flat().filter(Boolean)) {
+      const target = context.target || null;
+      const jobId = typeof context.jobId === "string" ? context.jobId.trim() : "";
+      if (!jobId && !target) continue;
+      if (!claimEstopContext(detail, { jobId, target })) continue;
+      void run({ jobId, target });
+      handled ||= context.consume !== false;
+    }
+    return handled;
   };
 }
 

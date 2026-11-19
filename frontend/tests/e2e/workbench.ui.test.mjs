@@ -390,3 +390,64 @@ test("[UI-06] 材料实验室: 合并导入确认框 + 保存不跳首项 + 标�
     rec.close();
   }
 });
+
+test("[UI-07] 双设备切页: 常驻画板切到工作台后按顶栏急停只停工作台设备；切回画板恢复停画板设备", async () => {
+  const recDraw = await startRecordingGrbl({ ackDelayMs: 0 });
+  const recHome = await startRecordingGrbl({ ackDelayMs: 0 });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await context.addInitScript(([host, drawPort, homePort]) => {
+    localStorage.setItem("laserLab.connection_mode", "network");
+    localStorage.setItem("laserLab.network_host", host);
+    localStorage.setItem("laserLab.network_telnet_port", drawPort);
+    localStorage.setItem("laser-forge-conn-mode", "network");
+    localStorage.setItem("laser-forge-host", host);
+    localStorage.setItem("laser-forge-telnet-port", homePort);
+  }, [GRBL_HOST, String(recDraw.port), String(recHome.port)]);
+  const page = await context.newPage();
+  const diagnose = traceApi(page);
+  try {
+    // 尝试给画板存档写入设备 B，后端丢弃连接字段，画板继续使用当前浏览器选的设备 A。
+    const saved = await page.request.post(`${API_BASE}/api/draw/state`, {
+      data: { form: { connection_mode: "network", network_host: GRBL_HOST, network_telnet_port: String(recHome.port) } },
+    });
+    assert.equal(saved.status(), 200);
+    const savedForm = (await saved.json()).result.form;
+    for (const key of ["connection_mode", "network_host", "network_telnet_port"]) {
+      assert.equal(Object.hasOwn(savedForm, key), false, `后端必须丢弃 ${key}`);
+    }
+
+    // 1. 先打开创作画板，让 #draw-keepalive 常驻挂载设备 A（recDraw）
+    await page.goto(`${API_BASE}/draw`);
+    await page.locator('[data-wb-card="draw-device"] input').first().waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+
+    // 2. 通过左侧导航切到雕刻工作台（设备 B: recHome），画板保持挂载但隐藏
+    await page.locator("nav.ob-nav button", { hasText: "雕刻工作台" }).click();
+    await page.getByPlaceholder("控制器 IP (例 192.168.1.10)").waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#draw-keepalive").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
+
+    // 3. 在工作台按顶栏急停：必须停工作台设备 B，隐藏画板不得拦截并误停设备 A
+    const homeBefore = recHome.events.length;
+    await page.locator("#nav-estop").click();
+    await waitFor(() => recHome.events.slice(homeBefore).includes("0x18"), "切到工作台后顶栏急停必须向工作台设备写出 0x18", 5000);
+    await page.getByTestId("app-dialog").getByText("停止请求已发送", { exact: true }).waitFor({ timeout: STEP_TIMEOUT_MS });
+    assert.equal(recDraw.events.includes("0x18"), false, "画板隐藏期间不得拦截顶栏急停并误停画板设备");
+    await page.getByTestId("app-dialog").getByRole("button", { name: "确定", exact: true }).click();
+    await page.getByTestId("app-dialog").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
+
+    // 4. 切回创作画板后按顶栏急停：恢复由画板停设备 A，不误发给工作台设备 B
+    await page.locator("nav.ob-nav button", { hasText: "创作画板" }).click();
+    await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+    const homeBeforeBack = recHome.events.length;
+    await page.locator("#nav-estop").click();
+    await waitFor(() => recDraw.events.includes("0x18"), "切回画板后顶栏急停必须向画板设备写出 0x18", 5000);
+    await page.getByTestId("app-dialog").getByText("已发送急停", { exact: true }).waitFor({ timeout: STEP_TIMEOUT_MS });
+    assert.equal(recHome.events.slice(homeBeforeBack).includes("0x18"), false, "切回画板后顶栏急停不得发给工作台设备");
+  } catch (error) {
+    await diagnose(error);
+  } finally {
+    await context.close();
+    recDraw.close();
+    recHome.close();
+  }
+});
