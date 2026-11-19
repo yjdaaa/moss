@@ -21,6 +21,36 @@ export function notifyMaterialsUpdated(ChannelImpl = globalThis.BroadcastChannel
   return false;
 }
 
+/**
+ * 订阅材料库跨页更新广播，返回清理函数；BroadcastChannel 不可用时安全降级为空操作。
+ *
+ * @param {() => void} onUpdate
+ * @param {typeof BroadcastChannel=} ChannelImpl
+ * @returns {() => void}
+ */
+export function subscribeMaterialsUpdated(onUpdate, ChannelImpl = globalThis.BroadcastChannel) {
+  let channel = null;
+  try {
+    if (typeof ChannelImpl === "function") {
+      channel = new ChannelImpl(MATERIAL_LIBRARY_CHANNEL);
+      channel.addEventListener("message", (event) => {
+        if (event?.data?.type === "materials-updated") {
+          onUpdate();
+        }
+      });
+    }
+  } catch {
+    channel = null;
+  }
+  return () => {
+    try {
+      channel?.close?.();
+    } catch {
+      // ignore close failures
+    }
+  };
+}
+
 export function extractUiMaterialOptions(httpJson) {
   if (!httpJson || httpJson.success !== true || !httpJson.result) {
     return null;

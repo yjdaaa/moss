@@ -13,6 +13,7 @@ import {
   pickThicknessForMaterial,
   restoreMaterialSelectState,
   returnToLibrary,
+  subscribeMaterialsUpdated,
   thicknessesEqual,
 } from "../src/materialSelectState.js";
 
@@ -417,4 +418,33 @@ test("loadUiMaterialRecommendation covers success and 8777-style failures", asyn
     }),
     "材料库推荐：S900 / F200 / 3次 / cut",
   );
+});
+
+test("subscribeMaterialsUpdated filters messages, cleans up, and tolerates missing BroadcastChannel", () => {
+  let received = 0;
+  let closed = false;
+  let listener = null;
+  class FakeChannel {
+    constructor(name) {
+      this.name = name;
+    }
+    addEventListener(type, fn) {
+      if (type === "message") listener = fn;
+    }
+    close() {
+      closed = true;
+    }
+  }
+  const unsubscribe = subscribeMaterialsUpdated(() => {
+    received += 1;
+  }, FakeChannel);
+  listener({ data: { type: "other" } });
+  assert.equal(received, 0);
+  listener({ data: { type: "materials-updated" } });
+  assert.equal(received, 1);
+  unsubscribe();
+  assert.equal(closed, true);
+
+  const noop = subscribeMaterialsUpdated(() => {}, null);
+  assert.doesNotThrow(() => noop());
 });

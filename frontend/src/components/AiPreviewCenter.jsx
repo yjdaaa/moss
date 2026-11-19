@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
-import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
+import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { onEmergencyStop } from "../estopBus.js";
@@ -74,11 +74,13 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const pollOpts = { signal: controller?.signal, timeoutMs: DEFAULT_READ_TIMEOUT_MS };
     const sync = createPollRunner(async (isCurrent) => {
       const sharedTargets = externalTargetsRef.current;
       const [recent, initialApprovals] = await Promise.all([
-        postJson("/api/workflow", { action: "recent" }),
-        Array.isArray(sharedTargets) ? Promise.resolve(null) : getJson("/v1/approvals?status=pending"),
+        postJson("/api/workflow", { action: "recent" }, pollOpts),
+        Array.isArray(sharedTargets) ? Promise.resolve(null) : getJson("/v1/approvals?status=pending", pollOpts),
       ]);
       if (cancelled || !isCurrent() || !(recent.ok && recent.data?.success)) return;
       const workflows = Array.isArray(recent.data.result?.workflows) ? recent.data.result.workflows : [];
@@ -91,7 +93,7 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
           approvalTargets: provisional,
         });
         if (candidates.some((record) => !watchedRef.current.has(record.workflow_id))) {
-          approvals = await getJson("/v1/approvals?status=pending");
+          approvals = await getJson("/v1/approvals?status=pending", pollOpts);
           if (cancelled || !isCurrent()) return;
         }
       }
@@ -145,6 +147,7 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      controller?.abort();
       sync.invalidate();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);

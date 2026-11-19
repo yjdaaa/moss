@@ -13,7 +13,7 @@ import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
 import { ObsidianSelectHost } from "./components/ObsidianSelectHost.jsx";
 import { showAlert, showConfirm } from "./appDialog.js";
-import { getJson, postJson } from "./api/client.js";
+import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "./api/client.js";
 import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
 import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
 import { AiPreviewCenter } from "./components/AiPreviewCenter.jsx";
@@ -247,8 +247,12 @@ function App() {
   // 2026-11-05：上一次请求未返回时跳过本节拍（240ms 高频时不叠加请求），切换间隔或卸载后丢弃旧响应
   useEffect(() => {
     let cancelled = false;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const syncMcp = createPollRunner(async (isCurrent) => {
-      const res = await getJson("/api/system/info");
+      const res = await getJson("/api/system/info", {
+        signal: controller?.signal,
+        timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+      });
       if (!cancelled && isCurrent() && res.ok && res.data?.success && res.data?.result?.mcp) {
         const result = res.data.result;
         const nextMcp = result.mcp;
@@ -280,6 +284,7 @@ function App() {
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       cancelled = true;
+      controller?.abort();
       syncMcp.invalidate();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibility);

@@ -5,7 +5,7 @@ import {
   Image as ImageIcon,
   PenTool,
 } from "lucide-react";
-import { getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
+import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
@@ -63,7 +63,7 @@ import { WorkbenchImageTool } from "../components/workbench/WorkbenchImageTool.j
 import { WorkbenchGcodeTool } from "../components/workbench/WorkbenchGcodeTool.jsx";
 import { WorkbenchMaterialCard } from "../components/workbench/WorkbenchMaterialCard.jsx";
 import { WorkbenchMonitorCard } from "../components/workbench/WorkbenchMonitorCard.jsx";
-import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated, pickThicknessForMaterial } from "../materialSelectState.js";
+import { notifyMaterialsUpdated, pickThicknessForMaterial, subscribeMaterialsUpdated } from "../materialSelectState.js";
 import { discoveryOutcome } from "../controllerDiscovery.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
@@ -325,22 +325,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     startup.loadRuntimeConfig();
 
     // 材料实验室修改后经 BroadcastChannel 跨页同步刷新
-    let channel = null;
-    try {
-      if (typeof BroadcastChannel === "function") {
-        channel = new BroadcastChannel(MATERIAL_LIBRARY_CHANNEL);
-        channel.addEventListener("message", (event) => {
-          if (event?.data?.type === "materials-updated") startupRef.current.loadMaterials();
-        });
-      }
-    } catch {
-      channel = null;
-    }
+    const unsubscribeMaterials = subscribeMaterialsUpdated(() => startupRef.current.loadMaterials());
 
     // 优化 1: 仅在应用启动后尚未探测过时自动静默握手一次；从其他页面切回工作台时不重复探测
     // （挂载那一刻的状态：之前已探测过就不再探测）
     if (initialCheckedAtRef.current) {
-      return () => channel?.close?.();
+      return unsubscribeMaterials;
     }
     const timer = setTimeout(() => {
       const latest = startupRef.current;
@@ -353,7 +343,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }, 600);
     return () => {
       clearTimeout(timer);
-      channel?.close?.();
+      unsubscribeMaterials();
     };
   }, []);
 
@@ -410,7 +400,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   ]);
 
   const loadMaterials = async () => {
-    const res = await getJson("/api/ui/material-options");
+    const res = await getJson("/api/ui/material-options", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
     if (res.ok && res.data?.success) {
       const list = res.data.result?.materials || [];
       setMaterials(list);
@@ -432,7 +422,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
   const loadSerialPorts = async (showFeedback = false) => {
     try {
-      const res = await getJson("/api/ui/serial-ports");
+      const res = await getJson("/api/ui/serial-ports", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
       if (res.ok && res.data?.success) {
         const ports = res.data.result?.ports || [];
         setSerialPorts(ports);
@@ -455,7 +445,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   };
 
   const loadRuntimeConfig = async () => {
-    const res = await getJson("/api/ui/runtime-config");
+    const res = await getJson("/api/ui/runtime-config", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
     if (res.ok && res.data?.success) {
       const conn = res.data.result?.connection;
       if (conn?.network?.default_host && !networkHost) {
@@ -464,7 +454,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }
     if (!externalMcpStatus) {
       // 读取系统信息中的真实小智 MCP 状态（外层 App 已同步时直接复用，省一次重复请求）
-      const sysRes = await getJson("/api/system/info");
+      const sysRes = await getJson("/api/system/info", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
       if (sysRes.ok && sysRes.data?.success && sysRes.data?.result?.mcp) {
         setMcpStatus(sysRes.data.result.mcp);
       }
@@ -474,6 +464,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   // 联动加载选定材质、厚度与当前加工内容对应的真实推荐工艺参数
   useEffect(() => {
     let cancelled = false;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     async function syncMaterialRecommendation() {
       if (!selectedMaterial || !selectedThickness) {
         setHasRecommendation(false);
@@ -488,7 +479,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       if (recMode.engravingMode) {
         query.set("engraving_mode", recMode.engravingMode);
       }
-      const res = await getJson(`/api/ui/material-recommendation?${query.toString()}`);
+      const res = await getJson(`/api/ui/material-recommendation?${query.toString()}`, {
+        signal: controller?.signal,
+        timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+      });
       if (cancelled) return;
       if (res.ok && res.data?.success && res.data.result) {
         const rec = res.data.result;
@@ -523,6 +517,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     syncMaterialRecommendation();
     return () => {
       cancelled = true;
+      controller?.abort();
     };
   }, [selectedMaterial, selectedThickness, activeTool, textStyleEffective, recRefreshTick]);
 

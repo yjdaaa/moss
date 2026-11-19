@@ -9,6 +9,9 @@ function tauriInvoke() {
   return typeof window !== "undefined" ? window.__TAURI__?.core?.invoke : undefined;
 }
 
+/**
+ * @returns {boolean}
+ */
 export function isVoiceCenterAvailable() {
   return voiceCenterAvailable({
     hasInvoke: Boolean(tauriInvoke()),
@@ -17,6 +20,11 @@ export function isVoiceCenterAvailable() {
   });
 }
 
+/**
+ * @param {string} command
+ * @param {Record<string, *>=} args
+ * @returns {Promise<*>}
+ */
 export async function invokeVoice(command, args = {}) {
   const invoke = tauriInvoke();
   if (!invoke) {

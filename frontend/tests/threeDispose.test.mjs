@@ -42,7 +42,14 @@ test("clearAndDispose 先释放再清空，组本身保留可复用", () => {
 // three.js 渲染器图形进程就留下约 100 MB（即使 forceContextLoss），复用后反复进出不再增长；
 // 运行层面的回归见 tests/twin-render.browser.mjs（上下文个数、静止不重画）。
 test("TwinStage3D：每次重建前释放显存，偏置变化不重建机台，卸载时释放场景并复用渲染器", () => {
-  const source = readFileSync(new URL("../src/components/TwinStage3D.jsx", import.meta.url), "utf8");
+  const source = [
+    "../src/components/TwinStage3D.jsx",
+    "../src/twin/stageVisuals.js",
+    "../src/twin/buildMachineScene.js",
+    "../src/twin/buildToolpathLines.js",
+  ]
+    .map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8"))
+    .join("\n");
   assert.doesNotMatch(source, /\b\w+Group\.clear\(\)/, "不得再直接 group.clear() 而不释放资源");
   assert.match(source, /clearAndDispose\(toolpathGroup\)/);
   assert.match(source, /disposeObjectResources\(scene\)/);

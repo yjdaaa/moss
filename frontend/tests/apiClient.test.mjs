@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchPreviewText, getJson, postJson, previewResourcePath } from "../src/api/client.js";
+import {
+  DEFAULT_ACTION_TIMEOUT_MS,
+  DEFAULT_READ_TIMEOUT_MS,
+  ESTOP_TIMEOUT_MS,
+  fetchPreviewBlobUrl,
+  fetchPreviewText,
+  getJson,
+  postJson,
+  previewResourcePath,
+} from "../src/api/client.js";
 
 function withFetch(impl, run) {
   const original = globalThis.fetch;
@@ -74,4 +83,19 @@ test("fetchPreviewText：非 2xx 不把错误页当正文；成功时返回文�
   });
   assert.deepEqual(urls, ["/preview?path=missing.gcode", "/preview?path=job.gcode"]);
   assert.equal((await fetchPreviewText("")).ok, false);
+});
+
+test("fetchPreviewText/fetchPreviewBlobUrl 支持有界超时，超时常数合理分层", async () => {
+  assert.ok(ESTOP_TIMEOUT_MS > 0 && ESTOP_TIMEOUT_MS < DEFAULT_READ_TIMEOUT_MS);
+  assert.ok(DEFAULT_READ_TIMEOUT_MS < DEFAULT_ACTION_TIMEOUT_MS);
+  await withFetch(hangingFetch([]), async () => {
+    const started = Date.now();
+    const textRes = await fetchPreviewText("slow.gcode", { timeoutMs: 25 });
+    assert.equal(textRes.ok, false);
+    assert.equal(textRes.timedOut, true);
+    assert.match(textRes.error, /超时/);
+    const blobUrl = await fetchPreviewBlobUrl("slow.png", { timeoutMs: 25 });
+    assert.equal(blobUrl, "");
+    assert.ok(Date.now() - started < 2000, "预览资源请求超时必须有界");
+  });
 });

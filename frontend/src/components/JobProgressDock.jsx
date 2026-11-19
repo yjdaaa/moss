@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, Download, OctagonX, Pause, Play, Square } from "lucide-react";
-import { apiFetch, getJson, postJson } from "../api/client.js";
+import { apiFetch, DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import {
@@ -65,10 +65,16 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
     let cancelled = false;
     let timer;
     let pollGen = 0;
+    let activeController = null;
     const poll = async () => {
       const myGen = ++pollGen;
       clearTimeout(timer);
-      const res = await getJson("/api/jobs/stop-targets");
+      activeController?.abort();
+      activeController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const res = await getJson("/api/jobs/stop-targets", {
+        signal: activeController?.signal,
+        timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+      });
       if (cancelled || !alive.current || myGen !== pollGen) return;
       const jobs = res?.data?.result?.jobs;
       if (res?.ok && res?.data?.success && Array.isArray(jobs)) {
@@ -110,6 +116,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
     return () => {
       cancelled = true;
       alive.current = false;
+      activeController?.abort();
       clearTimeout(timer);
       clearTimeout(lingerTimer.current);
       document.removeEventListener("visibilitychange", onVisibility);

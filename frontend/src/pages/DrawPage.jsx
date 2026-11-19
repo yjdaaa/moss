@@ -32,13 +32,13 @@ import {
 } from "../jobSummaryView.js";
 import {
   CUSTOM_OPTION_VALUE,
-  MATERIAL_LIBRARY_CHANNEL,
   applyMaterialLibraryRefresh,
   applyMaterialSelectChange,
   loadUiMaterialOptions,
   notifyMaterialsUpdated,
   restoreMaterialSelectState,
   returnToLibrary,
+  subscribeMaterialsUpdated,
 } from "../materialSelectState.js";
 import { getLaserExportDimensions } from "../laserExportDimensions.js";
 import {
@@ -141,7 +141,6 @@ const CONFIG_KEYS = [...BACKEND_CONFIG_KEYS,
   "baudrate",
 ];
 const EXCALIDRAW_LANG_CODE = "zh-CN";
-const MATERIAL_CHANNEL_NAME = MATERIAL_LIBRARY_CHANNEL;
 
 export function DrawPage({ onNavigate, active = true }) {
   // r49：关掉 MOSS 再打开也接着画——上次的画布（含插入的图片，超量时只存图形）从本机存储恢复
@@ -247,6 +246,7 @@ export function DrawPage({ onNavigate, active = true }) {
     };
   }, []);
 
+  const drawSyncWarnedRef = useRef(false);
   const syncDrawStateToBackend = (patch, { keepalive = false } = {}) => {
     if (!patch || typeof patch !== "object" || Object.keys(patch).length === 0) return;
     const body = JSON.stringify(patch);
@@ -259,7 +259,33 @@ export function DrawPage({ onNavigate, active = true }) {
       },
       body,
       ...(useKeepalive ? { keepalive: true } : {}),
-    }).catch(() => {});
+    })
+      .then((res) => {
+        if (res.ok) {
+          const wasWarned = drawSyncWarnedRef.current;
+          drawSyncWarnedRef.current = false;
+          if (wasWarned && !keepalive) {
+            setStatus((prev) => (prev.startsWith("画布已保存在本地浏览器，但") ? "画布已同步到本机服务" : prev));
+          }
+          return;
+        }
+        // 403（如局域网只读模式）或窗口退出阶段的 keepalive 不打断用户，其余写入失败显式提示
+        if (keepalive || res.status === 403) return;
+        console.warn(`[draw-state] 后端保存返回 HTTP ${res.status}`);
+        if (!drawSyncWarnedRef.current) {
+          drawSyncWarnedRef.current = true;
+          setStatus(`画布已保存在本地浏览器，但同步到本机服务失败（HTTP ${res.status}）`);
+        }
+      })
+      .catch((error) => {
+        if (keepalive) return;
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`[draw-state] 同步到本机服务失败: ${msg}`);
+        if (!drawSyncWarnedRef.current) {
+          drawSyncWarnedRef.current = true;
+          setStatus("画布已保存在本地浏览器，但暂未同步到本机服务（请确认服务运行正常）");
+        }
+      });
   };
 
   const applyRemoteSceneToBoard = useCallback((api, parsed) => {
@@ -748,29 +774,11 @@ export function DrawPage({ onNavigate, active = true }) {
     }
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
-    let channel = null;
-    try {
-      if (typeof BroadcastChannel === "function") {
-        channel = new BroadcastChannel(MATERIAL_CHANNEL_NAME);
-        channel.addEventListener("message", (event) => {
-          if (event && event.data && event.data.type === "materials-updated") {
-            refreshMaterialLibrary();
-          }
-        });
-      }
-    } catch (_error) {
-      channel = null;
-    }
+    const unsubscribeMaterials = subscribeMaterialsUpdated(refreshMaterialLibrary);
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
-      if (channel) {
-        try {
-          channel.close();
-        } catch (_error) {
-          // ignore close failures
-        }
-      }
+      unsubscribeMaterials();
     };
   }, []);
 

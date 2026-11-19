@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { HOME_APPROVALS, requestVoiceFocus } from "../voiceFocus.js";
 import { ShieldAlert } from "lucide-react";
-import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
+import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert } from "../appDialog.js";
 import { onEmergencyStop } from "../estopBus.js";
@@ -62,8 +62,12 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const sync = createPollRunner(async (isCurrent) => {
-      const res = await getJson("/v1/approvals?status=pending");
+      const res = await getJson("/v1/approvals?status=pending", {
+        signal: controller?.signal,
+        timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+      });
       if (cancelled || !isCurrent() || !(res.ok && res.data?.success)) return;
       const result = res.data.result || {};
       const rawApprovals = Array.isArray(result.approvals) ? result.approvals : [];
@@ -104,6 +108,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      controller?.abort();
       sync.invalidate();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);

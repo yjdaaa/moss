@@ -10,7 +10,7 @@ import {
   Square,
   ArrowUpRight,
 } from "lucide-react";
-import { apiFetch, getJson, postJson } from "../api/client.js";
+import { apiFetch, DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { showAlert, showChoice, showConfirm } from "../appDialog.js";
@@ -20,7 +20,7 @@ import { CalibrationWizard } from "../components/CalibrationWizard.jsx";
 import { markWizardStep, readWizardState, wizardMaterialKey, writeWizardState } from "../calibrationWizard.js";
 import { estopTargetArgs, visibleEstopContext } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
-import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated } from "../materialSelectState.js";
+import { notifyMaterialsUpdated, subscribeMaterialsUpdated } from "../materialSelectState.js";
 import {
   resolveMaterialLabSelection,
   resolveCellEditorValues,
@@ -154,7 +154,7 @@ export function MaterialLabPage({ onNavigate }) {
   }, []);
 
   const loadBootstrap = useCallback(async (preferred = {}) => {
-    const res = await getJson("/v1/material-lab/bootstrap");
+    const res = await getJson("/v1/material-lab/bootstrap", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
     if (res.ok && res.data?.success) {
       const result = res.data.result || {};
       setSourcePath(result.source_path || "");
@@ -173,7 +173,7 @@ export function MaterialLabPage({ onNavigate }) {
 
   const loadSerialPorts = useCallback(async () => {
     try {
-      const res = await getJson("/api/ui/serial-ports");
+      const res = await getJson("/api/ui/serial-ports", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
       if (res.ok && res.data?.success) {
         const ports = Array.isArray(res.data.result?.ports) ? res.data.result.ports : [];
         setSerialPorts(ports);
@@ -187,22 +187,12 @@ export function MaterialLabPage({ onNavigate }) {
   useEffect(() => {
     void loadBootstrap();
     void loadSerialPorts();
-    let channel = null;
-    try {
-      if (typeof BroadcastChannel === "function") {
-        channel = new BroadcastChannel(MATERIAL_LIBRARY_CHANNEL);
-        channel.addEventListener("message", (event) => {
-          if (event?.data?.type === "materials-updated") {
-            void loadBootstrap();
-          }
-        });
-      }
-    } catch {
-      channel = null;
-    }
+    const unsubscribeMaterials = subscribeMaterialsUpdated(() => {
+      void loadBootstrap();
+    });
     return () => {
       matrixPollRef.current?.();
-      channel?.close?.();
+      unsubscribeMaterials();
     };
   }, [loadBootstrap, loadSerialPorts]);
 

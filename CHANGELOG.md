@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 前端补齐 JSDoc 契约、有界轮询超时与中止清理、画板保存失败提示，并拆分 `TwinStage3D` 纯三维构建层（2026-11-19）
+
+- **现象**：前端缺少 `jsconfig.json` 与共享 HTTP/Tauri DTO 契约；背景轮询（进度浮层、审批卡、AI 预览窗、顶栏系统状态、工作台推荐参数）未设置请求超时与卸载中止信号，后端挂起时易积压；画板 `syncDrawStateToBackend` 用空 `.catch(() => {})` 吞掉全部网络和 HTTP 错误；`TwinStage3D.jsx`（2,324 行）把机台建模、烧灼画布与刀路几何与 React 组件混在同一文件；材料库跨页 `BroadcastChannel` 订阅在三个页面重复手写。
+- **根因与修复**：新增 `frontend/jsconfig.json` 与共享 JSDoc 契约 `frontend/src/api/types.js`，为 `api/client.js` 与 `voiceApi.js` 补齐参数/返回类型注解，导出分层超时常数（`ESTOP_TIMEOUT_MS`、`DEFAULT_READ_TIMEOUT_MS`、`DEFAULT_ACTION_TIMEOUT_MS`）并为 `fetchPreviewText`/`fetchPreviewBlobUrl` 接通 `timeoutMs`/`signal`（保持不传 `timeoutMs` 时的既有契约不变）；为 `JobProgressDock`、`ApprovalCenter`、`AiPreviewCenter`、`main.jsx` 及 `HomePage`/`MaterialLabPage` 高频轮询与查询接入有界超时与卸载 `AbortController` 清理；修复 `DrawPage.jsx::syncDrawStateToBackend` 吞错，非退出且非预期 403 时显式给出同步失败提示并记录 `console.warn`；从 `TwinStage3D.jsx` 拆出零 React 耦合的 `frontend/src/twin/{stageVisuals,buildMachineScene,buildToolpathLines}.js`（主组件由 2,324 行缩减至 1,038 行）；将三页重复的材料库 `BroadcastChannel` 订阅统一收口到 `materialSelectState.js::subscribeMaterialsUpdated`。保留原有 15 分片 CSS 与 Excalidraw 层叠关系不变，避免引入 `@layer` 与未分层第三方样式冲突。
+- **验证**：`node scripts/verify.mjs --full --e2e` 全绿（Rust 根工作区 + `moss-voice-local`、51 项脚本单测、358 项前端单测、17/17 项 Playwright 浏览器交互测试含 3 项三维孪生用例、FakeGrbl 回环 API+Chrome UI E2E 40/40 项、ESLint 零 error、Vite 生产构建全通过）；独立增量审查收敛。真实硬件与 Windows/Android 打包待后续发布阶段实机验收（`unverified`）。
+- **关联**：`frontend/jsconfig.json`、`frontend/src/api/{types,client}.js`、`frontend/src/voiceApi.js`、`frontend/src/materialSelectState.js`、`frontend/src/twin/{stageVisuals,buildMachineScene,buildToolpathLines}.js`、`frontend/src/components/{TwinStage3D,JobProgressDock,ApprovalCenter,AiPreviewCenter}.jsx`、`frontend/src/pages/{HomePage,DrawPage,MaterialLabPage}.jsx`、`frontend/src/main.jsx`、`frontend/tests/{apiClient,materialSelectState}.test.mjs`。
+
 ### 收口 `moss-home` 家居模块、统一 `moss-process` 进程树守卫修复本地 helper 孤儿泄漏，并支持可注入遥测（2026-11-19）
 
 - **现象**：家居只读发现 `home_readonly` 与历史备份审计 `home_backup_audit` 滞留在语音层 `moss-voice` 中但只被 `moss-home` 与桌面层使用；Windows `JobHandle` 在 `moss-voice/src/job.rs` 与 `moss-voice-providers/src/speech_cpp.rs` 重复实现，且 `moss-voice-providers/src/local.rs` 启动 `moss-voice-local` 漏挂 Job Object（Windows 异常退出时可能残留孤儿进程）；`ApiService` 与 `laser-mcp` 硬编码读取全局遥测单例，阻碍并行测试隔离。
