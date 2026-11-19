@@ -8,11 +8,27 @@ plugins {
 }
 
 // release 签名：读取 gen/android/keystore.properties（已被 .gitignore 忽略，不进仓库）。
-// 文件不存在时不配置签名，release 包保持未签名，不影响其他人构建。
+// 本地或 CI 烟测在未设置 MOSS_REQUIRE_ANDROID_RELEASE_SIGNING=true 且文件不存在时输出未签名 release APK；
+// 正式发布必须设置 MOSS_REQUIRE_ANDROID_RELEASE_SIGNING=true 并提供完整 keystore.properties，缺项直接失败。
+val requireReleaseSigning = System.getenv("MOSS_REQUIRE_ANDROID_RELEASE_SIGNING") == "true"
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
         FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
+}
+if (requireReleaseSigning) {
+    check(keystorePropertiesFile.exists()) {
+        "MOSS_REQUIRE_ANDROID_RELEASE_SIGNING=true requires gen/android/keystore.properties"
+    }
+    for (requiredKey in listOf("keyAlias", "password", "storeFile")) {
+        check(!keystoreProperties.getProperty(requiredKey).isNullOrBlank()) {
+            "Missing $requiredKey in gen/android/keystore.properties"
+        }
+    }
+    val storePath = file(keystoreProperties.getProperty("storeFile"))
+    check(storePath.isFile) {
+        "Android release keystore file not found: $storePath"
     }
 }
 

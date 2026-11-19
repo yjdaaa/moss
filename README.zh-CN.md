@@ -131,15 +131,17 @@ cargo run -p moss-host -- serve
 ### 3. 构建各端发行安装包
 
 ```powershell
-# Windows：构建 NSIS 安装包并打入 moss-voice-local 离线语音辅助程序
-powershell -ExecutionPolicy Bypass -File scripts/build-windows-installer.ps1
+# Windows：普通版 NSIS 安装包（不含未闭环离线语音 sidecar）
+cd frontend; npm run build; cd ..\apps\desktop\src-tauri; cargo tauri build
+# 带离线语音 helper 安装包受原生许可门禁拦截；仅内部非分发软件验证可显式传参：
+# powershell -ExecutionPolicy Bypass -File scripts/voice-helper/build-sidecar-installer.ps1 -AllowUnauditedInternal
 ```
 
 ```bash
-# macOS：构建 .app 与 .dmg 安装包（默认打入 moss-voice-local 离线语音辅助程序）
-bash scripts/build-macos-installer.sh
+# macOS：构建 .app 与 .dmg 安装包（默认产出不含 moss-voice-local sidecar 的普通包）
+bash scripts/build-macos-installer.sh --without-voice-sidecar
 
-# Android：构建 aarch64 发行版 APK
+# Android：构建 aarch64 发行版 APK（正式签名需配置 gen/android/keystore.properties）
 cd apps/desktop/src-tauri
 cargo tauri android build --target aarch64 --apk
 ```

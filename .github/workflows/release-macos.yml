@@ -3,12 +3,19 @@ name: Build macOS Release DMG
 on:
   # 全平台标签自动发布已统一由 .github/workflows/release.yml 并行接管；
   # 本工作流保留为单独重打/补挂某一个历史标签 macOS 通用版 DMG 的手动入口。
+  # 先解析并绑定目标标签与版本再 checkout 构建，且默认产出不含未闭环语音 sidecar 的普通包。
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '可选：把构建出的 macOS DMG 自动上传到指定 Release 标签（如 v0.1.0）'
+        description: '可选：指定要构建并上传 macOS DMG 的目标 Release 标签（如 v0.3.1；留空则仅保留当前分支 Actions 构建产物）'
         required: false
         default: ''
+        type: string
+      include_voice_sidecar:
+        description: '可选：是否打入离线语音辅助程序（仅原生许可审计全部闭环通过时允许开启）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -17,33 +24,157 @@ jobs:
   macos-dmg:
     runs-on: macos-latest
     steps:
+      - name: Resolve target tag, checkout ref, and version
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INCLUDE_SIDECAR: ${{ inputs.include_voice_sidecar }}
+          REPO: ${{ github.repository }}
+          TRIGGER_REF: ${{ github.ref }}
+        run: |
+          # BEGIN MACOS_META_RESOLVER
+          TAG="$(printf '%s' "$INPUT_TAG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [[ -z "$TAG" && "$TRIGGER_REF" == refs/tags/* ]]; then
+            TAG="${TRIGGER_REF#refs/tags/}"
+          fi
+          if [[ -n "$TAG" ]]; then
+            VERSION="${TAG#v}"
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Invalid release_tag '$TAG' (expected semantic tag like v0.3.1)" >&2
+              exit 1
+            fi
+            CHECKOUT_REF="refs/tags/$TAG"
+            ATTACH_RELEASE="true"
+            if [[ -z "${MOSS_TEST_SKIP_GH_LOOKUP:-}" ]]; then
+              gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null
+              gh release view "$TAG" --repo "$REPO" >/dev/null
+            fi
+          else
+            VERSION=""
+            CHECKOUT_REF="$TRIGGER_REF"
+            ATTACH_RELEASE="false"
+          fi
+          if [[ "$INCLUDE_SIDECAR" == "true" ]]; then
+            SIDECAR_FLAG="true"
+          else
+            SIDECAR_FLAG="false"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=$CHECKOUT_REF" >> "$GITHUB_OUTPUT"
+          echo "attach_release=$ATTACH_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "include_sidecar=$SIDECAR_FLAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved target tag='${TAG:-<none>}' checkout_ref='$CHECKOUT_REF' attach_release=$ATTACH_RELEASE include_sidecar=$SIDECAR_FLAG"
+          # END MACOS_META_RESOLVER
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.checkout_ref }}
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
+
+      - name: Verify checked-out ref & enforce native license gate
+        id: verify_ref
+        env:
+          TARGET_TAG: ${{ steps.meta.outputs.tag }}
+          TARGET_VERSION: ${{ steps.meta.outputs.version }}
+          INCLUDE_SIDECAR: ${{ steps.meta.outputs.include_sidecar }}
+        run: |
+          if [[ -n "$TARGET_TAG" ]]; then
+            HEAD_SHA="$(git rev-parse HEAD)"
+            TAG_SHA="$(git rev-parse "refs/tags/${TARGET_TAG}^{commit}")"
+            if [[ "$HEAD_SHA" != "$TAG_SHA" ]]; then
+              echo "::error::Checked-out HEAD ($HEAD_SHA) does not match tag $TARGET_TAG ($TAG_SHA)" >&2
+              exit 1
+            fi
+            VERSION="$TARGET_VERSION"
+          else
+            VERSION="$(python3 -c 'import json; print(json.load(open("apps/desktop/src-tauri/tauri.conf.json"))["version"])')"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid target version '$VERSION'" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$INCLUDE_SIDECAR" == "true" ]]; then
+            node scripts/voice-helper/check-sidecar-license-gate.mjs --platform macos --require-complete
+          else
+            echo "::notice::Building ordinary macOS package without unaudited voice sidecar (docs/developer/safety.md)."
+          fi
+
+      - name: Install and build frontend
+        env:
+          MOSS_RELEASE_VERSION: ${{ steps.verify_ref.outputs.version }}
         run: |
           cd frontend
           npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Install tauri-cli
         uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli
-      - name: Build Universal macOS .app & .dmg (with moss-voice-local sidecar)
+
+      - name: Build Universal macOS .app & .dmg and verify version
         env:
           MOSS_MACOS_TARGET: universal-apple-darwin
+          MOSS_SKIP_FRONTEND_BUILD: '1'
+          MOSS_VERSION_OVERRIDE: ${{ steps.verify_ref.outputs.version }}
+          MOSS_RELEASE_VERSION: ${{ steps.verify_ref.outputs.version }}
+          INCLUDE_SIDECAR: ${{ steps.meta.outputs.include_sidecar }}
           CI: 'true'
         run: |
-          bash scripts/build-macos-installer.sh --with-voice-sidecar
-          VERSION="$(python3 -c 'import json; print(json.load(open("apps/desktop/src-tauri/tauri.conf.json"))["version"])')"
+          if [[ "$INCLUDE_SIDECAR" == "true" ]]; then
+            bash scripts/build-macos-installer.sh --with-voice-sidecar
+          elif grep -q "verify_app_version_override" scripts/build-macos-installer.sh; then
+            bash scripts/build-macos-installer.sh --without-voice-sidecar
+          else
+            # 兼容历史标签：旧版 build-macos-installer.sh 的 --without-voice-sidecar 未读取 MOSS_VERSION_OVERRIDE
+            OVERLAY="$RUNNER_TEMP/tauri-macos-bare-overlay.json"
+            python3 - "$OVERLAY" "$MOSS_VERSION_OVERRIDE" <<'PY'
+          import json, sys
+          path, ver = sys.argv[1:3]
+          with open(path, "w", encoding="utf-8") as fp:
+              json.dump({"version": ver, "build": {"beforeBuildCommand": ""}}, fp)
+          PY
+            pushd apps/desktop/src-tauri >/dev/null
+            cargo tauri build --target "$MOSS_MACOS_TARGET" --config "$OVERLAY"
+            popd >/dev/null
+            codesign --verify --deep --strict "target/${MOSS_MACOS_TARGET}/release/bundle/macos/MOSS.app"
+          fi
+          APP_BUNDLE="target/universal-apple-darwin/release/bundle/macos/MOSS.app"
+          if [[ "$INCLUDE_SIDECAR" == "true" ]]; then
+            test -x "$APP_BUNDLE/Contents/MacOS/moss-voice-local"
+          else
+            if [[ -e "$APP_BUNDLE/Contents/MacOS/moss-voice-local" || -e "$APP_BUNDLE/Contents/Resources/licenses/voice-local" ]]; then
+              echo "::error::Unaudited voice sidecar leaked into ordinary macOS bundle" >&2
+              exit 1
+            fi
+          fi
+          python3 - "$APP_BUNDLE/Contents/Info.plist" "$MOSS_VERSION_OVERRIDE" <<'PY'
+          import plistlib, sys
+          plist_path, expected = sys.argv[1:3]
+          with open(plist_path, "rb") as fp:
+              actual = str(plistlib.load(fp).get("CFBundleShortVersionString", "")).strip()
+          if actual != expected:
+              raise SystemExit(f"Built MOSS.app version {actual!r} does not match target version {expected!r}")
+          PY
+
           DMG_SRC="$(ls -t target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)"
-          OUT_DMG="target/MOSS_${VERSION}_macos_universal.dmg"
+          OUT_DMG="target/MOSS_${MOSS_VERSION_OVERRIDE}_macos_universal.dmg"
           cp "$DMG_SRC" "$OUT_DMG"
           SHA="$(shasum -a 256 "$OUT_DMG" | awk '{print $1}')"
           BYTES="$(stat -f%z "$OUT_DMG")"
@@ -51,27 +182,31 @@ jobs:
           echo "DMG_SHA256=$SHA" >> "$GITHUB_ENV"
           echo "DMG_BYTES=$BYTES" >> "$GITHUB_ENV"
           echo "Built $OUT_DMG ($BYTES bytes, sha256=$SHA)"
+
       - name: Upload macOS DMG Artifact
         uses: actions/upload-artifact@v4
         with:
           name: moss-macos-universal-dmg
           path: ${{ env.DMG_PATH }}
+
       - name: Attach macOS DMG to GitHub Release
+        if: steps.meta.outputs.attach_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_TAG: ${{ inputs.release_tag }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARGET_VERSION: ${{ steps.verify_ref.outputs.version }}
+          INCLUDE_SIDECAR: ${{ steps.meta.outputs.include_sidecar }}
         run: |
-          TAG="$INPUT_TAG"
-          if [[ -z "$TAG" && "${GITHUB_REF:-}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
+          if [[ -z "$TAG" || "${DMG_PATH}" != *"MOSS_${TARGET_VERSION}_macos_universal.dmg" ]]; then
+            echo "::error::Resolved tag or DMG artifact path mismatch: tag=$TAG path=${DMG_PATH}" >&2
+            exit 1
           fi
-          if [[ -z "$TAG" ]]; then
-            echo "未指定 release_tag 且非标签触发，仅保留 Actions 构建产物。"
-            exit 0
-          fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${DMG_PATH}#macOS 通用版安装包 (Apple Silicon + Intel，含离线语音)" --clobber
-            echo "Uploaded $DMG_PATH to Release $TAG (sha256=$DMG_SHA256, bytes=$DMG_BYTES)"
+          if [[ "$INCLUDE_SIDECAR" == "true" ]]; then
+            node scripts/voice-helper/check-sidecar-license-gate.mjs --platform macos --require-complete
+            DMG_LABEL="macOS 通用版安装包 (Apple Silicon + Intel，含离线语音)"
           else
-            echo "Release $TAG 尚不存在，跳过附加。"
+            DMG_LABEL="macOS 通用版安装包 (Apple Silicon + Intel，不含离线语音)"
           fi
+          gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" "${DMG_PATH}#${DMG_LABEL}" --clobber
+          echo "Uploaded $DMG_PATH to Release $TAG (sha256=$DMG_SHA256, bytes=$DMG_BYTES)"

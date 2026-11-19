@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# macOS release bundle builder (.app and .dmg), bundling NV18 moss-voice-local sidecar + GPL sources/notices by default.
-# Pass --without-voice-sidecar only when debugging bare desktop packaging without the local voice helper.
+# macOS release bundle builder (.app and .dmg).
+# Defaults to the ordinary MIT-licensed desktop bundle (--without-voice-sidecar).
+# Pass --with-voice-sidecar only when the native-license audit gate passes (or set
+# MOSS_ALLOW_UNAUDITED_SIDECAR=1 strictly for non-distributable local QA).
 # Does not install, mount disk images, touch user runtime data, or connect to hardware.
 set -euo pipefail
 
@@ -9,7 +11,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-WITH_SIDECAR=1
+WITH_SIDECAR=0
 for arg in "$@"; do
   case "$arg" in
     --with-voice-sidecar)
@@ -77,6 +79,78 @@ copy_new() {
   cp "$from" "$to"
 }
 
+if [[ "${MOSS_VERSION_OVERRIDE:-}" != "" ]]; then
+  export MOSS_RELEASE_VERSION="$MOSS_VERSION_OVERRIDE"
+fi
+
+write_overlay_json() {
+  local overlay_path="$1"
+  local bin_rel="$2"
+  local rel_resource="$3"
+  python3 - "$overlay_path" "$bin_rel" "$rel_resource" "${APPLE_SIGNING_IDENTITY:-}" "${MOSS_VERSION_OVERRIDE:-}" <<'PY'
+import json, os, sys
+
+overlay_path, bin_rel, rel_resource, signing_id, version_override = sys.argv[1:6]
+bundle = {}
+if bin_rel and rel_resource:
+    bundle["externalBin"] = [bin_rel]
+    bundle["resources"] = {f"{rel_resource}/": "licenses/voice-local/"}
+# 应用内更新（2026-11-07）：只有提供了签名私钥（发布流水线的仓库密钥）才生成 MOSS.app.tar.gz 与 .sig
+if os.environ.get("TAURI_SIGNING_PRIVATE_KEY"):
+    bundle["createUpdaterArtifacts"] = True
+if signing_id:
+    bundle["macOS"] = {
+        "signingIdentity": signing_id,
+        "hardenedRuntime": True,
+    }
+payload = {
+    "build": {"beforeBuildCommand": ""},
+    "bundle": bundle,
+}
+if version_override:
+    payload["version"] = version_override
+with open(overlay_path, "w", encoding="utf-8") as fp:
+    json.dump(payload, fp, indent=2, ensure_ascii=False)
+PY
+}
+
+find_fresh_dmg() {
+  local dmg_dir="$1"
+  local stamp_file="$2"
+  python3 - "$dmg_dir" "$stamp_file" <<'PY'
+import pathlib, sys
+
+dmg_dir = pathlib.Path(sys.argv[1])
+stamp_mtime = pathlib.Path(sys.argv[2]).stat().st_mtime - 5.0
+candidates = sorted(
+    (p for p in dmg_dir.glob("*.dmg") if p.is_file() and p.stat().st_mtime >= stamp_mtime),
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+)
+if not candidates:
+    raise SystemExit("No fresh .dmg found in " + str(dmg_dir))
+print(candidates[0])
+PY
+}
+
+verify_app_version_override() {
+  local app_bundle="$1"
+  local expected="${MOSS_VERSION_OVERRIDE:-}"
+  if [[ -z "$expected" ]]; then
+    return 0
+  fi
+  python3 - "$app_bundle/Contents/Info.plist" "$expected" <<'PY'
+import plistlib, sys
+
+plist_path, expected = sys.argv[1:3]
+with open(plist_path, "rb") as fp:
+    info = plistlib.load(fp)
+actual = str(info.get("CFBundleShortVersionString", "")).strip()
+if actual != expected:
+    raise SystemExit(f"MOSS.app Info.plist version mismatch: expected {expected!r}, got {actual!r}")
+PY
+}
+
 if [[ "${MOSS_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
   pushd "$REPO/frontend" >/dev/null
   npm run build
@@ -84,13 +158,42 @@ if [[ "${MOSS_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
 fi
 
 if [[ "$WITH_SIDECAR" -eq 0 ]]; then
+  BUILD_ID="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  RUN_DIR="$TARGET_DIR/nv-bare-$BUILD_ID"
+  OVERLAY="$RUN_DIR/overlay.json"
+  mkdir -p "$RUN_DIR"
+  write_overlay_json "$OVERLAY" "" ""
+  STAMP_FILE="$RUN_DIR/.build-started"
+  touch "$STAMP_FILE"
+
   pushd "$DESKTOP" >/dev/null
-  cargo tauri build --target "$TRIPLE" --config '{"build":{"beforeBuildCommand":""}}'
+  cargo tauri build --target "$TRIPLE" --config "$OVERLAY"
   popd >/dev/null
+
   APP_BUNDLE="$TARGET_DIR/$TRIPLE/release/bundle/macos/MOSS.app"
+  APP_DESKTOP="$APP_BUNDLE/Contents/MacOS/moss-desktop"
+  test -x "$APP_DESKTOP"
+  if [[ -e "$APP_BUNDLE/Contents/MacOS/moss-voice-local" || -e "$APP_BUNDLE/Contents/Resources/licenses/voice-local" ]]; then
+    echo "Unexpected unaudited voice sidecar found inside --without-voice-sidecar bundle" >&2
+    exit 1
+  fi
+  verify_app_version_override "$APP_BUNDLE"
   codesign --verify --deep --strict "$APP_BUNDLE"
-  echo "MACOS_BUNDLE_DONE_WITHOUT_SIDECAR target=$TRIPLE app=$APP_BUNDLE"
+  DMG_FILE="$(find_fresh_dmg "$TARGET_DIR/$TRIPLE/release/bundle/dmg" "$STAMP_FILE")"
+  if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    UPD_TAR="$TARGET_DIR/$TRIPLE/release/bundle/macos/MOSS.app.tar.gz"
+    test -s "$UPD_TAR" && test -s "$UPD_TAR.sig"
+  fi
+  echo "MACOS_BUNDLE_DONE_WITHOUT_SIDECAR target=$TRIPLE app=$APP_BUNDLE dmg=$DMG_FILE"
   exit 0
+fi
+
+SIDECAR_LICENSE_AUDITED=0
+if [[ "${MOSS_ALLOW_UNAUDITED_SIDECAR:-0}" != "1" ]]; then
+  node "$REPO/scripts/voice-helper/check-sidecar-license-gate.mjs" --platform macos --require-complete
+  SIDECAR_LICENSE_AUDITED=1
+else
+  echo "WARNING: MOSS_ALLOW_UNAUDITED_SIDECAR=1 (internal QA only; NOT for external distribution per docs/developer/safety.md)" >&2
 fi
 
 BUILD_ID="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
@@ -158,34 +261,7 @@ if [[ -f "$HELPER_ROOT/rust-source-evidence.json" ]]; then
   fi
 fi
 
-if [[ "${MOSS_VERSION_OVERRIDE:-}" != "" ]]; then
-  export MOSS_RELEASE_VERSION="$MOSS_VERSION_OVERRIDE"
-fi
-python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" "${MOSS_VERSION_OVERRIDE:-}" <<'PY'
-import json, os, sys
-
-overlay_path, bin_rel, rel_resource, signing_id, version_override = sys.argv[1:6]
-bundle = {
-    "externalBin": [bin_rel],
-    "resources": {f"{rel_resource}/": "licenses/voice-local/"},
-}
-# 应用内更新（2026-11-07）：只有提供了签名私钥（发布流水线的仓库密钥）才生成 MOSS.app.tar.gz 与 .sig
-if os.environ.get("TAURI_SIGNING_PRIVATE_KEY"):
-    bundle["createUpdaterArtifacts"] = True
-if signing_id:
-    bundle["macOS"] = {
-        "signingIdentity": signing_id,
-        "hardenedRuntime": True,
-    }
-payload = {
-    "build": {"beforeBuildCommand": ""},
-    "bundle": bundle,
-}
-if version_override:
-    payload["version"] = version_override
-with open(overlay_path, "w", encoding="utf-8") as fp:
-    json.dump(payload, fp, indent=2, ensure_ascii=False)
-PY
+write_overlay_json "$OVERLAY" "$BIN_REL" "$REL_RESOURCE"
 
 STAMP_FILE="$RUN_DIR/.build-started"
 touch "$STAMP_FILE"
@@ -205,29 +281,16 @@ test -x "$APP_HELPER"
 require_file "$APP_COPYING"
 require_file "$APP_MAIN_RS"
 
+verify_app_version_override "$APP_BUNDLE"
 if can_exec_target "$TRIPLE"; then
   "$APP_HELPER" --version >/dev/null
 fi
 codesign --verify --deep --strict "$APP_BUNDLE"
 
 DMG_DIR="$TARGET_DIR/$TRIPLE/release/bundle/dmg"
-DMG_FILE="$(python3 - "$DMG_DIR" "$STAMP_FILE" <<'PY'
-import pathlib, sys
+DMG_FILE="$(find_fresh_dmg "$DMG_DIR" "$STAMP_FILE")"
 
-dmg_dir = pathlib.Path(sys.argv[1])
-stamp_mtime = pathlib.Path(sys.argv[2]).stat().st_mtime - 5.0
-candidates = sorted(
-    (p for p in dmg_dir.glob("*.dmg") if p.is_file() and p.stat().st_mtime >= stamp_mtime),
-    key=lambda p: p.stat().st_mtime,
-    reverse=True,
-)
-if not candidates:
-    raise SystemExit("No fresh .dmg found in " + str(dmg_dir))
-print(candidates[0])
-PY
-)"
-
-python3 - "$REPO" "$DESKTOP" "$SRC" "$APP_DESKTOP" "$APP_HELPER" "$DMG_FILE" "$MANIFEST" "$TRIPLE" <<'PY'
+python3 - "$REPO" "$DESKTOP" "$SRC" "$APP_DESKTOP" "$APP_HELPER" "$DMG_FILE" "$MANIFEST" "$TRIPLE" "${MOSS_VERSION_OVERRIDE:-}" "$SIDECAR_LICENSE_AUDITED" <<'PY'
 import datetime, hashlib, json, pathlib, re, sys
 
 repo = pathlib.Path(sys.argv[1])
@@ -238,6 +301,8 @@ app_helper = pathlib.Path(sys.argv[5])
 dmg_file = pathlib.Path(sys.argv[6])
 manifest = pathlib.Path(sys.argv[7])
 triple = sys.argv[8]
+version_override = sys.argv[9]
+license_audited = sys.argv[10] == "1"
 
 def sha256_file(path: pathlib.Path) -> str:
     h = hashlib.sha256()
@@ -268,7 +333,7 @@ source_hash = hashlib.sha256("\n".join(hash_lines).encode("utf-8")).hexdigest()
 
 tauri_conf = json.loads((desktop / "tauri.conf.json").read_text(encoding="utf-8"))
 release = {
-    "product_version": tauri_conf["version"],
+    "product_version": version_override or tauri_conf["version"],
     "target": triple,
     "helper_protocol": int(proto_match.group(1)),
     "db_schema": int(schema_match.group(1)),
@@ -279,7 +344,12 @@ release = {
         "helper": file_meta(app_helper),
         "installer": file_meta(dmg_file),
     },
-    "validation": "built_codesign_verified_not_installed_or_notarized",
+    "distributable": license_audited,
+    "validation": (
+        "built_codesign_verified_license_audited_not_installed_or_notarized"
+        if license_audited
+        else "internal_qa_only_unaudited_not_for_distribution"
+    ),
 }
 manifest.write_text(json.dumps(release, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 print("NV18_APP=" + str(app_desktop.parent.parent.parent))

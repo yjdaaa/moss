@@ -54,69 +54,69 @@ if (-not (Test-Path -LiteralPath $extracted -PathType Container)) {
     if ($licenseTexts.Count -eq 0) {
         Write-Output 'NV18_ARCHIVE_HAS_NO_EMBEDDED_LICENSES_SIDECAR_EVIDENCE_REQUIRED=True'
     }
-    # The binary archive alone does not prove corresponding native source.
-    # Independently reviewed source provenance is required per static library.
-    $evidence = Join-Path $repo 'apps/moss-voice-local/native-source-evidence.json'
-    Write-Output ('NV18_REVIEWED_NATIVE_SOURCE_EVIDENCE_PRESENT=' +
-        (Test-Path -LiteralPath $evidence -PathType Leaf))
-    if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {
-        $errors.Add('corresponding_native_source_provenance_unreviewed')
+}
+
+# The binary archive alone does not prove corresponding native source.
+# Independently reviewed source provenance is required per static library.
+$evidence = Join-Path $repo 'apps/moss-voice-local/native-source-evidence.json'
+Write-Output ('NV18_REVIEWED_NATIVE_SOURCE_EVIDENCE_PRESENT=' +
+    (Test-Path -LiteralPath $evidence -PathType Leaf))
+if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {
+    $errors.Add('corresponding_native_source_provenance_unreviewed')
+} else {
+    # A human-entered hash is not proof: every claimed source and license
+    # must be a real, task-owned file with a matching SHA-256.
+    $record = Get-Content -LiteralPath $evidence -Raw -ErrorAction Stop | ConvertFrom-Json
+    $sourcesRoot = Join-Path $repo 'apps/moss-voice-local/native-license-evidence'
+    if ($record.review_status -ne 'approved' -or
+        [string]::IsNullOrWhiteSpace([string]$record.reviewed_by)) {
+        $errors.Add('native_source_correspondence_review_pending')
+    }
+    if ($record.PSObject.Properties['limitations'] -and @($record.limitations).Count -gt 0){
+        $errors.Add('transitive_source_license_closure_incomplete')
+    }
+    if (
+        $record.archive_sha256 -ne $expectedArchiveSha256 -or
+        @($record.libraries).Count -ne $requiredNativeLibs.Count -or
+        -not (Test-Path -LiteralPath $sourcesRoot -PathType Container)) {
+        $errors.Add('native_source_evidence_incomplete')
     } else {
-        # A human-entered hash is not proof: every claimed source and license
-        # must be a real, task-owned file with a matching SHA-256.
-        $record = Get-Content -LiteralPath $evidence -Raw -ErrorAction Stop | ConvertFrom-Json
-        $sourcesRoot = Join-Path $repo 'apps/moss-voice-local/native-license-evidence'
-        if ($record.review_status -ne 'approved' -or
-            [string]::IsNullOrWhiteSpace([string]$record.reviewed_by)) {
-            $errors.Add('native_source_correspondence_review_pending')
-        }
-        if ($record.PSObject.Properties['limitations'] -and @($record.limitations).Count -gt 0){
-            $errors.Add('transitive_source_license_closure_incomplete')
-        }
-        if (
-            $record.archive_sha256 -ne $expectedArchiveSha256 -or
-            @($record.libraries).Count -ne $requiredNativeLibs.Count -or
-            -not (Test-Path -LiteralPath $sourcesRoot -PathType Container)) {
-            $errors.Add('native_source_evidence_incomplete')
-        } else {
-            $safeRoot = [IO.Path]::GetFullPath($sourcesRoot).TrimEnd('\', '/') +
-                [IO.Path]::DirectorySeparatorChar
-            foreach ($required in $requiredNativeLibs) {
-                $entry = @($record.libraries | Where-Object { $_.name -ceq $required })
-                if ($entry.Count -ne 1) {
-                    $errors.Add('native_source_evidence_missing_or_duplicate:' + $required)
+        $safeRoot = [IO.Path]::GetFullPath($sourcesRoot).TrimEnd('\', '/') +
+            [IO.Path]::DirectorySeparatorChar
+        foreach ($required in $requiredNativeLibs) {
+            $entry = @($record.libraries | Where-Object { $_.name -ceq $required })
+            if ($entry.Count -ne 1) {
+                $errors.Add('native_source_evidence_missing_or_duplicate:' + $required)
+                continue
+            }
+            $checks=@(@{file=$entry[0].source_file;hash=$entry[0].source_sha256;role='source'},@{file=$entry[0].license_file;hash=$entry[0].license_sha256;role='license'})
+            if($entry[0].PSObject.Properties['additional_licenses']){
+                foreach($extra in $entry[0].additional_licenses){$checks+=@{file=$extra.file;hash=$extra.sha256;role='additional_license'}}
+            }
+            foreach ($check in $checks) {
+                $role=$check.role
+                $relative = [string]$check.file
+                $expectedHash = [string]$check.hash
+                if ($relative -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,180}$' -or
+                    $relative -match '(^|/)\.\.?(/|$)' -or
+                    $expectedHash -notmatch '^[a-f0-9]{64}$') {
+                    $errors.Add('native_source_evidence_invalid_path_or_hash:' + $required + ':' + $role)
                     continue
                 }
-                $checks=@(@{file=$entry[0].source_file;hash=$entry[0].source_sha256;role='source'},@{file=$entry[0].license_file;hash=$entry[0].license_sha256;role='license'})
-                if($entry[0].PSObject.Properties['additional_licenses']){
-                    foreach($extra in $entry[0].additional_licenses){$checks+=@{file=$extra.file;hash=$extra.sha256;role='additional_license'}}
+                $full = [IO.Path]::GetFullPath((Join-Path $sourcesRoot $relative))
+                if (-not $full.StartsWith($safeRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+                    $errors.Add('native_source_evidence_file_missing:' + $required + ':' + $role)
+                    continue
                 }
-                foreach ($check in $checks) {
-                    $role=$check.role
-                    $relative = [string]$check.file
-                    $expectedHash = [string]$check.hash
-                    if ($relative -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,180}$' -or
-                        $relative -match '(^|/)\.\.?(/|$)' -or
-                        $expectedHash -notmatch '^[a-f0-9]{64}$') {
-                        $errors.Add('native_source_evidence_invalid_path_or_hash:' + $required + ':' + $role)
-                        continue
-                    }
-                    $full = [IO.Path]::GetFullPath((Join-Path $sourcesRoot $relative))
-                    if (-not $full.StartsWith($safeRoot, [StringComparison]::OrdinalIgnoreCase) -or
-                        -not (Test-Path -LiteralPath $full -PathType Leaf)) {
-                        $errors.Add('native_source_evidence_file_missing:' + $required + ':' + $role)
-                        continue
-                    }
-                    $file = Get-Item -LiteralPath $full -Force -ErrorAction Stop
-                    if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                        (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) {
-                        $errors.Add('native_source_evidence_hash_or_reparse_mismatch:' + $required + ':' + $role)
-                    }
+                $file = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) {
+                    $errors.Add('native_source_evidence_hash_or_reparse_mismatch:' + $required + ':' + $role)
                 }
             }
         }
     }
-
 }
 
 if (-not (Test-Path -LiteralPath $notices -PathType Leaf)) {
@@ -139,6 +139,7 @@ if(-not(Test-Path -LiteralPath $rustEvidence -PathType Leaf)){
     $errors.Add('rust_source_evidence_missing')
 }else{
     $rust=Get-Content -LiteralPath $rustEvidence -Raw|ConvertFrom-Json
+    if($rust.review_status -ne 'approved'){$errors.Add('rust_source_review_pending')}
     $locked=@{}
     foreach($block in [regex]::Split((Get-Content -LiteralPath $rustLock -Raw),'\[\[package\]\]')){
         $pkgName=[regex]::Match($block,'(?m)^name = "([^"]+)"').Groups[1].Value
@@ -156,6 +157,9 @@ if(-not(Test-Path -LiteralPath $rustEvidence -PathType Leaf)){
         $key="$($pkg.name)@$($pkg.version)"
         if(-not $seen.Add($key) -or -not $locked.ContainsKey($key) -or $locked[$key] -ne $pkg.source_sha256){
             $errors.Add('rust_package_lock_mismatch:'+$key);continue
+        }
+        if($pkg.PSObject.Properties['review_status'] -and $pkg.review_status -ne 'approved'){
+            $errors.Add('rust_package_review_pending:'+$key)
         }
         if(@($pkg.license_files).Count -eq 0){$errors.Add('rust_package_license_missing:'+$key)}
         $checks=@(@{file=$pkg.source_file;hash=$pkg.source_sha256})
@@ -178,28 +182,62 @@ if(-not(Test-Path -LiteralPath $rustEvidence -PathType Leaf)){
     Write-Output ('NV18_RUST_LICENSE_TEXTS='+(($rust.packages|ForEach-Object{@($_.license_files).Count}|Measure-Object -Sum).Sum))
 }
 
+# Hash the sorted names of the pinned ORT root's source and build-only dependency sets.
+function Get-ORTNameSetHash([object[]]$entries) {
+    [string[]]$names=@($entries | ForEach-Object { $_.name })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $bytes=[Text.Encoding]::UTF8.GetBytes(($names -join "`n"))
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 $ortEvidence=Join-Path $repo 'apps/moss-voice-local/native-license-evidence/ort-dependency-evidence.json'
 if(Test-Path -LiteralPath $ortEvidence -PathType Leaf){
     $ort=Get-Content -LiteralPath $ortEvidence -Raw|ConvertFrom-Json
-    if($ort.release_ready -ne $false -or $ort.review_status -ne 'pending'){$errors.Add('ort_candidate_receipt_cannot_self_approve')}
+    if($ort.release_ready -ne $true -or $ort.review_status -ne 'approved' -or
+        [string]::IsNullOrWhiteSpace($ort.reviewed_by)){$errors.Add('ort_candidate_receipt_unapproved')}
     if($ort.root_archive_sha256 -ne 'a5003dfd85d66a4d45bd2757c7f813f9e835142e9a936ac04877c788d6afe938'){$errors.Add('ort_root_archive_mismatch')}
-    if(@($ort.uncollected_sources).Count -gt 0 -or $ort.gitlink_resolution_error){$errors.Add('ort_candidate_collection_incomplete')}
+    if(@($ort.uncollected_sources).Count -gt 0 -or $ort.gitlink_resolution_error -or
+        @($ort.limitations).Count -gt 0){$errors.Add('ort_candidate_collection_incomplete')}
     $ortRoot=Join-Path $repo 'apps/moss-voice-local/native-license-evidence'
     $collected=@($ort.dependencies|Where-Object collection -eq collected_candidate)
-    if(@($ort.dependencies).Count -gt 100){throw 'ORT candidate receipt exceeds bounded entry count'}
+    if($collected.Count -ne 38 -or @($ort.dependencies).Count -ne 44 -or
+        @($ort.dependencies | Where-Object {
+            $_.name -isnot [string] -or $_.name -cnotmatch '^[a-z0-9_-]+$' -or
+            $_.collection -notin @('collected_candidate','not_collected_binary')
+        }).Count -gt 0){
+        $errors.Add('ort_candidate_collection_incomplete')
+    }
+    $hostBinaries=@($ort.dependencies|Where-Object collection -eq not_collected_binary)
+    if((Get-ORTNameSetHash $collected) -ne 'c3953ee18312beb2e11c52b25e518597a20fbbafe96a437fe8914f0d243b4e59' -or
+       (Get-ORTNameSetHash $hostBinaries) -ne '38b27be84af5f57042e4fd0bc7503903830ffc2fa00977a21aca25d3fc3840b8'){
+        $errors.Add('ort_dependency_set_mismatch')
+    }
+    $sourceHashes=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($dep in $collected){
-        $checks=@(@{file=$dep.source_file;hash=$dep.source_sha256;sha1=$(if($dep.PSObject.Properties['upstream_sha1']){$dep.upstream_sha1}else{$null})})
-        foreach($license in $dep.license_files){$checks+=@{file=$license.file;hash=$license.sha256;sha1=$null}}
+        $upstreamSha1=if($dep.PSObject.Properties['upstream_sha1']){$dep.upstream_sha1}else{$null}
+        if($dep.name -notlike 'gitlink-*' -and $upstreamSha1 -cnotmatch '^[a-f0-9]{40}$'){
+            $errors.Add('ort_candidate_collection_incomplete')
+            continue
+        }
+        $checks=@(@{file=$dep.source_file;hash=$dep.source_sha256;sha1=$upstreamSha1;source=$true})
+        if(@($dep.license_files).Count -eq 0){$errors.Add('ort_candidate_collection_incomplete')}
+        foreach($license in $dep.license_files){$checks+=@{file=$license.file;hash=$license.sha256;sha1=$null;source=$false}}
         foreach($check in $checks){
             if($check.file -notmatch '^ort-dependencies/[a-zA-Z0-9][a-zA-Z0-9._-]{0,180}$' -or $check.hash -notmatch '^[a-f0-9]{64}$'){$errors.Add('ort_evidence_invalid_path_or_hash');continue}
             $file=Join-Path $ortRoot $check.file
             if(-not(Test-Path -LiteralPath $file -PathType Leaf)){$errors.Add('ort_evidence_file_missing');continue}
-            if(((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $check.hash){$errors.Add('ort_evidence_bytes_changed')}
-            if($check.sha1 -and (Get-FileHash -LiteralPath $file -Algorithm SHA1).Hash.ToLowerInvariant() -ne $check.sha1){$errors.Add('ort_upstream_sha1_changed')}
+            if(((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$errors.Add('ort_evidence_bytes_changed');continue}
+            $actualHash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($actualHash -ne $check.hash){$errors.Add('ort_evidence_bytes_changed');continue}
+            if($check.sha1 -and (Get-FileHash -LiteralPath $file -Algorithm SHA1).Hash.ToLowerInvariant() -ne $check.sha1){$errors.Add('ort_upstream_sha1_changed');continue}
+            if($check.source -and -not $sourceHashes.Add($actualHash)){$errors.Add('ort_source_archive_duplicate')}
         }
     }
     Write-Output ('NV18_ORT_CANDIDATE_ARCHIVES='+$collected.Count)
+} else {
+    $errors.Add('ort_candidate_receipt_missing')
 }
 
 foreach ($issue in $errors) { Write-Output ('NV18_LICENSE_BLOCKER=' + $issue) }

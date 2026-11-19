@@ -5,6 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { fileURLToPath } from "node:url";
 
@@ -13,8 +15,13 @@ const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const HOST_BIN = process.platform === "win32" ? "moss-host.exe" : "moss-host";
 const RELEASE_EXE = path.join(ROOT_DIR, "target", "release", HOST_BIN);
 const DEBUG_EXE = path.join(ROOT_DIR, "target", "debug", HOST_BIN);
-const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "moss-e2e-"));
-const cleanupTestDir = () => fs.rmSync(TEST_DIR, { recursive: true, force: true });
+
+export function resolveSuiteFiles(argv = process.argv, env = process.env) {
+  const apiOnly = argv.includes("--api-only") || env.MOSS_E2E_API_ONLY === "1";
+  return apiOnly
+    ? ["frontend/tests/e2e/api.test.mjs"]
+    : ["frontend/tests/e2e/api.test.mjs", "frontend/tests/e2e/workbench.ui.test.mjs"];
+}
 
 /**
  * 回环 GRBL 模拟器：在 127.0.0.1 上监听 Telnet 端口，
@@ -25,7 +32,10 @@ const cleanupTestDir = () => fs.rmSync(TEST_DIR, { recursive: true, force: true 
 function startFakeGrblServer(port, opts = {}) {
   const laserMode = opts.laserMode ?? 1;
   const stats = { lines: 0, resets: 0, feedHolds: 0, connections: 0 };
+  const sockets = new Set();
   const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
     stats.connections += 1;
     let buffer = "";
     socket.on("data", (chunk) => {
@@ -62,7 +72,14 @@ function startFakeGrblServer(port, opts = {}) {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => resolve({ server, stats }));
+    server.listen(port, "127.0.0.1", () => resolve({
+      server,
+      stats,
+      close: () => new Promise((closed) => {
+        server.close(closed);
+        for (const socket of sockets) socket.destroy();
+      }),
+    }));
   });
 }
 
@@ -89,194 +106,194 @@ async function findAvailablePort(preferredPort = 9666) {
   throw new Error("无法找到空闲的测试端口");
 }
 
-async function waitForServer(url, timeoutMs = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+function startChild(file, args, options) {
+  const child = spawn(file, args, options);
+  let outcome;
+  const done = new Promise((resolve) => {
+    const finish = (result) => {
+      outcome = result;
+      resolve(result);
+    };
+    child.once("exit", (code, signal) => finish({ code, signal }));
+    child.on("error", (error) => {
+      // 启动失败没有 PID。已启动的进程即使发信号失败，也要以 exit 为准。
+      if (!child.pid) finish({ error });
+    });
+  });
+  return { child, done, get outcome() { return outcome; } };
+}
+
+async function stopChild(running) {
+  if (!running || running.outcome) return true;
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
     try {
-      const res = await fetch(url);
-      if (res.ok) {
-        return true;
-      }
-    } catch {
-      // Retry after delay
+      running.child.kill(signal);
+    } catch (error) {
+      console.error(`[E2E] 发送 ${signal} 失败：${error.message}`);
     }
-    await new Promise((r) => setTimeout(r, 200));
+    const timer = new AbortController();
+    try {
+      await Promise.race([
+        running.done,
+        sleep(signal === "SIGTERM" ? 2000 : 1000, undefined, { signal: timer.signal }),
+      ]);
+    } finally {
+      timer.abort();
+    }
+    if (running.outcome) return true;
   }
+  // 退出未确认时返回失败并保留目录，避免子进程和其管道继续拖住调度器。
+  running.child.stdout?.destroy();
+  running.child.stderr?.destroy();
+  running.child.unref();
   return false;
 }
 
-async function main() {
-  console.log("===============================================================");
-  console.log(" MOSS 端到端 (E2E) 测试调度器：API 链路 + 工作台界面");
-  console.log("===============================================================\n");
-
-  const exePath = fs.existsSync(RELEASE_EXE) ? RELEASE_EXE : DEBUG_EXE;
-  if (!fs.existsSync(exePath)) {
-    console.error(`❌ 找不到 moss-host 可执行文件: ${exePath}`);
-    console.error("请先运行: cargo build -p moss-host --release");
-    cleanupTestDir();
-    process.exit(1);
-  }
-
-  // 1. 准备测试隔离环境
-  const port = await findAvailablePort(9666);
-  const baseUrl = `http://127.0.0.1:${port}`;
-  console.log(`[E2E] 选定测试端口: ${port}`);
-  console.log(`[E2E] 隔离运行时目录: ${TEST_DIR}`);
-  console.log(`[E2E] 宿主可执行程序: ${exePath}`);
-
-  // 1.5 启动回环 GRBL 模拟器（真实 TCP 传输 + $32 握手 + 逐行 ok）
-  const grblPort = await findAvailablePort(23230);
-  const fakeGrbl = await startFakeGrblServer(grblPort);
-  console.log(`[E2E] 回环 GRBL 模拟器已监听: 127.0.0.1:${grblPort}`);
-
-  // 2. 启动真实后端服务（跨平台隔离运行目录，并关闭启动时自动联网检查更新以保证离线纯净测试）
-  for (const rel of [
-    path.join("moss"),
-    path.join("Library", "Application Support", "moss"),
-    path.join(".local", "share", "moss"),
-  ]) {
-    const dir = path.join(TEST_DIR, rel);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ auto_check_update: false }), "utf8");
-  }
-  console.log(`[E2E] 正在启动后端服务 (moss-host.exe serve)...`);
-  const hostEnv = {
-    ...process.env,
-    APPDATA: TEST_DIR,
-    HOME: TEST_DIR,
-    XDG_DATA_HOME: path.join(TEST_DIR, ".local", "share"),
-    MCP_ENDPOINT: "disabled-for-loopback-tests",
-    LASER_WEB_HOST: "127.0.0.1",
-    LASER_WEB_PORT: String(port),
-    LASER_MATERIAL_PARAMS_FILE: path.join(TEST_DIR, "materials.json"),
-  };
-
-  const hostProc = spawn(exePath, ["serve"], {
-    cwd: ROOT_DIR,
-    env: hostEnv,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  let detectedPort = null;
-  hostProc.stdout.on("data", (d) => {
-    const str = d.toString();
-    process.stdout.write(`[HOST] ${str}`);
-    const match = str.match(/moss-host serving on [^:]+:(\d+)/);
-    if (match && match[1]) {
-      detectedPort = Number(match[1]);
-    }
-  });
-  hostProc.stderr.on("data", (d) => {
-    const str = d.toString();
-    process.stderr.write(`[HOST-ERR] ${str}`);
-  });
-
-  let hostExited = false;
-  hostProc.on("exit", (code) => {
-    hostExited = true;
-    if (code !== 0 && code !== null) {
-      console.warn(`[HOST] 后端进程非零退出: ${code}`);
-    }
-  });
-
-  // 3. 等待服务就绪并动态探测实际绑定端口
-  console.log(`[E2E] 正在等待服务输出绑定端口并进行健康探针检查...`);
-  const startWait = Date.now();
-  while (!detectedPort && Date.now() - startWait < 5000) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  const actualPort = detectedPort || port;
-  const actualBaseUrl = `http://127.0.0.1:${actualPort}`;
-  console.log(`[E2E] 确认实际通信服务地址: ${actualBaseUrl}`);
-
-  const isReady = await waitForServer(`${actualBaseUrl}/api/system/info`, 10000);
-  if (!isReady) {
-    console.error(`❌ 后端服务未能于 10 秒内就绪！`);
-    if (!hostExited) hostProc.kill();
-    fakeGrbl.server.close();
-    cleanupTestDir();
-    process.exit(1);
-  }
-  console.log(`✓ 后端服务探针响应 200 OK，测试基座已就绪！\n`);
-
-  // 4. 执行核心 API 与硬件通信工作流端到端真实测试套件
-  console.log(`===============================================================`);
-  console.log(` 开始执行核心 API 与硬件通信工作流真实端到端断言测试套件`);
-  console.log(`===============================================================\n`);
-
-  const testEnv = {
-    ...process.env,
-    TEST_API_PORT: String(actualPort),
-    TEST_API_BASE: actualBaseUrl,
-    TEST_APPDATA: TEST_DIR,
-    TEST_GRBL_PORT: String(grblPort),
-  };
-
-  const apiOnly = process.argv.includes("--api-only") || process.env.MOSS_E2E_API_ONLY === "1";
-  const suiteFiles = apiOnly
-    ? ["frontend/tests/e2e/api.test.mjs"]
-    : ["frontend/tests/e2e/api.test.mjs", "frontend/tests/e2e/workbench.ui.test.mjs"];
-
-  const testProc = spawn(
-    process.execPath,
-    ["--test", "--test-concurrency=1", ...suiteFiles],
-    {
-      cwd: ROOT_DIR,
-      env: testEnv,
-      stdio: "inherit",
-    }
-  );
-
-  let testExitCode = await new Promise((resolve) => {
-    testProc.on("exit", (code) => resolve(code ?? 1));
-  });
-
-  console.log(`\n[E2E] GRBL 模拟器统计: 连接 ${fakeGrbl.stats.connections} 次, 收到 G-code ${fakeGrbl.stats.lines} 行, 进给保持 ${fakeGrbl.stats.feedHolds} 次, 0x18 软复位 ${fakeGrbl.stats.resets} 次`);
-  if (testExitCode === 0 && (fakeGrbl.stats.lines === 0 || fakeGrbl.stats.resets === 0 || fakeGrbl.stats.feedHolds === 0)) {
-    console.error("[E2E] 模拟器未观察到完整的 G-code/暂停/0x18 事件，拒绝报告测试通过。");
-    testExitCode = 1;
-  }
-  fakeGrbl.server.close();
-
-  // 5. 优雅退出后端服务
-  console.log(`\n[E2E] 正在安全回收测试后端进程 (PID: ${hostProc.pid})...`);
-  try {
-    // 先触发优雅停止
-    await fetch(`${actualBaseUrl}/api/workflow`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "cancel", workflow_id: "all" }),
-    }).catch(() => {});
-  } catch {}
-
-  if (!hostExited) {
-    hostProc.kill("SIGTERM");
-    // 等待 1 秒若未退出则强制杀死
-    await new Promise((r) => setTimeout(r, 1000));
-    if (!hostExited) {
-      hostProc.kill("SIGKILL");
-    }
-  }
-
-  console.log(`[E2E] 后端服务已安全回收。\n`);
-  cleanupTestDir();
-
-  if (testExitCode === 0) {
-    console.log("===============================================================");
-    console.log(" ✅ MOSS App 32 项真实端到端闭环测试全部通过！");
-    console.log("===============================================================");
-  } else {
-    console.error("===============================================================");
-    console.error(` ❌ 部分按钮或功能测试未通过 (Exit Code: ${testExitCode})`);
-    console.error("===============================================================");
-  }
-
-  process.exit(testExitCode);
+function childFailure(label, { code, signal, error }) {
+  return new Error(error
+    ? `${label}启动失败：${error.message}`
+    : `${label}提前退出（${signal ?? code}）`);
 }
 
-main().catch((err) => {
-  console.error("执行异常:", err);
-  cleanupTestDir();
-  process.exit(1);
-});
+function waitForAbort(signal) {
+  return new Promise((_, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+}
+
+function hostPort(running) {
+  const stdout = createInterface({ input: running.child.stdout, crlfDelay: Infinity });
+  return new Promise((resolve) => {
+    stdout.on("line", (line) => {
+      console.log(`[HOST] ${line}`);
+      const match = /^moss-host serving on 127\.0\.0\.1:(\d+)$/.exec(line);
+      if (!match) return;
+      const port = Number(match[1]);
+      if (port > 0 && port <= 65535) resolve(port);
+    });
+  });
+}
+
+async function waitForServer(baseUrl, signal) {
+  const url = `${baseUrl}/api/system/info`;
+  while (true) {
+    signal.throwIfAborted();
+    try {
+      const response = await fetch(url, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]),
+        redirect: "error",
+      });
+      await response.body?.cancel();
+      if (response.ok) return;
+    } catch {
+      signal.throwIfAborted();
+    }
+    await sleep(200, undefined, { signal });
+  }
+}
+
+async function main() {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "moss-e2e-"));
+  const interrupt = new AbortController();
+  const onSignal = (signal, code) => () => {
+    if (interrupt.signal.aborted) return;
+    process.exitCode = code;
+    interrupt.abort(new Error(`收到 ${signal}，停止 E2E 验证`));
+  };
+  const sigint = onSignal("SIGINT", 130);
+  const sigterm = onSignal("SIGTERM", 143);
+  process.on("SIGINT", sigint);
+  process.on("SIGTERM", sigterm);
+
+  let fakeGrbl;
+  let host;
+  let tests;
+  try {
+    console.log("MOSS E2E 测试调度器");
+    const exePath = fs.existsSync(RELEASE_EXE) ? RELEASE_EXE : DEBUG_EXE;
+    if (!fs.existsSync(exePath)) {
+      throw new Error(`找不到 moss-host：${exePath}。请先运行 cargo build -p moss-host --release`);
+    }
+    const port = await findAvailablePort(9666);
+    fakeGrbl = await startFakeGrblServer(0);
+    const grblPort = fakeGrbl.server.address().port;
+    interrupt.signal.throwIfAborted();
+    console.log(`[E2E] 隔离运行时目录: ${testDir}`);
+    console.log(`[E2E] 回环 GRBL 模拟器: 127.0.0.1:${grblPort}`);
+    for (const rel of ["moss", path.join("Library", "Application Support", "moss"), path.join(".local", "share", "moss")]) {
+      const dir = path.join(testDir, rel);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ auto_check_update: false }), "utf8");
+    }
+
+    host = startChild(exePath, ["serve"], {
+      cwd: testDir,
+      env: {
+        ...process.env,
+        APPDATA: testDir,
+        HOME: testDir,
+        XDG_DATA_HOME: path.join(testDir, ".local", "share"),
+        MCP_ENDPOINT: "disabled-for-loopback-tests",
+        LASER_WEB_HOST: "127.0.0.1",
+        LASER_WEB_PORT: String(port),
+        LASER_MATERIAL_PARAMS_FILE: path.join(testDir, "materials.json"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    host.child.stderr.on("data", (chunk) => process.stderr.write(`[HOST-ERR] ${chunk}`));
+    const hostEnded = new AbortController();
+    host.done.then((result) => hostEnded.abort(childFailure("测试宿主", result)));
+    const running = AbortSignal.any([interrupt.signal, hostEnded.signal]);
+    const starting = AbortSignal.any([running, AbortSignal.timeout(15000)]);
+    const actualPort = await Promise.race([hostPort(host), waitForAbort(starting)]);
+    const baseUrl = `http://127.0.0.1:${actualPort}`;
+    await waitForServer(baseUrl, starting);
+    running.throwIfAborted();
+    console.log(`[E2E] 测试宿主已就绪: ${baseUrl}`);
+
+    tests = startChild(process.execPath, ["--test", "--test-concurrency=1", ...resolveSuiteFiles()], {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        TEST_API_PORT: String(actualPort),
+        TEST_API_BASE: baseUrl,
+        TEST_APPDATA: testDir,
+        TEST_GRBL_PORT: String(grblPort),
+      },
+      stdio: "inherit",
+    });
+
+    const outcome = await Promise.race([tests.done, waitForAbort(running)]);
+    interrupt.signal.throwIfAborted();
+    if (outcome.error) throw childFailure("测试子进程", outcome);
+    process.exitCode = outcome.code ?? 1;
+    if (host.outcome) throw childFailure("测试宿主", host.outcome);
+    const { lines, connections, feedHolds, resets } = fakeGrbl.stats;
+    console.log(`[E2E] GRBL 模拟器: ${connections} 次连接、${lines} 行 G-code、${feedHolds} 次进给保持、${resets} 次软复位`);
+    if (process.exitCode === 0 && lines === 0) {
+      throw new Error("共享模拟器未接收 G-code，拒绝报告测试通过");
+    }
+  } finally {
+    try {
+      const [testsStopped, hostStopped] = await Promise.all([stopChild(tests), stopChild(host)]);
+      await fakeGrbl?.close();
+      if (!testsStopped || !hostStopped) {
+        throw new Error(`未确认测试子进程退出，保留临时目录 ${testDir}`);
+      }
+      fs.rmSync(testDir, { recursive: true, force: true });
+    } finally {
+      process.off("SIGINT", sigint);
+      process.off("SIGTERM", sigterm);
+    }
+  }
+  if (process.exitCode === 0) console.log("[E2E] 全部端到端用例通过");
+}
+
+if (process.argv[1] && fs.existsSync(process.argv[1])
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+  main().catch((error) => {
+    console.error("[E2E] 执行失败", error);
+    if (!process.exitCode) process.exitCode = 1;
+  });
+}

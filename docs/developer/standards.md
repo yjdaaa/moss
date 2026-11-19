@@ -59,6 +59,7 @@
 - 格式与静态检查（2026-11-07 加门禁）：Rust 用 `rustfmt` 默认规则（无 `rustfmt.toml`），`cargo clippy --workspace --all-targets -- -D warnings` 零警告（结构提示放行项见根 `Cargo.toml`，参数上限 10 见 `clippy.toml`，局部例外用带 `reason` 的 `#[expect(...)]`）。前端 `npm run lint` 零 error：Hooks 只能在组件顶层调用，“关闭即重置”的弹窗写外层判断 `visible`、内层组件放 Hooks；`react-hooks/exhaustive-deps` 暂为 warning，逐步清理。
 - 纯格式化的大提交记入 `.git-blame-ignore-revs`，本机执行一次 `git config blame.ignoreRevsFile .git-blame-ignore-revs`。
 - 测试里按源码文本断言时，正则要容忍 rustfmt 可能加的空白（如 `,\s*`），不要依赖紧凑写法。
+- FakeGrbl 端到端调度器只探测本轮启动的宿主报告的回环端口。宿主提前退出、启动超时或进程收到中断时，按失败收尾，等待所启动的子进程退出后再清理临时目录。
 
 ## 文档
 

@@ -4,12 +4,15 @@ param(
   [switch]$SkipFrontendBuild,
   [switch]$IncludeFullNativeEvidence,
   [string]$VersionOverride = '',
-  [string]$EmitGplSourceZip = ''
+  [string]$EmitGplSourceZip = '',
+  [switch]$AllowUnauditedInternal
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if(-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){throw 'Windows host required'}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$auditScript = Join-Path $PSScriptRoot 'audit-native-licenses.ps1'
+if(-not (Test-Path -LiteralPath $auditScript -PathType Leaf)){throw "Missing required license audit gate: $auditScript"}
 $desktop = Join-Path $repo 'apps/desktop/src-tauri'
 $helperRoot = Join-Path $repo 'apps/moss-voice-local'
 $target = Join-Path $repo 'target'
@@ -40,6 +43,24 @@ New-Item -ItemType Directory -Path $resource,$runDir,(Split-Path -Parent $bin) |
 Write-Output 'NV18_BUILDING_HELPER'
 & cargo build --release --manifest-path (Join-Path $helperRoot 'Cargo.toml') --target $triple --target-dir $target
 if($LASTEXITCODE -ne 0){throw 'Helper compilation failed'}
+$licenseAuditReady = $false
+if(-not $AllowUnauditedInternal){
+  $auditOut = @(& $auditScript -RequireComplete)
+  if($auditOut -contains 'NV18_NATIVE_LICENSE_RELEASE_READY=True'){
+    $licenseAuditReady = $true
+  } else {
+    throw 'Sidecar release blocked: native license audit gate did not report release ready. Pass -AllowUnauditedInternal only for non-distributable local QA.'
+  }
+} else {
+  $auditOut = @(& $auditScript)
+  $licenseAuditReady = ($auditOut -contains 'NV18_NATIVE_LICENSE_RELEASE_READY=True')
+  if(-not $licenseAuditReady){
+    if($EmitGplSourceZip -ne ''){
+      throw 'Refusing -EmitGplSourceZip with -AllowUnauditedInternal while native license audit is incomplete.'
+    }
+    Write-Warning 'NV18_INTERNAL_QA_UNAUDITED_SIDECAR=True (for internal QA only; NOT for external distribution per docs/developer/safety.md)'
+  }
+}
 Require-File $helper
 if((Get-Item $helper).Length -le 0){throw 'Empty helper EXE'}
 $version = @(& $helper --version 2>&1)
@@ -126,7 +147,8 @@ $release=@{
  source_tree_sha256=$sourceHash
  generated_at=(Get-Date).ToUniversalTime().ToString('o')
  files=$files
- validation='built_not_installed_or_license_audited'
+ distributable=[bool]$licenseAuditReady
+ validation=if($licenseAuditReady){'built_and_native_license_audited_not_installed'}else{'internal_qa_only_unaudited_not_for_distribution'}
 }
 $release|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $manifest -Encoding utf8
 Write-Output ('NV18_BUNDLE='+$nsis[0].FullName)

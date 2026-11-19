@@ -245,13 +245,13 @@ cd ..\apps\desktop\src-tauri
 cargo tauri build
 ```
 
-在 macOS 上直接运行打包脚本（自动完成前端构建、编译并内置本地语音辅助程序 `moss-voice-local` 及其许可证/对应源码、完成本地 ad-hoc 重签名校验，并产出 `.app`、`.dmg` 与 `release-manifest.json`）：
+在 macOS 上运行打包脚本（默认构建不含未闭环语音辅助程序 `moss-voice-local` 的普通 `.app` 与 `.dmg`；仅在原生许可门禁通过后才允许 `--with-voice-sidecar` 对外发布，内部软件验收需额外设 `MOSS_ALLOW_UNAUDITED_SIDECAR=1`）：
 
 ```bash
-./scripts/build-macos-installer.sh
+./scripts/build-macos-installer.sh --without-voice-sidecar
 ```
 
-Windows 产物：`target\release\bundle\nsis\MOSS_<版本>_x64-setup.exe`（带本地语音 helper 的专用包运行 `powershell -File scripts/voice-helper/build-sidecar-installer.ps1`，产物在 `target\x86_64-pc-windows-msvc\release\bundle\nsis\`）；macOS 产物：`target/<triple>/release/bundle/macos/MOSS.app` 与 `target/<triple>/release/bundle/dmg/MOSS_<版本>_<arch>.dmg`（Apple Silicon 为 `aarch64-apple-darwin`，Intel 为 `x86_64-apple-darwin`，也可设 `MOSS_MACOS_TARGET=universal-apple-darwin` 打双架构通用包）。安装包在未配置正式证书前仅做本地 ad-hoc 签名，在别的电脑上运行时 Windows 可能提示“未知发布者”（选“仍要运行”）、macOS Gatekeeper 可能拦截（在“系统设置 → 隐私与安全性”点击“仍要打开”）；正式分发前需代码签名与公证（macOS 构建可传 `APPLE_SIGNING_IDENTITY`）。
+Windows 产物：`target\release\bundle\nsis\MOSS_<版本>_x64-setup.exe`（仅内部非分发带本地语音 helper 的专用包可显式传 `-AllowUnauditedInternal` 运行 `powershell -File scripts/voice-helper/build-sidecar-installer.ps1`，产物在 `target\x86_64-pc-windows-msvc\release\bundle\nsis\`，详见 [安全入口](../developer/safety.md)）；macOS 产物：`target/<triple>/release/bundle/macos/MOSS.app` 与 `target/<triple>/release/bundle/dmg/MOSS_<版本>_<arch>.dmg`（Apple Silicon 为 `aarch64-apple-darwin`，Intel 为 `x86_64-apple-darwin`，也可设 `MOSS_MACOS_TARGET=universal-apple-darwin` 打双架构通用包）。安装包在未配置正式证书前仅做本地 ad-hoc 签名，在别的电脑上运行时 Windows 可能提示“未知发布者”（选“仍要运行”）、macOS Gatekeeper 可能拦截（在“系统设置 → 隐私与安全性”点击“仍要打开”）；正式分发前需代码签名与公证（macOS 构建可传 `APPLE_SIGNING_IDENTITY`）。
 
 ### 安装
 

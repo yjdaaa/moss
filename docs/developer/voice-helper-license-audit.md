@@ -75,3 +75,13 @@ Android APK 内 `lib/arm64-v8a/libmoss_desktop_lib.so` 与本次已编译 Rust s
 `r-efi`的[官方AUTHORS说明](https://github.com/r-efi/r-efi/blob/main/AUTHORS)把完整MIT许可及版权声明放在AUTHORS中。本轮直接从checksum已匹配Cargo.lock的5.3.0/6.0.0 `.crate`提取各自AUTHORS原文；未套用其他版本或手写许可。收集器仅在AUTHORS含LICENSE、MIT完整许可起句与COPYRIGHT段时将其计入许可证据，避免把普通作者列表当许可。现在146归档/279文本、`missing_license_texts=[]`，所有记录仍pending。
 
 只读审计另核对helper Cargo.lock自身SHA、registry包集合及每个源码checksum、实际279文本的SHA和非重解析点。正常诊断通过字节核对；严格发行检查仍按预期拒绝2类：**原生二进制/源码对应的独立审核**与**传递依赖/许可闭环**。固定ORT v1.28.2源码中`.gitmodules`列onnx/libprotobuf-mutator/emsdk，`cmake/deps.txt`另含固定URL/hash的依赖归档；单个ORT源码tar不包含它们。不能在缺预编译构建选项与依赖对应证据时凭猜测宣称闭环完成。
+
+## 发布流水线与打包脚本门禁接线
+
+- `scripts/voice-helper/audit-native-licenses.ps1` 在预编译 archive 缺失时同样核查 `native-source-evidence.json`（含 `review_status=approved` 与空 `limitations`）并校验 `rust-source-evidence.json` 审批状态；跨平台校验由 `scripts/voice-helper/check-sidecar-license-gate.mjs` 同步执行（含 macOS 原生 provenance 门禁）。
+- `scripts/voice-helper/build-sidecar-installer.ps1` 默认执行 `-RequireComplete` 失败关闭（仅内部非分发软件验证需显式 `-AllowUnauditedInternal` 且禁止 `-EmitGplSourceZip`）；`scripts/build-macos-installer.sh` 默认产出不含 sidecar 的普通安装包（`--without-voice-sidecar`），传 `--with-voice-sidecar` 时由上述门禁拦截（内部验收需 `MOSS_ALLOW_UNAUDITED_SIDECAR=1`）。
+- `.github/workflows/release.yml` 与 `.github/workflows/release-macos.yml` 在发布阶段自动执行该门禁：未闭环前扣留 `windows-offline-voice`、`gpl-source` 与 macOS sidecar，仅发布普通安装包并按真实产物写出 `latest.json` 与 Release 资产列表。
+
+## 2026-11-18 发布门禁
+
+ORT 回执只有标明 `release_ready=true`、`review_status=approved` 并填写审核人、清除未结限制时才可能通过。门禁另核对固定依赖集合、源码与许可文件字节，并按验过的实际 SHA-256 拒绝重复源码归档，包含改名后的副本。不同依赖可以共用同一份许可文本。候选收集仍标为待审核。通用准备任务与 macOS 使用 macOS 许可门禁，Windows 在 helper 编译取得固定归档后核对该归档和静态库。

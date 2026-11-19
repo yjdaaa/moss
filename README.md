@@ -131,15 +131,17 @@ cargo run -p moss-host -- serve
 ### 3. Build Release Installers
 
 ```powershell
-# Windows: NSIS installer + standalone moss-voice-local sidecar
-powershell -ExecutionPolicy Bypass -File scripts/build-windows-installer.ps1
+# Windows: standard NSIS installer (without un-audited voice sidecar)
+cd frontend; npm run build; cd ..\apps\desktop\src-tauri; cargo tauri build
+# Sidecar installer is license-gated; internal non-distributable QA only:
+# powershell -ExecutionPolicy Bypass -File scripts/voice-helper/build-sidecar-installer.ps1 -AllowUnauditedInternal
 ```
 
 ```bash
-# macOS: .app and .dmg bundle (bundles moss-voice-local sidecar by default)
-bash scripts/build-macos-installer.sh
+# macOS: .app and .dmg bundle (ordinary package without moss-voice-local sidecar by default)
+bash scripts/build-macos-installer.sh --without-voice-sidecar
 
-# Android: aarch64 release APK
+# Android: aarch64 release APK (requires gen/android/keystore.properties for release signing)
 cd apps/desktop/src-tauri
 cargo tauri android build --target aarch64 --apk
 ```
