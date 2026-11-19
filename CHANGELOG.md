@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 从桌面壳抽出 `moss-voice-host` 独立 crate，瘦身 `apps/desktop/src-tauri`（2026-11-19）
+
+- **现象**：桌面壳 `apps/desktop/src-tauri` 膨胀至 2.4 万余行，其中约 1.9 万行内置语音服务与长期记忆编排（`voice_builtin/imp/*`、`voice_context/host/*`）几乎无 Tauri/UI 耦合（仅 10 处调用 `tauri::async_runtime`），却迫使所有语音后端改动与测试绑定 Tauri 重编译，且桌面壳直接引入 16 个冗余依赖。
+- **根因与修复**：新增第 4 层零 UI 宿主总装配 crate `crates/moss-voice-host`（`BuiltinVoice`、`BuiltinState`、`ContextHost` 及 26 个语音编排子模块），将 10 处 `tauri::async_runtime::{block_on, spawn_blocking}` 全部替换为纯 `tokio`（复用当前 Tokio 阻塞池句柄或懒初始化专用运行时）；`apps/desktop/src-tauri/src/{voice_builtin,voice_context}.rs` 收敛为纯 Tauri 命令、系统文件对话框与主窗口来源校验薄壳，桌面壳正式依赖精简 16 项；在 `scripts/check-crate-layers.mjs` 引入第 4 层宿主总装配与 `shell: true` 应用壳标识，同步更新 `scripts/tests/crate-layers.test.mjs` 与 `docs/developer/architecture.md`。
+- **验证**：`node scripts/verify.mjs`（含 `moss-voice-host`、`moss-desktop` 全部 Rust 单测及 `block_on` 多/单线程运行时重入测试、脚本单测 51 项、前端单测 356 项、clippy/rustfmt/eslint/分层/卫生门禁零警告）全部通过；独立增量审查收敛。未做 Windows/Android 目标实机编译验收（`unverified`）。
+- **关联**：`crates/moss-voice-host/`、`apps/desktop/src-tauri/{Cargo.toml,src/voice_builtin.rs,src/voice_context.rs}`、`frontend/tests/voicePrivacyAcl.test.mjs`、`Cargo.toml`、`scripts/{check-crate-layers.mjs,tests/crate-layers.test.mjs}`、`docs/developer/architecture.md`。
+
 ### 消除进程内 HTTP 报文往返与线程局部回执，拆分 `laser-api` 路由与发送链路（2026-11-19）
 
 - **现象**：`laser-host` 与桌面审批执行回调进程内 `ApiService` 时反复拼装/解析原始 HTTP/1.1 报文；语音按预览走边框依赖 `thread_local! SHORT_JOB_WATCH` 隐式传参与 50 ms 轮询循环；急停/停机动作别名表分散在 `laser-contracts`/`laser-api`/`laser-host` 三处；`crates/laser-api/src/routes.rs`（1,542 行）和 `send.rs::launch_send_job_unchecked`（798 行）单体过长难以审读。

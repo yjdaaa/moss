@@ -19,6 +19,7 @@ members = [
     "crates/moss-voice-local-proto",
     "crates/moss-voice-providers",
     "crates/moss-voice-server",
+    "crates/moss-voice-host",
     "crates/moss-xiaozhi-display",
     "crates/moss-xiaozhi-proto",
 ]

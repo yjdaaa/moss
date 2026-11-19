@@ -176,7 +176,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             }
             let identity_for_context = identity.clone();
             let db_for_context = host.db.clone();
-            let calibrated_speakers: crate::voice_context::host::CalibratedSpeakersFn =
+            let calibrated_speakers: crate::context::CalibratedSpeakersFn =
                 Arc::new(move || {
                     if identity_for_context.valid_calibration().is_none() {
                         return Vec::new();
@@ -193,7 +193,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                         .map(|r| (r.id, r.name, r.revision))
                         .collect()
                 });
-            let context = crate::voice_context::host::ContextHost::with_speakers(
+            let context = crate::context::ContextHost::with_speakers(
                 host.db.clone(),
                 setting_path.clone(),
                 calibrated_speakers,

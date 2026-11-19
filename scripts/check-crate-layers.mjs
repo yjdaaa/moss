@@ -32,10 +32,12 @@ export const LAYERS = {
   "laser-host": { rank: 3 },
   "moss-agent": { rank: 3 },
   "moss-home": { rank: 3 },
-  // 4 应用壳：只做入口与平台胶水，任何 crate 都不得依赖它们
-  "moss-host": { rank: 4 },
-  "moss-desktop": { rank: 4 },
-  "moss-voice-local": { rank: 4 },
+  // 4 宿主总装配：聚合激光宿主、内置语音服务与跨域扩展（零 Tauri/UI 依赖），供桌面等应用壳复用
+  "moss-voice-host": { rank: 4 },
+  // 5 应用壳：只做入口与平台胶水，任何 crate 都不得依赖它们
+  "moss-host": { rank: 5, shell: true },
+  "moss-desktop": { rank: 5, shell: true },
+  "moss-voice-local": { rank: 5, shell: true },
 };
 
 // 根 workspace 之外仍要检查的独立工作区（GPL helper）。
@@ -137,7 +139,7 @@ export function edgeViolation(from, to, devOnly, layers = LAYERS) {
   if (!a) return `${from} 未登记分层`;
   if (!b) return `${to} 未登记分层`;
   if (from === to) return null;
-  if (b.rank === 4) return "应用壳不能被依赖";
+  if (b.shell) return "应用壳不能被依赖";
   // 测试依赖只需不依赖应用壳（测试可以借用其他域的实现做集成）
   if (devOnly) return null;
   if (b.rank > a.rank) return `向上依赖（第 ${a.rank} 层 → 第 ${b.rank} 层）`;

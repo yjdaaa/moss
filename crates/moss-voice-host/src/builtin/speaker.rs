@@ -117,7 +117,7 @@ impl IdentityResolver for DesktopIdentity {
             let worker = self.workers.clone().try_acquire_owned().ok()?;
             let backend = self.backend.clone();
             let pcm = pcm.to_vec();
-            tauri::async_runtime::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 let _worker = worker;
                 let pcm = if rate == 16000 {
                     pcm

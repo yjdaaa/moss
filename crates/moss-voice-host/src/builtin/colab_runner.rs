@@ -880,12 +880,8 @@ impl BuiltinVoice {
         let vision_ok = moss_voice_providers::vision::OpenAiVision::new(&url, &llm_model, &api_key)
             .ok()
             .and_then(|provider| {
-                tauri::async_runtime::block_on(provider.explain(
-                    "请仅用一句话描述此测试图像。",
-                    "image/png",
-                    &png,
-                ))
-                .ok()
+                crate::block_on(provider.explain("请仅用一句话描述此测试图像。", "image/png", &png))
+                    .ok()
             })
             .is_some_and(|text| !text.trim().is_empty());
         let vision_ms = vision_started.elapsed().as_millis() as u64;

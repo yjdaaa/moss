@@ -515,7 +515,7 @@ impl BuiltinVoice {
             .map_err(|_| internal("生成内存测试图片失败"))?;
         let png = output.into_inner();
         let started = std::time::Instant::now();
-        let result = tauri::async_runtime::block_on(session.provider.explain(
+        let result = crate::block_on(session.provider.explain(
             "请仅用一句话描述此测试图像。",
             "image/png",
             &png,

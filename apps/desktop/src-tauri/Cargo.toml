@@ -31,32 +31,19 @@ reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 tauri = { workspace = true, features = ["tray-icon"] }
 # 导出目录选择与“另存为”框（技术书 §9.7）；Android 本期不做
 tauri-plugin-dialog = "2"
-# 语音中心：自建 xiaozhi-server 的设置、进程管理、模型向导（技术书 §9.4）；Android 不编译（A-69）
+# 语音中心与内置语音宿主编排（零 UI 逻辑下沉到 crates/moss-voice-host）；Android 不编译（A-69）
 moss-voice = { path = "../../../crates/moss-voice" }
-# 内置语音服务（内置语音技术书 NV1 起）：设备 OTA 与 WebSocket、设备登记；Android 不编译
 moss-voice-server = { path = "../../../crates/moss-voice-server" }
-# 内置语音服务的模型提供方（NV5：对话模式的识别 / 大模型 / 合成）；Android 不编译
-moss-voice-providers = { path = "../../../crates/moss-voice-providers" }
-moss-xiaozhi-proto = { path = "../../../crates/moss-xiaozhi-proto" }
-# 本机 Agent（NV13）、家居控制（NV15）与小智 USB 配网；Android 不编译
-moss-agent = { path = "../../../crates/moss-agent" }
-moss-home = { path = "../../../crates/moss-home" }
-moss-usb-provision = { path = "../../../crates/moss-usb-provision" }
-laser-contracts = { path = "../../../crates/laser-contracts" }
-laser-api = { path = "../../../crates/laser-api" }
-laser-runtime = { path = "../../../crates/laser-runtime" }
-image = { workspace = true, features = ["png"] }
-getrandom.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+moss-voice-host = { path = "../../../crates/moss-voice-host" }
 tauri-plugin-updater = "2"
 
 [dev-dependencies]
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
 laser-runtime = { path = "../../../crates/laser-runtime", features = ["test-memory-secret-store", "test-sql-access"] }
-# NV19-08 host tests use temporary settings files and folders only.
 tempfile.workspace = true
 tauri = { workspace = true, features = ["test"] }
 reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 flate2.workspace = true
 tar.workspace = true
 

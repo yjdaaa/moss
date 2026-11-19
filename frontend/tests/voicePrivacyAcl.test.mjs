@@ -134,8 +134,12 @@ test("NV13 agent stop is main-window-only and saving keeps the enable switch", (
   assert.match(frontend("src/voiceApi.js"), /agentStop: \(runId\) => invokeVoice\("voice_agent_stop", \{ runId \}\)/);
   const stop = fnBody(native, "voice_agent_stop");
   assert.match(stop, /require_main_window\(&window\)\?/);
-  const save = native.match(/pub fn agent_save\b[\s\S]*?(?=\n {8}\}\n)/)[0];
-  const normalize = native.match(/fn normalize_agent_save\b[\s\S]*?(?=\n {4}\}\n)/)[0];
+  const voiceHostBuiltin = readFileSync(
+    new URL("../../crates/moss-voice-host/src/builtin.rs", import.meta.url),
+    "utf8",
+  );
+  const save = voiceHostBuiltin.match(/pub fn agent_save\b[\s\S]*?(?=\n {4}\}\n)/)[0];
+  const normalize = voiceHostBuiltin.match(/fn normalize_agent_save\b[\s\S]*?(?=\n\}\n)/)[0];
   assert.doesNotMatch(save, /config\.enabled\s*=\s*false/, "不再把开关强制改回关闭");
   assert.doesNotMatch(normalize, /config\.enabled\s*=\s*false/, "不再把开关强制改回关闭");
   assert.match(save, /normalize_agent_save\(/);

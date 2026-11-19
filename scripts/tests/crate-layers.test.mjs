@@ -45,6 +45,10 @@ test("允许向下、同域与测试依赖跨域", () => {
   assert.equal(edgeViolation("moss-voice-server", "laser-runtime", false), null);
   assert.equal(edgeViolation("moss-voice", "laser-contracts", false), null);
   assert.equal(edgeViolation("laser-host", "moss-voice", false), null);
+  assert.equal(edgeViolation("moss-voice-host", "laser-host", false), null);
+  assert.equal(edgeViolation("moss-voice-host", "moss-home", false), null);
+  assert.equal(edgeViolation("moss-voice-host", "moss-agent", false), null);
+  assert.equal(edgeViolation("moss-desktop", "moss-voice-host", false), null);
   assert.equal(edgeViolation("moss-voice-server", "laser-api", true), null);
 });
 

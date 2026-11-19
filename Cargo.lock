@@ -3141,21 +3141,13 @@ version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "flate2",
- "getrandom 0.3.4",
- "image",
  "jni 0.21.1",
- "laser-api",
- "laser-contracts",
  "laser-host",
  "laser-runtime",
  "minisign-verify",
- "moss-agent",
- "moss-home",
- "moss-usb-provision",
  "moss-voice",
- "moss-voice-providers",
+ "moss-voice-host",
  "moss-voice-server",
- "moss-xiaozhi-proto",
  "ndk-context",
  "reqwest",
  "serde",
@@ -3245,6 +3237,33 @@ dependencies = [
  "tar",
  "tempfile",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "moss-voice-host"
+version = "0.3.11"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "getrandom 0.3.4",
+ "image",
+ "laser-api",
+ "laser-contracts",
+ "laser-host",
+ "laser-runtime",
+ "moss-agent",
+ "moss-home",
+ "moss-usb-provision",
+ "moss-voice",
+ "moss-voice-providers",
+ "moss-voice-server",
+ "moss-xiaozhi-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

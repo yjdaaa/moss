@@ -6,7 +6,7 @@ use super::*;
 fn test_doubao(resolved: &moss_voice::models::ResolvedSection) -> moss_voice::TestResult {
     let started = std::time::Instant::now();
     let outcome: Result<(String, Option<String>), moss_voice_providers::ProviderError> =
-        tauri::async_runtime::block_on(async {
+        crate::block_on(async {
             match resolved.section {
                 Section::Asr => {
                     let asr = DoubaoAsr::new(&resolved.url, &resolved.api_key, &resolved.model)?;

@@ -20,8 +20,9 @@
 | 1 共享运行时 | `laser-runtime`（运行目录、配置、SQLite 与各类存储、密钥，激光与语音共用） | 第 0 层 |
 | 2 激光域 | `laser-core`、`laser-device`、`laser-tools`、`laser-mcp`、`laser-api` | 第 0、1 层与本域 |
 | 2 语音域 | `moss-voice`、`moss-voice-providers`、`moss-xiaozhi-display`、`moss-voice-server`、`moss-usb-provision` | 第 0、1 层与本域 |
-| 3 编排与跨域扩展 | `laser-host`（启动组装）；`moss-agent`、`moss-home`（同时用到激光审批与语音设置的扩展，由桌面壳直接组装） | 以下各层；本层之间不互相依赖 |
-| 4 应用壳 | `moss-host`、`moss-desktop`、`moss-voice-local`（独立工作区） | 以下各层；不得被依赖 |
+| 3 编排与跨域扩展 | `laser-host`（启动组装）；`moss-agent`、`moss-home`（同时用到激光审批与语音设置的扩展，彼此不互相依赖） | 以下各层；本层之间不互相依赖 |
+| 4 宿主总装配 | `moss-voice-host`（聚合激光宿主、内置语音、长期记忆与跨域扩展，零 Tauri/UI 依赖） | 以下各层 |
+| 5 应用壳 | `moss-host`、`moss-desktop`、`moss-voice-local`（独立工作区） | 以下各层；不得被依赖 |
 
 `crates/laser-contracts/tests/type_boundary.rs` 随测试运行，禁止 `laser-tools`、`laser-device`、`laser-core` 依赖 `serde_json` 或使用 `Value` 动态访问器，所有跨 crate 数据必须经 `laser-contracts` 的强类型结构。
 
@@ -48,6 +49,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 | `moss-home` | 家居控制（NV15，Home Assistant）：实体白名单策略、逐次桌面审批、HTTPS 传输与结果核验；只持宿主弱引用 | `HomeControlCoordinator` |
 | `moss-usb-provision` | 小智 USB 一键配网：串口枚举与激光串口避让、`espflash` 读写 NVS、写后芯片侧 MD5 校验与失败写回、预签设备令牌并登记“已允许”；激光占用、设备密钥由桌面壳传入 | `provision`、`execute_usb_provision_with`、`UsbFlasherSession`、`sweep_usb_temp_dir` |
 | `moss-xiaozhi-display` | 小智彩屏渲染、护目镜小机器人动图、中文字库与 `glyph_push` 动态字模补齐、全屏画风与唤醒词 `assets.bin` 纯构造（承载 4.8 MB 字库与 3.9 MB ESP-SR 模型，零网络与异步依赖） | `glyph_font::GlyphFontService`、`goggle_bot`、`render`、`screen_pack`、`wake_pack` |
+| `moss-voice-host` | 内置语音与长期记忆宿主总装配（零 Tauri/UI 依赖）：`BuiltinVoice` 生命周期、设备登记、本地模型/Colab/视觉/家居/声纹/固件/唤醒词/USB 配网编排、`ContextHost` 长期记忆与资料库 | `BuiltinVoice`、`BuiltinState`、`init`、`autostart`、`record_moss_event`、`context::ContextHost` |
 
 ## 3. HTTP 服务
 
@@ -87,14 +89,14 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 - 方案见 [MOSS 内置语音服务技术书](../integration/moss-native-voice-spec.md)。小智设备直接连到 MOSS，不再需要 xiaozhi-server 与接入点。
 - `crates/moss-xiaozhi-proto`：纯协议（消息、帧协议 v1/v2/v3、设备 token、OTA、ESP-IDF 分区表与 NVS v2 编解码 `nvs`）。`crates/moss-voice-server`：专用 tokio 运行时（2 个工作线程）+ axum，OTA（默认 8003）与设备 WebSocket（默认 8000）两个端口，监听所有网卡但只提供 `/xiaozhi/*`，不暴露 MOSS API；每台设备一个会话。
 - 只在用户在语音中心点“启动”时创建运行时，停止时整个运行时关闭（最多等 2 秒）；不影响现有 HTTP 服务、发送线程与急停。
-- 设备登记 `voice_devices`（schema v6）与 token 密钥（`app_secrets`）由桌面壳的 `DbRegistry` 提供（`apps/desktop/src-tauri/src/voice_builtin/imp/devices.rs`）；未允许、已撤销或 token 无效的设备在握手后收到 `alert` 提示并断开。
+- 设备登记 `voice_devices`（schema v6）与 token 密钥（`app_secrets`）由 `moss-voice-host` 的 `DbRegistry` 提供（`crates/moss-voice-host/src/builtin/devices.rs`）；未允许、已撤销或 token 无效的设备在握手后收到 `alert` 提示并断开。
 - 音频（NV2，`moss-voice-server/src/audio/`）：上行 Opus 解码（opus2 + 官方 libopus，随源码编译，构建需要 CMake；n94 起，原纯 Rust 后端 mousiki 在语音模式下与设备不兼容）；自动拾音模式用 `Vad` 接口判停（当前为进程内双阈值能量检测，静音 250 ms 即交给识别与大模型抢跑，开口前按句子是否说完再等 0–1 秒（技术书 n86）；Silero 随 NV6 本地模型辅助程序接入同一接口）；下行 24 kHz，经线性重采样与 `PlaybackPump` 编码，`tts start` 后留 180 ms 保护间隔，再按设备端缓冲余量（目标 5 帧）发送、稳态每 60 ms 一帧，供不上时不发帧；设备 `abort` 或新的 `listen start` 立即停播并丢弃未播内容。
 - 对话模式（NV3，`moss-voice-server/src/conversation.rs` + `crates/moss-voice-providers`）：每轮对话一个 tokio 任务——识别 → 大模型（OpenAI 兼容，流式，可调用工具，最多 5 轮）→ 切句 → 逐句合成；每句音频带文字标记进节奏泵，播到时发 `sentence_start`；打断即中止任务。历史每台设备一份，按长度截断，随会话结束丢弃。唤醒问候、退出词与空闲再见。提供方错误不含地址与密钥。
 - 工具（NV4）：MOSS 工具经 `moss_voice_server::HostTools`（宿主实现 `ToolHost`，桌面端调用 `laser_host::voice_tool_call`，身份 `CallerContext::Voice`）；`approval_required` 的结果直接朗读固定话术，不交给模型改写。设备声明 `features.mcp` 时，会话经同一 WebSocket 做 `initialize`、分页 `tools/list`，设备工具以 `device__<名称>` 提供给模型（`.` 等字符换成 `_`，调用时换回原名）。
 - 本地模型（NV6 / n93）：`apps/moss-voice-local`（GPL-3.0，独立工作区）运行 sherpa-onnx 的判停（Silero / TEN-VAD）、前端降噪（GTCRN，`denoise` 默认 `false`）、命令词抗噪（关键词检测 zipformer，随判停流运行，`kws` 默认 `false`，协议 7 / n101）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 约 0.5 秒周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice-Distill），另外 Qwen3-TTS 0.6B（`qwen3_tts_0_6b`）经按需下载且 SHA-256 校验的独立 `speech.cpp v0.10.1` 进程运行（`moss_voice::speech_cpp` / `moss_voice_providers::speech_cpp`），SmartTurn v3 尾音语义判停（`turn` 默认 `false`）由独立 `TurnHelper` 进程（单次 250 ms 软超时）与 `moss_voice_server::TurnEndPredictor` 并发估算且永不延迟 `is_stop` / `TurnGate`；MOSS 经标准输入输出协议 6（`crates/moss-voice-local-proto`）调用，客户端 `moss_voice_providers::local`（`streaming` 支持的本地识别均经 `LocalStreamingAsr` 接入边说边识别，`LocalAsr` 作整段兜底）；判停经 `moss_voice_server::VadFactory` / `LocalVad` 接入，出错退回能量判停。模型由 `moss_voice::local_models`（`CATALOG` 26 项）下载到运行目录 `models/` 并校验 SHA-256。辅助程序与 `moss-desktop.exe` 同目录，崩溃不影响 MOSS 主进程与急停。
 - 流式云厂商（NV7，`moss_voice_providers::doubao`）：豆包流式识别实现 `StreamingAsr`——会话在开始说话时建立 WebSocket、边说边送 16 kHz 音频，说完只等最后结果（失败退回整段识别）；豆包双向流式合成实现 `Tts::synthesize_stream`——每句第一段音频到达即播放，连接在句与句之间复用。帧协议移植自 univoice（MIT），WebSocket 与 axum 共用 tokio-tungstenite 0.29，TLS 为 rustls。
 - 接入点增强（NV8）：小智桥每个接入点一条线程（主接入点 `mcp_endpoint` + `mcp_extra_endpoints` 最多 4 个），30 秒心跳、90 秒无数据判定断线，遥测按接入点记录状态（`McpTelemetrySnapshot::endpoints`）。工具开关 `mcp_disabled_tools` 由 `ApiService` 持有，经 `HostBackend::tool_disabled` 在 `tools/list` 与调用两处生效，接入点与内置语音共用；`laser_safe_action_tool` 不可关闭。`dispatch_tool_call_with` 统一计入调用统计（`tool_stats`，内存）。
-- 桌面端（NV5，`apps/desktop/src-tauri/src/voice_builtin.rs` 保留 Tauri 命令与来源校验，其余按职责在 `voice_builtin/imp/`，其中 `usb_provision.rs` 只做 `voice_usb_provision` 的并发锁、激光串口判断与诊断记录，串口读/写小智 `0x9000` NVS 分区与预签设备密钥在 `crates/moss-usb-provision`）：模型地址等存 `settings.json` 的 `voice.builtin_models`，密钥存 `app_secrets`（`voice.llm.main` / `voice.asr.main` / `voice.tts.main`）；三项都配置时以对话模式启动（OpenAI 兼容提供方 + `DesktopToolHost` 调用 `laser_host::voice_tool_call`），否则回声模式。语音链路 `builtin`（`moss_voice::VoiceMode::Builtin`）时随 MOSS 后台启动；语音中心切换链路经 `HostHooks::builtin_start / builtin_stop`，启动失败整体回滚。设备会话数经 `DeviceRegistry::sessions_changed` 写入 `global_voice_telemetry`，`/api/system/info` 的 `voice.mode` 为 `builtin` 时据此报告。
+- 桌面端（NV5，`apps/desktop/src-tauri/src/voice_builtin.rs` 与 `voice_context.rs` 仅保留 Tauri 命令、对话框与主窗口来源校验，零 UI 编排主体下沉至 `crates/moss-voice-host`，其中 `builtin/usb_provision.rs` 只做 `voice_usb_provision` 的并发锁、激光串口判断与诊断记录，串口读/写小智 `0x9000` NVS 分区与预签设备密钥在 `crates/moss-usb-provision`）：模型地址等存 `settings.json` 的 `voice.builtin_models`，密钥存 `app_secrets`（`voice.llm.main` / `voice.asr.main` / `voice.tts.main`）；三项都配置时以对话模式启动（OpenAI 兼容提供方 + `DesktopToolHost` 调用 `laser_host::voice_tool_call`），否则回声模式。语音链路 `builtin`（`moss_voice::VoiceMode::Builtin`）时随 MOSS 后台启动；语音中心切换链路经 `HostHooks::builtin_start / builtin_stop`，启动失败整体回滚。设备会话数经 `DeviceRegistry::sessions_changed` 写入 `global_voice_telemetry`，`/api/system/info` 的 `voice.mode` 为 `builtin` 时据此报告。
 
 ## 5. 设备层与发送链路
 

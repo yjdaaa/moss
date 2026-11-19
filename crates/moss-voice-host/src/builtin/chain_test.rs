@@ -248,7 +248,7 @@ impl BuiltinVoice {
                     ));
                 }
             };
-            let seed_pcm = match tauri::async_runtime::block_on(seed_tts.synthesize(&prompt_text)) {
+            let seed_pcm = match crate::block_on(seed_tts.synthesize(&prompt_text)) {
                 Ok(pcm) if !pcm.samples.is_empty() && pcm.sample_rate > 0 => pcm,
                 Ok(_) => {
                     let msg = "生成测试录音失败：语音合成返回了空音频".to_owned();
@@ -563,9 +563,7 @@ impl BuiltinVoice {
             }
         };
 
-        let raw_heard = match tauri::async_runtime::block_on(
-            asr_provider.transcribe(speech_segment, 16_000),
-        ) {
+        let raw_heard = match crate::block_on(asr_provider.transcribe(speech_segment, 16_000)) {
             Ok(text) => text,
             Err(err) => {
                 let asr_ms = asr_started.elapsed().as_millis() as u64;
@@ -723,12 +721,8 @@ impl BuiltinVoice {
             }));
             let specs = host_tools.specs();
             let total_specs = specs.len();
-            let decision = tauri::async_runtime::block_on(filter.evaluate_turn(
-                &recognized_text,
-                &[],
-                &specs,
-                &[],
-            ));
+            let decision =
+                crate::block_on(filter.evaluate_turn(&recognized_text, &[], &specs, &[]));
             let jev_ms = jev_started.elapsed().as_millis() as u64;
             if !decision.applied {
                 let msg = format!(
@@ -857,7 +851,7 @@ impl BuiltinVoice {
             ChatMessage::system(sys_prompt),
             ChatMessage::user(recognized_text.clone()),
         ];
-        let (llm_outcome, first_delta_ms) = tauri::async_runtime::block_on(async {
+        let (llm_outcome, first_delta_ms) = crate::block_on(async {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let t0 = std::time::Instant::now();
             let first_slot = Arc::new(Mutex::new(None::<u64>));
@@ -962,7 +956,7 @@ impl BuiltinVoice {
         if speak_text.trim().is_empty() {
             speak_text = "收到。".to_owned();
         }
-        let reply_pcm = match tauri::async_runtime::block_on(tts_provider.synthesize(&speak_text)) {
+        let reply_pcm = match crate::block_on(tts_provider.synthesize(&speak_text)) {
             Ok(pcm) if !pcm.samples.is_empty() && pcm.sample_rate > 0 => pcm,
             Ok(_) => {
                 let tts_ms = tts_started.elapsed().as_millis() as u64;
