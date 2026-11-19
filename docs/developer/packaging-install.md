@@ -172,6 +172,7 @@
 
 - 保持 APK：首次从下载页获取安装，后续可在 App 内直接下载校验签名后的新版 APK 并拉起系统安装界面覆盖升级；系统卸载即删除应用与其私有数据；Android 不提供自定义安装目录。
 - 正式分发与覆盖升级必须使用同一固定签名证书（Android 系统要求覆盖安装的 APK 签名证书一致）：维护者本机保存 `~/.tauri/moss-android-release.jks`（及 `.pass`），仓库密钥配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`，本机调试通过已 gitignore 的 `gen/android/keystore.properties` 引用。`.github/workflows/release.yml` 强制要求三项固定签名密钥齐全并通过 `keytool` 与 `MOSS_REQUIRE_ANDROID_RELEASE_SIGNING=true` 校验及 `apksigner` 验签。APK 唯一签名证书的 SHA-256 必须等于配置的证书，否则失败。缺工具、缺密钥或无效都失败（不再生成临时 PKCS12 证书上传正式 APK）；CI 仅跑不上传产物的 `release` 烟测。此前由临时证书签名的旧版 APK 首次切换到固定正式证书时，需先卸载旧版再安装一次，之后所有新版均可原地保留数据覆盖升级。
+- 发布流程固定使用 Android Build Tools 36.0.0 验签。37.0.0 把 `--print-certs` 的输出改为按签名方案分组，旧格式的解析器会漏读证书。比对失败时日志会显示期望与实际证书的 SHA-256。
 - 运行目录位于应用私有数据目录 `app_data_dir`，更新包暂存在 `app_cache_dir/updates/`。
 
 ### 3.9 macOS 本机打包、安装与清理（2026-11-05）

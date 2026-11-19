@@ -2,6 +2,20 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## `v0.3.12` 本机 macOS 通用与 Android arm64 发布包（2026-11-19）
+
+应用源码为标签 `v0.3.12`（`64761a6`）。前端以 `npm ci` 和 `npm run build` 重新构建。macOS 使用 `scripts/build-macos-installer.sh --without-voice-sidecar` 生成通用 DMG。Android 使用 `cargo tauri android build --target aarch64 --apk --ci` 构建，启用固定签名门禁，SDK 为 API 36，NDK 为 27.0.12077973。交付文件与 `SHA256SUMS.txt` 位于 `target/moss-v0.3.12-local-release/`。
+
+| 产物 | UTC 时间（2026-11-19） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.12_macos_universal.dmg` | 11:38:31 | 81,274,305 | `4aac8aa3ac857f1ed9b25f18865f690dcd46e5c817b9078460fbe39625a7ed27` |
+| `MOSS_0.3.12_android_aarch64.apk` | 11:52:39 | 43,329,386 | `8e6515a9de82f5f43f55c841e1e7db5a6e308ff80fa5cf6de8e3de0b07853149` |
+| `MOSS_0.3.12_android_aarch64.apk.sig` | 11:53:31 | 444 | `c59460c120fcd7291d2d3162821b0a99882bafc614de862e2aee774b0f646b80` |
+
+核对：macOS 应用版本为 0.3.12，包含 `arm64` 和 `x86_64`，应用签名和 DMG 完整性校验均通过。Android 包名为 `com.moss.laser`，版本为 0.3.12（3012），仅含 `arm64-v8a`。通过修复后的验签步骤，证书 SHA-256 与固定证书及已发布的 v0.3.11 APK 一致。更新签名使用应用内置公钥完成校验，且绑定 0.3.12。
+
+**未验证**：两包均未实机安装，macOS 采用 ad-hoc 签名且未公证。Windows 精简安装版和便携版已由同一标签的 [GitHub 发布任务](https://github.com/yjdaaa/moss/actions/runs/44494968209/job/135460109154) 构建成功，需登录下载核验。GitHub Release 待发布。
+
 ## macOS 本机 Apple Silicon `0.3.7` 安装包构建（含离线语音辅助程序协议 7，2026-11-15）
 
 用户 2026-11-15 要求“帮我都优化完成吧，然后 git 并推送”：在 macOS 开发机（Apple Silicon，macOS 27.0）上以 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于工作树（提交前，含 n99–n101 语音链路改动；前端已重新构建）。`cargo tauri build` 生成并 ad-hoc 签名 `.app` 成功，但其 `bundle_dmg.sh` 排版 DMG 窗口时 Finder AppleScript 超时（`AppleEvent已超时 (-1712)`，本会话无图形自动化权限），改用 `hdiutil create -volname MOSS -srcfolder MOSS.app -format UDZO` 由同一 `.app` 生成不带拖拽排版的 DMG。

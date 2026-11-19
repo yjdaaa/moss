@@ -288,6 +288,8 @@ jobs:
     name: 2d. Android Signed APK (arm64)
     needs: prepare
     runs-on: ubuntu-latest
+    env:
+      ANDROID_RELEASE_BUILD_TOOLS: '36.0.0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -308,7 +310,7 @@ jobs:
         run: |
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMGR" --licenses > /dev/null || true
-          "$SDKMGR" --install "ndk;27.0.12077973"
+          "$SDKMGR" --install "ndk;27.0.12077973" "build-tools;$ANDROID_RELEASE_BUILD_TOOLS"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -394,8 +396,9 @@ jobs:
           mkdir -p target/release-assets
           APK_SRC="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
           test -s "$APK_SRC"
-          APKSIGNER="$(ls -1d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
-          if [[ -z "$APKSIGNER" || ! -x "$APKSIGNER" ]]; then
+          # Build Tools 37 changed --print-certs to report signers by signature scheme.
+          APKSIGNER="$ANDROID_HOME/build-tools/$ANDROID_RELEASE_BUILD_TOOLS/apksigner"
+          if [[ ! -x "$APKSIGNER" ]]; then
             echo "::error::Android apksigner is required for release verification." >&2
             exit 1
           fi
@@ -403,6 +406,7 @@ jobs:
           SIGNING_INFO="$("$APKSIGNER" verify --print-certs "$APK_SRC")"
           ACTUAL_SHA256="$(printf '%s\n' "$SIGNING_INFO" | awk -F': ' '/^Signer #[0-9]+ certificate SHA-256 digest: / {print tolower($2)}')"
           if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ || "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+            printf 'Expected certificate SHA-256: %s\nAPK certificate SHA-256: %s\n' "$EXPECTED_SHA256" "${ACTUAL_SHA256:-<missing>}" >&2
             echo "::error::APK signer does not match the configured Android release certificate." >&2
             exit 1
           fi

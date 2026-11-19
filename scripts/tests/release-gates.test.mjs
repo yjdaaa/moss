@@ -38,6 +38,8 @@ test("Android release verification accepts only the configured certificate", {
   const yaml = readRepo(".github/workflows/release.yml");
   assert.match(yaml, /keytool -exportcert -keystore/);
   assert.match(yaml, /MOSS_ANDROID_EXPECTED_CERT_SHA256=%s/);
+  assert.match(yaml, /ANDROID_RELEASE_BUILD_TOOLS: '36\.0\.0'/);
+  assert.match(yaml, /"\$SDKMGR" --install .*"build-tools;\$ANDROID_RELEASE_BUILD_TOOLS"/);
   assert.doesNotMatch(yaml, /keytool -printcert -jarfile/);
   const shell = stripYamlIndent(extractBetweenMarkers(
     yaml,
@@ -57,6 +59,13 @@ test("Android release verification accepts only the configured certificate", {
     ].join("\n"), { mode: 0o755 });
     const expected = "a".repeat(64);
     const cert = (id, hash) => "Signer #" + id + " certificate SHA-256 digest: " + hash;
+    const newerTools = join(root, "build-tools", "37.0.0");
+    mkdirSync(newerTools, { recursive: true });
+    writeFileSync(join(newerTools, "apksigner"), [
+      "#!/usr/bin/env bash",
+      'printf "V2 Signer: certificate SHA-256 digest: %s\\n" "$MOSS_ANDROID_EXPECTED_CERT_SHA256"',
+      "",
+    ].join("\n"), { mode: 0o755 });
     const verify = (certs, exitCode = "0", sdk = root) => spawnSync(
       "bash",
       ["-euo", "pipefail", "-c", shell],
@@ -66,6 +75,7 @@ test("Android release verification accepts only the configured certificate", {
         env: {
           PATH: process.env.PATH,
           ANDROID_HOME: sdk,
+          ANDROID_RELEASE_BUILD_TOOLS: "36.0.0",
           APK_SRC: "synthetic.apk",
           MOSS_ANDROID_EXPECTED_CERT_SHA256: expected,
           MOSS_FIXTURE_APK_CERTS: certs,
@@ -75,8 +85,12 @@ test("Android release verification accepts only the configured certificate", {
     );
     const good = verify(cert(1, expected.toUpperCase()));
     assert.equal(good.status, 0, good.stderr);
+    const wrongDigest = "b".repeat(64);
+    const wrongSigner = verify(cert(1, wrongDigest));
+    assert.ok(wrongSigner.stderr.includes(`Expected certificate SHA-256: ${expected}`));
+    assert.ok(wrongSigner.stderr.includes(`APK certificate SHA-256: ${wrongDigest}`));
     const invalid = [
-      verify(cert(1, "b".repeat(64))),
+      wrongSigner,
       verify(""),
       verify(cert(1, expected) + "\n" + cert(2, expected)),
       verify(cert(1, expected), "1"),

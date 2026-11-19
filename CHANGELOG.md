@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 固定 Android 验签工具版本，修复正式证书被误判不匹配（2026-11-19）
+
+- **现象**：`v0.3.12` 已完成 Android APK 构建，但验签步骤报证书不匹配，发布任务被跳过。
+- **根因与修复**：Build Tools 37.0.0 改变了 `apksigner --print-certs` 的输出，原流程自动选最新版后读不到指纹。发版验签固定到 36.0.0，比对失败时打印两个证书指纹，仍要求 APK 仅有一个与固定证书吻合的签名者。
+- **验证**：用两版 `apksigner` 验证同一份已发布的 `v0.3.11` APK，确认指纹与固定证书一致且旧解析在 37.0.0 下读不到指纹。本机构建的 `v0.3.12` APK 通过修复后的验签及更新签名校验，53 项脚本测试通过，云端发版待重跑。
+- **关联**：`.github/workflows/release.yml`、`scripts/tests/release-gates.test.mjs`、`docs/developer/packaging-install.md` §3.8。
+
 ## [0.3.12] - 2026-11-19
 
 ### 发布流水线补齐超长变更说明截断，修复两处 Windows 专属 clippy 警告并推进版本至 `0.3.12`（2026-11-19）
