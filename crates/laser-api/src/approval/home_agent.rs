@@ -55,36 +55,37 @@ impl ApprovalService {
         {
             return Err(ApprovalError::Expired);
         }
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !live_permit.load(Ordering::Acquire) {
-            return Err(ApprovalError::Expired);
-        }
-        if !db.consume_approval(approval_id, now)? {
-            return Err(ApprovalError::Consumed);
-        }
-        // Running is persistently recorded BEFORE any potential future send.
-        // recover_after_restart moves it to result_unknown and never retries.
-        db.set_approval_outcome(
-            approval_id,
-            &ApprovalOutcome {
-                success: false,
-                message: "Home Assistant 服务请求结果待确认；不得自动重发".into(),
-                job_id: None,
-                error_code: None,
-                phase: Some(ApprovalPhase::Running),
-            },
-            now,
-        )?;
-        db.append_audit(&audit_entry(
-            now,
-            DESKTOP_CLIENT,
-            AuditAction::ApprovalExecuted,
-            AuditResult::Ok,
-            &record,
-            AuditDetail::default(),
-        ))
-        .map_err(audit_failed)?;
-        tx.commit().map_err(sql_failed)?;
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !live_permit.load(Ordering::Acquire) {
+                return Err(ApprovalError::Expired);
+            }
+            if !db.consume_approval(approval_id, now)? {
+                return Err(ApprovalError::Consumed);
+            }
+            // Running is persistently recorded BEFORE any potential future send.
+            // recover_after_restart moves it to result_unknown and never retries.
+            db.set_approval_outcome(
+                approval_id,
+                &ApprovalOutcome {
+                    success: false,
+                    message: "Home Assistant 服务请求结果待确认；不得自动重发".into(),
+                    job_id: None,
+                    error_code: None,
+                    phase: Some(ApprovalPhase::Running),
+                },
+                now,
+            )?;
+            db.append_audit(&audit_entry(
+                now,
+                DESKTOP_CLIENT,
+                AuditAction::ApprovalExecuted,
+                AuditResult::Ok,
+                &record,
+                AuditDetail::default(),
+            ))
+            .map_err(audit_failed)?;
+            Ok(())
+        })?;
         db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound)
     }
 
@@ -130,29 +131,30 @@ impl ApprovalService {
         };
         // SQLite serializes this state change with consume_home_control.
         // Revocation must persist even when the best-effort audit fails.
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !db.transition_approval(approval_id, record.status, target, now, Some(&outcome))? {
-            return Err(status_error(&db, approval_id)?);
-        }
-        audit_best_effort(
-            &db,
-            &audit_entry(
-                now,
-                DESKTOP_CLIENT,
-                if target == ApprovalStatus::Rejected {
-                    AuditAction::ApprovalRejected
-                } else {
-                    AuditAction::ApprovalExpired
-                },
-                AuditResult::Ok,
-                &record,
-                AuditDetail {
-                    reason: Some("HomeControl 桌面主动撤销".into()),
-                    ..AuditDetail::default()
-                },
-            ),
-        );
-        tx.commit().map_err(sql_failed)?;
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !db.transition_approval(approval_id, record.status, target, now, Some(&outcome))? {
+                return Err(status_error(db, approval_id)?);
+            }
+            audit_best_effort(
+                db,
+                &audit_entry(
+                    now,
+                    DESKTOP_CLIENT,
+                    if target == ApprovalStatus::Rejected {
+                        AuditAction::ApprovalRejected
+                    } else {
+                        AuditAction::ApprovalExpired
+                    },
+                    AuditResult::Ok,
+                    &record,
+                    AuditDetail {
+                        reason: Some("HomeControl 桌面主动撤销".into()),
+                        ..AuditDetail::default()
+                    },
+                ),
+            );
+            Ok(())
+        })?;
         db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound)
     }
 
@@ -202,35 +204,36 @@ impl ApprovalService {
         if !db.voice_device(device)?.is_some_and(|row| row.is_allowed()) {
             return Err(ApprovalError::Expired);
         }
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !live_permit.load(Ordering::Acquire) {
-            return Err(ApprovalError::Expired);
-        }
-        if !db.consume_approval(approval_id, now)? {
-            return Err(ApprovalError::Consumed);
-        }
-        db.insert_agent_run(run)?;
-        db.set_approval_outcome(
-            approval_id,
-            &ApprovalOutcome {
-                success: false,
-                message: "Agent 任务正在运行".into(),
-                job_id: Some(run.id.clone()),
-                error_code: None,
-                phase: Some(ApprovalPhase::Running),
-            },
-            now,
-        )?;
-        db.append_audit(&audit_entry(
-            now,
-            DESKTOP_CLIENT,
-            AuditAction::ApprovalExecuted,
-            AuditResult::Ok,
-            &record,
-            AuditDetail::default(),
-        ))
-        .map_err(audit_failed)?;
-        tx.commit().map_err(sql_failed)?;
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !live_permit.load(Ordering::Acquire) {
+                return Err(ApprovalError::Expired);
+            }
+            if !db.consume_approval(approval_id, now)? {
+                return Err(ApprovalError::Consumed);
+            }
+            db.insert_agent_run(run)?;
+            db.set_approval_outcome(
+                approval_id,
+                &ApprovalOutcome {
+                    success: false,
+                    message: "Agent 任务正在运行".into(),
+                    job_id: Some(run.id.clone()),
+                    error_code: None,
+                    phase: Some(ApprovalPhase::Running),
+                },
+                now,
+            )?;
+            db.append_audit(&audit_entry(
+                now,
+                DESKTOP_CLIENT,
+                AuditAction::ApprovalExecuted,
+                AuditResult::Ok,
+                &record,
+                AuditDetail::default(),
+            ))
+            .map_err(audit_failed)?;
+            Ok(())
+        })?;
         db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound)
     }
 
@@ -254,54 +257,55 @@ impl ApprovalService {
         if record.kind != ApprovalKind::AgentRun || record.status != ApprovalStatus::Executed {
             return Err(ApprovalError::Consumed);
         }
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !db.finish_agent_run(run_id, status, output, truncated, error_code, now)? {
-            return Err(ApprovalError::Consumed);
-        }
-        let success = status == "completed";
-        let phase = match status {
-            "completed" => ApprovalPhase::Completed,
-            "cancelled" => ApprovalPhase::Cancelled,
-            _ => ApprovalPhase::Failed,
-        };
-        let outcome = ApprovalOutcome {
-            success,
-            message: if success {
-                "Agent 任务执行完成".into()
-            } else {
-                "Agent 任务未成功完成".into()
-            },
-            job_id: Some(run.id.clone()),
-            error_code: error_code.map(str::to_owned),
-            phase: Some(phase),
-        };
-        if success {
-            db.set_approval_outcome(&run.approval_id, &outcome, now)?;
-        } else {
-            if !db.transition_approval(
-                &run.approval_id,
-                ApprovalStatus::Executed,
-                ApprovalStatus::Failed,
-                now,
-                Some(&outcome),
-            )? {
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !db.finish_agent_run(run_id, status, output, truncated, error_code, now)? {
                 return Err(ApprovalError::Consumed);
             }
-            db.append_audit(&audit_entry(
-                now,
-                SYSTEM_CLIENT,
-                AuditAction::ApprovalFailed,
-                AuditResult::Failed,
-                &record,
-                AuditDetail {
-                    error_code: outcome.error_code.clone(),
-                    reason: Some("Agent 执行未完成".into()),
-                    ..AuditDetail::default()
+            let success = status == "completed";
+            let phase = match status {
+                "completed" => ApprovalPhase::Completed,
+                "cancelled" => ApprovalPhase::Cancelled,
+                _ => ApprovalPhase::Failed,
+            };
+            let outcome = ApprovalOutcome {
+                success,
+                message: if success {
+                    "Agent 任务执行完成".into()
+                } else {
+                    "Agent 任务未成功完成".into()
                 },
-            ))
-            .map_err(audit_failed)?;
-        }
-        tx.commit().map_err(sql_failed)?;
+                job_id: Some(run.id.clone()),
+                error_code: error_code.map(str::to_owned),
+                phase: Some(phase),
+            };
+            if success {
+                db.set_approval_outcome(&run.approval_id, &outcome, now)?;
+            } else {
+                if !db.transition_approval(
+                    &run.approval_id,
+                    ApprovalStatus::Executed,
+                    ApprovalStatus::Failed,
+                    now,
+                    Some(&outcome),
+                )? {
+                    return Err(ApprovalError::Consumed);
+                }
+                db.append_audit(&audit_entry(
+                    now,
+                    SYSTEM_CLIENT,
+                    AuditAction::ApprovalFailed,
+                    AuditResult::Failed,
+                    &record,
+                    AuditDetail {
+                        error_code: outcome.error_code.clone(),
+                        reason: Some("Agent 执行未完成".into()),
+                        ..AuditDetail::default()
+                    },
+                ))
+                .map_err(audit_failed)?;
+            }
+            Ok(())
+        })?;
         Ok(true)
     }
 }

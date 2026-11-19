@@ -1,7 +1,9 @@
 [package]
 name = "moss-desktop"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 build = "build.rs"
 
 [lib]
@@ -12,21 +14,21 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri.workspace = true
 laser-host = { path = "../../../crates/laser-host" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
 minisign-verify = "0.3"
-reqwest = { version = "0.13", default-features = false }
+reqwest.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { workspace = true, features = ["tray-icon"] }
 # 导出目录选择与“另存为”框（技术书 §9.7）；Android 本期不做
 tauri-plugin-dialog = "2"
 # 语音中心：自建 xiaozhi-server 的设置、进程管理、模型向导（技术书 §9.4）；Android 不编译（A-69）
@@ -43,20 +45,20 @@ moss-usb-provision = { path = "../../../crates/moss-usb-provision" }
 laser-contracts = { path = "../../../crates/laser-contracts" }
 laser-api = { path = "../../../crates/laser-api" }
 laser-runtime = { path = "../../../crates/laser-runtime" }
-image = { version = "0.25", default-features = false, features = ["png"] }
-getrandom = "0.3"
-tokio = { version = "1", features = ["sync"] }
+image = { workspace = true, features = ["png"] }
+getrandom.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tauri-plugin-updater = "2"
 
 [dev-dependencies]
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
-laser-runtime = { path = "../../../crates/laser-runtime", features = ["test-memory-secret-store"] }
+laser-runtime = { path = "../../../crates/laser-runtime", features = ["test-memory-secret-store", "test-sql-access"] }
 # NV19-08 host tests use temporary settings files and folders only.
-tempfile = "3"
-tauri = { version = "2", features = ["test"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
-flate2 = "1"
-tar = "0.4"
+tempfile.workspace = true
+tauri = { workspace = true, features = ["test"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
+flate2.workspace = true
+tar.workspace = true
 
 [lints]
 workspace = true

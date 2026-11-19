@@ -91,6 +91,16 @@ test("Windows 下将 .cmd 包装为 cmd.exe /d /c，防止 EINVAL", () => {
   });
 });
 
+test("--browser 与 --e2e 计划包含前端 Playwright 浏览器交互测试", () => {
+  const browserIds = planVerification([], { browser: true }).map((s) => s.id);
+  assert.ok(browserIds.includes("frontend-browser"));
+  assert.ok(!browserIds.includes("e2e"));
+
+  const e2eIds = planVerification([], { e2e: true }).map((s) => s.id);
+  assert.ok(e2eIds.includes("frontend-browser"));
+  assert.ok(e2eIds.includes("e2e"));
+});
+
 test("已删除 .rs 文件在 resolveStep 中不向 rustfmt 传空列表，fmt-write 跳过且检查回退 cargo fmt", () => {
   const steps = planVerification(["crates/laser-core/src/deleted.rs"], { fmtWrite: true });
   const writeStep = resolveStep(steps.find((s) => s.id === "rustfmt-write"), "/repo", () => false);

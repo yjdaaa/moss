@@ -37,14 +37,16 @@ fn patch(content: &str, verification: &str) -> ContextMemoryPatch {
 }
 
 fn count(db: &RuntimeDb, sql: &str) -> i64 {
-    db.connection.query_row(sql, [], |r| r.get(0)).unwrap()
+    db.test_connection()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
 }
 
 #[test]
 fn nv19_v10_upgrades_v9_database_and_keeps_nv10_summaries() {
     const { assert!(SCHEMA_VERSION >= 12, "NV19 表在 schema 10～12 引入") };
     let db = RuntimeDb::open_memory().unwrap();
-    db.connection
+    db.test_connection()
         .execute_batch("DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DELETE FROM schema_version WHERE version>=10;")
         .unwrap();
     db.ensure_voice_memory("aa:bb:cc:dd:ee:ff", 1.0).unwrap();
@@ -78,7 +80,7 @@ fn nv19_v10_upgrades_v9_database_and_keeps_nv10_summaries() {
 #[test]
 fn nv19_v10_failure_rolls_back_and_retry_succeeds() {
     let db = RuntimeDb::open_memory().unwrap();
-    db.connection
+    db.test_connection()
         .execute_batch(
             "DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DELETE FROM schema_version WHERE version>=10;
              CREATE TABLE context_extraction_runs(unexpected TEXT);",
@@ -95,7 +97,7 @@ fn nv19_v10_failure_rolls_back_and_retry_succeeds() {
         "同一事务内先建的表也回滚"
     );
 
-    db.connection
+    db.test_connection()
         .execute_batch("DROP TABLE context_extraction_runs;")
         .unwrap();
     db.migrate().unwrap();
@@ -154,7 +156,7 @@ fn nv19_check_constraints_reject_values_outside_the_contract() {
     );
     // Raw SQL bypassing the API still cannot store a tombstone with content.
     assert!(db
-        .connection
+        .test_connection()
         .execute(
             "INSERT INTO context_memories(id,scope_kind,scope_id,category,content,verification,source_kind,revision,created_at,updated_at,deleted_at)
              VALUES('raw','device','dev-a','preference','残留','candidate','user_edit',1,1,1,1)",
@@ -521,7 +523,7 @@ fn nv19_fts_index_follows_inserts_edits_deletes_and_filters_state() {
             .unwrap()
             .is_empty()
     );
-    let indexed: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_memories_fts WHERE context_memories_fts MATCH '\"降低功率\"'", [], |r| r.get(0)).unwrap();
+    let indexed: i64 = db.test_connection().query_row("SELECT COUNT(*) FROM context_memories_fts WHERE context_memories_fts MATCH '\"降低功率\"'", [], |r| r.get(0)).unwrap();
     assert_eq!(indexed, 1, "删除后索引里只剩另一范围的那条");
 }
 
@@ -658,7 +660,7 @@ mod knowledge {
                 && db.knowledge_dirs("r1").unwrap().is_empty()
                 && db.knowledge_files("d1").unwrap().is_empty()
         );
-        let indexed: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_knowledge_fts WHERE context_knowledge_fts MATCH '\"对焦步\"'", [], |r| r.get(0)).unwrap();
+        let indexed: i64 = db.test_connection().query_row("SELECT COUNT(*) FROM context_knowledge_fts WHERE context_knowledge_fts MATCH '\"对焦步\"'", [], |r| r.get(0)).unwrap();
         assert_eq!(indexed, 0, "全文索引一并清掉");
         assert_eq!(
             db.knowledge_roots("project", "p2").unwrap().len(),
@@ -766,7 +768,7 @@ mod knowledge {
 
         // Contentless: the passage text cannot be read back from the database.
         let text: Option<String> = db
-            .connection
+            .test_connection()
             .query_row(
                 "SELECT text FROM context_knowledge_chunks_fts LIMIT 1",
                 [],
@@ -776,7 +778,7 @@ mod knowledge {
         assert!(text.is_none(), "无正文索引读不回原文");
         let columns: Vec<String> = {
             let mut statement = db
-                .connection
+                .test_connection()
                 .prepare("SELECT name FROM pragma_table_info('context_knowledge_chunks')")
                 .unwrap();
             statement
@@ -811,7 +813,7 @@ mod knowledge {
         );
         assert!(db.delete_knowledge_root_if_revision("r1", 6).unwrap());
         let left: i64 = db
-            .connection
+            .test_connection()
             .query_row(
                 "SELECT COUNT(*) FROM context_knowledge_chunks WHERE root_id='r1'",
                 [],
@@ -819,7 +821,7 @@ mod knowledge {
             )
             .unwrap();
         assert_eq!(left, 0);
-        let indexed: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_knowledge_chunks_fts WHERE context_knowledge_chunks_fts MATCH '\"进气滤\" OR \"另一个\"'", [], |r| r.get(0)).unwrap();
+        let indexed: i64 = db.test_connection().query_row("SELECT COUNT(*) FROM context_knowledge_chunks_fts WHERE context_knowledge_chunks_fts MATCH '\"进气滤\" OR \"另一个\"'", [], |r| r.get(0)).unwrap();
         assert_eq!(indexed, 1, "删除目录后只剩另一项目的段落");
     }
 }

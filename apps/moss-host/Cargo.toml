@@ -1,7 +1,9 @@
 [package]
 name = "moss-host"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 laser-api = { path = "../../crates/laser-api" }

@@ -625,37 +625,7 @@ pub(crate) mod host {
         db: &RuntimeDb,
         id: &str,
     ) -> Option<(String, Option<String>)> {
-        let row = |sql: &str| -> Option<(String, Option<String>)> {
-            db.connection
-                .query_row(sql, [id], |r| {
-                    let status: String = r.get(0)?;
-                    let phase: Option<String> = r.get(1)?;
-                    let detail: Option<String> = r.get(2)?;
-                    let running: Option<i64> = r.get(3).ok().flatten();
-                    let effective_phase = phase.or_else(|| {
-                        let interrupted = detail
-                            .as_deref()
-                            .is_some_and(|d| d.contains("重启中断") || d.contains("退出中断"))
-                            || running == Some(1);
-                        (status == "failed" && interrupted).then(|| "result_unknown".to_owned())
-                    });
-                    Ok((status, effective_phase))
-                })
-                .ok()
-        };
-        row(
-            "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM workflows WHERE workflow_id=?1",
-        )
-        .or_else(|| {
-            row(
-                "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM calibrations WHERE calibration_id=?1",
-            )
-        })
-        .or_else(|| {
-            row(
-                "SELECT status, COALESCE(json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.result.phase')), COALESCE(json_extract(payload,'$.detail'), json_extract(payload,'$.result.detail')), NULL FROM jobs WHERE job_id=?1",
-            )
-        })
+        db.lookup_job_ref_state(id)
     }
 
     pub(crate) fn map_ref_state(kind: RefKind, status: &str, phase: Option<&str>) -> RefState {
@@ -694,17 +664,10 @@ pub(crate) mod host {
             let Ok(db) = self.0.db.lock() else {
                 return RefState::Unverifiable;
             };
-            let row = |sql: &str| -> Option<(String, Option<String>)> {
-                db.connection
-                    .query_row(sql, [&reference.id], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .ok()
-            };
             let found = match reference.kind {
-                RefKind::Approval => row(
-                    "SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1",
-                ),
+                RefKind::Approval => db.lookup_approval_ref_state(&reference.id),
                 RefKind::Job => query_job_ref_state(&db, &reference.id),
-                RefKind::AgentRun => row("SELECT status, NULL FROM voice_agent_runs WHERE id=?1"),
+                RefKind::AgentRun => db.lookup_agent_run_ref_state(&reference.id),
                 RefKind::Test => return RefState::Unverifiable,
             };
             let Some((status, phase)) = found else {
@@ -1746,8 +1709,7 @@ mod job_facts_tests {
     #[test]
     fn query_job_ref_state_reads_workflows_and_calibrations_before_legacy_jobs() {
         let db = laser_runtime::RuntimeDb::open_memory().unwrap();
-        db.connection
-            .execute_batch(
+        db.test_execute_batch(
                 "INSERT INTO workflows(workflow_id,status,created_at,updated_at,payload) VALUES
                    ('wf-real','sending',1,1,'{\"workflow_id\":\"wf-real\",\"status\":\"sending\",\"send_result\":{\"phase\":\"streaming\"}}');
                  INSERT INTO calibrations(calibration_id,status,created_at,updated_at,payload) VALUES
@@ -1779,11 +1741,9 @@ mod job_facts_tests {
         );
 
         // 普通预检或设备报错失败（不含中断未知阶段）仍映射为 Failed
-        db.connection
-            .execute(
+        db.test_execute_batch(
                 "INSERT INTO workflows(workflow_id,status,created_at,updated_at,payload) VALUES
                    ('wf-err','failed',1,1,'{\"workflow_id\":\"wf-err\",\"status\":\"failed\",\"send_result\":{\"success\":false,\"running\":false,\"error\":\"device_unreachable\"}}')",
-                [],
             )
             .unwrap();
         let (err_status, err_phase) = super::host::query_job_ref_state(&db, "wf-err").unwrap();

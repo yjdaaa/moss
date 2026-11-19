@@ -25,13 +25,7 @@ fn material_manage_writes_through_to_runtime_db_when_attached() {
     );
     let saved = parse_json_response(&service.handle_http(request.as_bytes()));
     assert_eq!(saved["success"], true, "{saved}");
-    let count_cells = |sql: &str| -> i64 {
-        db.lock()
-            .unwrap()
-            .connection
-            .query_row(sql, [], |row| row.get(0))
-            .unwrap()
-    };
+    let count_cells = |sql: &str| -> i64 { db.lock().unwrap().test_query_i64(sql).unwrap() };
     assert_eq!(
         count_cells(
             "SELECT COUNT(*) FROM material_params WHERE material_name='测试胶合板' AND thickness_key='4' AND laser_mode='cut'"

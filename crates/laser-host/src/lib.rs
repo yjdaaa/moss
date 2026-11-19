@@ -1733,11 +1733,9 @@ mod tests {
         let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
         db.lock()
             .unwrap()
-            .connection
-            .execute(
+            .test_execute_batch(
                 "INSERT INTO jobs(job_id, status, created_at, payload) VALUES
              ('active_job', 'running', unixepoch(), '{}')",
-                [],
             )
             .unwrap();
 
@@ -1752,12 +1750,7 @@ mod tests {
         let job_status: String = db
             .lock()
             .unwrap()
-            .connection
-            .query_row(
-                "SELECT status FROM jobs WHERE job_id='active_job'",
-                [],
-                |r| r.get(0),
-            )
+            .test_query_string("SELECT status FROM jobs WHERE job_id='active_job'")
             .unwrap();
         assert_eq!(job_status, "failed", "活动 job 必须在退出时标记为 failed");
     }
@@ -1803,27 +1796,13 @@ mod tests {
         {
             let guard = db.lock().unwrap();
             guard
-                .connection
-                .execute(
+                .test_execute_batch(
                     "INSERT INTO jobs(job_id, status, created_at, payload) VALUES
-                     ('job_1', 'running', unixepoch(), '{}')",
-                    [],
-                )
-                .unwrap();
-            guard
-                .connection
-                .execute(
-                    "INSERT INTO workflows(workflow_id, status, created_at, updated_at, payload) VALUES
-                     ('wf_1', 'sending', unixepoch(), unixepoch(), '{}')",
-                    [],
-                )
-                .unwrap();
-            guard
-                .connection
-                .execute(
-                    "INSERT INTO calibrations(calibration_id, status, created_at, updated_at, payload) VALUES
-                     ('cal_1', 'processing', unixepoch(), unixepoch(), '{}')",
-                    [],
+                     ('job_1', 'running', unixepoch(), '{}');
+                     INSERT INTO workflows(workflow_id, status, created_at, updated_at, payload) VALUES
+                     ('wf_1', 'sending', unixepoch(), unixepoch(), '{}');
+                     INSERT INTO calibrations(calibration_id, status, created_at, updated_at, payload) VALUES
+                     ('cal_1', 'processing', unixepoch(), unixepoch(), '{}');",
                 )
                 .unwrap();
         }
@@ -1850,13 +1829,11 @@ mod tests {
             ("calibrations", "calibration_id", "cal_1", "$.detail"),
         ] {
             let (status, detail): (String, String) = guard
-                .connection
-                .query_row(
+                .test_query_string_pair(
                     &format!(
                         "SELECT status, json_extract(payload, '{path}') FROM {table} WHERE {pk_col}=?1"
                     ),
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    id,
                 )
                 .unwrap();
             assert_eq!(

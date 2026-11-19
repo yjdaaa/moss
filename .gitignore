@@ -30,13 +30,9 @@ apps/desktop/src-tauri/binaries/
 apps/moss-voice-local/native-license-evidence/
 apps/moss-voice-local/rust-license-evidence/
 
-# 本机工具状态与生成的可视化（含本机路径）；显式放行仓库保留的 4 份架构快照
+# 本机工具状态与生成的可视化（含本机路径）
 .agents/skills/.skill-learning/
-.birdview/*
-!/.birdview/architecture.json
-!/.birdview/constraints.reviewed.json
-!/.birdview/project.html
-!/.birdview/project.sources.html
+.birdview/
 frontend/ui-prototype-*.html
 
 # Vite 在仓库根目录运行时留下的依赖预构建临时目录

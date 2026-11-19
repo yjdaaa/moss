@@ -1,18 +1,20 @@
 [package]
 name = "laser-mcp"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 laser-tools = { path = "../laser-tools" }
 laser-contracts = { path = "../laser-contracts" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 # 小智 MCP_ENDPOINT 为 wss://，同步客户端 + rustls（ring）+ 内置根证书，无需系统 OpenSSL
-tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tungstenite = { workspace = true, features = ["handshake", "rustls-tls-webpki-roots"] }
+rustls.workspace = true
 # 接入点身份显示（NV8）：解码 token 中 JWT 的载荷部分（只读字段，不校验签名）
-base64 = "0.22"
+base64.workspace = true
 
 [dev-dependencies]
 # 测试核对工具 schema 里的枚举与 laser-core 的取值一致

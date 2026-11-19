@@ -1,26 +1,28 @@
 [package]
 name = "moss-voice"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "语音中心（技术书 §9.4，P4）：语音链路（官方小智 / MOSS 内置服务）设置、内置服务模型配置与本地模型。仅桌面端使用，不进入 laser-api / moss-host / Android。"
 
 [dependencies]
 laser-contracts = { path = "../laser-contracts" }
 moss-mcp-client = { path = "../moss-mcp-client" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 # 模型“测试连接”（与 laser-api 相同的 reqwest 配置：阻塞、rustls、不跟随重定向由代码设置）
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 # 本地模型下载（NV6）：SHA-256 校验与 tar.bz2 解压（纯 Rust 的 bzip2 后端，不需要 C 编译器）
-sha2 = "0.10"
-tar = "0.4"
+sha2.workspace = true
+tar.workspace = true
 bzip2 = { version = "0.5", default-features = false, features = ["libbz2-rs-sys"] }
-flate2 = "1"
-base64 = "0.22"
+flate2.workspace = true
+base64.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Job Object：MOSS 退出（含异常退出）时连同内置服务的本地子进程树一起结束，不留孤儿进程
-windows-sys = { version = "0.59", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
@@ -28,7 +30,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [lints]
 workspace = true

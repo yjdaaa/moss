@@ -146,10 +146,6 @@ fn audit_failed(error: SchemaError) -> ApprovalError {
     ApprovalError::Unavailable(format!("审计记录写入失败，已拒绝执行：{error:?}"))
 }
 
-fn sql_failed(error: rusqlite::Error) -> ApprovalError {
-    ApprovalError::from(SchemaError::from(error))
-}
-
 fn audit_entry(
     now: f64,
     client: &str,

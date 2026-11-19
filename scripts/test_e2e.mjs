@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -9,6 +9,27 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { fileURLToPath } from "node:url";
+
+function resolveE2ePlaywrightChannel(env = process.env, platform = process.platform) {
+  if (env.PLAYWRIGHT_CHANNEL) return env.PLAYWRIGHT_CHANNEL;
+  if (platform === "win32") return "msedge";
+  if (platform === "darwin" && fs.existsSync("/Applications/Google Chrome.app")) {
+    const frontendDir = path.join(ROOT_DIR, "frontend");
+    if (fs.existsSync(path.join(frontendDir, "node_modules", "playwright"))) {
+      const probe = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          'import { chromium } from "playwright"; import { existsSync } from "node:fs"; process.exit(existsSync(chromium.executablePath()) ? 0 : 1);',
+        ],
+        { cwd: frontendDir, env, stdio: "ignore" },
+      );
+      if (probe.status !== 0) return "chrome";
+    }
+  }
+  return undefined;
+}
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
@@ -252,15 +273,21 @@ async function main() {
     running.throwIfAborted();
     console.log(`[E2E] 测试宿主已就绪: ${baseUrl}`);
 
-    tests = startChild(process.execPath, ["--test", "--test-concurrency=1", ...resolveSuiteFiles()], {
+    const suites = resolveSuiteFiles();
+    const pwChannel = suites.some((s) => s.includes(".ui."))
+      ? resolveE2ePlaywrightChannel(process.env, process.platform)
+      : undefined;
+    const testEnv = {
+      ...process.env,
+      TEST_API_PORT: String(actualPort),
+      TEST_API_BASE: baseUrl,
+      TEST_APPDATA: testDir,
+      TEST_GRBL_PORT: String(grblPort),
+    };
+    if (pwChannel) testEnv.PLAYWRIGHT_CHANNEL = pwChannel;
+    tests = startChild(process.execPath, ["--test", "--test-concurrency=1", ...suites], {
       cwd: ROOT_DIR,
-      env: {
-        ...process.env,
-        TEST_API_PORT: String(actualPort),
-        TEST_API_BASE: baseUrl,
-        TEST_APPDATA: testDir,
-        TEST_GRBL_PORT: String(grblPort),
-      },
+      env: testEnv,
       stdio: "inherit",
     });
 

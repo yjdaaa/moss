@@ -1,7 +1,9 @@
 [package]
 name = "moss-home"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "NV15 Home Assistant 家居控制：白名单策略、逐次桌面审批、HTTPS 传输与结果核验"
 
 [dependencies]
@@ -9,20 +11,20 @@ laser-contracts = { path = "../laser-contracts" }
 laser-runtime = { path = "../laser-runtime" }
 laser-api = { path = "../laser-api" }
 moss-voice = { path = "../moss-voice" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-getrandom = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
 
 [dev-dependencies]
 # 集成测试借用完整宿主组装运行目录与审批服务
 laser-host = { path = "../laser-host" }
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
 laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
-rcgen = "0.13"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tempfile = "3"
+rcgen.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

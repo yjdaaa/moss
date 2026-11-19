@@ -1,7 +1,9 @@
 [package]
 name = "laser-host"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 laser-contracts = { path = "../laser-contracts" }
@@ -11,19 +13,19 @@ laser-device = { path = "../laser-device" }
 laser-api = { path = "../laser-api" }
 laser-mcp = { path = "../laser-mcp" }
 laser-tools = { path = "../laser-tools" }
-serde_json = "1"
+serde_json.workspace = true
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 moss-mcp-client = { path = "../moss-mcp-client" }
 moss-voice = { path = "../moss-voice" }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
-laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
-tempfile = "3"
+laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store", "test-sql-access"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

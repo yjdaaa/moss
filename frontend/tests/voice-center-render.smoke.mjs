@@ -18,12 +18,10 @@ try {
   if (!production) await vite.listen();
   const local = vite.resolvedUrls?.local?.[0];
   if (!local) throw new Error("Vite loopback server URL unavailable");
-  // 设了 PLAYWRIGHT_CHANNEL（如 macOS 上的 chrome）就用对应浏览器，否则沿用 Windows 本机 Edge
+  // 与其余 *.browser.mjs 对齐：支持 PLAYWRIGHT_CHANNEL，Windows 默认本机 Edge，其余平台走 Playwright 默认浏览器
   browser = await chromium.launch({
     headless: true,
-    ...(process.env.PLAYWRIGHT_CHANNEL
-      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
-      : { executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" }),
+    channel: process.env.PLAYWRIGHT_CHANNEL || (process.platform === "win32" ? "msedge" : undefined),
   });
   const fixture = {
     voice_status: {

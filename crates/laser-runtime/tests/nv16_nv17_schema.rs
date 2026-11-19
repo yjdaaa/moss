@@ -85,7 +85,7 @@ fn home_token_is_private_versioned_and_revocation_invalidates_approvals() {
     );
     assert_eq!(db.update_home_token_if_revision(0, None, 2.).unwrap(), None);
     assert_eq!(db.home_token_status().unwrap(), (true, 1));
-    db.connection.execute(
+    db.test_connection().execute(
         "INSERT INTO approvals(approval_id,status,kind,target_record,digest,summary,source,created_at,expires_at,updated_at) VALUES('synthetic-ha','pending','home_control','light.desk','fake','fake approval','voice',1,30,1)",[],
     ).unwrap();
     assert_eq!(
@@ -99,7 +99,7 @@ fn home_token_is_private_versioned_and_revocation_invalidates_approvals() {
             .is_none()
     );
     let state: String = db
-        .connection
+        .test_connection()
         .query_row(
             "SELECT status FROM approvals WHERE approval_id='synthetic-ha'",
             [],
@@ -207,7 +207,7 @@ fn nv15_token_rotation_revoke_wipes_all_voice_grants_and_approval_pending() {
         1.,
     )
     .unwrap();
-    db.connection.execute(
+    db.test_connection().execute(
         "INSERT INTO approvals(approval_id,status,kind,target_record,digest,summary,source,created_at,expires_at,updated_at) VALUES('nv15-new','approved','home_control','light.desk','fake','fake approval','voice',1,30,1)",[],
     ).unwrap();
     assert_eq!(
@@ -226,7 +226,7 @@ fn nv15_token_rotation_revoke_wipes_all_voice_grants_and_approval_pending() {
         );
     }
     let status: String = db
-        .connection
+        .test_connection()
         .query_row(
             "SELECT status FROM approvals WHERE approval_id='nv15-new'",
             [],
@@ -333,7 +333,7 @@ fn nv15_foreign_dpapi_blob_recovery_requires_revision_and_never_decrypts_old_sec
     primary
         .set_secret("voice.homeassistant.voice_control_consent", "3:7:fake", 1.)
         .unwrap();
-    primary.connection.execute(
+    primary.test_connection().execute(
         "INSERT INTO approvals(approval_id,status,kind,target_record,digest,summary,source,created_at,expires_at,updated_at) VALUES('foreign-approval','approved','home_control','light.desk','fake','fake approval','voice',1,30,1)",[]
     ).unwrap();
     assert!(primary.home_token_status().is_err());
@@ -363,7 +363,7 @@ fn nv15_foreign_dpapi_blob_recovery_requires_revision_and_never_decrypts_old_sec
         assert_eq!(primary.get_secret(secret).unwrap(), None);
     }
     let state: String = primary
-        .connection
+        .test_connection()
         .query_row(
             "SELECT status FROM approvals WHERE approval_id='foreign-approval'",
             [],
@@ -412,11 +412,11 @@ fn nv15_corrupted_credential_revision_disables_even_backup_recovery() {
 fn nv16_person_memory_revision_unknown_and_deletion_are_isolated() {
     let db = RuntimeDb::open_memory().unwrap();
     for (id, name) in [("person-a", "甲"), ("person-b", "乙")] {
-        db.connection.execute(
+        db.test_connection().execute(
            "INSERT INTO voice_speakers(id,name,model_id,dimension,embedding,revision,created_at) VALUES(?1,?2,'synthetic',64,?3,1,0)",
            rusqlite::params![id,name,vec![0_u8;256]],
         ).unwrap();
-        db.connection
+        db.test_connection()
             .execute(
                 "INSERT INTO voice_person_memory(speaker_id,updated_at) VALUES(?1,0)",
                 [id],
@@ -456,7 +456,7 @@ fn nv16_person_memory_revision_unknown_and_deletion_are_isolated() {
 #[test]
 fn firmware_download_revision_and_transition_cannot_be_replayed() {
     let db = RuntimeDb::open_memory().unwrap();
-    db.connection.execute(
+    db.test_connection().execute(
         "INSERT INTO voice_firmware_delivery(delivery_id,device_id,artifact_sha256,updated_at) VALUES('d','device',?1,0)",
         rusqlite::params!["a".repeat(64)],
     ).unwrap();
@@ -485,7 +485,7 @@ fn firmware_download_revision_and_transition_cannot_be_replayed() {
             .unwrap()
     );
     let state: (String, i64) = db
-        .connection
+        .test_connection()
         .query_row(
             "SELECT download_status,revision FROM voice_firmware_delivery WHERE delivery_id='d'",
             [],
@@ -502,15 +502,15 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
     {
         let db = RuntimeDb::open(&file).unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-        db.connection.execute(
+        db.test_connection().execute(
             "INSERT INTO voice_speakers(id,name,model_id,dimension,embedding,revision,created_at) VALUES('test-person','甲','synthetic',64,?1,1,1.0)",
             rusqlite::params![vec![0_u8; 256]],
         ).unwrap();
-        db.connection.execute(
+        db.test_connection().execute(
             "INSERT INTO voice_person_memory(speaker_id,summary,revision,updated_at) VALUES('test-person','private',1,1.0)",
             [],
         ).unwrap();
-        db.connection.execute(
+        db.test_connection().execute(
             "INSERT INTO voice_firmware_delivery(delivery_id,device_id,artifact_sha256,download_status,updated_at) VALUES('test-transfer','test-device',?1,'downloading',1.0)",
             rusqlite::params!["a".repeat(64)],
         ).unwrap();
@@ -518,7 +518,7 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
     let db = RuntimeDb::open(&file).unwrap();
     assert_eq!(db.recover_firmware_downloads(2.0).unwrap(), 1);
     assert_eq!(db.recover_firmware_downloads(3.0).unwrap(), 0);
-    let state: (String,String,i64) = db.connection.query_row(
+    let state: (String,String,i64) = db.test_connection().query_row(
         "SELECT download_status,device_report_status,revision FROM voice_firmware_delivery WHERE delivery_id='test-transfer'",
         [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).unwrap();
@@ -528,7 +528,7 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
     assert_eq!(deliveries[0].download_status, "unknown");
     assert_eq!(deliveries[0].device_report_status, "not_reported");
     let summary: String = db
-        .connection
+        .test_connection()
         .query_row(
             "SELECT summary FROM voice_person_memory WHERE speaker_id='test-person'",
             [],
@@ -536,14 +536,14 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
         )
         .unwrap();
     assert_eq!(summary, "private");
-    db.connection
+    db.test_connection()
         .execute(
             "DELETE FROM voice_person_memory WHERE speaker_id='test-person'",
             [],
         )
         .unwrap();
     let remaining: i64 = db
-        .connection
+        .test_connection()
         .query_row("SELECT count(*) FROM voice_person_memory", [], |r| r.get(0))
         .unwrap();
     assert_eq!(remaining, 0);

@@ -84,4 +84,40 @@ workspace = true
     const parsed = parseManifest(`[package]\nname = "laser-host"\n[lints]\nworkspace = true\n${bad}`, known);
     assert.equal(parsed.normalSecretTestFeature, true, `应拦截正式依赖启用测试特性：\n${bad}`);
   }
+
+  const badSql = parseManifest(
+    `[package]\nname = "laser-api"\n[dependencies]\nlaser-runtime = { path = "../laser-runtime", features = ["test-sql-access"] }\nrusqlite = "0.32"\n[lints]\nworkspace = true\n`,
+    known,
+  );
+  assert.equal(badSql.normalSqlTestFeature, true);
+  assert.equal(badSql.directRusqlite, true);
+
+  for (const snippet of [
+    `[dependencies]\nrusqlite.workspace = true\n`,
+    `[dependencies.rusqlite]\nworkspace = true\n`,
+    `[dependencies]\n"rusqlite" = "0.32"\n`,
+    `[dependencies]\nsql = { package = "rusqlite", workspace = true }\n`,
+    `[dependencies.sql]\npackage = "rusqlite"\n`,
+  ]) {
+    const parsed = parseManifest(`[package]\nname = "laser-api"\n[lints]\nworkspace = true\n${snippet}`, known);
+    assert.equal(parsed.directRusqlite, true, `应拦截重命名或表头形式的 rusqlite：\n${snippet}`);
+  }
+
+  for (const snippet of [
+    `[features]\ntest-sql-access = ["laser-runtime/test-sql-access"]\n`,
+    `[features]\ntest-memory-secret-store = ["laser-runtime/test-memory-secret-store"]\n`,
+  ]) {
+    const parsed = parseManifest(`[package]\nname = "laser-api"\n[lints]\nworkspace = true\n${snippet}`, known);
+    assert.ok(
+      parsed.normalSqlTestFeature || parsed.normalSecretTestFeature,
+      `应拦截同名转发测试特性：\n${snippet}`,
+    );
+  }
+
+  const runtimeSelfFeatures = parseManifest(
+    `[package]\nname = "laser-runtime"\n[features]\ntest-memory-secret-store = []\ntest-sql-access = []\n[lints]\nworkspace = true\n`,
+    known,
+  );
+  assert.equal(runtimeSelfFeatures.normalSecretTestFeature, false);
+  assert.equal(runtimeSelfFeatures.normalSqlTestFeature, false);
 });

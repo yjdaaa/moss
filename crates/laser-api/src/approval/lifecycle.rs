@@ -379,33 +379,34 @@ impl ApprovalService {
             updated_at: now,
             outcome: None,
         };
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        db.insert_approval(&record)?;
-        db.append_audit(&audit_entry(
-            now,
-            &request.client,
-            AuditAction::ApprovalCreated,
-            AuditResult::Ok,
-            &record,
-            AuditDetail::default(),
-        ))
-        .map_err(audit_failed)?;
-        if !request.removed_fields.is_empty() {
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            db.insert_approval(&record)?;
             db.append_audit(&audit_entry(
                 now,
                 &request.client,
-                AuditAction::ConfirmedFieldStripped,
+                AuditAction::ApprovalCreated,
                 AuditResult::Ok,
                 &record,
-                AuditDetail {
-                    removed_fields: request.removed_fields.clone(),
-                    reason: Some("模型提供的确认不构成授权，需在桌面批准".into()),
-                    ..AuditDetail::default()
-                },
+                AuditDetail::default(),
             ))
             .map_err(audit_failed)?;
-        }
-        tx.commit().map_err(sql_failed)?;
+            if !request.removed_fields.is_empty() {
+                db.append_audit(&audit_entry(
+                    now,
+                    &request.client,
+                    AuditAction::ConfirmedFieldStripped,
+                    AuditResult::Ok,
+                    &record,
+                    AuditDetail {
+                        removed_fields: request.removed_fields.clone(),
+                        reason: Some("模型提供的确认不构成授权，需在桌面批准".into()),
+                        ..AuditDetail::default()
+                    },
+                ))
+                .map_err(audit_failed)?;
+            }
+            Ok(())
+        })?;
         Ok(record)
     }
 
@@ -479,27 +480,27 @@ impl ApprovalService {
         if submitted_digest != record.digest || current_digest != record.digest {
             return Err(ApprovalError::Mismatch);
         }
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !db.transition_approval(
-            approval_id,
-            ApprovalStatus::Pending,
-            ApprovalStatus::Approved,
-            now,
-            None,
-        )? {
-            drop(tx);
-            return Err(status_error(&db, approval_id)?);
-        }
-        db.append_audit(&audit_entry(
-            now,
-            DESKTOP_CLIENT,
-            AuditAction::ApprovalApproved,
-            AuditResult::Ok,
-            &record,
-            AuditDetail::default(),
-        ))
-        .map_err(audit_failed)?;
-        tx.commit().map_err(sql_failed)?;
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !db.transition_approval(
+                approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Approved,
+                now,
+                None,
+            )? {
+                return Err(status_error(db, approval_id)?);
+            }
+            db.append_audit(&audit_entry(
+                now,
+                DESKTOP_CLIENT,
+                AuditAction::ApprovalApproved,
+                AuditResult::Ok,
+                &record,
+                AuditDetail::default(),
+            ))
+            .map_err(audit_failed)?;
+            Ok(())
+        })?;
         db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound)
     }
 
@@ -625,39 +626,38 @@ impl ApprovalService {
             }
             return Err(ApprovalError::Mismatch);
         }
-        let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-        if !db.consume_approval(approval_id, now)? {
-            drop(tx);
-            return Err(status_error(&db, approval_id)?);
-        }
-        let initial_message = if record.kind == ApprovalKind::ExternalTool {
-            "外部调用正在执行，尚未收到结果"
-        } else {
-            "审批已放行，正在执行物理操作"
-        };
-        if !db.set_approval_outcome(
-            approval_id,
-            &ApprovalOutcome {
-                success: false,
-                message: initial_message.into(),
-                phase: Some(ApprovalPhase::Running),
-                ..Default::default()
-            },
-            now,
-        )? {
-            drop(tx);
-            return Err(status_error(&db, approval_id)?);
-        }
-        db.append_audit(&audit_entry(
-            now,
-            DESKTOP_CLIENT,
-            AuditAction::ApprovalExecuted,
-            AuditResult::Ok,
-            &record,
-            AuditDetail::default(),
-        ))
-        .map_err(audit_failed)?;
-        tx.commit().map_err(sql_failed)?;
+        db.with_transaction(|db| -> Result<(), ApprovalError> {
+            if !db.consume_approval(approval_id, now)? {
+                return Err(status_error(db, approval_id)?);
+            }
+            let initial_message = if record.kind == ApprovalKind::ExternalTool {
+                "外部调用正在执行，尚未收到结果"
+            } else {
+                "审批已放行，正在执行物理操作"
+            };
+            if !db.set_approval_outcome(
+                approval_id,
+                &ApprovalOutcome {
+                    success: false,
+                    message: initial_message.into(),
+                    phase: Some(ApprovalPhase::Running),
+                    ..Default::default()
+                },
+                now,
+            )? {
+                return Err(status_error(db, approval_id)?);
+            }
+            db.append_audit(&audit_entry(
+                now,
+                DESKTOP_CLIENT,
+                AuditAction::ApprovalExecuted,
+                AuditResult::Ok,
+                &record,
+                AuditDetail::default(),
+            ))
+            .map_err(audit_failed)?;
+            Ok(())
+        })?;
         db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound)
     }
 
@@ -709,48 +709,49 @@ impl ApprovalService {
             // SQLite transaction. If audit insertion fails, the terminal
             // outcome rolls back: an already-consumed control remains Running,
             // and restart recovery makes it result_unknown (never resends).
-            let tx = db.connection.unchecked_transaction().map_err(sql_failed)?;
-            let recorded = if outcome.success {
-                db.set_approval_outcome(approval_id, &outcome, now)?
-            } else {
-                db.transition_approval(
-                    approval_id,
-                    ApprovalStatus::Executed,
-                    ApprovalStatus::Failed,
+            db.with_transaction(|db| -> Result<(), ApprovalError> {
+                let recorded = if outcome.success {
+                    db.set_approval_outcome(approval_id, &outcome, now)?
+                } else {
+                    db.transition_approval(
+                        approval_id,
+                        ApprovalStatus::Executed,
+                        ApprovalStatus::Failed,
+                        now,
+                        Some(&outcome),
+                    )?
+                };
+                if !recorded {
+                    return Err(ApprovalError::Consumed);
+                }
+                let (action, result, reason) = if outcome.success {
+                    (
+                        AuditAction::ApprovalExecuted,
+                        AuditResult::Ok,
+                        "home_confirmed",
+                    )
+                } else {
+                    (
+                        AuditAction::ApprovalFailed,
+                        AuditResult::Failed,
+                        "home_result_unknown",
+                    )
+                };
+                db.append_audit(&audit_entry(
                     now,
-                    Some(&outcome),
-                )?
-            };
-            if !recorded {
-                return Err(ApprovalError::Consumed);
-            }
-            let (action, result, reason) = if outcome.success {
-                (
-                    AuditAction::ApprovalExecuted,
-                    AuditResult::Ok,
-                    "home_confirmed",
-                )
-            } else {
-                (
-                    AuditAction::ApprovalFailed,
-                    AuditResult::Failed,
-                    "home_result_unknown",
-                )
-            };
-            db.append_audit(&audit_entry(
-                now,
-                SYSTEM_CLIENT,
-                action,
-                result,
-                &record,
-                AuditDetail {
-                    error_code: outcome.error_code.clone(),
-                    reason: Some(reason.into()),
-                    ..AuditDetail::default()
-                },
-            ))
-            .map_err(audit_failed)?;
-            tx.commit().map_err(sql_failed)?;
+                    SYSTEM_CLIENT,
+                    action,
+                    result,
+                    &record,
+                    AuditDetail {
+                        error_code: outcome.error_code.clone(),
+                        reason: Some(reason.into()),
+                        ..AuditDetail::default()
+                    },
+                ))
+                .map_err(audit_failed)?;
+                Ok(())
+            })?;
             return db.get_approval(approval_id)?.ok_or(ApprovalError::NotFound);
         }
         let written = match (record.status, outcome.success) {

@@ -1,16 +1,17 @@
 [package]
 name = "moss-xiaozhi-proto"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "小智设备协议（内置语音服务 NV1）：消息类型、二进制音频帧 v1/v2/v3、设备 token、OTA 请求与响应。纯数据与纯函数，不含网络与异步代码。"
-license = "MIT"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
+sha2.workspace = true
+base64.workspace = true
 crc32fast = "1"
 
 [lints]

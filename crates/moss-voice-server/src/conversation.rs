@@ -1174,8 +1174,10 @@ impl Turn {
             } else {
                 STOP_ERR_SPEECH.into()
             }
+        } else if let Some(read) = read {
+            self.read_reply(read).await
         } else {
-            self.read_reply(read.unwrap()).await
+            return false;
         };
         if stop {
             self.speak_fixed(&reply).await;
@@ -1276,11 +1278,9 @@ impl Turn {
         let mut emitted_trailing_silent: usize = 0;
 
         loop {
-            let can_prefetch = sentence_rx.is_some()
-                && lookahead.as_ref().is_some_and(|slot| slot.is_none())
-                && !*sentence_rx_closed;
-            let maybe_pcm = if can_prefetch {
-                let rx = sentence_rx.as_deref_mut().unwrap();
+            let can_prefetch =
+                lookahead.as_ref().is_some_and(|slot| slot.is_none()) && !*sentence_rx_closed;
+            let maybe_pcm = if can_prefetch && let Some(rx) = sentence_rx.as_deref_mut() {
                 tokio::select! {
                     biased;
                     pcm = current.chunks_rx.recv() => pcm,

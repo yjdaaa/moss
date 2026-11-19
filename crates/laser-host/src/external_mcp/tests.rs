@@ -545,13 +545,12 @@ fn nv9_audit_failure_blocks_dispatch_and_restart_never_replays_an_approved_call(
         1
     );
     let pending = f.pending(json!({}));
-    f.db.lock().unwrap().connection.execute_batch("CREATE TRIGGER fail_external_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;").unwrap();
+    f.db.lock().unwrap().test_execute_batch("CREATE TRIGGER fail_external_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;").unwrap();
     assert_ne!(f.approve(&pending).0, 200);
     assert!(!f.call(json!({})).success);
     f.db.lock()
         .unwrap()
-        .connection
-        .execute_batch("DROP TRIGGER fail_external_audit;")
+        .test_execute_batch("DROP TRIGGER fail_external_audit;")
         .unwrap();
     let valid = f.pending(json!({}));
     let (status, response) = f.approve(&valid);
@@ -568,7 +567,7 @@ fn nv9_failed_result_audit_reports_possible_execution_without_replay() {
     let f = Fixture::new();
     f.start();
     let pending = f.pending(json!({}));
-    f.db.lock().unwrap().connection.execute_batch("CREATE TRIGGER fail_result_audit BEFORE INSERT ON audit_log WHEN NEW.action='external_tool_completed' BEGIN SELECT RAISE(ABORT,'injected result failure'); END;").unwrap();
+    f.db.lock().unwrap().test_execute_batch("CREATE TRIGGER fail_result_audit BEFORE INSERT ON audit_log WHEN NEW.action='external_tool_completed' BEGIN SELECT RAISE(ABORT,'injected result failure'); END;").unwrap();
     let (status, response) = f.approve(&pending);
     assert_ne!(status, 200);
     assert!(response.to_string().contains("不要重复操作"), "{response}");
@@ -583,8 +582,7 @@ fn nv9_failed_result_audit_reports_possible_execution_without_replay() {
     );
     f.db.lock()
         .unwrap()
-        .connection
-        .execute_batch("DROP TRIGGER fail_result_audit;")
+        .test_execute_batch("DROP TRIGGER fail_result_audit;")
         .unwrap();
     let next = f.pending(json!({}));
     let (status, response) = f.approve(&next);

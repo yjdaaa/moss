@@ -86,7 +86,10 @@ impl MusicController {
             if pump.buffered_samples() > MAX_PUMP_SAMPLES - 2400 {
                 break;
             }
-            let event = self.active.as_ref().unwrap().receiver.try_recv();
+            let Some(active) = self.active.as_ref() else {
+                return MusicProgress::Finished;
+            };
+            let event = active.receiver.try_recv();
             match event {
                 Ok(MusicDecodeEvent::Pcm {
                     generation,

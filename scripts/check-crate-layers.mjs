@@ -54,6 +54,8 @@ export function parseManifest(text, known) {
   let name = null;
   let lintsWorkspace = false;
   let normalSecretTestFeature = false;
+  let normalSqlTestFeature = false;
+  let directRusqlite = false;
   const normal = new Set();
   const dev = new Set();
   for (const raw of text.split(/\r?\n/)) {
@@ -62,9 +64,12 @@ export function parseManifest(text, known) {
     const header = line.match(/^\[([^\]]+)\]$/);
     if (header) {
       section = header[1].trim();
-      // [dependencies.foo] 这种表头形式
-      const table = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)\.([A-Za-z0-9_-]+)$/);
-      if (table && known.has(table[2])) (table[1] === "dev-dependencies" ? dev : normal).add(table[2]);
+      // [dependencies.foo] / [dependencies."foo"] 这种表头形式
+      const table = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)\.['"]?([A-Za-z0-9_-]+)['"]?$/);
+      if (table) {
+        if (known.has(table[2])) (table[1] === "dev-dependencies" ? dev : normal).add(table[2]);
+        if (table[2] === "rusqlite") directRusqlite = true;
+      }
       continue;
     }
     if (section === "package") {
@@ -78,20 +83,44 @@ export function parseManifest(text, known) {
       continue;
     }
     if (section === "features") {
-      if (!/^\s*test-memory-secret-store\s*=/.test(line) && /['"][^'"]*test-memory-secret-store['"]/.test(line)) {
+      const rhs = line.includes("=") ? line.slice(line.indexOf("=") + 1) : line;
+      if (/['"][^'"]*test-memory-secret-store['"]/.test(rhs)) {
         normalSecretTestFeature = true;
+      }
+      if (/['"][^'"]*test-sql-access['"]/.test(rhs)) {
+        normalSqlTestFeature = true;
       }
       continue;
     }
-    if (/(?:^|\.)(dependencies|build-dependencies)(?:\.[A-Za-z0-9_-]+)?$/.test(section)) {
+    if (/(?:^|\.)(dependencies|build-dependencies)(?:\.['"]?[A-Za-z0-9_-]+['"]?)?$/.test(section)) {
       if (/['"]test-memory-secret-store['"]/.test(line)) normalSecretTestFeature = true;
+      if (/['"]test-sql-access['"]/.test(line)) normalSqlTestFeature = true;
+    }
+    const anyDepSection = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)(?:\.['"]?[A-Za-z0-9_-]+['"]?)?$/);
+    if (!anyDepSection) continue;
+    const targetSet = anyDepSection[1] === "dev-dependencies" ? dev : normal;
+    const renamedPkg = line.match(/(?:^|[{,\s.])package\s*=\s*['"]([A-Za-z0-9_-]+)['"]/);
+    if (renamedPkg) {
+      if (known.has(renamedPkg[1])) targetSet.add(renamedPkg[1]);
+      if (renamedPkg[1] === "rusqlite") directRusqlite = true;
     }
     const kind = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)$/);
     if (!kind) continue;
-    const dep = line.match(/^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)?\s*=/);
-    if (dep && known.has(dep[1])) (kind[1] === "dev-dependencies" ? dev : normal).add(dep[1]);
+    const dep = line.match(/^['"]?([A-Za-z0-9_-]+)['"]?(?:\.[A-Za-z0-9_-]+)?\s*=/);
+    if (dep) {
+      if (known.has(dep[1])) targetSet.add(dep[1]);
+      if (dep[1] === "rusqlite") directRusqlite = true;
+    }
   }
-  return { name, normal: [...normal], dev: [...dev], lintsWorkspace, normalSecretTestFeature };
+  return {
+    name,
+    normal: [...normal],
+    dev: [...dev],
+    lintsWorkspace,
+    normalSecretTestFeature,
+    normalSqlTestFeature,
+    directRusqlite,
+  };
 }
 
 /** 判定一条依赖边是否合规；返回违规原因，合规返回 null。 */
@@ -133,6 +162,21 @@ export function checkLayers(root = REPO_ROOT, layers = LAYERS) {
         manifest: rel,
         from: parsed.name,
         reason: "正式依赖不得启用 test-memory-secret-store（仅限 [dev-dependencies]）",
+      });
+    }
+    if (parsed.normalSqlTestFeature) {
+      violations.push({
+        manifest: rel,
+        from: parsed.name,
+        reason: "正式依赖不得启用 test-sql-access（仅限 [dev-dependencies]）",
+      });
+    }
+    if (parsed.directRusqlite && parsed.name !== "laser-runtime") {
+      violations.push({
+        manifest: rel,
+        from: parsed.name,
+        to: "rusqlite",
+        reason: "SQLite 读写与事务必须经 laser-runtime::RuntimeDb 封装，禁止其他 crate 直接依赖 rusqlite",
       });
     }
     for (const [list, devOnly] of [[parsed.normal, false], [parsed.dev, true]]) {

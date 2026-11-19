@@ -576,10 +576,13 @@ impl AgentRuns for AgentCoordinator {
         let Some(me) = self.me.upgrade() else {
             return Self::response(503, "Agent 服务不可用", "agent_unavailable");
         };
+        let Some(request) = record.request.as_ref() else {
+            return Self::response(409, "审批缺少执行参数", "approval_mismatch");
+        };
         let digest = approval_digest(
             record.kind,
             &record.target_record,
-            record.request.as_ref().unwrap(),
+            request,
             &ApprovalConnection::Agent {
                 provider: plan.provider.as_str().into(),
                 fingerprint: plan.config_revision.clone(),

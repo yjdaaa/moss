@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "laser-api"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -2673,7 +2673,6 @@ dependencies = [
  "laser-runtime",
  "laser-tools",
  "reqwest",
- "rusqlite",
  "rust-embed",
  "serde_json",
  "sha1",
@@ -2683,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "laser-contracts"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -2693,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "laser-core"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",
@@ -2709,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "laser-device"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "hex",
  "if-addrs",
@@ -2721,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "laser-host"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "laser-api",
  "laser-contracts",
@@ -2741,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "laser-mcp"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "laser-contracts",
@@ -2750,12 +2749,12 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "tungstenite 0.26.2",
+ "tungstenite",
 ]
 
 [[package]]
 name = "laser-runtime"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "chrono",
  "dotenvy",
@@ -2772,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "laser-tools"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "laser-contracts",
  "laser-core",
@@ -3117,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "moss-agent"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "getrandom 0.3.4",
  "laser-api",
@@ -3138,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "moss-desktop"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3172,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "moss-home"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "getrandom 0.3.4",
  "laser-api",
@@ -3191,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "moss-host"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "laser-api",
  "laser-host",
@@ -3201,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "moss-mcp-client"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "axum",
  "reqwest",
@@ -3215,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "moss-usb-provision"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "espflash",
  "getrandom 0.3.4",
@@ -3232,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "bzip2",
@@ -3250,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-local-proto"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -3258,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-providers"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3277,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-server"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "aes",
  "axum",
@@ -3305,13 +3304,13 @@ dependencies = [
  "symphonia",
  "tempfile",
  "tokio",
- "tungstenite 0.26.2",
+ "tungstenite",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "moss-xiaozhi-proto"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
@@ -6307,7 +6306,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.29.0",
+ "tungstenite",
  "webpki-roots 0.26.11",
 ]
 
@@ -6553,26 +6552,6 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "tungstenite"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror 2.0.20",
- "utf-8",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
@@ -6587,6 +6566,7 @@ dependencies = [
  "rustls-pki-types",
  "sha1",
  "thiserror 2.0.20",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -6670,12 +6650,6 @@ dependencies = [
  "serde",
  "url",
 ]
-
-[[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"

@@ -1131,8 +1131,7 @@ fn audit_failure_refuses_r3_and_keeps_r2() {
         .unwrap()
         .lock()
         .unwrap()
-        .connection
-        .execute_batch("DROP TABLE audit_log;")
+        .test_execute_batch("DROP TABLE audit_log;")
         .unwrap();
     let lan = || laser_contracts::CallerContext::Lan {
         pairing_id: "pair_test".into(),
@@ -1942,8 +1941,7 @@ fn approved_send_mark_running_error_writes_failed_outcome_without_connecting() {
         .unwrap()
         .lock()
         .unwrap()
-        .connection
-        .execute_batch(
+        .test_execute_batch(
             "CREATE TRIGGER fail_mark_running BEFORE UPDATE OF outcome ON approvals
             WHEN json_extract(NEW.outcome, '$.phase') = 'running'
              AND json_extract(NEW.outcome, '$.job_id') IS NOT NULL

@@ -1044,11 +1044,8 @@ mod knowledge_sqlite {
         let stored: i64 =
             db.0.lock()
                 .unwrap()
-                .connection
-                .query_row(
+                .test_query_i64(
                     "SELECT COUNT(*) FROM context_knowledge_dirs WHERE l1 LIKE '%进气滤网%'",
-                    [],
-                    |r| r.get(0),
                 )
                 .unwrap();
         assert_eq!(stored, 0, "这句只在段落索引里，数据库里读不到原文");
@@ -1068,18 +1065,10 @@ mod resume_sqlite {
 
     impl ResumeFacts for DbFacts<'_> {
         fn state(&self, reference: &Reference) -> RefState {
-            let row = |sql: &str| -> Option<(String, Option<String>)> {
-                self.0
-                    .connection
-                    .query_row(sql, [&reference.id], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .ok()
-            };
             let found = match reference.kind {
-                RefKind::Approval => row(
-                    "SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1",
-                ),
-                RefKind::Job => row("SELECT status, NULL FROM jobs WHERE job_id=?1"),
-                RefKind::AgentRun => row("SELECT status, NULL FROM voice_agent_runs WHERE id=?1"),
+                RefKind::Approval => self.0.lookup_approval_ref_state(&reference.id),
+                RefKind::Job => self.0.lookup_job_ref_state(&reference.id),
+                RefKind::AgentRun => self.0.lookup_agent_run_ref_state(&reference.id),
                 RefKind::Test => return RefState::Unverifiable,
             };
             let Some((status, phase)) = found else {
@@ -1111,9 +1100,8 @@ mod resume_sqlite {
             "SELECT job_id||status FROM jobs ORDER BY 1",
             "SELECT id||status FROM voice_agent_runs ORDER BY 1",
         ] {
-            let mut statement = db.connection.prepare(sql).unwrap();
-            for row in statement.query_map([], |r| r.get::<_, String>(0)).unwrap() {
-                out.push_str(&row.unwrap());
+            for row in db.test_query_strings(sql).unwrap() {
+                out.push_str(&row);
                 out.push('\n');
             }
         }
@@ -1124,8 +1112,7 @@ mod resume_sqlite {
     fn nv19_resume_over_real_records_reports_without_replaying() {
         let facts_db = RuntimeDb::open_memory().unwrap();
         facts_db
-            .connection
-            .execute_batch(
+            .test_execute_batch(
                 "INSERT INTO approvals(approval_id,status,kind,target_record,digest,summary,source,created_at,expires_at,updated_at) VALUES
                    ('apr-old','expired','framing','wf','d','走边框','voice',1,121,130),
                    ('apr-wait','pending','framing','wf','d','走边框','voice',1,9999999999,1);

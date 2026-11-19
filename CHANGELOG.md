@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 接入 17 项前端浏览器测试到 CI、收敛 workspace 依赖与版本并彻底收口 `RuntimeDb` SQLite 边界（2026-11-19）
+
+- **现象**：`frontend/tests/` 已有 17 个 Playwright 浏览器交互测试（含硬编码 Windows Edge 路径的 `voice-center-render.smoke.mjs`）但长期脱离 `package.json`、`verify.mjs` 与 CI；根 `Cargo.toml` 缺 `[workspace.dependencies]`/`[workspace.package]` 且版本滞后在 `0.3.7`、`tungstenite` 存在 0.26/0.29 双版本；`laser-api` 仍直接依赖 `rusqlite` 且多处直接访问公开的 `RuntimeDb.connection`；仓库滞留过时的 `.birdview/` 快照与旧架构原型 `frontend/prototypes/`；生产代码尚存 5 处可去掉的 `.unwrap()`。
+- **根因与修复**：修复 `voice-center-render.smoke.mjs` 跨平台通道，新增 `scripts/test-frontend-browser.mjs`、`frontend` 的 `npm run test:browser`、`scripts/verify.mjs --browser`（`--e2e` 默认包含）并在 `.github/workflows/ci.yml` 的 `frontend` 任务执行；根 `Cargo.toml` 新增 `[workspace.package]`（统一 `0.3.11` / `MIT` / `rust-version = "1.95"`）与 `[workspace.dependencies]`（`tungstenite` 统一 `0.29`），同步 `package.json`、`tauri.conf.json`、`apps/moss-voice-local` 版本为 `0.3.11`，新增 `rust-toolchain.toml` 与 `engines`；在 `RuntimeDb` 补充 `with_transaction`、`delete_material`、`delete_material_thicknesses` 与 `lookup_*_ref_state`，将 `RuntimeDb.connection` 收口为 `pub(crate)`（跨 crate 故障注入测试走 dev-only 特性 `test-sql-access`），彻底移除 `laser-api` 对 `rusqlite` 的依赖并在 `scripts/check-crate-layers.mjs` 机器把关；删除 `.birdview/` 与 `frontend/prototypes/`，清理 5 处生产 `.unwrap()` 并同步 `docs/developer/architecture.md`。
+- **验证**：`node scripts/verify.mjs --full --e2e` 全绿（Rust 根工作区 + `moss-voice-local` 1,432 项、脚本单测 51 项、前端单测 356 项、前端 Playwright 浏览器测试 17/17 项、FakeGrbl 回环 API+Chrome UI E2E 40/40 项全通过，clippy/rustfmt/eslint/分层/卫生门禁零警告）；独立增量审查收敛。Windows/Linux CI 实际 runner 与真实硬件未实机验证（`unverified`）。
+- **关联**：`Cargo.toml`、各成员 `Cargo.toml`、`rust-toolchain.toml`、`scripts/{test-frontend-browser,test_e2e,verify,check-crate-layers}.mjs`、`.github/workflows/ci.yml`、`frontend/{package.json,tests/voice-center-render.smoke.mjs}`、`crates/laser-runtime/src/db.rs`、`crates/laser-api/src/{approval,materials}`、`crates/laser-host/src/external_mcp/store.rs`、`apps/desktop/src-tauri/src/voice_context.rs`、`docs/developer/architecture.md`。
+
 ### 加固急停通道、公开路由解码、命令启动、语音 Tokio 卸载与配置/FFI 防护（2026-11-19）
 
 - **现象**：持锁 panic 时全局急停钩子可能自死锁或因锁中毒跳过 `0x18`，且急停排在可能被 Wi-Fi `?` 心跳堵住的 `realtime_writer` 之后；公开静态路由 `/assets/*` 收到 `%中` 会因非 UTF-8 字符边界切片触发 panic 并误发急停；Windows `open_app_tool` 经 `cmd /C start` 存在命令注入且外部命令无超时；2 线程语音 Tokio 运行时多处同步读盘/锁库/PNG 渲染未走 `spawn_blocking`；`voice` 配置子分区损坏时写盘会拿默认值静默覆盖；`safe_asset_path`、重复 `Content-Length`、激光非有限坐标/除零以及 `smart_turn` ORT vtable / Unix 信号处理 / Windows 进程属性存在安全边界缺陷。

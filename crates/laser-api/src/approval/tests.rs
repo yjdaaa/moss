@@ -33,8 +33,7 @@ impl Fixture {
         self.db
             .lock()
             .unwrap()
-            .connection
-            .execute_batch("DROP TABLE audit_log;")
+            .test_execute_batch("DROP TABLE audit_log;")
             .unwrap();
     }
 

@@ -175,24 +175,35 @@ impl Store {
         configs.sort_by(|a, b| a.name.cmp(&b.name));
         validate_servers(&configs).map_err(|e| e.to_string())?;
         stop();
-        let tx = db
-            .connection
-            .unchecked_transaction()
-            .map_err(|_| "无法保存 MCP 凭据")?;
-        for (key, value) in values {
-            if let Some(value) = value {
-                db.set_secret(&new_refs[&key], &value, now())
-                    .map_err(|_| "无法保存 MCP 凭据")?;
+        enum SaveTxError {
+            Tx,
+            Msg(String),
+        }
+        impl From<laser_runtime::SchemaError> for SaveTxError {
+            fn from(_: laser_runtime::SchemaError) -> Self {
+                Self::Tx
             }
         }
-        invalidate(&db, &input.config.name)?;
-        db.append_audit(&config_audit(
-            &input.config.name,
-            "准备保存配置；服务已暂停，尚未声明文件写入成功",
-            AuditResult::Ok,
-        ))
-        .map_err(|_| "审计写入失败，未启用服务")?;
-        tx.commit().map_err(|_| "凭据事务提交失败，未启用服务")?;
+        db.with_transaction(|db| -> Result<(), SaveTxError> {
+            for (key, value) in values {
+                if let Some(value) = value {
+                    db.set_secret(&new_refs[&key], &value, now())
+                        .map_err(|_| SaveTxError::Msg("无法保存 MCP 凭据".into()))?;
+                }
+            }
+            invalidate(db, &input.config.name).map_err(SaveTxError::Msg)?;
+            db.append_audit(&config_audit(
+                &input.config.name,
+                "准备保存配置；服务已暂停，尚未声明文件写入成功",
+                AuditResult::Ok,
+            ))
+            .map_err(|_| SaveTxError::Msg("审计写入失败，未启用服务".into()))?;
+            Ok(())
+        })
+        .map_err(|err| match err {
+            SaveTxError::Tx => "凭据事务提交失败，未启用服务".to_owned(),
+            SaveTxError::Msg(msg) => msg,
+        })?;
         drop(db);
         // Old credential references are retained on failure (and after crashes); they are unreachable from the new config.
         moss_voice::settings::save_mcp_servers(&self.file, &configs)?;

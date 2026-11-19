@@ -13,7 +13,10 @@ pub fn retrieve(
     let request = build_request(client, base, token, datasets, question)?;
     let parsed = parse(&http::send_json(client, request)?)?;
     // The configured datasets are also the response provenance boundary.
-    if parsed["chunks"].as_array().unwrap().iter().any(|row| {
+    let Some(chunks) = parsed["chunks"].as_array() else {
+        return Err(FetchError::InvalidResponse);
+    };
+    if chunks.iter().any(|row| {
         !datasets
             .iter()
             .any(|id| row["dataset_id"].as_str() == Some(id.as_str()))

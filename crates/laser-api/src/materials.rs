@@ -673,36 +673,15 @@ pub(crate) fn handle_material_manage(
                 let db_guard = db_arc
                     .lock()
                     .map_err(|_| "材料库数据库锁失败".to_string())?;
-                let tx = db_guard
-                    .connection
-                    .unchecked_transaction()
-                    .map_err(|e| format!("{e:?}"))?;
                 if remove_whole_material {
-                    tx.execute(
-                        "DELETE FROM material_params WHERE material_name=?1",
-                        rusqlite::params![material],
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                    tx.execute(
-                        "DELETE FROM material_aliases WHERE material_name=?1",
-                        rusqlite::params![material],
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                    tx.execute(
-                        "DELETE FROM materials WHERE name=?1",
-                        rusqlite::params![material],
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                } else {
-                    for key in &removed_keys {
-                        tx.execute(
-                            "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2",
-                            rusqlite::params![material, key],
-                        )
+                    db_guard
+                        .delete_material(material)
                         .map_err(|e| format!("{e:?}"))?;
-                    }
+                } else {
+                    db_guard
+                        .delete_material_thicknesses(material, &removed_keys)
+                        .map_err(|e| format!("{e:?}"))?;
                 }
-                tx.commit().map_err(|e| format!("{e:?}"))?;
                 Ok(())
             }) {
                 Ok(_) => http_json(200, success(serde_json::json!({ "materials": library }))),
@@ -855,18 +834,9 @@ pub(crate) fn handle_material_manage(
                         let db_guard = db_arc
                             .lock()
                             .map_err(|_| "材料库数据库锁失败".to_string())?;
-                        let tx = db_guard
-                            .connection
-                            .unchecked_transaction()
+                        db_guard
+                            .delete_material_thicknesses(material, &pruned_keys)
                             .map_err(|e| format!("{e:?}"))?;
-                        for key in &pruned_keys {
-                            tx.execute(
-                                "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2",
-                                rusqlite::params![material, key],
-                            )
-                            .map_err(|e| format!("{e:?}"))?;
-                        }
-                        tx.commit().map_err(|e| format!("{e:?}"))?;
                     }
                     Ok(())
                 }) {

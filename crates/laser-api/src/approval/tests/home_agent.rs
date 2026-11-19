@@ -405,13 +405,12 @@ fn nv15_audit_failure_rolls_back_terminal_outcome_and_never_allows_replay() {
         .unwrap();
     {
         let db = fixture.db.lock().unwrap();
-        db.connection
-            .execute_batch(
-                "CREATE TRIGGER deny_home_terminal_audit BEFORE INSERT ON audit_log
+        db.test_execute_batch(
+            "CREATE TRIGGER deny_home_terminal_audit BEFORE INSERT ON audit_log
              WHEN NEW.action='approval_failed'
              BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END;",
-            )
-            .unwrap();
+        )
+        .unwrap();
     }
     assert!(
         fixture
@@ -449,8 +448,7 @@ fn nv15_audit_failure_rolls_back_terminal_outcome_and_never_allows_replay() {
     );
     {
         let db = fixture.db.lock().unwrap();
-        db.connection
-            .execute_batch("DROP TRIGGER deny_home_terminal_audit")
+        db.test_execute_batch("DROP TRIGGER deny_home_terminal_audit")
             .unwrap();
     }
     fixture.service.recover_after_restart().unwrap();

@@ -364,7 +364,7 @@ impl From<serde_json::Error> for SchemaError {
 }
 
 pub struct RuntimeDb {
-    pub connection: Connection,
+    pub(crate) connection: Connection,
     path: Option<std::path::PathBuf>,
 }
 
@@ -414,6 +414,163 @@ impl RuntimeDb {
             connection,
             path: Some(db_path.clone()),
         }))
+    }
+
+    /// 在单个 SQLite 事务内执行闭包；闭包返回 `Ok` 提交，返回 `Err` 自动回滚。
+    pub fn with_transaction<T, E, F>(&self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(&Self) -> Result<T, E>,
+        E: From<SchemaError>,
+    {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(SchemaError::from)?;
+        let value = f(self)?;
+        tx.commit().map_err(SchemaError::from)?;
+        Ok(value)
+    }
+
+    /// 只读查询任务引用的实时状态与阶段（优先 workflows → calibrations → 旧 jobs），
+    /// 退出/重启中断的在途任务统一映射为 `result_unknown`。
+    pub fn lookup_job_ref_state(&self, id: &str) -> Option<(String, Option<String>)> {
+        let row = |sql: &str| -> Option<(String, Option<String>)> {
+            self.connection
+                .query_row(sql, [id], |r| {
+                    let status: String = r.get(0)?;
+                    let phase: Option<String> = r.get(1)?;
+                    let detail: Option<String> = r.get(2)?;
+                    let running: Option<i64> = r.get(3).ok().flatten();
+                    let effective_phase = phase.or_else(|| {
+                        let interrupted = detail
+                            .as_deref()
+                            .is_some_and(|d| d.contains("重启中断") || d.contains("退出中断"))
+                            || running == Some(1);
+                        (status == "failed" && interrupted).then(|| "result_unknown".to_owned())
+                    });
+                    Ok((status, effective_phase))
+                })
+                .ok()
+        };
+        row(
+            "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM workflows WHERE workflow_id=?1",
+        )
+        .or_else(|| {
+            row(
+                "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM calibrations WHERE calibration_id=?1",
+            )
+        })
+        .or_else(|| {
+            row(
+                "SELECT status, COALESCE(json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.result.phase')), COALESCE(json_extract(payload,'$.detail'), json_extract(payload,'$.result.detail')), NULL FROM jobs WHERE job_id=?1",
+            )
+        })
+    }
+
+    /// 只读查询审批引用的状态与阶段。
+    pub fn lookup_approval_ref_state(&self, id: &str) -> Option<(String, Option<String>)> {
+        self.connection
+            .query_row(
+                "SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+    }
+
+    /// 只读查询 AgentRun 引用的状态。
+    pub fn lookup_agent_run_ref_state(&self, id: &str) -> Option<(String, Option<String>)> {
+        self.connection
+            .query_row(
+                "SELECT status, NULL FROM voice_agent_runs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+    }
+
+    /// 删除指定材料及其全部厚度参数与别名（单事务原子提交）。
+    pub fn delete_material(&self, material_name: &str) -> Result<(), SchemaError> {
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM material_params WHERE material_name=?1",
+            params![material_name],
+        )?;
+        tx.execute(
+            "DELETE FROM material_aliases WHERE material_name=?1",
+            params![material_name],
+        )?;
+        tx.execute(
+            "DELETE FROM materials WHERE name=?1",
+            params![material_name],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 删除指定材料下的一组厚度参数（单事务原子提交）。
+    pub fn delete_material_thicknesses(
+        &self,
+        material_name: &str,
+        thickness_keys: &[String],
+    ) -> Result<(), SchemaError> {
+        if thickness_keys.is_empty() {
+            return Ok(());
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        for key in thickness_keys {
+            tx.execute(
+                "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2",
+                params![material_name, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 仅供跨 crate 与本 crate 集成测试访问底层 SQLite 连接；严禁出现在正式依赖中。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// 仅供跨 crate 测试：执行 SQL 批处理（如故障注入触发器/构造历史行）。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_execute_batch(&self, sql: &str) -> Result<(), SchemaError> {
+        self.connection.execute_batch(sql)?;
+        Ok(())
+    }
+
+    /// 仅供跨 crate 测试：查询单值整数。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_query_i64(&self, sql: &str) -> Result<i64, SchemaError> {
+        Ok(self.connection.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    /// 仅供跨 crate 测试：查询单值文本。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_query_string(&self, sql: &str) -> Result<String, SchemaError> {
+        Ok(self.connection.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    /// 仅供跨 crate 测试：查询多行文本列。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_query_strings(&self, sql: &str) -> Result<Vec<String>, SchemaError> {
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 仅供跨 crate 测试：按单参数查询两列文本。
+    #[cfg(any(test, feature = "test-sql-access"))]
+    pub fn test_query_string_pair(
+        &self,
+        sql: &str,
+        param: &str,
+    ) -> Result<(String, String), SchemaError> {
+        Ok(self
+            .connection
+            .query_row(sql, [param], |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
 
     pub fn migrate(&self) -> Result<(), SchemaError> {

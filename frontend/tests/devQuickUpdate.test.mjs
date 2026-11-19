@@ -25,12 +25,32 @@ test("dev-desktop.ps1, quick-update-desktop.ps1, and clean-build-cache.ps1 stay 
   assert.equal(pkgJson.version, tauriConf.version, "frontend/package.json version must match tauri.conf.json");
 
   const rootCargo = readRepoText("Cargo.toml");
+  const workspacePkgBlock = rootCargo.match(/\[workspace\.package\]([\s\S]*?)(?=\n\[|$)/);
+  assert.ok(workspacePkgBlock, "root Cargo.toml must declare [workspace.package]");
+  const versionPattern = new RegExp(`^version\\s*=\\s*"${tauriConf.version.replace(/\./g, "\\.")}"`, "m");
+  assert.match(
+    workspacePkgBlock[1],
+    versionPattern,
+    `root Cargo.toml [workspace.package] version must match tauri.conf.json (${tauriConf.version})`,
+  );
   const memberMatches = [...rootCargo.matchAll(/"((?:apps|crates)\/[^"]+)"/g)].map((m) => m[1]);
   assert.ok(memberMatches.length >= 16, "workspace members must be parsable from root Cargo.toml");
-  const versionPattern = new RegExp(`^version\\s*=\\s*"${tauriConf.version.replace(/\./g, "\\.")}"`, "m");
-  for (const dir of [...memberMatches, "apps/moss-voice-local"]) {
+  for (const dir of memberMatches) {
     const manifest = readRepoText(`${dir}/Cargo.toml`);
-    assert.match(manifest, versionPattern, `${dir}/Cargo.toml version must match tauri.conf.json (${tauriConf.version})`);
+    const matchesExplicit = versionPattern.test(manifest);
+    const inheritsWorkspace = /^version\.workspace\s*=\s*true$/m.test(manifest);
+    assert.ok(
+      matchesExplicit || inheritsWorkspace,
+      `${dir}/Cargo.toml must declare version = "${tauriConf.version}" or version.workspace = true`,
+    );
+  }
+  for (const standalone of ["apps/moss-voice-local", "crates/moss-voice-local-proto"]) {
+    const manifest = readRepoText(`${standalone}/Cargo.toml`);
+    assert.match(
+      manifest,
+      versionPattern,
+      `${standalone}/Cargo.toml standalone version must match tauri.conf.json (${tauriConf.version})`,
+    );
   }
 });
 

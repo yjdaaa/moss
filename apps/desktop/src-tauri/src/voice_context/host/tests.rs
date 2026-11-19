@@ -378,7 +378,7 @@ fn nv19_knowledge_experience_and_resume_through_the_host() {
 
     call(&f, json!({"action": "set_project", "name": "维护手册"})).unwrap();
     assert!(call(&f, json!({"action": "resume_get"})).unwrap().is_null());
-    f.db.lock().unwrap().connection.execute_batch(
+    f.db.lock().unwrap().test_execute_batch(
         "INSERT INTO approvals(approval_id,status,kind,target_record,digest,summary,source,created_at,expires_at,updated_at) VALUES ('apr-old','expired','framing','wf','d','走边框','voice',1,121,130);"
     ).unwrap();
     let note = json!({"decisions": ["统一 3 毫米"], "todos": ["重新走边框 [approval:apr-old]"], "evidence": [], "unverified": []});
@@ -401,12 +401,7 @@ fn nv19_knowledge_experience_and_resume_through_the_host() {
     let status: String =
         f.db.lock()
             .unwrap()
-            .connection
-            .query_row(
-                "SELECT status FROM approvals WHERE approval_id='apr-old'",
-                [],
-                |r| r.get(0),
-            )
+            .test_query_string("SELECT status FROM approvals WHERE approval_id='apr-old'")
             .unwrap();
     assert_eq!(status, "expired", "恢复不改审批");
 }

@@ -1,27 +1,31 @@
 [package]
 name = "laser-runtime"
-version = "0.3.7"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 laser-contracts = { path = "../laser-contracts" }
-rusqlite = { version = "0.32", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 dotenvy = "0.15"
 fs4 = "0.13"
-sha2 = "0.10"
-hex = "0.4"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+sha2.workspace = true
+hex.workspace = true
+chrono = { workspace = true, features = ["std", "clock"] }
 
 [features]
 # 仅供测试：macOS 上用进程内主密钥代替登录钥匙串，避免测试读写用户真实钥匙串并卡在授权弹窗。
 # 只允许出现在 dev-dependencies 中；正式构建不得启用。
 test-memory-secret-store = []
+# 仅供跨 crate 集成测试注入 SQL 故障（如触发器/缺表）与断言表行；只允许出现在 dev-dependencies 中。
+test-sql-access = []
 
 [dev-dependencies]
-laser-runtime = { path = ".", features = ["test-memory-secret-store"] }
-tempfile = "3"
+laser-runtime = { path = ".", features = ["test-memory-secret-store", "test-sql-access"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

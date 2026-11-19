@@ -4,7 +4,8 @@
 //   node scripts/verify.mjs              # 按当前改动范围执行对应检查与测试
 //   node scripts/verify.mjs --quick      # 只跑静态门禁、格式检查与 clippy / eslint
 //   node scripts/verify.mjs --full       # 全量检查根工作区、moss-voice-local 与前端
-//   node scripts/verify.mjs --e2e        # 追加前端 build、release moss-host 与 E2E 测试
+//   node scripts/verify.mjs --browser    # 追加全部前端 Playwright 浏览器交互测试
+//   node scripts/verify.mjs --e2e        # 追加前端 build、浏览器交互测试、release moss-host 与 E2E 测试
 //   node scripts/verify.mjs --fmt-write  # 只对改动过的 .rs 执行 rustfmt，不碰其他文件
 //   node scripts/verify.mjs --install-hooks  # 启用仓库 .githooks（core.hooksPath）
 //   node scripts/verify.mjs --dry-run    # 只打印执行计划
@@ -34,7 +35,7 @@ function isHelperPath(p) {
 
 /** 解析命令行参数。 */
 export function parseArgs(argv) {
-  const known = new Set(["--quick", "--full", "--e2e", "--fmt-write", "--install-hooks", "--dry-run", "--force", "--help", "-h"]);
+  const known = new Set(["--quick", "--full", "--browser", "--e2e", "--fmt-write", "--install-hooks", "--dry-run", "--force", "--help", "-h"]);
   for (const arg of argv) {
     if (!known.has(arg)) {
       throw new Error(`未知参数: ${arg}`);
@@ -43,6 +44,7 @@ export function parseArgs(argv) {
   return {
     quick: argv.includes("--quick"),
     full: argv.includes("--full"),
+    browser: argv.includes("--browser"),
     e2e: argv.includes("--e2e"),
     fmtWrite: argv.includes("--fmt-write"),
     installHooks: argv.includes("--install-hooks"),
@@ -54,7 +56,7 @@ export function parseArgs(argv) {
 
 /** 按改动路径列表与运行选项生成验证步骤计划（纯函数）。 */
 export function planVerification(changedFiles, options = {}) {
-  const { quick = false, full = false, e2e = false, fmtWrite = false } = options;
+  const { quick = false, full = false, browser = false, e2e = false, fmtWrite = false } = options;
   const files = [...new Set(changedFiles.map(normalizeRelPath).filter(Boolean))];
   const steps = [
     { id: "check-crate-layers", label: "crate 分层与清单检查", cmd: process.execPath, args: ["scripts/check-crate-layers.mjs"], cwd: ".", locksBuild: false },
@@ -110,6 +112,10 @@ export function planVerification(changedFiles, options = {}) {
     }
   }
 
+  if (browser || e2e) {
+    steps.push({ id: "frontend-browser", label: "前端 Playwright 浏览器交互测试", cmd: process.execPath, args: ["scripts/test-frontend-browser.mjs"], cwd: ".", locksBuild: true });
+  }
+
   if (e2e) {
     if (!steps.some((s) => s.id === "frontend-build")) {
       steps.push({ id: "frontend-build", label: "前端生产构建", cmd: npmCmd, args: ["--prefix", "frontend", "run", "build"], cwd: ".", locksBuild: true });
@@ -125,7 +131,7 @@ export function planVerification(changedFiles, options = {}) {
 export function detectActiveBuildProcesses(psOutput, selfPid = process.pid) {
   const hits = [];
   // Windows 命令行形如 `"C:\…\cargo.exe" test`：允许反斜杠 / 引号分隔与 `.exe` 后缀
-  const toolRe = /(?:^|[\s/\\"])(cargo|rustc|vite|playwright|test_e2e\.mjs)(?:\.exe)?(?:["\s]|$)/i;
+  const toolRe = /(?:^|[\s/\\"])(cargo|rustc|vite|playwright|test_e2e\.mjs|test-frontend-browser\.mjs)(?:\.exe)?(?:["\s]|$)/i;
   for (const raw of psOutput.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
@@ -249,7 +255,7 @@ function main() {
   }
 
   if (opts.help) {
-    console.log("用法：node scripts/verify.mjs [--quick|--full|--e2e|--fmt-write|--install-hooks|--dry-run|--force]");
+    console.log("用法：node scripts/verify.mjs [--quick|--full|--browser|--e2e|--fmt-write|--install-hooks|--dry-run|--force]");
     return;
   }
   if (opts.installHooks) {
