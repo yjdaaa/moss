@@ -22,8 +22,7 @@ pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
 mod fast;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
-pub mod glyph_font; // n81 小智设备屏幕中文字库与 glyph_push v1 动态字模补齐（2026-11-12）
-mod goggle_bot;
+pub use moss_xiaozhi_display::{glyph_font, goggle_bot, screen_pack};
 pub mod home_tools;
 pub mod jev;
 pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
@@ -37,7 +36,6 @@ pub mod persona; // n59 说话角色（只改语气，安全铁律锁死在末�
 pub mod plugins;
 pub mod preview_push;
 mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
-pub mod screen_pack; // n70 小智全屏画风资源包（2026-11-08 用户决定）
 mod session;
 #[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled

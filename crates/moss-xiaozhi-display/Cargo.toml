@@ -1,0 +1,24 @@
+[package]
+name = "moss-xiaozhi-display"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "小智设备彩屏渲染、护目镜小机器人动图、中文字库与动态字模（glyph_push）、全屏画风与唤醒词资源包（assets.bin）纯数据构造模块，零网络与异步依赖。"
+
+[dependencies]
+moss-xiaozhi-proto = { path = "../moss-xiaozhi-proto" }
+image = { workspace = true, features = ["png", "jpeg", "gif"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[features]
+# 仅供跨 crate 测试构造合成字库目录，严禁在正式依赖中启用。
+test-fixtures = []
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

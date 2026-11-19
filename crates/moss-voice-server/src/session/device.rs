@@ -155,13 +155,13 @@ impl<'a> Session<'a> {
                         .ok()
                         .flatten();
                         if let Some(prefs) = prefs {
-                            self.screen_pack = prefs
+                            self.screen.screen_pack = prefs
                                 .screen_pack
                                 .as_deref()
                                 .is_some_and(crate::screen_pack::marker_supports_scenes);
                             self.shared
                                 .state
-                                .set_screen_pack(self.session_id, self.screen_pack);
+                                .set_screen_pack(self.session_id, self.screen.screen_pack);
                             let mut replayed = false;
                             if let Some(v) = prefs.volume
                                 && self
@@ -467,7 +467,7 @@ impl<'a> Session<'a> {
         if !send_json(socket, &message).await {
             return Err("发送失败".into());
         }
-        self.last_screen_emotion = Some(name);
+        self.screen.last_screen_emotion = Some(name);
         self.event(format!("小智全屏试看：{}", scene.label_zh()));
         Ok(())
     }
@@ -758,7 +758,7 @@ impl<'a> Session<'a> {
                         self.shared.http_port
                     );
                     let now = Instant::now();
-                    self.preview_hold = Some(PreviewHold {
+                    self.screen.preview_hold = Some(PreviewHold {
                         url: url.clone(),
                         until: now + self.shared.config.preview_hold_duration,
                         next_refresh: now + self.shared.config.preview_hold_interval,
@@ -772,14 +772,14 @@ impl<'a> Session<'a> {
                     .await?;
                     if !clean_card.is_empty() {
                         if self.busy() {
-                            self.pending_oled_preview = Some(clean_card);
+                            self.screen.pending_oled_preview = Some(clean_card);
                         } else if !self.send_stt(socket, format!("[预览] {clean_card}")).await {
                             return Err("发送失败".into());
                         }
                     }
                     return Ok(());
                 }
-                self.preview_hold = None;
+                self.screen.preview_hold = None;
                 // 普通单色 OLED（`monochrome: true`）或未启用彩屏图片工具的官方固件：自动降级为滚动文字预览卡
                 let card = if clean_card.is_empty() {
                     "激光雕刻预览已就绪".to_owned()
@@ -787,7 +787,7 @@ impl<'a> Session<'a> {
                     clean_card
                 };
                 if self.busy() {
-                    self.pending_oled_preview = Some(card);
+                    self.screen.pending_oled_preview = Some(card);
                     self.event("已暂存小智 OLED 雕刻预览文字卡（本轮语音播完后自动上屏）");
                     Ok(())
                 } else if matches!(self.phase, Phase::Listening(_)) {

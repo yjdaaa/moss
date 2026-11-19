@@ -6,10 +6,10 @@ impl<'a> Session<'a> {
     /// 思考期间是否继续听“用户接着说”：还没开口、没开始执行工具的普通回答轮次。
     pub(super) fn may_follow_up(&self) -> bool {
         matches!(self.phase, Phase::Thinking)
-            && !self.listen_manual
-            && self.paused.is_none()
+            && !self.listen.listen_manual
+            && self.listen.paused.is_none()
             // 主动播报轮次没有前半句，但播报还没开口时用户说话也要接住（自动模式下设备此刻仍在上传）
-            && (self.last_utterance.is_some() || self.turn.as_ref().is_some_and(|turn| turn.report))
+            && (self.listen.last_utterance.is_some() || self.turn.as_ref().is_some_and(|turn| turn.report))
             && self.turn.as_ref().is_some_and(|turn| {
                 turn.kind == TurnKind::Answer
                     && !turn.close
@@ -30,7 +30,7 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         let listening = matches!(self.phase, Phase::Listening(_));
         let may_interrupt = self.shared.config.barge_in
-            && self.listen_realtime
+            && self.listen.listen_realtime
             && matches!(self.phase, Phase::Thinking | Phase::Speaking { .. })
             && !self.turn.as_ref().is_some_and(|turn| turn.fast_stop)
             && (self.turn.as_ref().is_some_and(|turn| {
@@ -41,13 +41,14 @@ impl<'a> Session<'a> {
         // 还没开播所以没有回声问题，不依赖“自然插话”开关；已开始执行工具的轮次除外。
         let may_follow_up = self.may_follow_up();
         if !may_follow_up {
-            self.follow_probe = None;
+            self.listen.follow_probe = None;
         }
         // 一段话刚说完：尾音继续送进判停流收命令词结果（确认窗口在用判停流时让给它）
         let kws_tail = !listening
-            && self.follow_probe.is_none()
+            && self.listen.follow_probe.is_none()
             && self.vad_worker.is_some()
             && self
+                .listen
                 .kws_tail_until
                 .is_some_and(|until| Instant::now() < until);
         if !listening && !may_interrupt && !may_follow_up && !kws_tail {
@@ -67,7 +68,7 @@ impl<'a> Session<'a> {
             }
         };
         if listening && frame_rms(&pcm) >= self.shared.config.vad.start_rms {
-            self.last_heard_loud = Some(Instant::now());
+            self.bg.last_heard_loud = Some(Instant::now());
         }
         if kws_tail && let Some(worker) = self.vad_worker.as_mut() {
             worker.submit(pcm.clone(), false)?;
@@ -78,34 +79,35 @@ impl<'a> Session<'a> {
         if !listening {
             let guarded = matches!(self.phase, Phase::Speaking { .. })
                 && self
+                    .listen
                     .playback_started
                     .is_none_or(|at| at.elapsed() < Duration::from_millis(300));
             let detected = if may_follow_up {
                 if frame_rms(&pcm) >= self.shared.config.vad.start_rms {
-                    self.last_loud = Some(Instant::now());
+                    self.listen.last_loud = Some(Instant::now());
                 }
-                if let Some(probe) = self.follow_probe.as_mut() {
+                if let Some(probe) = self.listen.follow_probe.as_mut() {
                     // 确认中：后续帧接着交给判停模型，结果在 on_vad_result 里看
                     probe.head.extend_from_slice(&pcm);
                     let expired = Instant::now() >= probe.until;
                     if let Some(worker) = self.vad_worker.as_mut() {
                         worker.submit(pcm, true)?;
                     }
-                    if expired && let Some(probe) = self.follow_probe.take() {
-                        self.follow.reset();
+                    if expired && let Some(probe) = self.listen.follow_probe.take() {
+                        self.listen.follow.reset();
                         self.event("思考中听到的声响，判停模型认为不是人声：照常回答".to_owned());
                         self.check_for_stop_word(probe.head);
                     }
                     return Ok(());
                 }
-                let detected = self.follow.accept(&pcm, false);
+                let detected = self.listen.follow.accept(&pcm, false);
                 if let (Some(head), Some(worker)) = (detected.as_ref(), self.vad_worker.as_mut()) {
                     // 用户像是又开口了：照常重置判停流再补送开头（判停模型才能报出“开始说话”确认接着说），
                     // 刚说完那句的尾音也不再送（新的话会走新的判停与命令词检测）
                     worker.reset();
-                    self.kws_tail_until = None;
+                    self.listen.kws_tail_until = None;
                     worker.submit(head.clone(), true)?;
-                    self.follow_probe = Some(FollowProbe {
+                    self.listen.follow_probe = Some(FollowProbe {
                         head: head.clone(),
                         until: Instant::now() + FOLLOW_CONFIRM,
                     });
@@ -113,7 +115,7 @@ impl<'a> Session<'a> {
                 }
                 detected
             } else {
-                self.barge.accept(&pcm, guarded)
+                self.listen.barge.accept(&pcm, guarded)
             };
             let Some(head) = detected else {
                 return Ok(());
@@ -121,7 +123,7 @@ impl<'a> Session<'a> {
             return self.take_over(socket, head, may_follow_up).await;
         }
         self.set_level(crate::audio::pcm_rms_level(&pcm));
-        if !self.listen_manual
+        if !self.listen.listen_manual
             && let Some(worker) = self.vad_worker.as_mut()
         {
             worker.submit(pcm, false)?;
@@ -139,11 +141,11 @@ impl<'a> Session<'a> {
         let Some(conversation) = self.conversation.clone() else {
             return;
         };
-        if let Some(task) = self.stop_check.take() {
+        if let Some(task) = self.listen.stop_check.take() {
             task.abort();
         }
         let rate = self.uplink_rate;
-        self.stop_check = Some(tokio::spawn(async move {
+        self.listen.stop_check = Some(tokio::spawn(async move {
             let text = conversation.asr.transcribe(&head, rate).await.ok()?;
             let text = crate::conversation::apply_asr_corrections(
                 &text,
@@ -168,7 +170,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         self.event("思考中听到“停”：打断当前回答，执行停止");
-        if self.turn.is_some() || self.paused.is_some() {
+        if self.turn.is_some() || self.listen.paused.is_some() {
             self.interrupt(socket, "用户说停").await?;
         }
         self.start_turn(TurnInput::FastStop { text }, TurnKind::Answer);
@@ -182,7 +184,10 @@ impl<'a> Session<'a> {
         head: Vec<i16>,
         may_follow_up: bool,
     ) -> Result<(), String> {
-        let elapsed = self.playback_started.map(|at| at.elapsed().as_millis());
+        let elapsed = self
+            .listen
+            .playback_started
+            .map(|at| at.elapsed().as_millis());
         let thinking = matches!(self.phase, Phase::Thinking);
         // 思考中接着说：前半句不单独记入历史，与后半句拼成一段重新识别
         // 作废前先抢工具执行闩：任务刚好已经开始执行工具时不能重来（否则同一个工具会执行两遍），
@@ -200,7 +205,7 @@ impl<'a> Session<'a> {
             if let Some(turn) = self.turn.as_mut() {
                 turn.user = None;
             }
-            self.last_utterance.take()
+            self.listen.last_utterance.take()
         } else {
             None
         };
@@ -208,17 +213,22 @@ impl<'a> Session<'a> {
         // 回答正在播：先暂停，等插话识别出来再定——真有话才打断，一声“嗯”或噪声就接着说
         let pause = !follow_up
             && matches!(self.phase, Phase::Speaking { .. })
-            && self.paused.is_none()
+            && self.listen.paused.is_none()
             && !self.music.as_ref().is_some_and(|music| music.active())
             && self.turn.is_some();
         if pause {
-            self.paused = self.turn.take();
+            self.listen.paused = self.turn.take();
             // 关上被暂停回答的闸门：插话识别出来之前它不能再发起新的工具调用
-            if let Some(release) = self.paused.as_ref().and_then(|turn| turn.release.as_ref()) {
+            if let Some(release) = self
+                .listen
+                .paused
+                .as_ref()
+                .and_then(|turn| turn.release.as_ref())
+            {
                 let _ = release.send(false);
             }
             self.pump.pause();
-            self.playback_started = None;
+            self.listen.playback_started = None;
         } else {
             self.interrupt(
                 socket,
@@ -235,7 +245,7 @@ impl<'a> Session<'a> {
         }
         self.start_listening(false);
         // 暂停与思考中接着说都没有发 tts stop，设备不会重发 listen start
-        self.barge_resumed = !follow_up && !pause;
+        self.listen.barge_resumed = !follow_up && !pause;
         // 判停器只需要后半句的开头来进入“说话中”；交给识别的是前半句 + 后半句
         let vad_head = head.clone();
         let head = match earlier {
@@ -293,7 +303,7 @@ impl<'a> Session<'a> {
 
     pub(super) fn busy(&self) -> bool {
         self.turn.is_some()
-            || self.paused.is_some()
+            || self.listen.paused.is_some()
             || matches!(self.phase, Phase::Speaking { .. } | Phase::Thinking)
     }
 
@@ -317,27 +327,27 @@ impl<'a> Session<'a> {
                 let manual = mode.as_deref() == Some("manual");
                 let realtime = mode.as_deref() == Some("realtime");
                 if manual {
-                    self.preview_hold = None;
+                    self.screen.preview_hold = None;
                 }
                 self.record_listen_mode(manual, realtime);
                 // 插话后某些固件会补发一次 listen start：只在还没开口（聆听 / 思考）时吞掉这一次；
                 // 新回答已经在播时的 listen start 是用户主动按键或唤醒，必须照常打断
                 if realtime
-                    && self.listen_realtime
-                    && self.barge_resumed
+                    && self.listen.listen_realtime
+                    && self.listen.barge_resumed
                     && matches!(self.phase, Phase::Listening(_) | Phase::Thinking)
                 {
-                    self.barge_resumed = false;
+                    self.listen.barge_resumed = false;
                     return Ok(());
                 }
-                self.barge_resumed = false;
-                self.listen_realtime = realtime;
+                self.listen.barge_resumed = false;
+                self.listen.listen_realtime = realtime;
                 // 唤醒后设备紧接着发 listen start：不打断唤醒回应，播完再拾音
                 if let Some(turn) = self.turn.as_mut()
                     && turn.kind == TurnKind::Greeting
                 {
                     turn.listen_after = Some(manual);
-                    self.listen_manual = manual;
+                    self.listen.listen_manual = manual;
                     return Ok(());
                 }
                 if self.busy() {
@@ -377,17 +387,17 @@ impl<'a> Session<'a> {
             }
             Ok(ClientMessage::Abort { reason }) => {
                 let reason = reason.unwrap_or_else(|| "设备打断".into());
-                self.preview_hold = None;
-                self.pending_oled_preview = None;
-                self.one_shot_badge_url = None;
-                self.music_hud = None;
+                self.screen.preview_hold = None;
+                self.screen.pending_oled_preview = None;
+                self.screen.one_shot_badge_url = None;
+                self.screen.music_hud = None;
                 let was_busy = self.busy();
                 if was_busy {
                     self.interrupt(socket, &reason).await?;
                 }
                 if matches!(self.phase, Phase::Listening(_)) {
                     self.pending_listen_stop = false;
-                    self.hold_check = None;
+                    self.listen.hold_check = None;
                     if let Some(worker) = self.vad_worker.as_mut() {
                         worker.reset();
                     }
@@ -421,7 +431,7 @@ impl<'a> Session<'a> {
                     cap.as_ref().map(|f| f.size),
                     cap.as_ref().map(|f| f.bpp),
                 );
-                self.text_font_cap = cap;
+                self.screen.text_font_cap = cap;
             }
             Ok(_) => {}
             Err(error) => self.event(
@@ -438,7 +448,7 @@ impl<'a> Session<'a> {
 
     /// 空闲到期：对话模式先说再见（说完断开），回声模式直接断开。
     pub(super) async fn on_idle(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
-        if self.paused.is_some() {
+        if self.listen.paused.is_some() {
             self.abandon_paused(socket, "空闲超时").await?;
         }
         let idle = self.shared.config.idle_timeout.as_secs();

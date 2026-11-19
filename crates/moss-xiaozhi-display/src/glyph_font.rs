@@ -21,7 +21,7 @@ use moss_xiaozhi_proto::{GlyphItem, GlyphPushPayload, TextFontCapability};
 use serde_json::{Value, json};
 
 use crate::goggle_bot::base64_encode;
-use crate::wake_assets::AssetEntry;
+use crate::wake_pack::AssetEntry;
 
 pub const FONT_BUNDLE_ID: &str = "noto-v1";
 const MAX_GLYPHS: usize = 64;
@@ -739,7 +739,7 @@ impl GlyphFontService {
     }
 
     /// 快路径判定：纯 ASCII 或基础字表已有字不需要进 `spawn_blocking` 触碰磁盘/分片。
-    pub(crate) fn needs_lookup(capability: Option<&TextFontCapability>, text: &str) -> bool {
+    pub fn needs_lookup(capability: Option<&TextFontCapability>, text: &str) -> bool {
         let Some(cap) = capability else {
             return false;
         };
@@ -755,7 +755,7 @@ impl GlyphFontService {
     }
 
     /// 供异步会话在单次 `spawn_blocking` 内合并查询缺字与补字载荷，避免阻塞 Tokio 工作线程。
-    pub(crate) fn prepare_text_glyphs(
+    pub fn prepare_text_glyphs(
         &self,
         capability: Option<&TextFontCapability>,
         text: &str,
@@ -907,10 +907,165 @@ pub fn glyph_push_for_text(
     })
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures {
+    use super::*;
+
+    pub struct SyntheticGlyph<'a> {
+        pub codepoint: u32,
+        pub adv_w: u32,
+        pub box_w: u16,
+        pub box_h: u16,
+        pub ofs_x: i16,
+        pub ofs_y: i16,
+        pub bitmap: &'a [u8],
+    }
+
+    pub fn build_synthetic_cbin(bpp: u8, glyphs: &[SyntheticGlyph<'_>]) -> Vec<u8> {
+        let dsc = 28usize;
+        let dsc_len = 24usize;
+        let cmap_offset = dsc_len;
+        let cmap_len = glyphs.len() * 20;
+        let glyph_dsc_offset = cmap_offset + cmap_len;
+        let glyph_dsc_len = (glyphs.len() + 1) * 16;
+        let bitmap_offset = glyph_dsc_offset + glyph_dsc_len;
+        let total_bitmap: usize = glyphs.iter().map(|g| g.bitmap.len()).sum();
+
+        let mut buf = vec![0u8; dsc + bitmap_offset + total_bitmap];
+        buf[12..16].copy_from_slice(&24i32.to_le_bytes());
+        buf[16..20].copy_from_slice(&3i32.to_le_bytes());
+        buf[24..28].copy_from_slice(&(dsc as u32).to_le_bytes());
+
+        buf[dsc..dsc + 4].copy_from_slice(&(bitmap_offset as u32).to_le_bytes());
+        buf[dsc + 4..dsc + 8].copy_from_slice(&(glyph_dsc_offset as u32).to_le_bytes());
+        buf[dsc + 8..dsc + 12].copy_from_slice(&(cmap_offset as u32).to_le_bytes());
+        let bitfield = (glyphs.len() as u16 & 0x1FF) | ((u16::from(bpp)) << 9);
+        buf[dsc + 18..dsc + 20].copy_from_slice(&bitfield.to_le_bytes());
+        buf[dsc + 20] = 0;
+
+        let cmap_abs = dsc + cmap_offset;
+        let glyph_dsc_abs = dsc + glyph_dsc_offset;
+        let bitmap_abs = dsc + bitmap_offset;
+        let mut bmp_cursor = 0usize;
+
+        for (i, g) in glyphs.iter().enumerate() {
+            let glyph_id = (i + 1) as u16;
+            let cptr = cmap_abs + i * 20;
+            buf[cptr..cptr + 4].copy_from_slice(&g.codepoint.to_le_bytes());
+            buf[cptr + 4..cptr + 6].copy_from_slice(&1u16.to_le_bytes());
+            buf[cptr + 6..cptr + 8].copy_from_slice(&glyph_id.to_le_bytes());
+            buf[cptr + 18] = CMAP_FORMAT0_TINY;
+
+            let gptr = glyph_dsc_abs + usize::from(glyph_id) * 16;
+            buf[gptr..gptr + 4].copy_from_slice(&(bmp_cursor as u32).to_le_bytes());
+            buf[gptr + 4..gptr + 8].copy_from_slice(&g.adv_w.to_le_bytes());
+            buf[gptr + 8..gptr + 10].copy_from_slice(&g.box_w.to_le_bytes());
+            buf[gptr + 10..gptr + 12].copy_from_slice(&g.box_h.to_le_bytes());
+            buf[gptr + 12..gptr + 14].copy_from_slice(&g.ofs_x.to_le_bytes());
+            buf[gptr + 14..gptr + 16].copy_from_slice(&g.ofs_y.to_le_bytes());
+
+            buf[bitmap_abs + bmp_cursor..bitmap_abs + bmp_cursor + g.bitmap.len()]
+                .copy_from_slice(g.bitmap);
+            bmp_cursor += g.bitmap.len();
+        }
+        buf
+    }
+
+    /// 在测试临时目录生成一套与官方 `noto-v1-full` 同结构的迷你全量分片包（含 `cjk_sc` 与 `cjk_jp` 分片），
+    /// 覆盖 `common` 缺字代表字：“椴”（U+6934）、“𠮷”（U+20BB7）与日文汉字“桜”（U+685C）。
+    pub fn write_synthetic_full_bundle(dir: &Path) {
+        fs::create_dir_all(dir.join("20_4")).unwrap();
+        let duan_bmp = vec![0xA5u8; (20 * 20 * 4usize).div_ceil(8)];
+        let yoshi_bmp = vec![0x5Au8; (19 * 19 * 4usize).div_ceil(8)];
+        let sakura_bmp = vec![0x3Cu8; (18 * 18 * 4usize).div_ceil(8)];
+
+        let cjk_sc = build_synthetic_cbin(
+            4,
+            &[
+                SyntheticGlyph {
+                    codepoint: '椴' as u32,
+                    adv_w: 320,
+                    box_w: 20,
+                    box_h: 20,
+                    ofs_x: 0,
+                    ofs_y: -3,
+                    bitmap: &duan_bmp,
+                },
+                SyntheticGlyph {
+                    codepoint: '𠮷' as u32,
+                    adv_w: 320,
+                    box_w: 19,
+                    box_h: 19,
+                    ofs_x: 0,
+                    ofs_y: -2,
+                    bitmap: &yoshi_bmp,
+                },
+            ],
+        );
+        let cjk_jp = build_synthetic_cbin(
+            4,
+            &[SyntheticGlyph {
+                codepoint: '桜' as u32,
+                adv_w: 320,
+                box_w: 18,
+                box_h: 18,
+                ofs_x: 1,
+                ofs_y: -1,
+                bitmap: &sakura_bmp,
+            }],
+        );
+        fs::write(dir.join("20_4/cjk_sc.cbin"), cjk_sc).unwrap();
+        fs::write(dir.join("20_4/cjk_jp.cbin"), cjk_jp).unwrap();
+
+        let basic_cps: Vec<u32> = basic_charset().iter().copied().collect();
+        let mut common_cps = basic_cps.clone();
+        for ch in [
+            '激', '光', '雕', '刻', '木', '野', '家', '好', '开', '始', '吧',
+        ] {
+            common_cps.push(ch as u32);
+        }
+        common_cps.sort_unstable();
+        common_cps.dedup();
+
+        let manifest = json!({
+            "version": 1,
+            "bundle_id": "noto-v1",
+            "coverage_count": 3,
+            "profiles": [
+                { "name": "20_4", "size": 20, "bpp": 4 }
+            ],
+            "charsets": {
+                "basic": { "charset": "basic", "count": basic_cps.len(), "codepoints": basic_cps },
+                "common": { "charset": "common", "count": common_cps.len(), "codepoints": common_cps }
+            },
+            "shards": [
+                {
+                    "id": "cjk_sc",
+                    "count": 2,
+                    "ranges": [[0x6934u32, 0x6934u32], [0x20BB7u32, 0x20BB7u32]],
+                    "profiles": { "20_4": "20_4/cjk_sc.cbin" }
+                },
+                {
+                    "id": "cjk_jp",
+                    "count": 1,
+                    "ranges": [[0x685Cu32, 0x685Cu32]],
+                    "profiles": { "20_4": "20_4/cjk_jp.cbin" }
+                }
+            ]
+        });
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use sha2::{Digest, Sha256};
 
+    use super::test_fixtures::write_synthetic_full_bundle;
     use super::*;
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -1044,155 +1199,6 @@ pub(crate) mod tests {
             ..basic_cap
         };
         assert!(glyph_push_for_text(Some(&other_bundle), text).is_none());
-    }
-
-    pub(crate) struct SyntheticGlyph<'a> {
-        pub codepoint: u32,
-        pub adv_w: u32,
-        pub box_w: u16,
-        pub box_h: u16,
-        pub ofs_x: i16,
-        pub ofs_y: i16,
-        pub bitmap: &'a [u8],
-    }
-
-    pub(crate) fn build_synthetic_cbin(bpp: u8, glyphs: &[SyntheticGlyph<'_>]) -> Vec<u8> {
-        let dsc = 28usize;
-        let dsc_len = 24usize;
-        let cmap_offset = dsc_len;
-        let cmap_len = glyphs.len() * 20;
-        let glyph_dsc_offset = cmap_offset + cmap_len;
-        let glyph_dsc_len = (glyphs.len() + 1) * 16;
-        let bitmap_offset = glyph_dsc_offset + glyph_dsc_len;
-        let total_bitmap: usize = glyphs.iter().map(|g| g.bitmap.len()).sum();
-
-        let mut buf = vec![0u8; dsc + bitmap_offset + total_bitmap];
-        buf[12..16].copy_from_slice(&24i32.to_le_bytes());
-        buf[16..20].copy_from_slice(&3i32.to_le_bytes());
-        buf[24..28].copy_from_slice(&(dsc as u32).to_le_bytes());
-
-        buf[dsc..dsc + 4].copy_from_slice(&(bitmap_offset as u32).to_le_bytes());
-        buf[dsc + 4..dsc + 8].copy_from_slice(&(glyph_dsc_offset as u32).to_le_bytes());
-        buf[dsc + 8..dsc + 12].copy_from_slice(&(cmap_offset as u32).to_le_bytes());
-        let bitfield = (glyphs.len() as u16 & 0x1FF) | ((u16::from(bpp)) << 9);
-        buf[dsc + 18..dsc + 20].copy_from_slice(&bitfield.to_le_bytes());
-        buf[dsc + 20] = 0;
-
-        let cmap_abs = dsc + cmap_offset;
-        let glyph_dsc_abs = dsc + glyph_dsc_offset;
-        let bitmap_abs = dsc + bitmap_offset;
-        let mut bmp_cursor = 0usize;
-
-        for (i, g) in glyphs.iter().enumerate() {
-            let glyph_id = (i + 1) as u16;
-            let cptr = cmap_abs + i * 20;
-            buf[cptr..cptr + 4].copy_from_slice(&g.codepoint.to_le_bytes());
-            buf[cptr + 4..cptr + 6].copy_from_slice(&1u16.to_le_bytes());
-            buf[cptr + 6..cptr + 8].copy_from_slice(&glyph_id.to_le_bytes());
-            buf[cptr + 18] = CMAP_FORMAT0_TINY;
-
-            let gptr = glyph_dsc_abs + usize::from(glyph_id) * 16;
-            buf[gptr..gptr + 4].copy_from_slice(&(bmp_cursor as u32).to_le_bytes());
-            buf[gptr + 4..gptr + 8].copy_from_slice(&g.adv_w.to_le_bytes());
-            buf[gptr + 8..gptr + 10].copy_from_slice(&g.box_w.to_le_bytes());
-            buf[gptr + 10..gptr + 12].copy_from_slice(&g.box_h.to_le_bytes());
-            buf[gptr + 12..gptr + 14].copy_from_slice(&g.ofs_x.to_le_bytes());
-            buf[gptr + 14..gptr + 16].copy_from_slice(&g.ofs_y.to_le_bytes());
-
-            buf[bitmap_abs + bmp_cursor..bitmap_abs + bmp_cursor + g.bitmap.len()]
-                .copy_from_slice(g.bitmap);
-            bmp_cursor += g.bitmap.len();
-        }
-        buf
-    }
-
-    /// 在测试临时目录生成一套与官方 `noto-v1-full` 同结构的迷你全量分片包（含 `cjk_sc` 与 `cjk_jp` 分片），
-    /// 覆盖 `common` 缺字代表字：“椴”（U+6934）、“𠮷”（U+20BB7）与日文汉字“桜”（U+685C）。
-    pub(crate) fn write_synthetic_full_bundle(dir: &Path) {
-        fs::create_dir_all(dir.join("20_4")).unwrap();
-        let duan_bmp = vec![0xA5u8; (20 * 20 * 4usize).div_ceil(8)];
-        let yoshi_bmp = vec![0x5Au8; (19 * 19 * 4usize).div_ceil(8)];
-        let sakura_bmp = vec![0x3Cu8; (18 * 18 * 4usize).div_ceil(8)];
-
-        let cjk_sc = build_synthetic_cbin(
-            4,
-            &[
-                SyntheticGlyph {
-                    codepoint: '椴' as u32,
-                    adv_w: 320,
-                    box_w: 20,
-                    box_h: 20,
-                    ofs_x: 0,
-                    ofs_y: -3,
-                    bitmap: &duan_bmp,
-                },
-                SyntheticGlyph {
-                    codepoint: '𠮷' as u32,
-                    adv_w: 320,
-                    box_w: 19,
-                    box_h: 19,
-                    ofs_x: 0,
-                    ofs_y: -2,
-                    bitmap: &yoshi_bmp,
-                },
-            ],
-        );
-        let cjk_jp = build_synthetic_cbin(
-            4,
-            &[SyntheticGlyph {
-                codepoint: '桜' as u32,
-                adv_w: 320,
-                box_w: 18,
-                box_h: 18,
-                ofs_x: 1,
-                ofs_y: -1,
-                bitmap: &sakura_bmp,
-            }],
-        );
-        fs::write(dir.join("20_4/cjk_sc.cbin"), cjk_sc).unwrap();
-        fs::write(dir.join("20_4/cjk_jp.cbin"), cjk_jp).unwrap();
-
-        let basic_cps: Vec<u32> = basic_charset().iter().copied().collect();
-        let mut common_cps = basic_cps.clone();
-        for ch in [
-            '激', '光', '雕', '刻', '木', '野', '家', '好', '开', '始', '吧',
-        ] {
-            common_cps.push(ch as u32);
-        }
-        common_cps.sort_unstable();
-        common_cps.dedup();
-
-        let manifest = json!({
-            "version": 1,
-            "bundle_id": "noto-v1",
-            "coverage_count": 3,
-            "profiles": [
-                { "name": "20_4", "size": 20, "bpp": 4 }
-            ],
-            "charsets": {
-                "basic": { "charset": "basic", "count": basic_cps.len(), "codepoints": basic_cps },
-                "common": { "charset": "common", "count": common_cps.len(), "codepoints": common_cps }
-            },
-            "shards": [
-                {
-                    "id": "cjk_sc",
-                    "count": 2,
-                    "ranges": [[0x6934u32, 0x6934u32], [0x20BB7u32, 0x20BB7u32]],
-                    "profiles": { "20_4": "20_4/cjk_sc.cbin" }
-                },
-                {
-                    "id": "cjk_jp",
-                    "count": 1,
-                    "ranges": [[0x685Cu32, 0x685Cu32]],
-                    "profiles": { "20_4": "20_4/cjk_jp.cbin" }
-                }
-            ]
-        });
-        fs::write(
-            dir.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
     }
 
     #[test]

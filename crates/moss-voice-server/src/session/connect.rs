@@ -368,7 +368,7 @@ pub(crate) async fn serve_session(
             session.mqtt = mqtt;
             let init_font_size = text_font_cap.as_ref().map(|f| f.size);
             let init_font_bpp = text_font_cap.as_ref().map(|f| f.bpp);
-            session.text_font_cap = text_font_cap;
+            session.screen.text_font_cap = text_font_cap;
             if device_mcp {
                 session.device_mcp = Some(DeviceMcp::new());
                 session.vision_host = vision_host;
@@ -488,7 +488,7 @@ pub(crate) async fn serve_session(
     session.finish_timing("disconnected");
     session.last_verified_person = None;
     session.carried_photo = None;
-    session.paused = None;
+    session.listen.paused = None;
     session.turn = None;
     session.pump.clear();
     drop(lease);

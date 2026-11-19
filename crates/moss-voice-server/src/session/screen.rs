@@ -12,6 +12,7 @@ impl<'a> Session<'a> {
             .and_then(|d| d.screen_size)
             .map_or(320, |(w, _)| w);
         let size = self
+            .screen
             .text_font_cap
             .as_ref()
             .map_or(20, |cap| cap.size)
@@ -22,7 +23,7 @@ impl<'a> Session<'a> {
 
     /// n70 这台设备是否按全屏画风包显示（单色屏不算）。
     pub(super) fn pack_active(&self) -> bool {
-        self.screen_pack
+        self.screen.screen_pack
             && self
                 .device_mcp
                 .as_ref()
@@ -31,7 +32,7 @@ impl<'a> Session<'a> {
 
     /// n70 当前有效的常驻场景（到期的完工 / 急停徽章、已停播的音乐不算）。
     fn sticky_scene(&self) -> Option<&ScreenSceneState> {
-        let scene = self.screen_scene.as_ref()?;
+        let scene = self.screen.screen_scene.as_ref()?;
         if scene.until.is_some_and(|t| Instant::now() >= t) {
             return None;
         }
@@ -66,7 +67,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         let name = crate::screen_pack::emotion_name(self.shared.card_style(), scene);
-        if !force && self.last_screen_emotion.as_deref() == Some(name.as_str()) {
+        if !force && self.screen.last_screen_emotion.as_deref() == Some(name.as_str()) {
             return Ok(());
         }
         let message = ServerMessage::Llm {
@@ -77,7 +78,7 @@ impl<'a> Session<'a> {
         if !send_json(socket, &message).await {
             return Err("发送失败".into());
         }
-        self.last_screen_emotion = Some(name);
+        self.screen.last_screen_emotion = Some(name);
         Ok(())
     }
 
@@ -123,10 +124,11 @@ impl<'a> Session<'a> {
         ttl: Option<Duration>,
     ) -> Result<(), String> {
         let text_changed = self
+            .screen
             .screen_scene
             .as_ref()
             .is_none_or(|old| old.scene != scene || old.text != text);
-        self.screen_scene = Some(ScreenSceneState {
+        self.screen.screen_scene = Some(ScreenSceneState {
             scene,
             text: text.clone(),
             until: ttl.map(|d| Instant::now() + d),
@@ -145,13 +147,14 @@ impl<'a> Session<'a> {
         scenes: &[crate::BotPose],
     ) -> Result<(), String> {
         if !self
+            .screen
             .screen_scene
             .as_ref()
             .is_some_and(|s| scenes.contains(&s.scene))
         {
             return Ok(());
         }
-        self.screen_scene = None;
+        self.screen.screen_scene = None;
         if !self.busy() {
             let fallback = if matches!(self.phase, Phase::Listening(_)) {
                 crate::BotPose::Listening
@@ -191,11 +194,11 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         let now = Instant::now();
         let speaking = self.actively_speaking_user();
-        let Some(hold) = self.preview_hold.as_mut() else {
+        let Some(hold) = self.screen.preview_hold.as_mut() else {
             return Ok(());
         };
         if now >= hold.until || speaking {
-            self.preview_hold = None;
+            self.screen.preview_hold = None;
             return Ok(());
         }
         let url = hold.url.clone();
@@ -217,10 +220,10 @@ impl<'a> Session<'a> {
             d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
         });
         if !music_active || !can_color {
-            self.music_hud = None;
+            self.screen.music_hud = None;
             return Ok(());
         }
-        let Some((title_ascii, frame)) = self.music_hud.as_mut().map(|hud| {
+        let Some((title_ascii, frame)) = self.screen.music_hud.as_mut().map(|hud| {
             let current = hud.frame;
             hud.frame = hud.frame.wrapping_add(1);
             hud.next_refresh = Instant::now() + self.shared.config.preview_hold_interval;

@@ -19,7 +19,7 @@
 | 0 边界与通用库 | `laser-contracts`、`moss-xiaozhi-proto`、`moss-voice-local-proto`、`moss-mcp-client` | 仓库内无 |
 | 1 共享运行时 | `laser-runtime`（运行目录、配置、SQLite 与各类存储、密钥，激光与语音共用） | 第 0 层 |
 | 2 激光域 | `laser-core`、`laser-device`、`laser-tools`、`laser-mcp`、`laser-api` | 第 0、1 层与本域 |
-| 2 语音域 | `moss-voice`、`moss-voice-providers`、`moss-voice-server`、`moss-usb-provision` | 第 0、1 层与本域 |
+| 2 语音域 | `moss-voice`、`moss-voice-providers`、`moss-xiaozhi-display`、`moss-voice-server`、`moss-usb-provision` | 第 0、1 层与本域 |
 | 3 编排与跨域扩展 | `laser-host`（启动组装）；`moss-agent`、`moss-home`（同时用到激光审批与语音设置的扩展，由桌面壳直接组装） | 以下各层；本层之间不互相依赖 |
 | 4 应用壳 | `moss-host`、`moss-desktop`、`moss-voice-local`（独立工作区） | 以下各层；不得被依赖 |
 
@@ -47,6 +47,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 | `moss-agent` | 本机 Agent（NV13，Claude Code / Codex）：CLI 识别与参数校验、Windows Job Object / Unix 进程组受限运行器、桌面单次审批桥 | `AgentCoordinator`、`AgentRunner`、`detect_cli`、`Provider` |
 | `moss-home` | 家居控制（NV15，Home Assistant）：实体白名单策略、逐次桌面审批、HTTPS 传输与结果核验；只持宿主弱引用 | `HomeControlCoordinator` |
 | `moss-usb-provision` | 小智 USB 一键配网：串口枚举与激光串口避让、`espflash` 读写 NVS、写后芯片侧 MD5 校验与失败写回、预签设备令牌并登记“已允许”；激光占用、设备密钥由桌面壳传入 | `provision`、`execute_usb_provision_with`、`UsbFlasherSession`、`sweep_usb_temp_dir` |
+| `moss-xiaozhi-display` | 小智彩屏渲染、护目镜小机器人动图、中文字库与 `glyph_push` 动态字模补齐、全屏画风与唤醒词 `assets.bin` 纯构造（承载 4.8 MB 字库与 3.9 MB ESP-SR 模型，零网络与异步依赖） | `glyph_font::GlyphFontService`、`goggle_bot`、`render`、`screen_pack`、`wake_pack` |
 
 ## 3. HTTP 服务
 

@@ -106,11 +106,12 @@ workspace = true
   for (const snippet of [
     `[features]\ntest-sql-access = ["laser-runtime/test-sql-access"]\n`,
     `[features]\ntest-memory-secret-store = ["laser-runtime/test-memory-secret-store"]\n`,
+    `[dependencies]\nmoss-xiaozhi-display = { path = "../moss-xiaozhi-display", features = ["test-fixtures"] }\n`,
   ]) {
     const parsed = parseManifest(`[package]\nname = "laser-api"\n[lints]\nworkspace = true\n${snippet}`, known);
     assert.ok(
-      parsed.normalSqlTestFeature || parsed.normalSecretTestFeature,
-      `应拦截同名转发测试特性：\n${snippet}`,
+      parsed.normalSqlTestFeature || parsed.normalSecretTestFeature || parsed.normalTestFixturesFeature,
+      `应拦截正式依赖或同名转发测试特性：\n${snippet}`,
     );
   }
 

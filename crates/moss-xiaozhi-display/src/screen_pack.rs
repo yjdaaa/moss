@@ -22,8 +22,8 @@ use image::{Delay, Frame, Rgb, RgbImage, Rgba, RgbaImage};
 use serde_json::json;
 
 use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_goggle_bot};
-use crate::preview_push::{draw_moss_optical_eye, draw_text_5x7, put_px, text_width_px};
-use crate::wake_assets::{AssetEntry, ScreenExtras};
+use crate::render::{draw_moss_optical_eye, draw_text_5x7, put_px, text_width_px};
+use crate::wake_pack::{AssetEntry, ScreenExtras};
 
 /// 画风包版本前缀，记在设备偏好 `screen_pack` 里（`moss-screen-2:<style>:<16hex>`，n81 起内置 `noto-v1` 中文字库，n84 起附带内容指纹）。
 pub const PACK_VERSION: &str = "moss-screen-2";
@@ -171,13 +171,13 @@ pub fn extras_digest(style: ScreenCardStyle, screen: (u32, u32)) -> Result<[u8; 
         hasher.update(&entry.data);
     }
     hasher.update(b"emoji:");
-    crate::wake_assets::hash_canonical_json(
+    crate::wake_pack::hash_canonical_json(
         &mut hasher,
         &serde_json::Value::Array(extras.emoji_collection),
     );
     hasher.update(b"skin:");
     if let Some(skin) = &extras.skin {
-        crate::wake_assets::hash_canonical_json(&mut hasher, skin);
+        crate::wake_pack::hash_canonical_json(&mut hasher, skin);
     } else {
         hasher.update(b"none;");
     }
@@ -196,7 +196,7 @@ pub fn pack_fingerprint(
     style: ScreenCardStyle,
     screen: (u32, u32),
     fallback_font: Option<crate::glyph_font::FontProfile>,
-    base_fp: crate::wake_assets::BasePackFingerprint,
+    base_fp: crate::wake_pack::BasePackFingerprint,
 ) -> Result<String, String> {
     use sha2::{Digest, Sha256};
 
@@ -228,7 +228,7 @@ pub fn pack_marker_for(
     style: ScreenCardStyle,
     screen: (u32, u32),
     fallback_font: Option<crate::glyph_font::FontProfile>,
-    base_fp: crate::wake_assets::BasePackFingerprint,
+    base_fp: crate::wake_pack::BasePackFingerprint,
 ) -> Result<String, String> {
     let fp = pack_fingerprint(style, screen, fallback_font, base_fp)?;
     Ok(format!("{PACK_VERSION}:{}:{fp}", style.as_str()))
@@ -240,7 +240,7 @@ pub fn pack_marker(style: ScreenCardStyle) -> String {
         style,
         (320, 240),
         Some(crate::glyph_font::PROFILES[2]),
-        crate::wake_assets::fingerprint_base_pack(None),
+        crate::wake_pack::fingerprint_base_pack(None),
     )
     .unwrap_or_else(|_| format!("{PACK_VERSION}:{}", style.as_str()))
 }

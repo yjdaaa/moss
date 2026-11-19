@@ -3292,6 +3292,7 @@ dependencies = [
  "moss-voice",
  "moss-voice-local-proto",
  "moss-voice-providers",
+ "moss-xiaozhi-display",
  "moss-xiaozhi-proto",
  "opus2",
  "quick-xml",
@@ -3306,6 +3307,18 @@ dependencies = [
  "tokio",
  "tungstenite",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "moss-xiaozhi-display"
+version = "0.3.11"
+dependencies = [
+ "image",
+ "moss-xiaozhi-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

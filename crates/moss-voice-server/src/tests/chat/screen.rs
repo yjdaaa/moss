@@ -391,7 +391,7 @@ fn common_font_device_hot_loads_full_bundle_for_rare_and_multilingual_glyphs() {
     .unwrap();
 
     // 服务启动后才把 noto_v1_full 下载解压就位：验证无需重启服务直接热生效
-    crate::glyph_font::tests::write_synthetic_full_bundle(&full_dir);
+    crate::glyph_font::test_fixtures::write_synthetic_full_bundle(&full_dir);
 
     let mut device = allowed_device_with(&server, &registry, 1, true);
     let init = read_mcp(&mut device);

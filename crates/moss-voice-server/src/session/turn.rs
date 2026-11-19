@@ -7,21 +7,21 @@ impl<'a> Session<'a> {
         let Some(conversation) = self.conversation.clone() else {
             return;
         };
-        self.turn_scene = None;
+        self.screen.turn_scene = None;
         if matches!(kind, TurnKind::Answer | TurnKind::Goodbye) {
-            self.preview_hold = None;
-            self.pending_oled_preview = None;
-            self.one_shot_badge_url = None;
-            self.music_hud = None;
+            self.screen.preview_hold = None;
+            self.screen.pending_oled_preview = None;
+            self.screen.one_shot_badge_url = None;
+            self.screen.music_hud = None;
         }
-        self.barge.reset();
-        self.follow.reset();
-        self.last_loud = None;
-        self.playback_started = None;
-        self.barge_resumed = false;
+        self.listen.barge.reset();
+        self.listen.follow.reset();
+        self.listen.last_loud = None;
+        self.listen.playback_started = None;
+        self.listen.barge_resumed = false;
         // 对暂停中的回答的插话：先只做识别，确认不是附和后才请求大模型
-        let hold_llm = self.paused.is_some();
-        let silence_ended = std::mem::take(&mut self.gate_next_turn);
+        let hold_llm = self.listen.paused.is_some();
+        let silence_ended = std::mem::take(&mut self.listen.gate_next_turn);
         let gated = (silence_ended || hold_llm)
             && kind == TurnKind::Answer
             && matches!(input, TurnInput::Utterance { .. });
@@ -31,7 +31,7 @@ impl<'a> Session<'a> {
         let gated_answer = kind == TurnKind::Answer && matches!(input, TurnInput::Utterance { .. });
         let tool_latch = std::sync::Arc::new(crate::conversation::ToolLatch::default());
         let command_hint =
-            std::sync::Arc::new(std::sync::Mutex::new(self.utterance_keyword.take()));
+            std::sync::Arc::new(std::sync::Mutex::new(self.listen.utterance_keyword.take()));
         let (release, gate) = if gated_answer {
             let (tx, rx) = tokio::sync::watch::channel(!gated);
             (
@@ -42,7 +42,8 @@ impl<'a> Session<'a> {
                     speculative: gated,
                     hold_llm: gated && hold_llm,
                     fresh_history: fresh_history.clone(),
-                    allow_silent: !self.listen_manual && conversation.settings.ignore_bystanders,
+                    allow_silent: !self.listen.listen_manual
+                        && conversation.settings.ignore_bystanders,
                     // 声纹按人记忆开启时历史按人提交，后台结果不知道该记给谁：不转后台
                     allow_background: conversation.personal_context.is_none(),
                     command_hint: command_hint.clone(),
@@ -52,7 +53,7 @@ impl<'a> Session<'a> {
             (None, None)
         };
         let tool_latch = gated_answer.then_some(tool_latch);
-        self.last_utterance = match &input {
+        self.listen.last_utterance = match &input {
             TurnInput::Utterance { pcm, .. } if silence_ended => Some(pcm.clone()),
             _ => None,
         };
@@ -222,7 +223,7 @@ impl<'a> Session<'a> {
         let mut resampler =
             Resampler::new(self.uplink_rate, self.shared.config.downlink_sample_rate);
         self.pump.begin();
-        self.playback_started = None;
+        self.listen.playback_started = None;
         self.pump
             .push_marked(&resampler.process(&pcm), "（回声）".into());
         self.pump.finish();
@@ -288,9 +289,9 @@ impl<'a> Session<'a> {
         self.set_state("speaking");
         // Title is bounded by the filesystem scanner; no absolute path/URL.
         self.event(format!("开始播放本地歌曲：{title}"));
-        self.playback_started = None;
-        self.barge.reset();
-        self.preview_hold = None;
+        self.listen.playback_started = None;
+        self.listen.barge.reset();
+        self.screen.preview_hold = None;
         let want_hud = self
             .conversation
             .as_ref()
@@ -350,7 +351,7 @@ impl<'a> Session<'a> {
                     "http://{host}:{}/mcp/preview/{tok}.png",
                     self.shared.http_port
                 );
-                self.music_hud = Some(MusicHud {
+                self.screen.music_hud = Some(MusicHud {
                     title_ascii,
                     frame: 1,
                     next_refresh: Instant::now() + self.shared.config.preview_hold_interval,
@@ -376,7 +377,7 @@ impl<'a> Session<'a> {
         if self.turn.is_none() {
             return Ok(());
         }
-        if self.paused.is_some() {
+        if self.listen.paused.is_some() {
             // 插话那一轮的第一个结论决定被暂停的回答的去留
             match &event {
                 Some(TurnEvent::Heard(text)) if self.is_backchannel_now(text) => {
@@ -393,7 +394,7 @@ impl<'a> Session<'a> {
                 }
                 // 已识别出文字、正等大模型判断时出错（大模型或合成失败）：用户确实说了话，
                 // 不能让原回答接着说而把这句吞掉——走下面的作废原回答、照常报错
-                Some(TurnEvent::Failed(error)) if !self.paused_waits_for_model => {
+                Some(TurnEvent::Failed(error)) if !self.listen.paused_waits_for_model => {
                     self.event(EventRecord::from_provider(
                         EventLevel::Warn,
                         "插话识别出错，继续原回答：",
@@ -424,7 +425,7 @@ impl<'a> Session<'a> {
                     self.event(format!("自然插话：识别出 {chars} 字，打断原回答"));
                 }
                 Some(_) => {
-                    let deferred = self.paused_waits_for_model;
+                    let deferred = self.listen.paused_waits_for_model;
                     self.abandon_paused_for_barge(socket).await?;
                     if deferred {
                         self.event("自然插话：是对小智说的，打断原回答");
@@ -473,7 +474,7 @@ impl<'a> Session<'a> {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.close = true;
                 }
-                self.barge.reset();
+                self.listen.barge.reset();
             }
             TurnEvent::Timing { stage, ms } => {
                 if let Some(turn) = self.turn.as_mut()
@@ -562,23 +563,23 @@ impl<'a> Session<'a> {
                     Some(_) => {}
                     None => self.release_turn(),
                 }
-                if self.last_screen_stt.take().as_deref() != Some(text.as_str())
+                if self.screen.last_screen_stt.take().as_deref() != Some(text.as_str())
                     && !self.send_stt(socket, text).await
                 {
                     return Err("发送失败".into());
                 }
                 // n70 听完开始想：全屏画风切到“思考”（插话还在判断、原回答只是暂停时不切）
-                if self.paused.is_none() && self.sticky_while_talking().is_none() {
+                if self.listen.paused.is_none() && self.sticky_while_talking().is_none() {
                     self.show_screen(socket, crate::BotPose::Thinking, true)
                         .await?;
                 }
             }
             TurnEvent::Background(query) => {
-                if self.background.len() >= MAX_BACKGROUND {
+                if self.bg.background.len() >= MAX_BACKGROUND {
                     // 中止最早的那个（丢弃即中止）
-                    self.background.remove(0);
+                    self.bg.background.remove(0);
                 }
-                self.background.push(query);
+                self.bg.background.push(query);
                 self.event("慢查询转到后台继续，查好了再主动告诉用户");
             }
             TurnEvent::NotForMe if self.turn.as_ref().is_some_and(|turn| turn.audio_started) => {
@@ -587,7 +588,7 @@ impl<'a> Session<'a> {
                     turn.done = true;
                 }
                 self.pump.finish();
-                if self.playback_started.is_none()
+                if self.listen.playback_started.is_none()
                     && self.pump.ready_to_start()
                     && let Phase::Speaking { next, .. } = &mut self.phase
                 {
@@ -599,9 +600,9 @@ impl<'a> Session<'a> {
                 if let Some(mut turn) = self.turn.take() {
                     self.stash_uncommitted_photo(&mut turn);
                 }
-                self.last_screen_stt = None;
+                self.screen.last_screen_stt = None;
                 self.event("这句不是对小智说的，没有接话，继续拾音");
-                if self.listen_manual {
+                if self.listen.listen_manual {
                     self.phase = Phase::Idle;
                     self.set_state("idle");
                 } else {
@@ -613,9 +614,9 @@ impl<'a> Session<'a> {
                 if let Some(mut turn) = self.turn.take() {
                     self.stash_uncommitted_photo(&mut turn);
                 }
-                self.last_screen_stt = None;
+                self.screen.last_screen_stt = None;
                 self.event("没有识别出文字，继续拾音");
-                if self.listen_manual {
+                if self.listen.listen_manual {
                     self.phase = Phase::Idle;
                     self.set_state("idle");
                 } else {
@@ -627,7 +628,7 @@ impl<'a> Session<'a> {
                 // n70 刷了画风包：大模型的表情换成当前画风的对应全屏场景
                 self.shared.state.set_emotion(self.session_id, emotion);
                 let scene = crate::screen_pack::speaking_scene(emotion);
-                self.turn_scene = Some(scene);
+                self.screen.turn_scene = Some(scene);
                 // 已经开口就马上换；还没开口的等发 tts start 时一起换
                 if self.sticky_while_talking().is_none()
                     && self.turn.as_ref().is_some_and(|t| t.audio_started)
@@ -646,10 +647,11 @@ impl<'a> Session<'a> {
                     return Err("发送失败".into());
                 }
                 let restore_url = self
+                    .screen
                     .preview_hold
                     .as_ref()
                     .map(|h| h.url.clone())
-                    .or_else(|| self.one_shot_badge_url.take());
+                    .or_else(|| self.screen.one_shot_badge_url.take());
                 if let Some(url) = restore_url {
                     self.send_quiet_device_call(
                         socket,
@@ -674,19 +676,20 @@ impl<'a> Session<'a> {
                 turn.audio_started = true;
                 if first
                     && self
+                        .bg
                         .reporting
                         .as_ref()
                         .is_some_and(|(number, _)| *number == self.turn_number)
                 {
                     // 播报已经开口：不再重来
-                    self.reporting = None;
+                    self.bg.reporting = None;
                 }
                 if first && turn.kind == TurnKind::Answer {
                     let latency = turn.started.elapsed().as_millis();
                     self.event(format!("首句延迟：{latency} ms（说完到首句音频就绪）"));
                 }
                 if first {
-                    self.playback_started = None;
+                    self.listen.playback_started = None;
                     self.pump.begin();
                     self.tts(socket, TtsState::Start, None).await?;
                     self.phase = Phase::speaking_after_tts_start();
@@ -718,7 +721,7 @@ impl<'a> Session<'a> {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.resampler = Some(resampler);
                 }
-                if self.playback_started.is_none()
+                if self.listen.playback_started.is_none()
                     && self.pump.ready_to_start()
                     && let Phase::Speaking { next, .. } = &mut self.phase
                 {
@@ -738,7 +741,7 @@ impl<'a> Session<'a> {
                     .get_or_insert_with(|| Resampler::new(pcm.sample_rate, downlink));
                 let samples = resampler.process(&pcm.samples);
                 self.pump.push(&samples);
-                if self.playback_started.is_none()
+                if self.listen.playback_started.is_none()
                     && self.pump.ready_to_start()
                     && let Phase::Speaking { next, .. } = &mut self.phase
                 {
@@ -748,7 +751,7 @@ impl<'a> Session<'a> {
             TurnEvent::SentenceEnd => {
                 if self.turn.as_ref().is_some_and(|t| t.audio_started) {
                     self.pump.mark_sentence_end();
-                    if self.playback_started.is_none()
+                    if self.listen.playback_started.is_none()
                         && self.pump.ready_to_start()
                         && let Phase::Speaking { next, .. } = &mut self.phase
                     {
@@ -784,7 +787,7 @@ impl<'a> Session<'a> {
                 if turn.audio_started {
                     // 播完剩余音频后由 tick 收尾；若此前仍在等待启动缓冲则立即唤醒首帧
                     self.pump.finish();
-                    if self.playback_started.is_none()
+                    if self.listen.playback_started.is_none()
                         && self.pump.ready_to_start()
                         && let Phase::Speaking { next, .. } = &mut self.phase
                     {
@@ -848,7 +851,7 @@ impl<'a> Session<'a> {
                 );
             }
         }
-        self.playback_started = None;
+        self.listen.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();
@@ -872,8 +875,8 @@ impl<'a> Session<'a> {
         }
         if let Some(manual) = turn.listen_after {
             self.start_listening(manual);
-        } else if self.listen_realtime
-            || (!played && turn.kind == TurnKind::Answer && !self.listen_manual)
+        } else if self.listen.listen_realtime
+            || (!played && turn.kind == TurnKind::Answer && !self.listen.listen_manual)
         {
             // realtime 固件一直上传声音，不保证再发 listen start；无音频的 auto 模式也仍在拾音
             self.start_listening(false);
@@ -902,6 +905,7 @@ impl<'a> Session<'a> {
             return;
         }
         let speaking = self
+            .listen
             .last_loud
             .is_some_and(|at| now.duration_since(at) < Duration::from_millis(250));
         if speaking && now < latest {
@@ -948,7 +952,7 @@ impl<'a> Session<'a> {
     /// 原回答已经说到最后一秒时，“好的”“是的”更可能是在回答它的提问，按正常的一句话处理。
     fn is_backchannel_now(&self, text: &str) -> bool {
         crate::fast::is_backchannel(text)
-            && !(self.paused.as_ref().is_some_and(|turn| turn.done)
+            && !(self.listen.paused.as_ref().is_some_and(|turn| turn.done)
                 && self.pump.buffered_samples() < self.shared.config.downlink_sample_rate as usize)
     }
 
@@ -966,7 +970,7 @@ impl<'a> Session<'a> {
             return;
         }
         self.event("后台查询完成，等空闲时播报");
-        self.background_ready.push_back(BackgroundReport {
+        self.bg.background_ready.push_back(BackgroundReport {
             question,
             results,
             done_at: Instant::now(),
@@ -976,10 +980,12 @@ impl<'a> Session<'a> {
 
     /// 等用户安静多久后再看能不能播报（没有待播结果、或正在对话时由对话事件唤醒，不需要定时）。
     pub(super) fn background_report_deadline(&self, socket: &crate::link::Link) -> Option<Instant> {
-        if self.background_ready.is_empty() || self.busy() || (self.mqtt && !socket.audio_open()) {
+        if self.bg.background_ready.is_empty() || self.busy() || (self.mqtt && !socket.audio_open())
+        {
             return None;
         }
         let quiet_from = self
+            .bg
             .last_heard_loud
             .map_or(self.last_activity, |loud| loud.max(self.last_activity));
         Some((quiet_from + QUIET_BEFORE_REPORT).max(Instant::now() + Duration::from_millis(200)))
@@ -989,22 +995,25 @@ impl<'a> Session<'a> {
     pub(super) fn deliver_background(&mut self, socket: &crate::link::Link) {
         // 上一次播报还没开口就被用户的话取代（或没说出来）：放回队列重来
         if self
+            .bg
             .reporting
             .as_ref()
             .is_some_and(|(turn, _)| self.turn.is_none() || *turn != self.turn_number)
-            && let Some((_, mut report)) = self.reporting.take()
+            && let Some((_, mut report)) = self.bg.reporting.take()
         {
             report.attempts += 1;
             if report.attempts < MAX_REPORT_ATTEMPTS {
-                self.background_ready.push_front(report);
+                self.bg.background_ready.push_front(report);
             }
         }
-        self.background_ready
+        self.bg
+            .background_ready
             .retain(|report| report.done_at.elapsed() < BACKGROUND_REPORT_TTL);
         let quiet_from = self
+            .bg
             .last_heard_loud
             .map_or(self.last_activity, |loud| loud.max(self.last_activity));
-        if self.background_ready.is_empty()
+        if self.bg.background_ready.is_empty()
             || self.busy()
             || self.actively_speaking_user()
             || quiet_from.elapsed() < QUIET_BEFORE_REPORT
@@ -1013,7 +1022,7 @@ impl<'a> Session<'a> {
         {
             return;
         }
-        let Some(report) = self.background_ready.pop_front() else {
+        let Some(report) = self.bg.background_ready.pop_front() else {
             return;
         };
         self.event("播报后台查询结果");
@@ -1024,13 +1033,13 @@ impl<'a> Session<'a> {
             },
             TurnKind::Answer,
         );
-        self.reporting = Some((self.turn_number, report));
+        self.bg.reporting = Some((self.turn_number, report));
     }
 
     /// 插话识别出来后能否先让大模型判断是不是对小智说的（不能时立即打断原回答，与 n100 之前一致）：
     /// 自动 / 实时拾音才有“不是对我说的”选项；声纹按人记忆开启时历史按人提交，仍立即打断。
     fn can_ask_whether_addressed(&self) -> bool {
-        !self.listen_manual
+        !self.listen.listen_manual
             && self.conversation.as_ref().is_some_and(|conversation| {
                 conversation.personal_context.is_none() && conversation.settings.ignore_bystanders
             })
@@ -1039,7 +1048,7 @@ impl<'a> Session<'a> {
     /// 交给插话这一轮的临时历史：原回答按“用户实际听到的部分 + 没说出口的”记上，但还不写进会话历史——
     /// 大模型判断不是对小智说的、原回答接着说时，会话历史保持原样。
     fn offer_provisional_history(&mut self) {
-        let Some(paused) = self.paused.as_ref() else {
+        let Some(paused) = self.listen.paused.as_ref() else {
             return;
         };
         let mut history = self.history.clone();
@@ -1056,7 +1065,7 @@ impl<'a> Session<'a> {
         {
             *slot = Some(history);
         }
-        self.paused_waits_for_model = true;
+        self.listen.paused_waits_for_model = true;
     }
 
     /// 插话确定是对小智说的：作废被暂停的回答（已播部分记入历史），把最新历史交给插话这一轮。
@@ -1064,34 +1073,34 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
     ) -> Result<(), String> {
-        let deferred = std::mem::take(&mut self.paused_waits_for_model);
+        let deferred = std::mem::take(&mut self.listen.paused_waits_for_model);
         self.abandon_paused(socket, "自然插话").await?;
         if !deferred {
             // 被打断的回答刚记入历史：把最新历史或尚未提交给任何人的照片交给等放行的这一轮
             self.sync_fresh_history_after_abandon_paused();
         }
         // 某些固件在 tts stop 后再发一次 listen start：不能把刚开始的这一轮打断
-        self.barge_resumed = true;
+        self.listen.barge_resumed = true;
         Ok(())
     }
 
     /// 被暂停的回答接着说（插话只是附和、没听出内容，或不是对小智说的）。
     fn resume_paused(&mut self, why: &str) {
-        self.paused_waits_for_model = false;
-        let Some(paused) = self.paused.take() else {
+        self.listen.paused_waits_for_model = false;
+        let Some(paused) = self.listen.paused.take() else {
             return;
         };
         self.finish_timing("ignored");
         if let Some(mut abandoned) = self.turn.replace(paused) {
             self.stash_uncommitted_photo(&mut abandoned);
         }
-        self.hold_check = None;
+        self.listen.hold_check = None;
         self.pending_listen_stop = false;
         if let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
-        self.barge.reset();
-        self.playback_started = None;
+        self.listen.barge.reset();
+        self.listen.playback_started = None;
         if let Some(release) = self.turn.as_ref().and_then(|turn| turn.release.as_ref()) {
             let _ = release.send(true);
         }
@@ -1108,8 +1117,8 @@ impl<'a> Session<'a> {
         reason: &str,
     ) -> Result<(), String> {
         // 被暂停的回答一旦作废，“等大模型判断插话是不是对小智说的”也随之结束（审查修正：不留残值）
-        self.paused_waits_for_model = false;
-        let Some(paused) = self.paused.take() else {
+        self.listen.paused_waits_for_model = false;
+        let Some(paused) = self.listen.paused.take() else {
             return Ok(());
         };
         let current = self.turn.replace(paused);
@@ -1127,7 +1136,7 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         reason: &str,
     ) -> Result<(), String> {
-        self.barge_resumed = false;
+        self.listen.barge_resumed = false;
         self.abandon_paused(socket, reason).await?;
         self.interrupt_current(socket, reason).await
     }
@@ -1138,10 +1147,10 @@ impl<'a> Session<'a> {
         reason: &str,
     ) -> Result<(), String> {
         self.finish_timing("interrupted");
-        self.preview_hold = None;
-        self.pending_oled_preview = None;
-        self.one_shot_badge_url = None;
-        self.music_hud = None;
+        self.screen.preview_hold = None;
+        self.screen.pending_oled_preview = None;
+        self.screen.one_shot_badge_url = None;
+        self.screen.music_hud = None;
         if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             self.carried_photo = None;
         } else if let Some(personal) = self

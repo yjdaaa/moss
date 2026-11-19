@@ -26,6 +26,7 @@ export const LAYERS = {
   "moss-voice": { rank: 2, domain: "voice" },
   "moss-voice-providers": { rank: 2, domain: "voice" },
   "moss-voice-server": { rank: 2, domain: "voice" },
+  "moss-xiaozhi-display": { rank: 2, domain: "voice" },
   "moss-usb-provision": { rank: 2, domain: "voice" },
   // 3 编排与跨域扩展：启动组装，以及同时用到激光审批与语音设置的扩展（彼此不互相依赖）
   "laser-host": { rank: 3 },
@@ -55,6 +56,7 @@ export function parseManifest(text, known) {
   let lintsWorkspace = false;
   let normalSecretTestFeature = false;
   let normalSqlTestFeature = false;
+  let normalTestFixturesFeature = false;
   let directRusqlite = false;
   const normal = new Set();
   const dev = new Set();
@@ -90,11 +92,15 @@ export function parseManifest(text, known) {
       if (/['"][^'"]*test-sql-access['"]/.test(rhs)) {
         normalSqlTestFeature = true;
       }
+      if (/['"][^'"]*test-fixtures['"]/.test(rhs)) {
+        normalTestFixturesFeature = true;
+      }
       continue;
     }
     if (/(?:^|\.)(dependencies|build-dependencies)(?:\.['"]?[A-Za-z0-9_-]+['"]?)?$/.test(section)) {
       if (/['"]test-memory-secret-store['"]/.test(line)) normalSecretTestFeature = true;
       if (/['"]test-sql-access['"]/.test(line)) normalSqlTestFeature = true;
+      if (/['"]test-fixtures['"]/.test(line)) normalTestFixturesFeature = true;
     }
     const anyDepSection = section.match(/(?:^|\.)(dependencies|dev-dependencies|build-dependencies)(?:\.['"]?[A-Za-z0-9_-]+['"]?)?$/);
     if (!anyDepSection) continue;
@@ -119,6 +125,7 @@ export function parseManifest(text, known) {
     lintsWorkspace,
     normalSecretTestFeature,
     normalSqlTestFeature,
+    normalTestFixturesFeature,
     directRusqlite,
   };
 }
@@ -169,6 +176,13 @@ export function checkLayers(root = REPO_ROOT, layers = LAYERS) {
         manifest: rel,
         from: parsed.name,
         reason: "正式依赖不得启用 test-sql-access（仅限 [dev-dependencies]）",
+      });
+    }
+    if (parsed.normalTestFixturesFeature) {
+      violations.push({
+        manifest: rel,
+        from: parsed.name,
+        reason: "正式依赖不得启用 test-fixtures（仅限 [dev-dependencies]）",
       });
     }
     if (parsed.directRusqlite && parsed.name !== "laser-runtime") {

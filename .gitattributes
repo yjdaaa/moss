@@ -6,5 +6,5 @@
 *.icns binary
 *.bmp binary
 *.woff2 binary
-crates/moss-voice-server/assets/esp-sr/** binary
-crates/moss-voice-server/assets/xiaozhi-fonts/*.bin binary
+crates/moss-xiaozhi-display/assets/esp-sr/** binary
+crates/moss-xiaozhi-display/assets/xiaozhi-fonts/*.bin binary

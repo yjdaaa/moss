@@ -1,7 +1,13 @@
 use super::*;
 
 fn sha(bytes: &[u8]) -> String {
-    crate::firmware::sha256_hex(bytes)
+    use sha2::{Digest, Sha256};
+    let mut out = String::with_capacity(64);
+    for b in Sha256::digest(bytes) {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
 }
 
 fn entry(name: &str, data: &[u8]) -> AssetEntry {
@@ -278,33 +284,6 @@ fn n61_wake_word_input_is_checked_against_the_model_pinyin() {
             && normalize_threshold(1.0).is_err()
             && normalize_threshold(f64::NAN).is_err()
     );
-}
-
-#[test]
-fn n61_staged_package_is_one_device_one_token_and_expires() {
-    let store = AssetsStore::default();
-    let first = store.stage("dev-a", vec![1, 2, 3]).unwrap();
-    assert!(crate::firmware::token_ok(&first));
-    assert_eq!(
-        store.fetch(&first).map(|(d, b)| (d, b.as_ref().clone())),
-        Some(("dev-a".into(), vec![1, 2, 3]))
-    );
-    let other = store.stage("dev-b", vec![9]).unwrap();
-    let second = store.stage("dev-a", vec![4]).unwrap();
-    assert!(
-        store.fetch(&first).is_none(),
-        "同一台设备的新推送顶掉旧令牌"
-    );
-    assert!(store.fetch(&second).is_some() && store.fetch(&other).is_some());
-    assert!(store.fetch("../etc/passwd").is_none() && store.fetch(&"0".repeat(32)).is_none());
-    store
-        .staged
-        .lock()
-        .unwrap()
-        .get_mut(&second)
-        .unwrap()
-        .expires = Instant::now() - Duration::from_secs(1);
-    assert!(store.fetch(&second).is_none(), "过期后不再给");
 }
 
 #[test]

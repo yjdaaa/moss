@@ -1,5 +1,5 @@
 use super::*;
-use crate::wake_assets::{
+use crate::wake_pack::{
     ASSETS_MAX_BYTES, WakeTarget, build_package_with_screen, pack_assets, parse_assets,
 };
 use serde_json::Value;
@@ -222,7 +222,7 @@ fn other_screen_sizes_scale_with_the_screen() {
 #[test]
 fn n84_pack_marker_combines_version_prefix_and_content_fingerprint() {
     use crate::glyph_font::PROFILES;
-    use crate::wake_assets::fingerprint_base_pack;
+    use crate::wake_pack::fingerprint_base_pack;
 
     let hud = pack_marker(ScreenCardStyle::MossHud);
     let parsed = parse_pack_marker(&hud).expect("三段式标记可解析");

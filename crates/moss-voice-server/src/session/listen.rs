@@ -16,7 +16,7 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn start_listening(&mut self, manual: bool) {
-        self.barge_resumed = false;
+        self.listen.barge_resumed = false;
         self.recording_started = Instant::now();
         self.recording_marks = BTreeMap::from([("recording_start".into(), 0)]);
         self.vad.reset();
@@ -24,11 +24,11 @@ impl<'a> Session<'a> {
             worker.reset();
         }
         self.pending_listen_stop = false;
-        self.hold_check = None;
-        self.last_screen_stt = None;
-        self.utterance_keyword = None;
-        self.kws_tail_until = None;
-        self.listen_manual = manual;
+        self.listen.hold_check = None;
+        self.screen.last_screen_stt = None;
+        self.listen.utterance_keyword = None;
+        self.listen.kws_tail_until = None;
+        self.listen.listen_manual = manual;
         // 手动模式按住即说：马上建立识别连接；自动模式等 VAD 确认开始说话（避免为环境声建连接）
         let stream = if manual { self.open_stream() } else { None };
         self.phase = Phase::Listening(Listening {
@@ -99,7 +99,7 @@ impl<'a> Session<'a> {
                         );
                     }
                     VadEvent::Keyword(kind) => {
-                        self.utterance_keyword = Some(kind);
+                        self.listen.utterance_keyword = Some(kind);
                         self.shared.state.event(EventRecord::info(
                             DiagCategory::Audio,
                             format!("命令词模型听到{}命令", keyword_label(kind)),
@@ -108,7 +108,7 @@ impl<'a> Session<'a> {
                 }
             }
             if listening.speaking && !was_speaking {
-                if self.hold_check.take().is_some()
+                if self.listen.hold_check.take().is_some()
                     || listening.hold_deadline.is_some()
                     || listening.finalize_after_vad_seq.is_some()
                 {
@@ -156,7 +156,7 @@ impl<'a> Session<'a> {
             }
         }
         if began {
-            self.preview_hold = None;
+            self.screen.preview_hold = None;
             // VAD 刚确认开始说话：建立流式识别，先补送保留的开头与这一帧
             let stream = self.open_stream();
             if let Phase::Listening(listening) = &mut self.phase {
@@ -168,7 +168,7 @@ impl<'a> Session<'a> {
         let Phase::Listening(listening) = &mut self.phase else {
             return None;
         };
-        if ended && self.hold_check.is_none() {
+        if ended && self.listen.hold_check.is_none() {
             return Some((
                 std::mem::take(&mut listening.utterance),
                 UtteranceEnd::Silence,
@@ -202,7 +202,7 @@ impl<'a> Session<'a> {
         );
         if crate::fast::is_stop(&corrected) {
             self.pending_listen_stop = false;
-            self.hold_check = None;
+            self.listen.hold_check = None;
             if let Some(worker) = self.vad_worker.as_mut() {
                 worker.reset();
             }
@@ -230,7 +230,7 @@ impl<'a> Session<'a> {
             })
             .unwrap_or_default();
         let min_audio_samples = self.samples(INTERIM_STT_MIN_AUDIO_MS);
-        let can_push_screen_stt = self.paused.is_none() && self.hold_check.is_none();
+        let can_push_screen_stt = self.listen.paused.is_none() && self.listen.hold_check.is_none();
         let mut push_screen_stt = false;
         {
             let Phase::Listening(listening) = &mut self.phase else {
@@ -279,7 +279,7 @@ impl<'a> Session<'a> {
                 && moss_voice_providers::text::speakable(&corrected)
                 && !crate::fast::is_noise_filler(&corrected)
                 && crate::fast::normalized(&corrected).chars().count() >= 2
-                && self.last_screen_stt.as_deref() != Some(corrected.as_str())
+                && self.screen.last_screen_stt.as_deref() != Some(corrected.as_str())
             {
                 listening.last_interim_stt_at = Some(now);
                 push_screen_stt = true;
@@ -318,7 +318,7 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         if matches!(end, UtteranceEnd::Silence)
             && !self.pending_listen_stop
-            && self.hold_check.is_none()
+            && self.listen.hold_check.is_none()
             && let Some(conversation) = self.conversation.clone()
             && let Some(jev) = conversation
                 .jev_filter
@@ -372,7 +372,7 @@ impl<'a> Session<'a> {
                     // `tools()` 放到后台任务内的 spawn_blocking，既不阻塞会话循环也不占 2-worker Tokio 线程。
                     listening.utterance = pcm;
                     listening.speaking = false;
-                    self.hold_check = Some(PendingHoldCheck {
+                    self.listen.hold_check = Some(PendingHoldCheck {
                         paused_at,
                         task: tokio::spawn(async move {
                             tokio::task::yield_now().await;
@@ -433,7 +433,7 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
     ) -> Result<(), String> {
-        if !self.listen_manual
+        if !self.listen.listen_manual
             && let Some(target) = self
                 .vad_worker
                 .as_ref()
@@ -464,10 +464,10 @@ impl<'a> Session<'a> {
         end: UtteranceEnd,
     ) -> Result<(), String> {
         self.pending_listen_stop = false;
-        self.hold_check = None;
+        self.listen.hold_check = None;
         // 开了命令词检测：说完先不重置判停流，尾音接着送进同一路，命令词模型才等得到词后那一小段、报出结果
         // （下次开始拾音时照常重置；这期间判停事件在思考阶段本就不处理，只收命令词）
-        let keep_for_keywords = !self.listen_manual
+        let keep_for_keywords = !self.listen.listen_manual
             && self
                 .conversation
                 .as_ref()
@@ -497,14 +497,15 @@ impl<'a> Session<'a> {
         {
             enrollment.submit(self.device_id, self.session_id, &pcm, sample_rate);
         }
-        self.gate_next_turn = matches!(end, UtteranceEnd::Silence) && !self.listen_manual;
+        self.listen.gate_next_turn =
+            matches!(end, UtteranceEnd::Silence) && !self.listen.listen_manual;
         if self
             .conversation
             .as_ref()
             .is_some_and(|conversation| conversation.settings.command_keywords)
-            && !self.listen_manual
+            && !self.listen.listen_manual
         {
-            self.kws_tail_until = Some(Instant::now() + KWS_TAIL);
+            self.listen.kws_tail_until = Some(Instant::now() + KWS_TAIL);
         }
         self.start_turn(
             TurnInput::Utterance {
@@ -521,7 +522,7 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
     ) -> Result<(), String> {
-        if !self.listen_manual
+        if !self.listen.listen_manual
             && self
                 .vad_worker
                 .as_ref()
@@ -556,8 +557,8 @@ impl<'a> Session<'a> {
                 moss_voice_providers::local::CommandKeyword::Stop,
             ))
         {
-            self.follow_probe = None;
-            self.follow.reset();
+            self.listen.follow_probe = None;
+            self.listen.follow.reset();
             self.event("思考中命令词模型听到“停”");
             return self.on_stop_check_done(socket, Some("停".into())).await;
         }
@@ -588,25 +589,25 @@ impl<'a> Session<'a> {
         if frame.prime && matches!(self.phase, Phase::Listening(_)) {
             for event in &frame.events {
                 if let VadEvent::Keyword(kind) = event {
-                    self.utterance_keyword = Some(*kind);
+                    self.listen.utterance_keyword = Some(*kind);
                 }
             }
         }
         // 思考中“接着说”候选的确认结果：判停模型也听到人声才放弃还没开口的回答
         if frame.prime && matches!(self.phase, Phase::Thinking) {
-            if self.follow_probe.is_some()
+            if self.listen.follow_probe.is_some()
                 && frame.events.contains(&VadEvent::SpeechStart)
                 && self.may_follow_up()
-                && let Some(probe) = self.follow_probe.take()
+                && let Some(probe) = self.listen.follow_probe.take()
             {
-                self.follow.reset();
+                self.listen.follow.reset();
                 return self.take_over(socket, probe.head, true).await;
             }
             return Ok(());
         }
         // 插话 / 接着说补送开头后判停模型的结论：此刻不在说话（只是噪声，或一句短话已说完）就立刻收尾识别，
         // 不再等一个永远不会来的“说完”（此前在突发噪声下会一直等到 30 秒上限）
-        if frame.prime && matches!(self.phase, Phase::Listening(_)) && !self.listen_manual {
+        if frame.prime && matches!(self.phase, Phase::Listening(_)) && !self.listen.listen_manual {
             let in_speech = frame
                 .events
                 .iter()
@@ -620,7 +621,7 @@ impl<'a> Session<'a> {
         }
         if !frame.prime
             && matches!(self.phase, Phase::Listening(_))
-            && !self.listen_manual
+            && !self.listen.listen_manual
             && let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, frame.notice)))
         {
             self.finish_or_hold_utterance(socket, pcm, end).await?;
@@ -655,13 +656,13 @@ impl<'a> Session<'a> {
 
     /// 正在拾音或存在尚未提交的半句录音/续听判定时，延后加工完成播报，待本轮对话安全结束后再播。
     pub(super) fn listening_occupied(&self) -> bool {
-        if self.hold_check.is_some() || self.pending_listen_stop {
+        if self.listen.hold_check.is_some() || self.pending_listen_stop {
             return true;
         }
         match &self.phase {
             Phase::Listening(listening) => {
                 listening.manual
-                    || !self.listen_realtime
+                    || !self.listen.listen_realtime
                     || listening.speaking
                     || !listening.utterance.is_empty()
                     || listening.hold_deadline.is_some()
@@ -676,7 +677,7 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn actively_speaking_user(&self) -> bool {
-        if self.hold_check.is_some() || self.pending_listen_stop {
+        if self.listen.hold_check.is_some() || self.pending_listen_stop {
             return true;
         }
         match &self.phase {

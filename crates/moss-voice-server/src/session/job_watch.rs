@@ -38,16 +38,17 @@ impl<'a> Session<'a> {
     /// - 任务处于 `sending` 时：彩屏刷新双画风实时进度副屏 HUD；
     /// - 严格模式有待电脑批准请求时：彩屏刷新待电脑审批警戒卡（含倒计时条）。
     pub(super) async fn poll_jobs(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
-        self.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
+        self.notices.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
         if self.busy() || !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
         // n70 完工 / 急停画面到时间了：回到聆听或待命
         if self
+            .screen
             .screen_scene
             .as_ref()
             .is_some_and(|scene| scene.until.is_some_and(|t| Instant::now() >= t))
-            && let Some(scene) = self.screen_scene.as_ref().map(|s| s.scene)
+            && let Some(scene) = self.screen.screen_scene.as_ref().map(|s| s.scene)
         {
             self.clear_sticky(socket, &[scene]).await?;
         }
@@ -57,8 +58,8 @@ impl<'a> Session<'a> {
         let want_announce = conversation.settings.announce_job_done;
         let want_hud = conversation.settings.screen_preview_sync;
         if !want_announce && !want_hud {
-            self.pending_finished.clear();
-            self.pending_agent_notices.clear();
+            self.notices.pending_finished.clear();
+            self.notices.pending_agent_notices.clear();
             return Ok(());
         }
         // 若用户正在说话或处于非实时拾音占线态，延后轮询以免丢失终态边沿或干扰拾音
@@ -70,22 +71,23 @@ impl<'a> Session<'a> {
             session_id: self.session_id.to_owned(),
         };
         let snap = self
+            .notices
             .jobs
             .poll_full_with(conversation.tools.as_ref(), &context, want_announce)
             .await;
         for job in snap.finished {
-            enqueue_bounded_notice(&mut self.pending_finished, job, |a, b| {
+            enqueue_bounded_notice(&mut self.notices.pending_finished, job, |a, b| {
                 a.workflow_id == b.workflow_id
             });
         }
         if want_announce {
             for notice in snap.agent_notices {
-                enqueue_bounded_notice(&mut self.pending_agent_notices, notice, |a, b| {
+                enqueue_bounded_notice(&mut self.notices.pending_agent_notices, notice, |a, b| {
                     a.claim_key == b.claim_key
                 });
             }
         } else {
-            self.pending_agent_notices.clear();
+            self.notices.pending_agent_notices.clear();
         }
         let can_color_hud = self.device_mcp.as_ref().is_some_and(|d| {
             d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
@@ -95,22 +97,22 @@ impl<'a> Session<'a> {
             .as_ref()
             .is_some_and(|d| d.screen_monochrome == Some(true));
 
-        while let Some(job) = self.pending_finished.pop_front() {
+        while let Some(job) = self.notices.pending_finished.pop_front() {
             if want_announce {
                 if !self.shared.job_announcements.claim(&job.workflow_id) {
                     continue;
                 }
-                self.preview_hold = None;
-                self.last_hud_workflow = None;
-                self.last_approval_summary = None;
-                self.engrave_preview = None;
+                self.screen.preview_hold = None;
+                self.screen.last_hud_workflow = None;
+                self.screen.last_approval_summary = None;
+                self.screen.engrave_preview = None;
                 if want_hud && self.pack_active() {
                     self.show_finished_scene(socket, &job).await?;
                 } else if want_hud
                     && can_color_hud
                     && let Some(badge_url) = self.stage_terminal_badge_url(&job).await
                 {
-                    self.one_shot_badge_url = Some(badge_url.clone());
+                    self.screen.one_shot_badge_url = Some(badge_url.clone());
                     self.send_quiet_device_call(
                         socket,
                         "self.screen.preview_image",
@@ -161,14 +163,14 @@ impl<'a> Session<'a> {
                 );
                 return Ok(());
             } else if want_hud && self.pack_active() {
-                self.preview_hold = None;
-                self.last_hud_workflow = None;
-                self.engrave_preview = None;
+                self.screen.preview_hold = None;
+                self.screen.last_hud_workflow = None;
+                self.screen.engrave_preview = None;
                 self.show_finished_scene(socket, &job).await?;
                 return Ok(());
             } else if want_hud && can_color_hud {
-                self.preview_hold = None;
-                self.last_hud_workflow = None;
+                self.screen.preview_hold = None;
+                self.screen.last_hud_workflow = None;
                 if let Some(badge_url) = self.stage_terminal_badge_url(&job).await {
                     self.send_quiet_device_call(
                         socket,
@@ -182,7 +184,7 @@ impl<'a> Session<'a> {
         }
 
         if want_announce {
-            while let Some(notice) = self.pending_agent_notices.pop_front() {
+            while let Some(notice) = self.notices.pending_agent_notices.pop_front() {
                 if !self.shared.job_announcements.claim(&notice.claim_key) {
                     continue;
                 }
@@ -223,12 +225,13 @@ impl<'a> Session<'a> {
         }
 
         if let Some(progress) = snap.active_job.filter(|_| want_hud) {
-            self.preview_hold = None;
-            self.last_approval_summary = None;
-            let frame = self.hud_frame;
-            self.hud_frame = self.hud_frame.wrapping_add(1);
+            self.screen.preview_hold = None;
+            self.screen.last_approval_summary = None;
+            let frame = self.screen.hud_frame;
+            self.screen.hud_frame = self.screen.hud_frame.wrapping_add(1);
             // n70 开始雕刻后才取这个任务的刀路预览（每个任务只取一次）
             if self
+                .screen
                 .engrave_preview
                 .as_ref()
                 .is_none_or(|(id, _)| id != &progress.workflow_id)
@@ -238,9 +241,13 @@ impl<'a> Session<'a> {
                     .workflow_preview(&context, &progress.workflow_id)
                     .await
                     .map(Arc::new);
-                self.engrave_preview = Some((progress.workflow_id.clone(), bytes));
+                self.screen.engrave_preview = Some((progress.workflow_id.clone(), bytes));
             }
-            let toolpath = self.engrave_preview.as_ref().and_then(|(_, b)| b.clone());
+            let toolpath = self
+                .screen
+                .engrave_preview
+                .as_ref()
+                .and_then(|(_, b)| b.clone());
             if self.pack_active() {
                 // 全屏画风：先把底层切到“雕刻”并叠一行进度字，再在中央盖刀路进度卡（有刀路时）
                 self.set_sticky(
@@ -283,10 +290,12 @@ impl<'a> Session<'a> {
                         self.shared.http_port
                     );
                     let first_for_job = self
+                        .screen
                         .last_hud_workflow
                         .as_ref()
                         .is_none_or(|(id, _)| id != &progress.workflow_id);
-                    self.last_hud_workflow = Some((progress.workflow_id.clone(), progress.percent));
+                    self.screen.last_hud_workflow =
+                        Some((progress.workflow_id.clone(), progress.percent));
                     self.last_activity = Instant::now();
                     if first_for_job {
                         self.event("向小智彩屏开启实时激光加工进度副屏 HUD");
@@ -299,14 +308,15 @@ impl<'a> Session<'a> {
                     .await?;
                 }
             } else if is_mono_oled {
-                let should_refresh = match &self.last_hud_workflow {
+                let should_refresh = match &self.screen.last_hud_workflow {
                     Some((id, prev_pct)) if id == &progress.workflow_id => {
                         progress.percent.abs_diff(*prev_pct) >= 10
                     }
                     _ => true,
                 };
                 if should_refresh {
-                    self.last_hud_workflow = Some((progress.workflow_id.clone(), progress.percent));
+                    self.screen.last_hud_workflow =
+                        Some((progress.workflow_id.clone(), progress.percent));
                     self.last_activity = Instant::now();
                     let alert = ServerMessage::Alert {
                         status: "加工中".into(),
@@ -318,22 +328,22 @@ impl<'a> Session<'a> {
             }
             return Ok(());
         }
-        self.last_hud_workflow = None;
-        self.engrave_preview = None;
+        self.screen.last_hud_workflow = None;
+        self.screen.engrave_preview = None;
         self.clear_sticky(socket, &[crate::BotPose::GogglesEngrave])
             .await?;
 
         if let Some(pending) = snap.pending_approval.filter(|_| want_hud) {
-            self.preview_hold = None;
-            let frame = self.hud_frame;
-            self.hud_frame = self.hud_frame.wrapping_add(1);
+            self.screen.preview_hold = None;
+            let frame = self.screen.hud_frame;
+            self.screen.hud_frame = self.screen.hud_frame.wrapping_add(1);
             let first_for_approval =
-                self.last_approval_summary.as_deref() != Some(pending.summary.as_str());
+                self.screen.last_approval_summary.as_deref() != Some(pending.summary.as_str());
             if self.pack_active() {
                 // n70 全屏警戒画面一直显示，倒计时写在那行字里
                 self.last_activity = Instant::now();
                 if first_for_approval {
-                    self.last_approval_summary = Some(pending.summary.clone());
+                    self.screen.last_approval_summary = Some(pending.summary.clone());
                     self.event("小智全屏切到待电脑批准画面");
                 }
                 self.set_sticky(
@@ -375,7 +385,7 @@ impl<'a> Session<'a> {
                     )
                     .await?;
                     if first_for_approval {
-                        self.last_approval_summary = Some(pending.summary.clone());
+                        self.screen.last_approval_summary = Some(pending.summary.clone());
                         self.event("向小智彩屏推送待电脑审批警戒卡");
                         let _ = self
                             .send_stt(socket, format!("[待电脑批准] {}", pending.summary))
@@ -383,7 +393,7 @@ impl<'a> Session<'a> {
                     }
                 }
             } else if is_mono_oled && first_for_approval {
-                self.last_approval_summary = Some(pending.summary.clone());
+                self.screen.last_approval_summary = Some(pending.summary.clone());
                 self.last_activity = Instant::now();
                 let _ = send_json(
                     socket,
@@ -397,7 +407,7 @@ impl<'a> Session<'a> {
             }
             return Ok(());
         }
-        self.last_approval_summary = None;
+        self.screen.last_approval_summary = None;
         self.clear_sticky(socket, &[crate::BotPose::ApprovalWave])
             .await?;
         Ok(())

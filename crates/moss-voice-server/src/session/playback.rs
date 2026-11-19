@@ -67,9 +67,9 @@ impl<'a> Session<'a> {
                         turn.frames_sent += 1;
                     }
                     self.set_level(self.pump.last_level());
-                    if self.playback_started.is_none() {
-                        self.playback_started = Some(Instant::now());
-                        self.barge.reset();
+                    if self.listen.playback_started.is_none() {
+                        self.listen.playback_started = Some(Instant::now());
+                        self.listen.barge.reset();
                     }
                     if let Some(turn) = self.turn.as_mut()
                         && let Some(timing) = turn.timing.as_mut()
@@ -99,7 +99,7 @@ impl<'a> Session<'a> {
                         stop_at,
                         ..
                     } = &mut self.phase
-                        && self.playback_started.is_some()
+                        && self.listen.playback_started.is_some()
                     {
                         let at = *stop_at.get_or_insert(*anchor + step * *sent + DRAIN_MARGIN);
                         if Instant::now() < at {
@@ -108,14 +108,14 @@ impl<'a> Session<'a> {
                         }
                     }
                     if was_music {
-                        self.music_hud = None;
+                        self.screen.music_hud = None;
                         if let Some(music) = self.music.as_mut() {
                             music.finish_after_pump_done();
                         }
                     }
                     self.stop_speaking(socket, None).await?;
                     return if was_music {
-                        if self.listen_realtime {
+                        if self.listen.listen_realtime {
                             self.start_listening(false);
                         }
                         Ok(())
@@ -143,8 +143,8 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         let stats = self.pump.stats();
         if let Some(reason) = interrupted {
-            self.pending_oled_preview = None;
-            self.preview_hold = None;
+            self.screen.pending_oled_preview = None;
+            self.screen.preview_hold = None;
             self.pump.clear();
             self.event(format!("播放被打断（{reason}）：已播 {} 帧", stats.frames));
         } else {
@@ -153,13 +153,13 @@ impl<'a> Session<'a> {
                 stats.frames, stats.underruns
             ));
         }
-        self.playback_started = None;
+        self.listen.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();
         self.tts(socket, TtsState::Stop, None).await?;
         if interrupted.is_none() {
-            if let Some(hold_url) = self.preview_hold.as_mut().map(|hold| {
+            if let Some(hold_url) = self.screen.preview_hold.as_mut().map(|hold| {
                 let now = Instant::now();
                 hold.until = now + self.shared.config.preview_hold_duration;
                 hold.next_refresh = now + self.shared.config.preview_hold_interval;
@@ -172,7 +172,7 @@ impl<'a> Session<'a> {
                 )
                 .await?;
             }
-            if let Some(card) = self.pending_oled_preview.take()
+            if let Some(card) = self.screen.pending_oled_preview.take()
                 && !self.send_stt(socket, format!("[预览] {card}")).await
             {
                 return Err("发送失败".into());

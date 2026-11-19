@@ -123,32 +123,37 @@ impl<'a> Session<'a> {
             ),
             decode_errors: 0,
             phase: Phase::Idle,
-            hold_check: None,
-            stop_check: None,
-            utterance_keyword: None,
-            kws_tail_until: None,
             last_activity: Instant::now(),
-            listen_manual: false,
-            listen_realtime: false,
-            barge: crate::barge::BargeIn::new(
-                uplink_rate,
-                shared.config.barge_in_ms,
-                &shared.config.vad,
-            ),
-            playback_started: None,
-            barge_resumed: false,
-            follow: crate::barge::BargeIn::follow_up(uplink_rate, &shared.config.vad),
-            follow_probe: None,
-            gate_next_turn: false,
-            paused: None,
-            paused_waits_for_model: false,
-            background: Vec::new(),
-            background_ready: VecDeque::new(),
-            reporting: None,
-            last_heard_loud: None,
-            last_loud: None,
-            last_utterance: None,
-            glyph_gaps_reported: Default::default(),
+            listen: ListenAndBargeState {
+                hold_check: None,
+                stop_check: None,
+                utterance_keyword: None,
+                kws_tail_until: None,
+                listen_manual: false,
+                listen_realtime: false,
+                barge: crate::barge::BargeIn::new(
+                    uplink_rate,
+                    shared.config.barge_in_ms,
+                    &shared.config.vad,
+                ),
+                playback_started: None,
+                barge_resumed: false,
+                follow: crate::barge::BargeIn::follow_up(uplink_rate, &shared.config.vad),
+                follow_probe: None,
+                gate_next_turn: false,
+                paused: None,
+                paused_waits_for_model: false,
+                last_loud: None,
+                last_utterance: None,
+            },
+            bg: BackgroundQueryState::default(),
+            screen: SessionScreenState::default(),
+            notices: JobNoticeState {
+                jobs: crate::jobs::JobWatcher::new(),
+                next_job_poll: Instant::now() + shared.config.job_poll_interval,
+                pending_finished: std::collections::VecDeque::new(),
+                pending_agent_notices: std::collections::VecDeque::new(),
+            },
             conversation: match shared.config.mode {
                 ServerMode::Echo => None,
                 ServerMode::Chat => shared.config.conversation.clone(),
@@ -160,26 +165,8 @@ impl<'a> Session<'a> {
             vision_host: None,
             vision_token: None,
             device_mcp: None,
-            pending_oled_preview: None,
-            preview_hold: None,
-            last_hud_workflow: None,
-            hud_frame: 0,
-            last_approval_summary: None,
-            one_shot_badge_url: None,
-            music_hud: None,
-            screen_pack: false,
-            screen_scene: None,
-            last_screen_emotion: None,
-            engrave_preview: None,
-            turn_scene: None,
             mqtt: false,
             pending_goodbye: None,
-            text_font_cap: None,
-            last_screen_stt: None,
-            jobs: crate::jobs::JobWatcher::new(),
-            next_job_poll: Instant::now() + shared.config.job_poll_interval,
-            pending_finished: std::collections::VecDeque::new(),
-            pending_agent_notices: std::collections::VecDeque::new(),
         })
     }
 
@@ -245,7 +232,7 @@ impl<'a> Session<'a> {
     fn emit_glyph_gap_event(&mut self, undisplayable: Vec<char>, full_pack_ready: bool) {
         let fresh: Vec<char> = undisplayable
             .into_iter()
-            .filter(|ch| self.glyph_gaps_reported.insert(*ch))
+            .filter(|ch| self.screen.glyph_gaps_reported.insert(*ch))
             .collect();
         if fresh.is_empty() {
             return;
@@ -272,11 +259,14 @@ impl<'a> Session<'a> {
         &mut self,
         text: &str,
     ) -> Option<moss_xiaozhi_proto::GlyphPushPayload> {
-        if !crate::glyph_font::GlyphFontService::needs_lookup(self.text_font_cap.as_ref(), text) {
+        if !crate::glyph_font::GlyphFontService::needs_lookup(
+            self.screen.text_font_cap.as_ref(),
+            text,
+        ) {
             return None;
         }
         let glyph_fonts = self.shared.glyph_fonts.clone();
-        let cap = self.text_font_cap.clone();
+        let cap = self.screen.text_font_cap.clone();
         let text_owned = text.to_owned();
         let (undisplayable, full_ready, glyph_push) = tokio::task::spawn_blocking(move || {
             glyph_fonts.prepare_text_glyphs(cap.as_ref(), &text_owned)
@@ -299,7 +289,7 @@ impl<'a> Session<'a> {
         )
         .await;
         if sent {
-            self.last_screen_stt = Some(text);
+            self.screen.last_screen_stt = Some(text);
         }
         sent
     }
@@ -313,7 +303,7 @@ impl<'a> Session<'a> {
         let starting = matches!(state, TtsState::Start);
         let glyph_push = match (&state, text.as_deref()) {
             (TtsState::SentenceStart, Some(s)) => {
-                self.last_screen_stt = None;
+                self.screen.last_screen_stt = None;
                 self.prepare_glyphs_async(s).await
             }
             _ => None,
@@ -331,7 +321,7 @@ impl<'a> Session<'a> {
             // n70 开口说话：全屏画风切到“说话”（听歌、完工、急停画面说话时保持）
             let scene = self
                 .sticky_while_talking()
-                .or(self.turn_scene)
+                .or(self.screen.turn_scene)
                 .unwrap_or(crate::BotPose::Talking);
             self.show_screen(socket, scene, true).await?;
         }
@@ -387,23 +377,23 @@ impl<'a> Session<'a> {
             music.cancel(&mut self.pump);
         }
         self.turn = None;
-        self.paused = None;
-        self.paused_waits_for_model = false;
-        if let Some(task) = self.stop_check.take() {
+        self.listen.paused = None;
+        self.listen.paused_waits_for_model = false;
+        if let Some(task) = self.listen.stop_check.take() {
             task.abort();
         }
         // 后台查询属于这一场对话：中止（丢弃即中止）并清掉待播结果，不带进下一场
-        self.background.clear();
-        self.background_ready.clear();
-        self.reporting = None;
+        self.bg.background.clear();
+        self.bg.background_ready.clear();
+        self.bg.reporting = None;
         self.carried_photo = None;
         self.pump.clear();
-        self.hold_check = None;
+        self.listen.hold_check = None;
         self.pending_listen_stop = false;
         if let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
-        self.playback_started = None;
+        self.listen.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         socket.end_audio(self.session_id, notify);
@@ -445,7 +435,10 @@ impl<'a> Session<'a> {
                     .and_then(|turn| turn.hold)
                     .map_or_else(|| Instant::now() + Duration::from_secs(3600), |(at, _)| at),
                 // n71 常连模式没在对话（语音通道关着）时不算空闲，设备一直在线
-                _ if !socket.audio_open() && self.turn.is_none() && self.paused.is_none() => {
+                _ if !socket.audio_open()
+                    && self.turn.is_none()
+                    && self.listen.paused.is_none() =>
+                {
                     Instant::now() + Duration::from_secs(3600)
                 }
                 _ => self.last_activity + idle_timeout,
@@ -454,10 +447,10 @@ impl<'a> Session<'a> {
                 Phase::Listening(listening) => listening.hold_deadline,
                 _ => None,
             };
-            let preview_hold_deadline = self.preview_hold.as_ref().map(|h| h.next_refresh);
-            let music_hud_deadline = self.music_hud.as_ref().map(|m| m.next_refresh);
+            let preview_hold_deadline = self.screen.preview_hold.as_ref().map(|h| h.next_refresh);
+            let music_hud_deadline = self.screen.music_hud.as_ref().map(|m| m.next_refresh);
             // 加工结束播报与副屏 HUD 用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
-            let job_deadline = self.next_job_poll;
+            let job_deadline = self.notices.next_job_poll;
             let report_deadline = self.background_report_deadline(socket);
             // 按顺序检查（biased）：对话任务的事件先于它发出的设备工具调用处理，设备看到的顺序与任务一致
             // （先 stt 再 tools/call）；设备消息先于播放定时器，打断不被积压的播放拍延迟。
@@ -479,8 +472,8 @@ impl<'a> Session<'a> {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(_)) => return "连接出错".into(),
                 },
-                (paused_at, held) = next_listening_hold_check(&mut self.hold_check) => self.on_hold_check_done(socket, paused_at, held).await,
-                stop = next_stop_check(&mut self.stop_check) => self.on_stop_check_done(socket, stop).await,
+                (paused_at, held) = next_listening_hold_check(&mut self.listen.hold_check) => self.on_hold_check_done(socket, paused_at, held).await,
+                stop = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop).await,
                 call = next_device_call(&mut self.device_mcp) => self.forward_device_call(socket, call).await,
                 request = async {
                     if requests_closed {
@@ -530,7 +523,7 @@ impl<'a> Session<'a> {
                         None => std::future::pending().await,
                     }
                 } => Ok(()),
-                (question, outcomes) = next_background_done(&mut self.background) => {
+                (question, outcomes) = next_background_done(&mut self.bg.background) => {
                     self.background_done(question, &outcomes);
                     Ok(())
                 }

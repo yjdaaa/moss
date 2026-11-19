@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 拆分 `moss-xiaozhi-display` 独立 crate 并收敛 `Session` 67 字段为领域子状态（2026-11-19）
+
+- **现象**：`crates/moss-voice-server` 超过 5.8 万行且捆绑 8.7 MB 静态字库与 ESP-SR 唤醒词资源，修改服务端或对话逻辑会拖带重编译整套字库、画风包与像素渲染；核心会话结构 `Session<'a>` 扁平堆叠 67 个字段，屏幕、打断、后台查询与作业播报职责混杂。
+- **根因与修复**：新增第 2 层语音域纯数据/渲染 crate `crates/moss-xiaozhi-display`（零 Tokio/Axum/Opus 依赖），迁出 `glyph_font`、`goggle_bot`、`screen_pack`、`wake_pack`（含 4.8 MB `xiaozhi-fonts` 与 3.9 MB `esp-sr` 资产）及 `render` 纯像素/GIF 渲染逻辑，`moss-voice-server` 通过公开重导出保持既有调用面兼容并仅保留 `AssetsStore`/`PreviewStore` 与 Axum 路由；跨 crate 合成字库夹具经 dev-only 特性 `test-fixtures` 隔离并由 `scripts/check-crate-layers.mjs` 把关；将 `Session<'a>` 的 39 个高频扁平字段收敛为 `SessionScreenState`、`ListenAndBargeState`、`BackgroundQueryState`、`JobNoticeState` 四个清晰子结构。同步 `.gitattributes`、`.gitignore`、`THIRD_PARTY_NOTICES.md` 与 `docs/developer/architecture.md`。
+- **验证**：`node scripts/verify.mjs` 全绿（Rust 根工作区 1,419 项含 `moss-xiaozhi-display` 26 项与 `moss-voice-server` 全部单测/集成测试通过，脚本单测 51 项通过，clippy/rustfmt/分层/卫生门禁零警告）；独立增量审查通过。未接真实 ESP32 彩屏设备实机验收（`unverified`）。
+- **关联**：`crates/moss-xiaozhi-display/`、`crates/moss-voice-server/src/{lib,preview_push,wake_assets,session}.rs`、`crates/moss-voice-server/src/session/*.rs`、`scripts/check-crate-layers.mjs`、`THIRD_PARTY_NOTICES.md`、`docs/developer/architecture.md`。
+
 ### 接入 17 项前端浏览器测试到 CI、收敛 workspace 依赖与版本并彻底收口 `RuntimeDb` SQLite 边界（2026-11-19）
 
 - **现象**：`frontend/tests/` 已有 17 个 Playwright 浏览器交互测试（含硬编码 Windows Edge 路径的 `voice-center-render.smoke.mjs`）但长期脱离 `package.json`、`verify.mjs` 与 CI；根 `Cargo.toml` 缺 `[workspace.dependencies]`/`[workspace.package]` 且版本滞后在 `0.3.7`、`tungstenite` 存在 0.26/0.29 双版本；`laser-api` 仍直接依赖 `rusqlite` 且多处直接访问公开的 `RuntimeDb.connection`；仓库滞留过时的 `.birdview/` 快照与旧架构原型 `frontend/prototypes/`；生产代码尚存 5 处可去掉的 `.unwrap()`。

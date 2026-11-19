@@ -7,6 +7,7 @@ license.workspace = true
 description = "MOSS 内置语音服务（内置语音技术书 NV1 起）：小智设备的 OTA 与 WebSocket 服务、设备允许流程、会话。仅桌面端使用，不进入 laser-api / moss-host / Android。"
 
 [dependencies]
+moss-xiaozhi-display = { path = "../moss-xiaozhi-display" }
 moss-xiaozhi-proto = { path = "../moss-xiaozhi-proto" }
 moss-voice-providers = { path = "../moss-voice-providers" }
 serde.workspace = true
@@ -40,6 +41,7 @@ if-addrs.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+moss-xiaozhi-display = { path = "../moss-xiaozhi-display", features = ["test-fixtures"] }
 rcgen.workspace = true
 # NV19-02: reference store adapter over the real schema v10 (test only; no runtime dependency).
 laser-runtime = { path = "../laser-runtime", features = ["test-sql-access"] }

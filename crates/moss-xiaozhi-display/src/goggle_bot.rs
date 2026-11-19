@@ -590,7 +590,7 @@ pub fn cached_goggle_bot_gif(pose: BotPose) -> Option<&'static [u8]> {
 }
 
 /// 已编码过时直接取缓存（不阻塞）；尚未编码返回 `None`。
-pub(crate) fn goggle_bot_gif_if_encoded(pose: BotPose) -> Option<Option<&'static [u8]>> {
+pub fn goggle_bot_gif_if_encoded(pose: BotPose) -> Option<Option<&'static [u8]>> {
     goggle_bot_gif_slot(pose).get().map(Option::as_deref)
 }
 

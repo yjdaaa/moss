@@ -691,76 +691,11 @@ struct MusicHud {
     next_refresh: Instant,
 }
 
-struct Session<'a> {
-    permission: Arc<std::sync::atomic::AtomicBool>,
-    recording_started: Instant,
-    recording_marks: BTreeMap<String, u64>,
-    turn_number: u64,
-    shared: &'a Shared,
-    session_id: &'a str,
-    device_id: &'a str,
-    client_id: &'a str,
-    version: u32,
-    timestamp: u32,
-    uplink_rate: u32,
-    decoder: OpusDecoder,
-    vad: Box<dyn Vad>,
-    vad_worker: Option<crate::audio::worker::VadWorker>,
-    pending_listen_stop: bool,
-    music: Option<MusicController>,
-    pump: PlaybackPump,
-    decode_errors: u64,
-    phase: Phase,
-    hold_check: Option<PendingHoldCheck>,
-    /// 这一段话里命令词检测模型听到的停止 / 退出命令词（交给这一轮对话纠正识别结果，n101）
-    utterance_keyword: Option<moss_voice_providers::local::CommandKeyword>,
-    /// 一段话说完后继续把尾音送进判停流到这个时刻：命令词模型要在词说完后再听一小段才出结果（n101）
-    kws_tail_until: Option<Instant>,
-    /// 思考中判停模型没认出人声的那阵声音正在识别是不是“停”
-    stop_check: Option<tokio::task::JoinHandle<Option<String>>>,
-    /// 最近一次文本消息或说话的时间（自动模式下设备持续上传静音，静音帧不算活动）
-    last_activity: Instant,
-    /// 最近一次 `listen start` 是否为手动模式
-    listen_manual: bool,
-    listen_realtime: bool,
-    barge: crate::barge::BargeIn,
-    playback_started: Option<Instant>,
-    /// 兼容收到 tts stop 后再次发 listen start 的固件，不能清掉已补送的开头。
-    barge_resumed: bool,
-    /// 说话中听到插话而暂停的那一轮：等插话识别出来再决定——真有话就打断它，只是附和或没听清就接着说
-    paused: Option<ActiveTurn>,
-    /// 插话已识别出文字、正等大模型判断是不是对小智说的（期间原回答保持暂停，n100）
-    paused_waits_for_model: bool,
-    /// 转到后台还在查的只读慢查询（n100，最多 [`MAX_BACKGROUND`] 个）
-    background: Vec<crate::conversation::BackgroundQuery>,
-    /// 查完了、等空闲时播报的结果
-    background_ready: VecDeque<BackgroundReport>,
-    /// 正在播报的那份结果与它所在的轮次：开口前被用户的话取代就放回队列重来
-    reporting: Option<(u64, BackgroundReport)>,
-    /// 聆听中最近一次听到有响度的声音（后台结果等用户安静一会儿再播报）
-    last_heard_loud: Option<Instant>,
-    /// 思考期间“用户接着说”的检测器（比播放中的插话检测灵敏）
-    follow: crate::barge::BargeIn,
-    /// 用了本地判停模型时，能量检测的“接着说”候选要等模型也听到人声才算（2026-11-15 整链实测：
-    /// 突发噪声下每次敲击都会放弃已备好的回答）
-    follow_probe: Option<FollowProbe>,
-    /// 下一轮由静音判停触发（不是设备 listen stop）：可以抢跑
-    gate_next_turn: bool,
-    /// 思考期间最近一次听到明显人声的时刻
-    last_loud: Option<Instant>,
-    /// 自动拾音时交给当前这一轮的那段录音：思考期间用户接着说话时，与后半句拼成完整的一段重新识别
-    last_utterance: Option<Vec<i16>>,
+/// 副屏渲染、画风包、底栏字幕与动态字模状态（从 `Session` 67 个扁平字段中收敛）。
+#[derive(Default)]
+struct SessionScreenState {
     /// 已提示过“屏幕显示不出”的字：同一个字每次连接只提示一次
     glyph_gaps_reported: std::collections::BTreeSet<char>,
-    conversation: Option<Arc<Conversation>>,
-    history: Vec<ChatMessage>,
-    turn: Option<ActiveTurn>,
-    /// 个人模式下尚未提交到任何说话人历史的视觉照片上下文（被 Ignored / 暂停切回 / 思考合并 / 打断且未识别出原话时暂存到下一轮）
-    carried_photo: Option<ChatMessage>,
-    last_verified_person: Option<VerifiedPersonHint>,
-    vision_host: Option<String>,
-    vision_token: Option<String>,
-    device_mcp: Option<DeviceMcp>,
     /// 对话播报期间暂存的雕刻预览底部摘要（播完 `tts:stop` 后无声刷到 `bottom_bar_` 供用户核对）
     pending_oled_preview: Option<String>,
     /// 彩屏预览确认窗口内的 4 秒无声续期句柄（克服官方固件 5 秒自动隐藏预览计时器；用户开口即停）
@@ -785,20 +720,107 @@ struct Session<'a> {
     engrave_preview: Option<(String, Option<Arc<Vec<u8>>>)>,
     /// n70 本轮回复的表情场景（大模型的表情往往先于第一句音频到，开口时再显示）
     turn_scene: Option<crate::BotPose>,
-    /// n71 常连模式（MQTT）：会话跟着控制通道一直在，一轮对话结束只关语音通道
-    mqtt: bool,
-    /// n71 常连模式下这一轮对话要结束（说完再见、用户说退出、空闲到期）：在会话循环里关语音通道
-    pending_goodbye: Option<String>,
     /// n81 设备在 `hello` 中声明的字库与 `glyph_push` 能力
     text_font_cap: Option<TextFontCapability>,
     /// 当前小智屏幕底栏最近一次发出的 `stt` 文本（最终识别文字未变化时免重复下发，避免重置固件跑马灯滚动）
     last_screen_stt: Option<String>,
+}
+
+/// 后台慢查询队列与空闲播报状态（n100）。
+#[derive(Default)]
+struct BackgroundQueryState {
+    /// 转到后台还在查的只读慢查询（n100，最多 [`MAX_BACKGROUND`] 个）
+    background: Vec<crate::conversation::BackgroundQuery>,
+    /// 查完了、等空闲时播报的结果
+    background_ready: VecDeque<BackgroundReport>,
+    /// 正在播报的那份结果与它所在的轮次：开口前被用户的话取代就放回队列重来
+    reporting: Option<(u64, BackgroundReport)>,
+    /// 聆听中最近一次听到有响度的声音（后台结果等用户安静一会儿再播报）
+    last_heard_loud: Option<Instant>,
+}
+
+/// 加工与 Agent 终态轮询及有界播报队列。
+struct JobNoticeState {
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
     /// 同拍内可能同时结束多个加工/Agent 任务：一次空闲拍只播 1 条，其余暂存于此（上限 16）等下一拍轮到再播，防并发通知被吞。
     pending_finished: std::collections::VecDeque<crate::jobs::FinishedJob>,
     pending_agent_notices: std::collections::VecDeque<crate::jobs::AgentRunNotice>,
+}
+
+/// 拾音模式、打断、暂停恢复与续说检测状态。
+struct ListenAndBargeState {
+    hold_check: Option<PendingHoldCheck>,
+    /// 这一段话里命令词检测模型听到的停止 / 退出命令词（交给这一轮对话纠正识别结果，n101）
+    utterance_keyword: Option<moss_voice_providers::local::CommandKeyword>,
+    /// 一段话说完后继续把尾音送进判停流到这个时刻：命令词模型要在词说完后再听一小段才出结果（n101）
+    kws_tail_until: Option<Instant>,
+    /// 思考中判停模型没认出人声的那阵声音正在识别是不是“停”
+    stop_check: Option<tokio::task::JoinHandle<Option<String>>>,
+    /// 最近一次 `listen start` 是否为手动模式
+    listen_manual: bool,
+    listen_realtime: bool,
+    barge: crate::barge::BargeIn,
+    playback_started: Option<Instant>,
+    /// 兼容收到 tts stop 后再次发 listen start 的固件，不能清掉已补送的开头。
+    barge_resumed: bool,
+    /// 说话中听到插话而暂停的那一轮：等插话识别出来再决定——真有话就打断它，只是附和或没听清就接着说
+    paused: Option<ActiveTurn>,
+    /// 插话已识别出文字、正等大模型判断是不是对小智说的（期间原回答保持暂停，n100）
+    paused_waits_for_model: bool,
+    /// 思考期间“用户接着说”的检测器（比播放中的插话检测灵敏）
+    follow: crate::barge::BargeIn,
+    /// 用了本地判停模型时，能量检测的“接着说”候选要等模型也听到人声才算（2026-11-15 整链实测：
+    /// 突发噪声下每次敲击都会放弃已备好的回答）
+    follow_probe: Option<FollowProbe>,
+    /// 下一轮由静音判停触发（不是设备 listen stop）：可以抢跑
+    gate_next_turn: bool,
+    /// 思考期间最近一次听到明显人声的时刻
+    last_loud: Option<Instant>,
+    /// 自动拾音时交给当前这一轮的那段录音：思考期间用户接着说话时，与后半句拼成完整的一段重新识别
+    last_utterance: Option<Vec<i16>>,
+}
+
+struct Session<'a> {
+    permission: Arc<std::sync::atomic::AtomicBool>,
+    recording_started: Instant,
+    recording_marks: BTreeMap<String, u64>,
+    turn_number: u64,
+    shared: &'a Shared,
+    session_id: &'a str,
+    device_id: &'a str,
+    client_id: &'a str,
+    version: u32,
+    timestamp: u32,
+    uplink_rate: u32,
+    decoder: OpusDecoder,
+    vad: Box<dyn Vad>,
+    vad_worker: Option<crate::audio::worker::VadWorker>,
+    pending_listen_stop: bool,
+    music: Option<MusicController>,
+    pump: PlaybackPump,
+    decode_errors: u64,
+    phase: Phase,
+    /// 最近一次文本消息或说话的时间（自动模式下设备持续上传静音，静音帧不算活动）
+    last_activity: Instant,
+    listen: ListenAndBargeState,
+    bg: BackgroundQueryState,
+    screen: SessionScreenState,
+    notices: JobNoticeState,
+    conversation: Option<Arc<Conversation>>,
+    history: Vec<ChatMessage>,
+    turn: Option<ActiveTurn>,
+    /// 个人模式下尚未提交到任何说话人历史的视觉照片上下文（被 Ignored / 暂停切回 / 思考合并 / 打断且未识别出原话时暂存到下一轮）
+    carried_photo: Option<ChatMessage>,
+    last_verified_person: Option<VerifiedPersonHint>,
+    vision_host: Option<String>,
+    vision_token: Option<String>,
+    device_mcp: Option<DeviceMcp>,
+    /// n71 常连模式（MQTT）：会话跟着控制通道一直在，一轮对话结束只关语音通道
+    mqtt: bool,
+    /// n71 常连模式下这一轮对话要结束（说完再见、用户说退出、空闲到期）：在会话循环里关语音通道
+    pending_goodbye: Option<String>,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。
