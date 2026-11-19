@@ -593,3 +593,46 @@ test("通过符号链接启动 sidecar 门禁时仍检查并拒绝未闭环许�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("release.yml 的发布说明生成器对超长 CHANGELOG 自动按行截断以避开 GitHub 125000 字符上限", () => {
+  const releaseYml = readRepo(".github/workflows/release.yml");
+  const rawBlock = extractBetweenMarkers(releaseYml, "# BEGIN RELEASE_NOTES_GENERATOR", "# END RELEASE_NOTES_GENERATOR");
+  const dedented = stripYamlIndent(rawBlock);
+  const pyMatch = dedented.match(
+    /python3 - "\$VERSION" "\$TAG" "\$SIDECAR_READY" "\$GITHUB_REPOSITORY" > release-notes\.md <<'PY'\n([\s\S]*?)\nPY/,
+  );
+  assert.ok(pyMatch, "应能提取 release.yml 的发布说明生成 Python 脚本");
+  const pyCode = pyMatch[1];
+
+  const runNotes = (changelogText, { ver = "0.3.12", tag = "v0.3.12", sidecarReady = "false", repo = "yjdaaa/moss" } = {}) => {
+    const work = mkdtempSync(join(tmpdir(), "moss-notes-"));
+    try {
+      mkdirSync(join(work, "dist"), { recursive: true });
+      writeFileSync(join(work, "CHANGELOG.md"), changelogText);
+      writeFileSync(join(work, "dist", "SHA256SUMS.txt"), "deadbeef  MOSS_0.3.12_x64-lite-setup.exe\n");
+      return spawnSync("python3", ["-", ver, tag, sidecarReady, repo], {
+        cwd: work,
+        input: pyCode,
+        encoding: "utf8",
+      });
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  };
+
+  // 超长段落（约 19 万字符）必须截断到 125,000 字符以内，同时保留门禁提示、完整 SHA-256 与 CHANGELOG 链接
+  const hugeSection = Array.from({ length: 1200 }, (_, i) => `- 第 ${i + 1} 条改动：${"详情说明".repeat(38)}`).join("\n");
+  const hugeRes = runNotes(`# Changelog\n\n## [Unreleased]\n\n## [0.3.12] - 2026-11-19\n\n${hugeSection}\n\n## [0.3.11] - 2026-11-07\n- 旧版\n`);
+  assert.equal(hugeRes.status, 0, hugeRes.stderr);
+  assert.ok(hugeRes.stdout.length < 125_000, `超长发布说明必须小于 125000 字符，实际 ${hugeRes.stdout.length}`);
+  assert.match(hugeRes.stdout, /^## MOSS v0\.3\.12/m);
+  assert.match(hugeRes.stdout, /完整更新记录见 \[CHANGELOG\.md\]\(https:\/\/github\.com\/yjdaaa\/moss\/blob\/v0\.3\.12\/CHANGELOG\.md\)/);
+  assert.match(hugeRes.stdout, /不含离线语音 sidecar/);
+  assert.match(hugeRes.stdout, /deadbeef  MOSS_0\.3\.12_x64-lite-setup\.exe/);
+
+  // 正常短段落不应被截断或追加省略提示
+  const shortRes = runNotes(`# Changelog\n\n## [0.3.12] - 2026-11-19\n\n- 精简改动\n`, { sidecarReady: "true" });
+  assert.equal(shortRes.status, 0, shortRes.stderr);
+  assert.match(shortRes.stdout, /- 精简改动/);
+  assert.doesNotMatch(shortRes.stdout, /完整更新记录见/);
+});

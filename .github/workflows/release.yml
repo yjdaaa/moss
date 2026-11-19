@@ -531,10 +531,11 @@ jobs:
           sha256sum * | tee SHA256SUMS.txt
           cd ..
 
-          python3 - "$VERSION" "$TAG" "$SIDECAR_READY" > release-notes.md <<'PY'
+          # BEGIN RELEASE_NOTES_GENERATOR
+          python3 - "$VERSION" "$TAG" "$SIDECAR_READY" "$GITHUB_REPOSITORY" > release-notes.md <<'PY'
           import pathlib, re, subprocess, sys
 
-          ver, tag, sidecar_ready = sys.argv[1:4]
+          ver, tag, sidecar_ready, repo = sys.argv[1:5]
           changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
           pattern = re.compile(rf"^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=^## \[|\Z)", re.M | re.S)
           m = pattern.search(changelog)
@@ -559,8 +560,27 @@ jobs:
               )
 
           sums = pathlib.Path("dist/SHA256SUMS.txt").read_text(encoding="utf-8").strip()
-          print(f"## MOSS {tag}\n\n{body}{gate_note}\n### SHA-256 校验和\n\n```text\n{sums}\n```")
+          header = f"## MOSS {tag}\n\n"
+          footer = f"{gate_note}\n### SHA-256 校验和\n\n```text\n{sums}\n```"
+          # GitHub Release 正文硬上限 125,000 字符；留足余量，超长时按行截断并附完整 CHANGELOG 链接
+          max_notes_chars = 110_000
+          changelog_url = f"https://github.com/{repo}/blob/{tag}/CHANGELOG.md"
+          truncation_notice = f"\n\n> 变更条目较长，以上为近期摘要；完整更新记录见 [CHANGELOG.md]({changelog_url})。"
+          max_body_chars = max(2000, max_notes_chars - len(header) - len(footer) - len(truncation_notice))
+          if len(body) > max_body_chars:
+              kept = []
+              total = 0
+              for line in body.splitlines():
+                  step = len(line) + 1
+                  if total + step > max_body_chars:
+                      break
+                  kept.append(line)
+                  total += step
+              kept_text = "\n".join(kept).rstrip() if kept else body[:max_body_chars].rstrip()
+              body = f"{kept_text}{truncation_notice}"
+          print(f"{header}{body}{footer}")
           PY
+          # END RELEASE_NOTES_GENERATOR
 
       - name: Create or update GitHub Release
         run: |

@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "laser-api"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "laser-contracts"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "laser-core"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",
@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "laser-device"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "hex",
  "if-addrs",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "laser-host"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "laser-api",
  "laser-contracts",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "laser-mcp"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "laser-contracts",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "laser-runtime"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "chrono",
  "dotenvy",
@@ -2771,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "laser-tools"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "laser-contracts",
  "laser-core",
@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "moss-agent"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "getrandom 0.3.4",
  "laser-api",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "moss-desktop"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "moss-home"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "getrandom 0.3.4",
  "laser-api",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "moss-host"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "laser-api",
  "laser-host",
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "moss-mcp-client"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "axum",
  "reqwest",
@@ -3206,14 +3206,14 @@ dependencies = [
 
 [[package]]
 name = "moss-process"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "moss-usb-provision"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "espflash",
  "getrandom 0.3.4",
@@ -3230,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "bzip2",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-host"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3275,7 +3275,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-local-proto"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-providers"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3302,7 +3302,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-server"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "aes",
  "axum",
@@ -3337,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "moss-xiaozhi-display"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "image",
  "moss-xiaozhi-proto",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "moss-xiaozhi-proto"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",

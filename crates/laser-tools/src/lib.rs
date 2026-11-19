@@ -757,6 +757,7 @@ fn hide_console_window(cmd: &mut std::process::Command) -> &mut std::process::Co
 }
 
 const COMMAND_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(target_os = "windows"))]
 const SYSTEM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORTCUT_EXEC_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_CAPTURE_BYTES: usize = 64 * 1024;

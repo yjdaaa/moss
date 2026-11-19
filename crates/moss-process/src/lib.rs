@@ -24,7 +24,7 @@ mod imp {
             use std::os::windows::io::AsRawHandle;
             unsafe {
                 let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                if job == 0 as HANDLE {
+                if job.is_null() {
                     return None;
                 }
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -35,9 +35,7 @@ mod imp {
                     (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 );
-                if configured == 0
-                    || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0
-                {
+                if configured == 0 || AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
                     CloseHandle(job);
                     return None;
                 }

@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-19
+
+### 发布流水线补齐超长变更说明截断，修复两处 Windows 专属 clippy 警告并推进版本至 `0.3.12`（2026-11-19）
+
+- **现象**：自 `v0.3.11` 以来 `CHANGELOG.md` 累计超过 18 万字符，直接作为 GitHub Release 正文会触发 125,000 字符上限 422 失败；此外 `moss-process` 在 `windows-sys 0.59` 下使用 `0 as HANDLE` 与多余 `as HANDLE`，`laser-tools` 的 `SYSTEM_OPEN_TIMEOUT` 仅在非 Windows 分支使用，会在 Windows CI `-D warnings` 报错。
+- **根因与修复**：在 `.github/workflows/release.yml` 发布说明生成器加入按行长度上限（110,000 字符），超长时保留近期条目、门禁说明与完整 `SHA-256` 校验和并附带当前标签 `CHANGELOG.md` 链接；将 `crates/moss-process/src/lib.rs` 的空句柄判断与传参改为 `job.is_null()` 与 `child.as_raw_handle()`，为 `crates/laser-tools/src/lib.rs::SYSTEM_OPEN_TIMEOUT` 补上 `#[cfg(not(target_os = "windows"))]`；将根工作区、`tauri.conf.json`、`frontend/package.json`、`apps/moss-voice-local` 与 `crates/moss-voice-local-proto` 统一升级至 `0.3.12`，并在 `CHANGELOG.md` 归档 `[0.3.12]`。
+- **验证**：`scripts/tests/release-gates.test.mjs` 新增 19 万字符超长说明截断与短说明直通回归测试，`node scripts/verify.mjs --full` 与 `cargo check --workspace --target x86_64-apple-darwin` 全部通过；Windows 专属编译与四端正式包由推送后云端 CI 与 Release 流水线实跑校验。
+- **关联**：`.github/workflows/release.yml`、`scripts/tests/release-gates.test.mjs`、`crates/moss-process/src/lib.rs`、`crates/laser-tools/src/lib.rs`、`Cargo.toml`、`apps/desktop/src-tauri/tauri.conf.json`、`frontend/package.json`、`apps/moss-voice-local/Cargo.toml`、`crates/moss-voice-local-proto/Cargo.toml`、`CHANGELOG.md`。
+
 ### 修正 2026-11-19 重构审查遗留问题
 
 - **现象**：崩溃急停遇到作业表短暂占用时可能漏发，语音走边框的终态回执没有等待上限，部分语音状态仍绕过注入的遥测。画板同步失败会盖掉操作提示，浏览器测试在高负载或子进程卡住时容易误报或挂住。
