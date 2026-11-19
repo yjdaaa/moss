@@ -1876,16 +1876,14 @@ fn voice_frame_checks_material_safety_and_accepts_null_power() {
 fn abandoned_voice_frame_never_starts_moving() {
     let fixture = strict_fixture(false, true);
     let workflow_id = preview_workflow(&fixture.service);
-    let watch: crate::ShortJobWatch =
-        std::sync::Arc::new(std::sync::Mutex::new(crate::ShortJobStart::Abandoned));
-    crate::watch_short_jobs_on_this_thread(Some(watch));
-    let (status, refused) = post_with_ctx(
-        &fixture.service,
+    let watch = crate::ShortJobWatch::new_abandoned();
+    let (status, refused) = fixture.service.dispatch_json_with_watch(
+        "POST",
         "/api/workflow",
         &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
         voice_ctx(),
+        Some(&watch),
     );
-    crate::watch_short_jobs_on_this_thread(None);
     assert_eq!(status, 409, "{refused}");
     assert_eq!(refused["detail"]["error_code"], "short_job_abandoned");
     assert_eq!(fixture.service.active_job_count(), 0);
@@ -1899,18 +1897,17 @@ fn abandoned_voice_frame_never_starts_moving() {
         "放弃后不能运动"
     );
     // 登记了回执、没放弃：开始时回执写入作业编号
-    let watch: crate::ShortJobWatch = std::sync::Arc::default();
-    crate::watch_short_jobs_on_this_thread(Some(watch.clone()));
-    let (status, framed) = post_with_ctx(
-        &fixture.service,
+    let watch = crate::ShortJobWatch::new();
+    let (status, framed) = fixture.service.dispatch_json_with_watch(
+        "POST",
         "/api/workflow",
         &frame_body(&workflow_id, serde_json::json!({"confirmed": true})),
         voice_ctx(),
+        Some(&watch),
     );
-    crate::watch_short_jobs_on_this_thread(None);
     assert_eq!(status, 200, "{framed}");
     assert!(
-        matches!(&*watch.lock().unwrap(), crate::ShortJobStart::Started(id) if id.starts_with("framing-"))
+        matches!(watch.state(), crate::ShortJobStart::Started(id) if id.starts_with("framing-"))
     );
 }
 

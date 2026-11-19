@@ -453,28 +453,13 @@ impl crate::ApiService {
                 return error_response(&ApprovalError::Mismatch);
             }
         };
-        let payload = Value::Object(body).to_string();
-        let request = format!(
-            "POST {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            payload.len(),
-            payload
-        );
-        let raw = self.handle_http_with_ctx(
-            request.as_bytes(),
+        self.dispatch_json(
+            "POST",
+            route,
+            &Value::Object(body),
             CallerContext::Approval {
                 approval_id: record.approval_id.clone(),
             },
-        );
-        let Some(separator) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
-            return (500, crate::failure("执行响应格式错误", None));
-        };
-        let status = String::from_utf8_lossy(&raw[..separator])
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse::<u16>().ok())
-            .unwrap_or(500);
-        let body = serde_json::from_slice(&raw[separator + 4..])
-            .unwrap_or_else(|_| crate::failure("执行响应无法解析", None));
-        (status, body)
+        )
     }
 }

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 消除进程内 HTTP 报文往返与线程局部回执，拆分 `laser-api` 路由与发送链路（2026-11-19）
+
+- **现象**：`laser-host` 与桌面审批执行回调进程内 `ApiService` 时反复拼装/解析原始 HTTP/1.1 报文；语音按预览走边框依赖 `thread_local! SHORT_JOB_WATCH` 隐式传参与 50 ms 轮询循环；急停/停机动作别名表分散在 `laser-contracts`/`laser-api`/`laser-host` 三处；`crates/laser-api/src/routes.rs`（1,542 行）和 `send.rs::launch_send_job_unchecked`（798 行）单体过长难以审读。
+- **根因与修复**：在 `ApiService` 新增进程内类型化入口 `dispatch_json` / `dispatch_json_with_watch`，`laser-host::in_process_request` 与 `laser-api::approval::desktop` 全部改为直接调用，不再经过 HTTP 报文序列化与头解析；删除 `thread_local! SHORT_JOB_WATCH`，改为显式传入条件变量驱动的 `ShortJobWatch`（含 `ShortJobStart::Finished` 终态与 `wait_until_settled`）；在 `laser-contracts` 统一收敛 `is_emergency_stop_action` 与 `is_safe_action_stop_or_halt` 供三方复用；将 `routes.rs` 按领域拆分为 `routes.rs`（入口与传输层）及 `routes/{system,device,workflow,material}.rs` 四个子模块，将 `send.rs::launch_send_job_unchecked` 拆解为顺序清晰的校验、预约、建连登记、预检、脱机/流式执行与终态迁移辅助函数（锁顺序、双 SHA-256 复核与急停安全语义完全保持一致）。同步 `docs/developer/architecture.md`。
+- **验证**：`node scripts/verify.mjs` 全绿（含 `laser-contracts`/`laser-api`/`laser-host` 全部单测及新增 `ShortJobWatch` 条件变量唤醒与 `dispatch_json` 门禁测试，clippy/rustfmt/分层/卫生门禁零警告）；独立增量审查收敛。未接真实雕刻机实机验收（`unverified`）。
+- **关联**：`crates/laser-contracts/src/lib.rs`、`crates/laser-api/src/{jobs,routes,safe_action,send,approval/desktop}.rs`、`crates/laser-api/src/routes/{system,device,workflow,material}.rs`、`crates/laser-host/src/lib.rs`、`docs/developer/architecture.md`。
+
 ### 拆分 `moss-xiaozhi-display` 独立 crate 并收敛 `Session` 67 字段为领域子状态（2026-11-19）
 
 - **现象**：`crates/moss-voice-server` 超过 5.8 万行且捆绑 8.7 MB 静态字库与 ESP-SR 唤醒词资源，修改服务端或对话逻辑会拖带重编译整套字库、画风包与像素渲染；核心会话结构 `Session<'a>` 扁平堆叠 67 个字段，屏幕、打断、后台查询与作业播报职责混杂。

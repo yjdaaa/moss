@@ -46,29 +46,82 @@ impl ActiveJob {
 
 /// 短作业（走边框）的开始回执（2026-11-18，技术书 r52）：内置语音在后台线程里发起走边框，
 /// 等到“这一次”真正开始就先回话；等不及放弃后，同一次请求不得再让机器动。
-/// 由发起请求的线程登记（[`watch_short_jobs_on_this_thread`]），`run_short_device_job` 通过预检后在回执锁内检查是否放弃并发布作业编号。
+/// 经 `ApiService::dispatch_json_with_watch` 显式传入，通过 `Condvar` 立即唤醒（不再依赖 `thread_local!` 或轮询睡眠）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ShortJobStart {
     #[default]
     Waiting,
     Started(String),
+    Finished,
     Abandoned,
 }
 
-pub type ShortJobWatch = std::sync::Arc<std::sync::Mutex<ShortJobStart>>;
-
-thread_local! {
-    static SHORT_JOB_WATCH: std::cell::RefCell<Option<ShortJobWatch>> =
-        const { std::cell::RefCell::new(None) };
+#[derive(Default)]
+pub struct ShortJobWatch {
+    state: std::sync::Mutex<ShortJobStart>,
+    notify: std::sync::Condvar,
 }
 
-/// 为当前线程接下来发起的短作业登记开始回执（`None` 取消登记）。
-pub fn watch_short_jobs_on_this_thread(watch: Option<ShortJobWatch>) {
-    SHORT_JOB_WATCH.with(|slot| *slot.borrow_mut() = watch);
-}
+impl ShortJobWatch {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
 
-pub(crate) fn current_short_job_watch() -> Option<ShortJobWatch> {
-    SHORT_JOB_WATCH.with(|slot| slot.borrow().clone())
+    pub fn new_abandoned() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            state: std::sync::Mutex::new(ShortJobStart::Abandoned),
+            notify: std::sync::Condvar::new(),
+        })
+    }
+
+    pub fn state(&self) -> ShortJobStart {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn lock_state(&self) -> std::sync::MutexGuard<'_, ShortJobStart> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn notify_all(&self) {
+        self.notify.notify_all();
+    }
+
+    /// 后台调用提前结束（未进入开始阶段或已直接返回/panic）：仅当仍处于 Waiting 时标记为 Finished 并唤醒等待者。
+    pub fn mark_finished(&self) {
+        let mut guard = self.lock_state();
+        if *guard == ShortJobStart::Waiting {
+            *guard = ShortJobStart::Finished;
+        }
+        drop(guard);
+        self.notify.notify_all();
+    }
+
+    /// 阻塞等待短作业开始或调用提前结束，直到截止时刻；超时仍未开始则原子置为 Abandoned，阻止后续起动。
+    pub fn wait_until_settled(&self, deadline: std::time::Instant) -> ShortJobStart {
+        let mut guard = self.lock_state();
+        loop {
+            if *guard != ShortJobStart::Waiting {
+                return guard.clone();
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                *guard = ShortJobStart::Abandoned;
+                self.notify.notify_all();
+                return ShortJobStart::Abandoned;
+            }
+            let wait_for = deadline.saturating_duration_since(now);
+            let (next_guard, _) = self
+                .notify
+                .wait_timeout(guard, wait_for)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard = next_guard;
+        }
+    }
 }
 
 pub type ActiveJobs = std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<ActiveJob>>>>;
@@ -481,5 +534,51 @@ pub(crate) fn flush_cancel_feed_hold(job: Option<std::sync::Arc<ActiveJob>>) {
         let _ = job
             .transport
             .write_realtime(laser_device::RealtimeCommand::FeedHold);
+    }
+}
+
+#[cfg(test)]
+mod short_job_watch_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn short_job_watch_wakes_immediately_on_started() {
+        let watch = ShortJobWatch::new();
+        let bg = watch.clone();
+        let started_at = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            {
+                let mut state = bg.lock_state();
+                *state = ShortJobStart::Started("framing-1".to_owned());
+            }
+            bg.notify_all();
+        });
+        let settled = watch.wait_until_settled(Instant::now() + Duration::from_secs(2));
+        assert!(matches!(settled, ShortJobStart::Started(ref id) if id == "framing-1"));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn short_job_watch_wakes_on_mark_finished() {
+        let watch = ShortJobWatch::new();
+        let bg = watch.clone();
+        let started_at = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            bg.mark_finished();
+        });
+        let settled = watch.wait_until_settled(Instant::now() + Duration::from_secs(2));
+        assert!(matches!(settled, ShortJobStart::Finished));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn short_job_watch_abandons_on_timeout() {
+        let watch = ShortJobWatch::new();
+        let settled = watch.wait_until_settled(Instant::now() + Duration::from_millis(30));
+        assert!(matches!(settled, ShortJobStart::Abandoned));
+        assert!(matches!(watch.state(), ShortJobStart::Abandoned));
     }
 }

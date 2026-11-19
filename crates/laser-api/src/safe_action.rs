@@ -330,7 +330,7 @@ impl ApiService {
             None => {}
         }
 
-        if self.is_shutdown_requested() && !matches!(action, "emergency_stop" | "soft_reset") {
+        if self.is_shutdown_requested() && !laser_contracts::is_emergency_stop_action(action) {
             return laser_contracts::ToolCallResult::with_detail(
                 false,
                 "服务正在关闭，已拒绝新的设备操作",
@@ -801,6 +801,7 @@ impl ApiService {
         &self,
         mut object: serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
+        short_job_watch: Option<&std::sync::Arc<crate::jobs::ShortJobWatch>>,
     ) -> Vec<u8> {
         if self.is_shutdown_requested() {
             return http_json(
@@ -858,7 +859,7 @@ impl ApiService {
                 }
             }
         }
-        let response = self.run_framing(&object, ctx);
+        let response = self.run_framing(&object, ctx, short_job_watch);
         let outcome: Result<serde_json::Value, (u16, serde_json::Value)> =
             if response.starts_with(b"HTTP/1.1 200") {
                 Ok(serde_json::Value::Null)
@@ -893,6 +894,7 @@ impl ApiService {
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
+        short_job_watch: Option<&std::sync::Arc<crate::jobs::ShortJobWatch>>,
     ) -> Vec<u8> {
         let Some(workflow_id) = object
             .get("workflow_id")
@@ -1018,7 +1020,7 @@ impl ApiService {
         framing.insert("max_y".into(), serde_json::json!(round(max_y)));
         framing.insert("feed_rate".into(), serde_json::json!(2000));
         framing.insert("power".into(), serde_json::json!(0));
-        let response = self.framing_with_authority(framing, ctx);
+        let response = self.framing_with_authority(framing, ctx, short_job_watch);
         if !response.starts_with(b"HTTP/1.1 200") {
             return response;
         }
@@ -1038,6 +1040,7 @@ impl ApiService {
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
+        short_job_watch: Option<&std::sync::Arc<crate::jobs::ShortJobWatch>>,
     ) -> Vec<u8> {
         let permit = match self.voice_permit(ctx) {
             Ok(permit) => permit,
@@ -1094,7 +1097,7 @@ impl ApiService {
             cancelled_code: "framing_cancelled",
             travel_check: Some(&framing_gcode),
         };
-        let job_id = match self.run_short_device_job(object, permit, lines, &job) {
+        let job_id = match self.run_short_device_job(object, permit, lines, &job, short_job_watch) {
             Ok(job_id) => job_id,
             Err(response) => return response,
         };
@@ -1181,7 +1184,7 @@ impl ApiService {
             cancelled_code: "pointer_fire_cancelled",
             travel_check: None,
         };
-        match self.run_short_device_job(object, None, lines, &job) {
+        match self.run_short_device_job(object, None, lines, &job, None) {
             Ok(job_id) => http_json(
                 200,
                 success(serde_json::json!({
@@ -1204,6 +1207,7 @@ impl ApiService {
         permit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         lines: Vec<String>,
         job_spec: &ShortDeviceJob<'_>,
+        short_job_watch: Option<&std::sync::Arc<crate::jobs::ShortJobWatch>>,
     ) -> Result<String, Vec<u8>> {
         use std::sync::atomic::Ordering;
         let label = job_spec.label;
@@ -1458,12 +1462,7 @@ impl ApiService {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut dropped = Vec::new();
             // 发起方放弃等待后禁止开走；预检已登记的作业在通过检查后才发布开始回执。
-            let watch = crate::jobs::current_short_job_watch();
-            let mut watch_state = watch.as_ref().map(|watch| {
-                watch
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-            });
+            let mut watch_state = short_job_watch.map(|watch| watch.lock_state());
             if watch_state
                 .as_deref()
                 .is_some_and(|state| *state == crate::jobs::ShortJobStart::Abandoned)
@@ -1487,6 +1486,9 @@ impl ApiService {
                 *state = crate::jobs::ShortJobStart::Started(job_id.clone());
             }
             drop(watch_state);
+            if let Some(watch) = short_job_watch {
+                watch.notify_all();
+            }
             dropped
         };
         preflight_cleanup.armed = false;

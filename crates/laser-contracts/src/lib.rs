@@ -244,6 +244,20 @@ pub fn global_voice_telemetry() -> &'static VoiceTelemetry {
     &VOICE_TELEMETRY
 }
 
+/// 归并急停/软复位安全动作判断（单点真相，供 `laser-api`、`laser-host` 等共用）。
+pub fn is_emergency_stop_action(action: &str) -> bool {
+    let norm = action.trim();
+    norm.eq_ignore_ascii_case("emergency_stop") || norm.eq_ignore_ascii_case("soft_reset")
+}
+
+/// 归并停止/暂停类安全动作判断（宿主关停与语音快路径共用）。
+pub fn is_safe_action_stop_or_halt(action: &str) -> bool {
+    let norm = action.trim();
+    is_emergency_stop_action(norm)
+        || norm.eq_ignore_ascii_case("pause")
+        || norm.eq_ignore_ascii_case("stop_framing")
+}
+
 fn unix_now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -385,39 +385,16 @@ pub struct InProcessBackend {
     pub api: Arc<ApiService>,
 }
 
-/// 以给定身份调用进程内 HTTP 处理器，返回（状态码, JSON 响应体）。
+/// 以给定身份直接调用进程内类型化分发入口（不再拼装原始 HTTP/1.1 报文），返回（状态码, JSON 响应体）。
 fn in_process_request(
     api: &ApiService,
     method: &str,
     route: &str,
     body: &serde_json::Value,
     caller: laser_contracts::CallerContext,
+    short_job_watch: Option<&Arc<laser_api::ShortJobWatch>>,
 ) -> Result<(u16, serde_json::Value), String> {
-    let payload = if body.is_null() {
-        String::new()
-    } else {
-        body.to_string()
-    };
-    let request = format!(
-        "{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        payload.len(),
-        payload
-    );
-    let raw = api.handle_http_with_ctx(request.as_bytes(), caller);
-    let separator = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("后端响应缺少头部分隔符")?;
-    let head = String::from_utf8_lossy(&raw[..separator]);
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or("后端响应状态行无法解析")?;
-    let body = serde_json::from_slice(&raw[separator + 4..])
-        .unwrap_or_else(|_| serde_json::json!({"success": status < 400, "result": String::from_utf8_lossy(&raw[separator + 4..])}));
-    Ok((status, body))
+    Ok(api.dispatch_json_with_watch(method, route, body, caller, short_job_watch))
 }
 
 impl laser_mcp::HostBackend for InProcessBackend {
@@ -434,6 +411,7 @@ impl laser_mcp::HostBackend for InProcessBackend {
             route,
             body,
             laser_contracts::CallerContext::McpBridge,
+            None,
         )
     }
 
@@ -467,6 +445,7 @@ pub struct VoiceBackend {
     pub api: Arc<ApiService>,
     pub device_id: String,
     pub session_id: String,
+    pub short_job_watch: Option<Arc<laser_api::ShortJobWatch>>,
 }
 
 impl VoiceBackend {
@@ -485,7 +464,14 @@ impl laser_mcp::HostBackend for VoiceBackend {
         route: &str,
         body: &serde_json::Value,
     ) -> Result<(u16, serde_json::Value), String> {
-        in_process_request(&self.api, method, route, body, self.caller())
+        in_process_request(
+            &self.api,
+            method,
+            route,
+            body,
+            self.caller(),
+            self.short_job_watch.as_ref(),
+        )
     }
 
     fn strict_mode(&self) -> bool {
@@ -542,26 +528,32 @@ pub fn voice_tools_list(api: &ApiService) -> serde_json::Value {
 /// 让用户走到一半能说“暂停 / 继续 / 不走了”。没开始就结束的（未确认、门禁拒绝、严格模式待批准、
 /// 连接或预检失败）照常返回结果；走边框本身仍在后台按原流程执行，急停与停止目标不变。
 fn voice_frame_call(
-    backend: VoiceBackend,
+    mut backend: VoiceBackend,
     arguments: &serde_json::Value,
 ) -> laser_contracts::ToolCallResult {
     use laser_api::ShortJobStart;
     // 语音工具 30 秒超时（moss-voice-server `tool_timeout`），这里更早放弃，放弃后同一次请求不会再让机器动
     const START_WAIT: Duration = Duration::from_secs(20);
-    let watch: laser_api::ShortJobWatch = Arc::default();
+    let watch = laser_api::ShortJobWatch::new();
+    backend.short_job_watch = Some(watch.clone());
     let arguments = arguments.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     {
-        let watch = watch.clone();
+        struct FinishWatchOnDrop(Arc<laser_api::ShortJobWatch>);
+        impl Drop for FinishWatchOnDrop {
+            fn drop(&mut self) {
+                self.0.mark_finished();
+            }
+        }
+        let watch_guard = FinishWatchOnDrop(watch.clone());
         std::thread::spawn(move || {
-            laser_api::watch_short_jobs_on_this_thread(Some(watch));
+            let _guard = watch_guard;
             let result = laser_mcp::dispatch_tool_call_with(
                 "laser_workflow_tool",
                 &arguments,
                 false,
                 Some(&backend),
             );
-            laser_api::watch_short_jobs_on_this_thread(None);
             let _ = tx.send(result);
         });
     }
@@ -573,28 +565,17 @@ fn voice_frame_call(
         ))
     };
     let deadline = std::time::Instant::now() + START_WAIT;
-    loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(result) => return result,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return laser_contracts::ToolCallResult::err(
-                    "走边框没有执行完，结果未知，请看电脑上的 MOSS",
-                );
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let mut state = watch
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let ShortJobStart::Started(job_id) = &*state {
-            return started_reply(job_id);
-        }
-        if std::time::Instant::now() > deadline {
-            *state = ShortJobStart::Abandoned;
-            return laser_contracts::ToolCallResult::err(
-                "连接或检查机器太慢，这次走边框已放弃，机器不会再动；请看电脑上的 MOSS，确认机器正常后再说一次",
-            );
-        }
+    match watch.wait_until_settled(deadline) {
+        ShortJobStart::Started(job_id) => started_reply(&job_id),
+        ShortJobStart::Abandoned => laser_contracts::ToolCallResult::err(
+            "连接或检查机器太慢，这次走边框已放弃，机器不会再动；请看电脑上的 MOSS，确认机器正常后再说一次",
+        ),
+        ShortJobStart::Finished | ShortJobStart::Waiting => match rx.recv() {
+            Ok(result) => result,
+            Err(_) => laser_contracts::ToolCallResult::err(
+                "走边框没有执行完，结果未知，请看电脑上的 MOSS",
+            ),
+        },
     }
 }
 
@@ -608,14 +589,10 @@ pub fn voice_tool_call(
 ) -> laser_contracts::ToolCallResult {
     if api.is_shutdown_requested() {
         let is_stop = name == "laser_safe_action_tool"
-            && matches!(
-                arguments
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    .as_deref(),
-                Some("emergency_stop" | "soft_reset" | "pause" | "stop_framing")
-            );
+            && arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(laser_contracts::is_safe_action_stop_or_halt);
         if !is_stop {
             return laser_contracts::ToolCallResult::with_detail(
                 false,
@@ -648,6 +625,7 @@ pub fn voice_tool_call(
         api: api.clone(),
         device_id: device_id.to_owned(),
         session_id: session_id.to_owned(),
+        short_job_watch: None,
     };
     if name == "laser_workflow_tool" && arguments["action"].as_str().map(str::trim) == Some("frame")
     {
@@ -700,7 +678,7 @@ pub fn voice_recent_workflows(
     };
     let body = serde_json::json!({"action": "recent"});
     let (status, response) =
-        in_process_request(api, "POST", "/api/workflow", &body, make_caller()).ok()?;
+        in_process_request(api, "POST", "/api/workflow", &body, make_caller(), None).ok()?;
     if status >= 400 {
         return None;
     }
@@ -717,6 +695,7 @@ pub fn voice_recent_workflows(
             "/api/jobs/stop-targets",
             &serde_json::Value::Null,
             make_caller(),
+            None,
         )
         && let Some(jobs) = targets_res["result"]["jobs"].as_array()
         && let Some(items) = result["workflows"].as_array_mut()
