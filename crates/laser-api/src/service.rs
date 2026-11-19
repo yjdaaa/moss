@@ -69,7 +69,35 @@ impl ApiService {
             verified_connection: std::sync::RwLock::new(None),
             voice_sessions: Default::default(),
             shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_telemetry: laser_contracts::global_mcp_telemetry_arc(),
+            voice_telemetry: laser_contracts::global_voice_telemetry_arc(),
         }
+    }
+
+    /// 注入隔离的 MCP 遥测实例（默认使用进程级全局单例）。
+    pub fn with_mcp_telemetry(
+        mut self,
+        telemetry: std::sync::Arc<laser_contracts::McpTelemetry>,
+    ) -> Self {
+        self.mcp_telemetry = telemetry;
+        self
+    }
+
+    /// 注入隔离的语音会话遥测实例（默认使用进程级全局单例）。
+    pub fn with_voice_telemetry(
+        mut self,
+        telemetry: std::sync::Arc<laser_contracts::VoiceTelemetry>,
+    ) -> Self {
+        self.voice_telemetry = telemetry;
+        self
+    }
+
+    pub fn mcp_telemetry(&self) -> &std::sync::Arc<laser_contracts::McpTelemetry> {
+        &self.mcp_telemetry
+    }
+
+    pub fn voice_telemetry(&self) -> &std::sync::Arc<laser_contracts::VoiceTelemetry> {
+        &self.voice_telemetry
     }
 
     /// 严格模式开关（来自 `MOSS_FUSION_STRICT`，见 [`laser_runtime::config::fusion_strict_from_env`]）。

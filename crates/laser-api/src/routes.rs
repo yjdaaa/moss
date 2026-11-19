@@ -300,4 +300,54 @@ mod dispatch_json_tests {
         assert_eq!(lan_status, 403);
         assert_eq!(lan_body["success"], false);
     }
+
+    #[test]
+    fn injected_telemetry_is_isolated_from_process_globals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"voice":{"mode":"builtin"}}"#,
+        )
+        .expect("write settings");
+        let mcp = std::sync::Arc::new(laser_contracts::McpTelemetry::new());
+        mcp.record_client_info("isolated-client", "9.9.9");
+        let voice = std::sync::Arc::new(laser_contracts::VoiceTelemetry::new());
+        voice.set_device_sessions(Some(7));
+        voice.set_pulse(Some("speaking"), 88);
+
+        let service = ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 8766,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+        .with_runtime_path(dir.path().to_path_buf())
+        .with_mcp_telemetry(mcp)
+        .with_voice_telemetry(voice);
+
+        let (status, info) = service.dispatch_json(
+            "GET",
+            "/api/system/info",
+            &serde_json::Value::Null,
+            laser_contracts::CallerContext::Loopback,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            info["result"]["mcp"]["client_info"],
+            "isolated-client v9.9.9"
+        );
+        assert_eq!(info["result"]["voice"]["device_sessions"], 7);
+        assert_eq!(info["result"]["voice"]["phase"], "speaking");
+        assert_eq!(info["result"]["voice"]["level"], 88);
+        assert_ne!(
+            laser_contracts::global_mcp_telemetry()
+                .snapshot()
+                .client_name,
+            "isolated-client"
+        );
+    }
 }

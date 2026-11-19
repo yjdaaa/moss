@@ -35,7 +35,7 @@ impl HttpsHomeTransport {
         // Production GET and POST share the identical one-time DNS/IP pinning
         // policy, TLS verification, proxy exclusion and redirect denial.
         #[cfg(not(test))]
-        let client = moss_voice::home_readonly::pinned_client(&url).map_err(|_| ())?;
+        let client = crate::home_readonly::pinned_client(&url).map_err(|_| ())?;
         #[cfg(test)]
         let client = Client::builder()
             .https_only(true)

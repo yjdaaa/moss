@@ -1,0 +1,18 @@
+[package]
+name = "moss-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "跨平台子进程生命周期守卫（Windows Job Object 进程树托管），消除孤儿本地模型与网关进程。"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

@@ -3,6 +3,8 @@
 //! 2026-10-14 用户决定：不再用源码常量锁住。用户在私密窗口填好地址、令牌、勾选实体并
 //! 明确同意语音控制后即开启；每个动作仍逐次在桌面批准，结果未知时不自动重发。
 
+pub mod home_backup_audit;
+pub mod home_readonly;
 // 白名单策略、审批后执行与 HTTPS 传输（原 laser-host 私有模块）
 mod voice_home;
 
@@ -17,7 +19,7 @@ use laser_contracts::{
     ApprovalConnection, ApprovalKind, ApprovalSource, ApprovalStatus, CallerContext,
 };
 use laser_runtime::RuntimeDb;
-use moss_voice::{home_readonly, settings::BuiltinHomeAssistant};
+use moss_voice::settings::BuiltinHomeAssistant;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;

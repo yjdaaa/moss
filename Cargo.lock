@@ -3205,6 +3205,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "moss-process"
+version = "0.3.11"
+dependencies = [
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "moss-usb-provision"
 version = "0.3.11"
 dependencies = [
@@ -3230,13 +3237,13 @@ dependencies = [
  "flate2",
  "laser-contracts",
  "moss-mcp-client",
+ "moss-process",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3282,6 +3289,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "getrandom 0.3.4",
+ "moss-process",
  "moss-voice-local-proto",
  "reqwest",
  "rustls",
@@ -3290,7 +3298,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "webpki-roots 1.0.9",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

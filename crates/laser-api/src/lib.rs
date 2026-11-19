@@ -128,6 +128,9 @@ pub struct ApiService {
     voice_sessions: voice_authority::VoiceSessions,
     /// 宿主关停门禁：关停清点前置位，拒绝所有新启动的连接、发码与设备操作（急停现有在途/待确认通道除外）。
     shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// MCP 与内置语音遥测实例：默认共享进程全局单例，测试或独立宿主可注入隔离实例避免并行串味。
+    mcp_telemetry: std::sync::Arc<laser_contracts::McpTelemetry>,
+    voice_telemetry: std::sync::Arc<laser_contracts::VoiceTelemetry>,
 }
 
 fn unix_seconds() -> u64 {

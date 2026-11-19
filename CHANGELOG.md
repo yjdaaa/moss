@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 收口 `moss-home` 家居模块、统一 `moss-process` 进程树守卫修复本地 helper 孤儿泄漏，并支持可注入遥测（2026-11-19）
+
+- **现象**：家居只读发现 `home_readonly` 与历史备份审计 `home_backup_audit` 滞留在语音层 `moss-voice` 中但只被 `moss-home` 与桌面层使用；Windows `JobHandle` 在 `moss-voice/src/job.rs` 与 `moss-voice-providers/src/speech_cpp.rs` 重复实现，且 `moss-voice-providers/src/local.rs` 启动 `moss-voice-local` 漏挂 Job Object（Windows 异常退出时可能残留孤儿进程）；`ApiService` 与 `laser-mcp` 硬编码读取全局遥测单例，阻碍并行测试隔离。
+- **根因与修复**：新增第 0 层无业务依赖 crate `crates/moss-process` 统一提供 `JobHandle`（`KILL_ON_JOB_CLOSE`），移除 `moss-voice` 与 `moss-voice-providers` 的重复实现及各自的 `windows-sys` 依赖，并在 `moss-voice-providers/src/local.rs::LocalHelper::spawn` 挂载 `JobHandle`（随 `invalidate` 与 `Drop` 终止整棵进程树）；将 `home_readonly` 与 `home_backup_audit` 迁移至 `crates/moss-home` 并同步 `moss-voice-host` 与桌面壳引用；在 `laser-contracts` 开放 `VoiceTelemetry::new` 与 `global_*_telemetry_arc`，为 `ApiService` 增加 `with_mcp_telemetry`/`with_voice_telemetry` 依赖注入（默认共享全局单例），为 `laser_mcp::HostBackend` 增加 `mcp_telemetry()` 默认方法并贯通 `laser-host` 的 `InProcessBackend`、`VoiceBackend`、`mcp_overview` 与桥接入口。同步 `scripts/check-crate-layers.mjs` 与 `docs/developer/architecture.md`。
+- **验证**：`node scripts/verify.mjs` 全绿（含新增 `moss-process` 线程安全校验、`ApiService` 与 `laser-host` 遥测隔离单测、全部 21 个工作区 crate 与 51 项脚本单测及 356 项前端单测，clippy/rustfmt/分层/卫生门禁零警告）；独立增量审查收敛。Windows Job Object 实机进程树回收未在 macOS 验证（`unverified`）。
+- **关联**：`crates/moss-process/`、`crates/moss-home/src/{lib,home_readonly,home_backup_audit,voice_home/https_transport}.rs`、`crates/moss-voice/{Cargo.toml,src/lib.rs,src/job.rs}`、`crates/moss-voice-providers/{Cargo.toml,src/local.rs,src/speech_cpp.rs}`、`crates/laser-{contracts,api,mcp,host}/src/`、`crates/moss-voice-host/src/{lib,builtin/home}.rs`、`apps/desktop/src-tauri/src/voice_builtin.rs`、`scripts/check-crate-layers.mjs`、`docs/developer/{architecture,safety}.md`。
+
 ### 从桌面壳抽出 `moss-voice-host` 独立 crate，瘦身 `apps/desktop/src-tauri`（2026-11-19）
 
 - **现象**：桌面壳 `apps/desktop/src-tauri` 膨胀至 2.4 万余行，其中约 1.9 万行内置语音服务与长期记忆编排（`voice_builtin/imp/*`、`voice_context/host/*`）几乎无 Tauri/UI 耦合（仅 10 处调用 `tauri::async_runtime`），却迫使所有语音后端改动与测试绑定 Tauri 重编译，且桌面壳直接引入 16 个冗余依赖。

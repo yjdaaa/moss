@@ -14,6 +14,7 @@ members = [
     "crates/moss-agent",
     "crates/moss-home",
     "crates/moss-mcp-client",
+    "crates/moss-process",
     "crates/moss-usb-provision",
     "crates/moss-voice",
     "crates/moss-voice-local-proto",

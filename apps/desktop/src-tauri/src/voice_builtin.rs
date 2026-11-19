@@ -692,12 +692,12 @@ pub async fn voice_home_backup_audit(
             return Ok(Value::Null);
         };
         let path=picked.into_path().map_err(|_|serde_json::json!({"code":"home_audit_invalid","message":"无法识别所选文件"}))?;
-        let audit=moss_voice::home_backup_audit::audit_selected_file(&path)
+        let audit=moss_voice_host::home_backup_audit::audit_selected_file(&path)
             .map_err(|_|serde_json::json!({"code":"home_audit_invalid","message":"文件不符合只读安全审计条件（路径、类型或大小）"}))?;
         let category=match audit.risk {
-            moss_voice::home_backup_audit::BackupRisk::SuspectedLegacyCredential=>"suspected_legacy_credential",
-            moss_voice::home_backup_audit::BackupRisk::EncryptedCredentialMaterial=>"encrypted_credential_material",
-            moss_voice::home_backup_audit::BackupRisk::UnknownTreatAsSensitive=>"unknown_treat_as_sensitive",
+            moss_voice_host::home_backup_audit::BackupRisk::SuspectedLegacyCredential=>"suspected_legacy_credential",
+            moss_voice_host::home_backup_audit::BackupRisk::EncryptedCredentialMaterial=>"encrypted_credential_material",
+            moss_voice_host::home_backup_audit::BackupRisk::UnknownTreatAsSensitive=>"unknown_treat_as_sensitive",
         };
         Ok(serde_json::json!({"risk":category,"inspected_bytes":audit.inspected_bytes,"safe_to_share":false}))
     }).await.map_err(|_|serde_json::json!({"code":"home_audit_failed","message":"历史文件审计未完成"}))?;

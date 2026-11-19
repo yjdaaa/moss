@@ -16,8 +16,6 @@
 pub mod builtin;
 mod center;
 pub mod colab;
-pub mod home_backup_audit;
-pub mod home_readonly;
 pub mod job;
 pub mod laya_env;
 pub mod local_models;

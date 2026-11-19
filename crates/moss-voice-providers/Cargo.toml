@@ -15,6 +15,7 @@ reqwest = { workspace = true, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["sync", "time", "rt", "net", "macros"] }
 # 本地模型辅助程序的帧协议（NV6）
 moss-voice-local-proto = { path = "../moss-voice-local-proto" }
+moss-process = { path = "../moss-process" }
 # 豆包流式识别与合成（NV7）：WebSocket 客户端与 axum 共用 tokio-tungstenite 0.29；TLS 用 rustls（明确指定 ring 与内置根证书）
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 rustls.workspace = true
@@ -23,14 +24,6 @@ futures-util = { workspace = true, features = ["sink", "std"] }
 # 豆包识别帧的 gzip 压缩
 flate2.workspace = true
 getrandom.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }

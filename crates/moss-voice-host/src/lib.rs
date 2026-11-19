@@ -7,6 +7,7 @@ mod builtin;
 pub mod context;
 
 pub use builtin::{BuiltinState, BuiltinVoice, autostart, init, parse_sections, record_moss_event};
+pub use moss_home::home_backup_audit;
 
 fn fallback_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();

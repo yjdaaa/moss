@@ -16,7 +16,7 @@
 
 | 层 | crate | 可依赖 |
 | --- | --- | --- |
-| 0 边界与通用库 | `laser-contracts`、`moss-xiaozhi-proto`、`moss-voice-local-proto`、`moss-mcp-client` | 仓库内无 |
+| 0 边界与通用库 | `laser-contracts`、`moss-xiaozhi-proto`、`moss-voice-local-proto`、`moss-mcp-client`、`moss-process` | 仓库内无 |
 | 1 共享运行时 | `laser-runtime`（运行目录、配置、SQLite 与各类存储、密钥，激光与语音共用） | 第 0 层 |
 | 2 激光域 | `laser-core`、`laser-device`、`laser-tools`、`laser-mcp`、`laser-api` | 第 0、1 层与本域 |
 | 2 语音域 | `moss-voice`、`moss-voice-providers`、`moss-xiaozhi-display`、`moss-voice-server`、`moss-usb-provision` | 第 0、1 层与本域 |
@@ -46,7 +46,8 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 | `laser-api` | HTTP 服务与业务编排：所有 `/api/*`、`/v1/*` 路由（按系统/设备/工作流/材料拆分子模块并暴露进程内类型化入口 `dispatch_json`），workflow 状态机，发送门禁与 `JobWorker` 调度，材料实验室，局域网配对，桌面会话、严格模式与桌面审批（`approval.rs`），前端静态资源 | `ApiService`、`dispatch_json`、`ShortJobWatch`、`AuthManager`、`abort_all_active_jobs`、`ApprovalService`、`require_r3_authority` |
 | `laser-host` | 组装层：初始化运行目录、配置、数据库、`ApiService`，启动 HTTP 与 MCP 桥，全局退出协调器，语音工具分发与第三方 MCP 接线（`external_mcp`） | `HostApplication`、`InProcessBackend`、`ShutdownCoordinator`、`voice_tool_call`、`external_mcp::ExternalMcp` |
 | `moss-agent` | 本机 Agent（NV13，Claude Code / Codex）：CLI 识别与参数校验、Windows Job Object / Unix 进程组受限运行器、桌面单次审批桥 | `AgentCoordinator`、`AgentRunner`、`detect_cli`、`Provider` |
-| `moss-home` | 家居控制（NV15，Home Assistant）：实体白名单策略、逐次桌面审批、HTTPS 传输与结果核验；只持宿主弱引用 | `HomeControlCoordinator` |
+| `moss-home` | 家居控制与只读发现（NV15，Home Assistant）：只读实体发现（`home_readonly`）、历史备份只读审计（`home_backup_audit`）、实体白名单策略、逐次桌面审批、HTTPS 传输与结果核验；只持宿主弱引用 | `HomeControlCoordinator`、`home_readonly`、`home_backup_audit` |
+| `moss-process` | 第 0 层跨平台子进程生命周期守卫：Windows Job Object（`KILL_ON_JOB_CLOSE`）进程树托管句柄，供 OneJev / 本地视觉 / Laya / `moss-voice-local` / `speech.cpp` 共用 | `JobHandle` |
 | `moss-usb-provision` | 小智 USB 一键配网：串口枚举与激光串口避让、`espflash` 读写 NVS、写后芯片侧 MD5 校验与失败写回、预签设备令牌并登记“已允许”；激光占用、设备密钥由桌面壳传入 | `provision`、`execute_usb_provision_with`、`UsbFlasherSession`、`sweep_usb_temp_dir` |
 | `moss-xiaozhi-display` | 小智彩屏渲染、护目镜小机器人动图、中文字库与 `glyph_push` 动态字模补齐、全屏画风与唤醒词 `assets.bin` 纯构造（承载 4.8 MB 字库与 3.9 MB ESP-SR 模型，零网络与异步依赖） | `glyph_font::GlyphFontService`、`goggle_bot`、`render`、`screen_pack`、`wake_pack` |
 | `moss-voice-host` | 内置语音与长期记忆宿主总装配（零 Tauri/UI 依赖）：`BuiltinVoice` 生命周期、设备登记、本地模型/Colab/视觉/家居/声纹/固件/唤醒词/USB 配网编排、`ContextHost` 长期记忆与资料库 | `BuiltinVoice`、`BuiltinState`、`init`、`autostart`、`record_moss_event`、`context::ContextHost` |
@@ -81,7 +82,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 - crate `crates/moss-voice` 不依赖 Tauri，由 `apps/desktop/src-tauri` 在非 Android / iOS 目标引入（`src/voice.rs`，Tauri 命令见 [接口契约](api-contracts.md) §5）；`laser-host` 的 `external_mcp`（同样限非移动目标）与 `moss-agent`、`moss-home`、`moss-usb-provision` 只用其设置读写；`laser-api`、`moss-host`、Android 不包含进程管理代码。
 - `VoiceCenter` 编排页面操作；MOSS 后端的能力经 `HostHooks` 交入：严格模式状态（只读展示；开关由 `voice_strict_set` 写 `.env` 并热切换）、小智桥重连（`HostApplication::restart_mcp_bridge`：先停旧桥、等待其退出，再按 `settings.json` 接新桥）、桥连接状态、设备会话数（切到官方时清零；内置链路由内置服务写 `laser_contracts::global_voice_telemetry`，`/api/system/info` 的 `voice.device_sessions` 读取）、内置服务启停。
 - 链路切换：官方 / 内置二选一，切换不改 `mcp_endpoint` 与严格模式，只写 `settings.json` 的 `voice.mode` 并启停内置服务，失败恢复设置与内置服务。2026-11-17 起自建服务端链路连代码删除（原 `supervisor` 子进程管理、`config_yaml` 模型向导、`health` 接入点健康检查、服务端日志与“自建链路强制严格模式”一并移除）。旧设置里的 `voice.mode = "self_hosted"` 读作 `builtin`，桌面端在后端初始化后、启动小智桥前调用 `moss_voice::settings::migrate_legacy_self_hosted` 一次性改写（有官方接入点备份则写回顶层 `mcp_endpoint`）。
-- 子进程句柄：内置服务的本地进程（OneJev、本地视觉、Laya）共用 `moss_voice::job::JobHandle`（Windows Job Object，随 MOSS 关闭结束进程树）。
+- 子进程句柄：内置服务的全部本地子进程（OneJev、本地视觉、Laya、`moss-voice-local`、`speech.cpp`）统一共用 `moss_process::JobHandle`（Windows Job Object `KILL_ON_JOB_CLOSE`，随 MOSS 关闭或异常退出结束进程树）。
 - 退出顺序：`ShutdownState::request()`（急停与任务清零）→ 停止内置语音服务与第三方 MCP 子进程 → 退出。
 
 ## 4c. 内置语音服务（NV，仅桌面端，建设中）

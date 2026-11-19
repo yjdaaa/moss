@@ -53,6 +53,7 @@ struct Inner {
     next_stream: AtomicU64,
     alive: AtomicBool,
     child: Mutex<Option<Child>>,
+    job: Mutex<Option<moss_process::JobHandle>>,
     pacing: Mutex<Pacing>,
 }
 
@@ -133,6 +134,11 @@ impl Inner {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
+        if let Ok(mut job) = self.job.lock()
+            && let Some(job) = job.take()
+        {
+            job.terminate();
+        }
         if let Ok(mut child) = self.child.lock()
             && let Some(child) = child.as_mut()
         {
@@ -143,6 +149,11 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        if let Ok(mut job) = self.job.lock()
+            && let Some(job) = job.take()
+        {
+            job.terminate();
+        }
         if let Ok(mut child) = self.child.lock()
             && let Some(mut child) = child.take()
         {
@@ -291,6 +302,7 @@ impl LocalHelper {
         let mut child = command
             .spawn()
             .map_err(|error| ProviderError::new(format!("本地模型程序启动失败：{error}")))?;
+        let job = moss_process::JobHandle::for_child(&child);
         let stdin = child
             .stdin
             .take()
@@ -300,6 +312,9 @@ impl LocalHelper {
             .take()
             .ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输出"))?;
         let helper = Self::from_streams(Box::new(stdout), Box::new(stdin));
+        if let Ok(mut slot) = helper.inner.job.lock() {
+            *slot = job;
+        }
         if let Ok(mut slot) = helper.inner.child.lock() {
             *slot = Some(child);
         }
@@ -317,6 +332,7 @@ impl LocalHelper {
             next_stream: AtomicU64::new(1),
             alive: AtomicBool::new(true),
             child: Mutex::new(None),
+            job: Mutex::new(None),
             pacing: Mutex::new(Pacing::default()),
         });
         let weak_writer = Arc::downgrade(&inner);
@@ -377,6 +393,11 @@ impl LocalHelper {
         self.inner.alive.store(false, Ordering::SeqCst);
         if let Ok(mut pending) = self.inner.pending.lock() {
             pending.clear();
+        }
+        if let Ok(mut job) = self.inner.job.lock()
+            && let Some(job) = job.take()
+        {
+            job.terminate();
         }
         if let Ok(mut slot) = self.inner.child.lock()
             && let Some(mut child) = slot.take()

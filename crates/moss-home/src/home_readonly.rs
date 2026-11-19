@@ -1,6 +1,6 @@
 //! NV15 trusted desktop-initiated *read-only* HA discovery. No service POST,
 //! arbitrary URL forwarding, control approval or voice tool is provided here.
-use crate::settings::BuiltinHomeAssistant;
+use moss_voice::settings::BuiltinHomeAssistant;
 use reqwest::{StatusCode, Url, blocking::Client, header, redirect::Policy};
 use serde::Serialize;
 use serde_json::Value;
@@ -374,7 +374,7 @@ pub fn discover_guarded<F: Fn() -> bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{BuiltinHomeEntity, HomeApprovalPreference};
+    use moss_voice::settings::{BuiltinHomeEntity, HomeApprovalPreference};
     fn config() -> BuiltinHomeAssistant {
         BuiltinHomeAssistant {
             enabled: false,

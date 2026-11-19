@@ -80,7 +80,7 @@ impl HomeHost for DesktopHomeHost {
             }
         };
         let discovered =
-            moss_voice::home_readonly::discover_guarded(&config, &token, policy, revision, || {
+            moss_home::home_readonly::discover_guarded(&config, &token, policy, revision, || {
                 self.permitted(context)
                     && self.current().is_some_and(|(latest, p, r, _)| {
                         latest == config && p == policy && r == revision
@@ -100,7 +100,7 @@ impl HomeHost for DesktopHomeHost {
                         "attributes":entity.attributes,"actions_available":entity.actions_available}),
                 None => deny("home_unknown_entity"),
             },
-            Err(moss_voice::home_readonly::DiscoveryError::Unauthorized) => {
+            Err(moss_home::home_readonly::DiscoveryError::Unauthorized) => {
                 deny("home_unauthorized")
             }
             Err(_) => deny("home_unavailable"),
@@ -478,7 +478,7 @@ impl BuiltinVoice {
     /// Explicit trusted main-window read-only discovery; never sends a
     /// Home Assistant service POST and never exposes the bearer token.
     pub fn home_discover(&self) -> Result<Value, CenterError> {
-        use moss_voice::home_readonly::{self, DiscoveryError};
+        use moss_home::home_readonly::{self, DiscoveryError};
         let (settings, policy_revision) =
             moss_voice::settings::read_home_offline(&self.settings_file())
                 .map_err(|_| CenterError::new("home_unavailable", 409, "无法安全读取家居白名单"))?;

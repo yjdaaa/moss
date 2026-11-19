@@ -165,10 +165,16 @@ pub struct McpTelemetry {
     data: Mutex<McpTelemetrySnapshot>,
 }
 
-static MCP_TELEMETRY: OnceLock<McpTelemetry> = OnceLock::new();
+static MCP_TELEMETRY: OnceLock<std::sync::Arc<McpTelemetry>> = OnceLock::new();
+
+pub fn global_mcp_telemetry_arc() -> std::sync::Arc<McpTelemetry> {
+    MCP_TELEMETRY
+        .get_or_init(|| std::sync::Arc::new(McpTelemetry::new()))
+        .clone()
+}
 
 pub fn global_mcp_telemetry() -> &'static McpTelemetry {
-    MCP_TELEMETRY.get_or_init(McpTelemetry::new)
+    MCP_TELEMETRY.get_or_init(|| std::sync::Arc::new(McpTelemetry::new()))
 }
 
 /// 内置链路的设备会话数（技术书 §9.4.5）：由桌面端内置语音服务写入，
@@ -180,8 +186,14 @@ pub struct VoiceTelemetry {
     pulse_packed: std::sync::atomic::AtomicU16,
 }
 
+impl Default for VoiceTelemetry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VoiceTelemetry {
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             device_sessions: std::sync::atomic::AtomicI64::new(-1),
             pulse_packed: std::sync::atomic::AtomicU16::new(0),
@@ -238,10 +250,16 @@ impl VoiceTelemetry {
     }
 }
 
-static VOICE_TELEMETRY: VoiceTelemetry = VoiceTelemetry::new();
+static VOICE_TELEMETRY: OnceLock<std::sync::Arc<VoiceTelemetry>> = OnceLock::new();
+
+pub fn global_voice_telemetry_arc() -> std::sync::Arc<VoiceTelemetry> {
+    VOICE_TELEMETRY
+        .get_or_init(|| std::sync::Arc::new(VoiceTelemetry::new()))
+        .clone()
+}
 
 pub fn global_voice_telemetry() -> &'static VoiceTelemetry {
-    &VOICE_TELEMETRY
+    VOICE_TELEMETRY.get_or_init(|| std::sync::Arc::new(VoiceTelemetry::new()))
 }
 
 /// 归并急停/软复位安全动作判断（单点真相，供 `laser-api`、`laser-host` 等共用）。

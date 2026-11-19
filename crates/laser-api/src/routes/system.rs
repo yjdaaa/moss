@@ -228,7 +228,7 @@ impl ApiService {
             .unwrap_or(false);
 
         let mcp_endpoint = configured_mcp_endpoint(self.runtime_path.as_deref());
-        let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
+        let telemetry = self.mcp_telemetry.snapshot();
         let include_mcp_details = !matches!(
             ctx,
             laser_contracts::CallerContext::Lan { pairing_id } if pairing_id.is_empty()
@@ -256,7 +256,7 @@ impl ApiService {
                 "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count, include_mcp_details),
                 // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端内置语音服务
                 // 上报，官方链路或未知时为 null（技术书 §9.4.5）
-                "voice": voice_status_json(self.runtime_path.as_deref())
+                "voice": voice_status_json(self.runtime_path.as_deref(), self.voice_telemetry.as_ref())
             })),
         )
     }

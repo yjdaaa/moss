@@ -65,6 +65,18 @@ pub trait HostBackend: Send + Sync {
     fn default_connection(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
         None
     }
+
+    /// MCP 遥测实例（默认复用进程级全局单例；宿主或测试可注入隔离实例避免并行测试串味）。
+    fn mcp_telemetry(&self) -> &McpTelemetry {
+        global_mcp_telemetry()
+    }
+}
+
+fn telemetry_for(backend: Option<&dyn HostBackend>) -> &McpTelemetry {
+    match backend {
+        Some(backend) => backend.mcp_telemetry(),
+        None => global_mcp_telemetry(),
+    }
 }
 
 /// n73 需要连接机器的工具。
@@ -878,7 +890,7 @@ pub fn dispatch_tool_call_with(
     } else {
         "（未知工具）"
     };
-    global_mcp_telemetry().record_tool_call(counted, &caller, outcome);
+    telemetry_for(backend).record_tool_call(counted, &caller, outcome);
     result
 }
 
@@ -1394,6 +1406,7 @@ pub fn handle_json_rpc_with(
 ) -> Option<serde_json::Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id")?;
+    let telemetry = telemetry_for(backend);
     match method {
         "initialize" => {
             // 只记录对方真实上报的客户端信息；未上报时留空，不编造名称。
@@ -1405,15 +1418,15 @@ pub fn handle_json_rpc_with(
                 .pointer("/params/clientInfo/version")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            global_mcp_telemetry().record_client_info(client_name, client_ver);
-            global_mcp_telemetry().record_protocol_version(PROTOCOL_VERSION);
+            telemetry.record_client_info(client_name, client_ver);
+            telemetry.record_protocol_version(PROTOCOL_VERSION);
             let shown = match (client_name.is_empty(), client_ver.is_empty()) {
                 (true, _) => "未上报".to_owned(),
                 (false, true) => client_name.to_owned(),
                 (false, false) => format!("{client_name} v{client_ver}"),
             };
-            global_mcp_telemetry().record_event(&format!("[RECV] initialize (client: {shown})"));
-            global_mcp_telemetry().record_event(&format!(
+            telemetry.record_event(&format!("[RECV] initialize (client: {shown})"));
+            telemetry.record_event(&format!(
                 "[SEND] initialize 握手响应 (protocol: {PROTOCOL_VERSION}, server: {SERVER_NAME})"
             ));
             Some(serde_json::json!({
@@ -1427,14 +1440,14 @@ pub fn handle_json_rpc_with(
             }))
         }
         "ping" => {
-            global_mcp_telemetry().record_event("[PING] 心跳保持正常");
+            telemetry.record_event("[PING] 心跳保持正常");
             Some(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": {} }))
         }
         "tools/list" => {
             let tools = tools_list_with(developer_mode, backend);
             let count = tools["tools"].as_array().map(Vec::len).unwrap_or(0);
-            global_mcp_telemetry().record_request("tools/list (查询工具列表)");
-            global_mcp_telemetry().record_event(&format!(
+            telemetry.record_request("tools/list (查询工具列表)");
+            telemetry.record_event(&format!(
                 "[RECV] tools/list -> 已返回 {count} 项激光数控工具定义"
             ));
             Some(serde_json::json!({
@@ -1450,16 +1463,15 @@ pub fn handle_json_rpc_with(
             let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
                 return Some(rpc_error(id, -32602, "缺少工具名 name"));
             };
-            global_mcp_telemetry().record_request(&format!("tools/call: {name}"));
-            global_mcp_telemetry()
-                .record_event(&format!("[CALL] tools/call: {name} (正在执行受控安全操作)"));
+            telemetry.record_request(&format!("tools/call: {name}"));
+            telemetry.record_event(&format!("[CALL] tools/call: {name} (正在执行受控安全操作)"));
             let arguments = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
             let result = dispatch_tool_call_with(name, &arguments, developer_mode, backend);
             let formatted_text = format_mcp_response(&result);
-            global_mcp_telemetry().record_event(&format!(
+            telemetry.record_event(&format!(
                 "[RESP] tools/call: {name} -> {}",
                 if result.success {
                     "执行成功"
@@ -1580,7 +1592,7 @@ fn run_bridge_timed(
             Ok(()) => eprintln!("[mcp-bridge] 连接正常关闭: {redacted}"),
             Err(error) => {
                 let error = scrub_token(error, endpoint);
-                global_mcp_telemetry().link_down(link_id, Some(&error));
+                telemetry_for(backend.as_deref()).link_down(link_id, Some(&error));
                 eprintln!(
                     "[mcp-bridge] 连接失败/断开 ({redacted}): {error}；{}s 后重连",
                     backoff.as_secs()
@@ -1602,22 +1614,27 @@ fn run_bridge_timed(
 }
 
 /// 连接存续期间把该接入点标记为已连接；离开作用域（正常关闭、出错、退出）时标记为断开。
-struct LinkGuard {
+struct LinkGuard<'a> {
+    telemetry: &'a McpTelemetry,
     id: String,
 }
 
-impl LinkGuard {
-    fn connect(id: &str, redacted_endpoint: &str) -> Self {
-        global_mcp_telemetry().link_up(id, redacted_endpoint);
-        global_mcp_telemetry().record_event(&format!("[LINK] 已连接接入点 {redacted_endpoint}"));
-        Self { id: id.to_owned() }
+impl<'a> LinkGuard<'a> {
+    fn connect(telemetry: &'a McpTelemetry, id: &str, redacted_endpoint: &str) -> Self {
+        telemetry.link_up(id, redacted_endpoint);
+        telemetry.record_event(&format!("[LINK] 已连接接入点 {redacted_endpoint}"));
+        Self {
+            telemetry,
+            id: id.to_owned(),
+        }
     }
 }
 
-impl Drop for LinkGuard {
+impl Drop for LinkGuard<'_> {
     fn drop(&mut self) {
-        global_mcp_telemetry().link_down(&self.id, None);
-        global_mcp_telemetry().record_event(&format!("[LINK] 与接入点（{}）的连接已断开", self.id));
+        self.telemetry.link_down(&self.id, None);
+        self.telemetry
+            .record_event(&format!("[LINK] 与接入点（{}）的连接已断开", self.id));
     }
 }
 
@@ -1693,8 +1710,9 @@ fn serve_one_connection(
     let (mut socket, _response) = tungstenite::connect(endpoint).map_err(|e| e.to_string())?;
     stats.connections.fetch_add(1, Ordering::Relaxed);
     eprintln!("[mcp-bridge] 已连接 {}", redact_endpoint(endpoint));
+    let telemetry = telemetry_for(backend);
     // 顶栏“小智”状态的来源：连接期间该接入点为已连接，函数以任何方式返回时由守卫置为断开。
-    let _link = LinkGuard::connect(link_id, &redact_endpoint(endpoint));
+    let _link = LinkGuard::connect(telemetry, link_id, &redact_endpoint(endpoint));
     let stream = match socket.get_ref() {
         MaybeTlsStream::Plain(s) => Some(s),
         MaybeTlsStream::Rustls(s) => Some(s.get_ref()),
@@ -1742,7 +1760,7 @@ fn serve_one_connection(
         match message {
             Message::Text(text) => {
                 stats.messages_in.fetch_add(1, Ordering::Relaxed);
-                global_mcp_telemetry().record_message();
+                telemetry.record_message();
                 let response = match serde_json::from_str::<serde_json::Value>(&text) {
                     Ok(message) => {
                         if message.get("method").and_then(serde_json::Value::as_str)
@@ -1755,11 +1773,7 @@ fn serve_one_connection(
                                     .unwrap_or("")
                                     .to_owned()
                             };
-                            global_mcp_telemetry().record_link_client(
-                                link_id,
-                                &info("name"),
-                                &info("version"),
-                            );
+                            telemetry.record_link_client(link_id, &info("name"), &info("version"));
                         }
                         handle_json_rpc_with(&message, developer_mode, backend)
                     }

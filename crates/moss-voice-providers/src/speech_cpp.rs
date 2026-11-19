@@ -26,67 +26,7 @@ const SYNTHESIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STDERR_TAIL_LIMIT: usize = 24;
 
-#[cfg(windows)]
-mod job {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
-    };
-
-    pub struct JobHandle(HANDLE);
-
-    unsafe impl Send for JobHandle {}
-
-    impl JobHandle {
-        pub fn for_child(child: &std::process::Child) -> Option<Self> {
-            use std::os::windows::io::AsRawHandle;
-            unsafe {
-                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                if job == 0 as HANDLE {
-                    return None;
-                }
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                let configured = SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-                if configured == 0
-                    || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0
-                {
-                    CloseHandle(job);
-                    return None;
-                }
-                Some(Self(job))
-            }
-        }
-    }
-
-    impl Drop for JobHandle {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-mod job {
-    pub struct JobHandle;
-
-    impl JobHandle {
-        pub fn for_child(_child: &std::process::Child) -> Option<Self> {
-            None
-        }
-    }
-}
-
-use job::JobHandle;
+use moss_process::JobHandle;
 
 struct WorkerIo {
     writer: Box<dyn Write + Send>,
@@ -100,12 +40,17 @@ struct WorkerInner {
     io: Mutex<Option<WorkerIo>>,
     child: Mutex<Option<Child>>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-    _job: Option<JobHandle>,
+    job: Mutex<Option<JobHandle>>,
 }
 
 impl WorkerInner {
     fn kill_child(&self) {
         self.alive.store(false, Ordering::SeqCst);
+        if let Ok(mut job) = self.job.lock()
+            && let Some(job) = job.take()
+        {
+            job.terminate();
+        }
         if let Ok(mut slot) = self.child.lock()
             && let Some(mut child) = slot.take()
         {
@@ -346,7 +291,7 @@ impl SpeechCppWorker {
                 io: Mutex::new(Some(WorkerIo { writer, rx })),
                 child: Mutex::new(child),
                 stderr_tail,
-                _job: job,
+                job: Mutex::new(job),
             }),
         };
 

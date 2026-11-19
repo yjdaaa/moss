@@ -15,6 +15,7 @@ export const LAYERS = {
   "moss-xiaozhi-proto": { rank: 0 },
   "moss-voice-local-proto": { rank: 0 },
   "moss-mcp-client": { rank: 0 },
+  "moss-process": { rank: 0 },
   // 1 共享运行时：运行目录、配置、SQLite 与各类存储、密钥（激光和语音共用）
   "laser-runtime": { rank: 1 },
   // 2 业务域：同域内可互相依赖，跨域禁止

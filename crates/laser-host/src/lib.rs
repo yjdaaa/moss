@@ -436,6 +436,10 @@ impl laser_mcp::HostBackend for InProcessBackend {
             .verified_connection()
             .and_then(|record| record["fields"].as_object().cloned())
     }
+
+    fn mcp_telemetry(&self) -> &laser_contracts::McpTelemetry {
+        self.api.mcp_telemetry().as_ref()
+    }
 }
 
 /// 内置语音服务调用 MOSS 工具时的后端（内置语音技术书 §5.2，NV4）：身份为 `CallerContext::Voice`，审计记为 `voice:<设备>`。
@@ -502,6 +506,10 @@ impl laser_mcp::HostBackend for VoiceBackend {
         self.api
             .verified_connection()
             .and_then(|record| record["fields"].as_object().cloned())
+    }
+
+    fn mcp_telemetry(&self) -> &laser_contracts::McpTelemetry {
+        self.api.mcp_telemetry().as_ref()
     }
 }
 
@@ -828,7 +836,7 @@ pub fn set_voice_pulse(phase: Option<&str>, level: u8) {
 }
 /// 语音中心“接入点与工具”卡片的数据（NV8）：各接入点的状态与身份、每个工具的开关与调用统计。地址均已脱敏。
 pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_json::Value {
-    let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
+    let telemetry = api.mcp_telemetry().snapshot();
     let endpoints: Vec<serde_json::Value> = configured_mcp_endpoints(runtime_dir)
         .into_iter()
         .map(|(id, endpoint)| {
@@ -1075,7 +1083,9 @@ impl HostApplication {
             .iter()
             .map(|(id, endpoint)| (id.clone(), laser_mcp::redact_endpoint(endpoint)))
             .collect();
-        laser_contracts::global_mcp_telemetry().register_endpoints(&redacted);
+        self.api_service
+            .mcp_telemetry()
+            .register_endpoints(&redacted);
         let developer_mode = laser_tools::developer_mode_enabled();
         let mut controls = Vec::new();
         for (id, endpoint) in endpoints {
@@ -1871,5 +1881,48 @@ mod tests {
                 .expect("trigger_shutdown must not self-deadlock on raw_handles mutex")
         );
         assert_eq!(fake.realtime(), vec![0x18]);
+    }
+
+    #[test]
+    fn injected_mcp_telemetry_receives_tool_calls_without_mutating_global() {
+        let isolated = Arc::new(laser_contracts::McpTelemetry::new());
+        let api = Arc::new(
+            ApiService::new(
+                LaserSettings {
+                    default_connection_mode: "network".into(),
+                    engraving_mode: "raster".into(),
+                    web_host: "127.0.0.1".into(),
+                    web_port: 8766,
+                    material_params_file: None,
+                },
+                laser_contracts::builtin_material_library(),
+            )
+            .with_mcp_telemetry(isolated.clone()),
+        );
+        let backend = InProcessBackend { api: api.clone() };
+        let res = laser_mcp::dispatch_tool_call_with(
+            "material_params_tool",
+            &serde_json::json!({
+                "material": "wood",
+                "thickness_mm": 3.0,
+                "laser_mode": "engrave"
+            }),
+            false,
+            Some(&backend),
+        );
+        assert!(res.success, "{res:?}");
+        let snap = isolated.snapshot();
+        assert_eq!(
+            snap.tool_stats
+                .get("material_params_tool")
+                .map(|stat| stat.calls),
+            Some(1)
+        );
+        let overview = mcp_overview(std::path::Path::new("."), &api);
+        let mat_tool = overview["tools"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|t| t["name"] == "material_params_tool"))
+            .expect("material_params_tool in overview");
+        assert_eq!(mat_tool["calls"], 1);
     }
 }

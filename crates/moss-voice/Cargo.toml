@@ -9,6 +9,7 @@ description = "语音中心（技术书 §9.4，P4）：语音链路（官方小
 [dependencies]
 laser-contracts = { path = "../laser-contracts" }
 moss-mcp-client = { path = "../moss-mcp-client" }
+moss-process = { path = "../moss-process" }
 serde.workspace = true
 serde_json.workspace = true
 # 模型“测试连接”（与 laser-api 相同的 reqwest 配置：阻塞、rustls、不跟随重定向由代码设置）
@@ -19,15 +20,6 @@ tar.workspace = true
 bzip2 = { version = "0.5", default-features = false, features = ["libbz2-rs-sys"] }
 flate2.workspace = true
 base64.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-# Job Object：MOSS 退出（含异常退出）时连同内置服务的本地子进程树一起结束，不留孤儿进程
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }
 
 [dev-dependencies]
 tempfile.workspace = true
