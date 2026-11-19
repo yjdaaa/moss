@@ -1914,3 +1914,59 @@ fn abandoned_voice_frame_never_starts_moving() {
         matches!(&*watch.lock().unwrap(), crate::ShortJobStart::Started(id) if id.starts_with("framing-"))
     );
 }
+
+#[test]
+fn approved_send_mark_running_error_writes_failed_outcome_without_connecting() {
+    let fixture = strict_fixture(true, true);
+    let workflow_id = preview_workflow(&fixture.service);
+    let request = confirm_send_body(&workflow_id, "127.0.0.1");
+    let (status, pending) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &request,
+        laser_contracts::CallerContext::McpBridge,
+    );
+    assert_eq!(status, 202, "{pending}");
+    let approval_id = pending["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let approvals = fixture.service.approvals().unwrap();
+    let digest = approvals.get(&approval_id).unwrap().digest;
+    approvals.approve(&approval_id, &digest, &digest).unwrap();
+
+    // 只让消费后绑定 job_id 的 running 写失败。真实数据库仍允许保存失败终态。
+    fixture
+        .db
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER fail_mark_running BEFORE UPDATE OF outcome ON approvals
+            WHEN json_extract(NEW.outcome, '$.phase') = 'running'
+             AND json_extract(NEW.outcome, '$.job_id') IS NOT NULL
+            BEGIN SELECT RAISE(ABORT, 'injected mark_running failure'); END;",
+        )
+        .unwrap();
+    let (status, rejected) = post_with_ctx(
+        &fixture.service,
+        "/api/workflow",
+        &request,
+        laser_contracts::CallerContext::Approval {
+            approval_id: approval_id.clone(),
+        },
+    );
+    assert!(status >= 400, "{status}: {rejected}");
+    assert!(fixture.targets.lock().unwrap().is_empty());
+    assert!(fixture.written.lock().unwrap().is_empty());
+    let outcome = approvals.get(&approval_id).unwrap().outcome.unwrap();
+    assert_eq!(
+        outcome.phase,
+        Some(laser_contracts::ApprovalPhase::Failed),
+        "{outcome:?}"
+    );
+    assert!(!outcome.success);
+    assert!(outcome.job_id.is_none());
+}

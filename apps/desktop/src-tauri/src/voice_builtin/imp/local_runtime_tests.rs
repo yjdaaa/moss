@@ -1112,6 +1112,8 @@ fn model_delete_blocks_during_chain_test_and_active_turn_or_fallback_workers() {
         db: host.db.clone(),
         host: host.clone(),
         settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
     });
     let server = VoiceServer::start(
         ServerConfig {
@@ -1213,6 +1215,8 @@ fn model_delete_waits_for_lifecycle_lock_before_deleting_running_speech_worker()
         db: host.db.clone(),
         host: host.clone(),
         settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
     });
     let server = VoiceServer::start(
         ServerConfig {

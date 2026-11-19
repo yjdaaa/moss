@@ -71,6 +71,10 @@ impl ShutdownCoordinator {
         self.requested.load(Ordering::SeqCst)
     }
 
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        self.requested.clone()
+    }
+
     fn snapshot_raw_handles(&self) -> Vec<RawAbortCallback> {
         self.raw_handles
             .lock()
@@ -515,6 +519,24 @@ pub fn voice_tool_call(
     name: &str,
     arguments: &serde_json::Value,
 ) -> laser_contracts::ToolCallResult {
+    if api.is_shutdown_requested() {
+        let is_stop = name == "laser_safe_action_tool"
+            && matches!(
+                arguments
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref(),
+                Some("emergency_stop" | "soft_reset" | "pause" | "stop_framing")
+            );
+        if !is_stop {
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "服务正在关闭，已拒绝新的工具调用",
+                "host_shutting_down",
+            );
+        }
+    }
     if !api.voice_session_allowed(device_id, session_id) {
         return laser_contracts::ToolCallResult::with_detail(
             false,
@@ -903,7 +925,8 @@ impl HostApplication {
                     runtime_root.path.clone(),
                 )))
                 .with_allowed_origins(allowed_origins)
-                .with_strict_mode(strict_mode),
+                .with_strict_mode(strict_mode)
+                .with_shutdown_flag(coordinator.shutdown_flag()),
         );
         // 技术书 §5.5：重启后所有待批准 / 已批准未执行的审批一律过期（A-32）
         let expired = api_service.recover_approvals_after_restart();
@@ -1351,6 +1374,12 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(service.active_framing_job_ids().len(), 1, "边框还在走");
+        service.request_shutdown();
+        let new_framing = call(serde_json::json!({
+            "action": "frame", "workflow_id": workflow_id, "confirmed": true,
+            "connection_mode": "network", "network_host": "127.0.0.1"
+        }));
+        assert_eq!(new_framing.detail.as_deref(), Some("host_shutting_down"));
         let stopped = voice_tool_call(
             &service,
             "aa:bb:cc:dd:ee:01",

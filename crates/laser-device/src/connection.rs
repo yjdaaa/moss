@@ -81,11 +81,15 @@ pub struct DeviceConnection<T: DeviceTransport> {
     /// 顺序信道没有未确认字节时 `Bf:` 报告的最大剩余 RX 字节，即设备 RX 缓冲的真实容量；
     /// `None` 表示尚未观测到。由预检 `?` 与完成等待阶段记录，字符计数窗口据此确定。
     pub rx_capacity_observed: Option<usize>,
-    /// 机器 X/Y 行程：握手 `$$` 的 `$130/$131`，FluidNC `$CD` 的 `max_travel_mm` 优先。
+    /// 机器 X/Y 行程：握手 `$$` 的 `$130/$131`，FluidNC `$CD` 的 `max_travel_mm` 按字段覆盖合并。
     /// 发送前用来复核任务范围（2026-11-06）；都没有时为空，调用方跳过该项检查。
     pub travel_limits: MachineLimits,
     /// 最近一次状态报告里的机床坐标 `MPos`（用于断点续雕在 `0x18` 复位后精确重建 `G92` 偏移）。
     pub last_mpos: Option<(f64, f64, f64)>,
+    /// 最近一次 `cancel()` 发送 `0x18` 前观测到的状态报告（用于评估规划器队列剩余深度）。
+    pub last_cancel_report: Option<StatusReport>,
+    /// `$CD` / `$RI` 超时且未能排空终止应答后置位，阻止后续顺序发送消费迟到的 `ok`。
+    sequential_channel_dirty: bool,
 }
 
 impl<T: DeviceTransport> DeviceConnection<T> {
@@ -104,6 +108,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             rx_capacity_observed: None,
             travel_limits: MachineLimits::default(),
             last_mpos: None,
+            last_cancel_report: None,
+            sequential_channel_dirty: false,
         }
     }
 
@@ -194,12 +200,25 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// - 若已在输出 `$` 设置行中途收到复位横幅，则清空半截状态并补发一次 `$$`；
     /// - 只有真正收到了 `$` 设置行但 `$32!=1` 时才报激光模式门禁错误。
     pub fn handshake_with_deadline(&mut self, deadline: Duration) -> Result<Vec<String>, String> {
+        self.handshake_with_deadline_cancellable(deadline, None)
+    }
+
+    pub fn handshake_with_deadline_cancellable(
+        &mut self,
+        deadline: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<String>, String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err("用户取消，未执行握手".into());
+        }
         self.state = DeviceState::Disconnected;
         self.max_spindle_speed = None;
         self.report_status_mask = None;
         self.rx_capacity_observed = None;
         self.travel_limits = MachineLimits::default();
         self.last_mpos = None;
+        self.last_cancel_report = None;
+        self.sequential_channel_dirty = false;
         self.transport.write_line("$$")?;
         let start = Instant::now();
         let mut laser_mode = None;
@@ -209,6 +228,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         let mut retried_after_boot = false;
         let mut terminated = false;
         loop {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err("用户取消，停止握手".into());
+            }
             if start.elapsed() > deadline {
                 break;
             }
@@ -292,13 +314,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     }
 
     /// 握手后读取 FluidNC `$CD` 配置并缓存到 `features`。非 FluidNC（`error:3`）、超时或空响应时
-    /// 保持 `None` 且不报错；返回是否读到了配置。
+    /// 保持 `None` 且不报错；按字段叠加合并行程上限，不擦除 `$$` 已报告的其余轴或运动参数。
     pub fn load_features(&mut self, timeout: Duration) -> bool {
         match self.fetch_fluidnc_config(timeout) {
             Ok((limits, features)) => {
-                if limits.x_travel_mm.is_some() || limits.y_travel_mm.is_some() {
-                    self.travel_limits = limits;
-                }
+                self.travel_limits.merge_prefer(&limits);
                 self.features = Some(features);
                 true
             }
@@ -312,28 +332,63 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     ///
     /// 2026-11-05 修订：`$RI` 的应答在 2 秒内未到时不再直接放行（迟到的 `ok` 会被当成首行 G-code 的 ack），
     /// 而是补发 `G4 P0`（不运动、不出光）同步，按顺序应答规则在限定时间内收齐 `$RI` 与 `G4 P0`
-    /// 两个终止应答后才放行；收不齐则置 `Lost` 并返回错误，调用方不得开始流式发送。
+    /// 两个终止应答后才放行；收不齐则置 `Lost` 与失步标记并返回错误，调用方不得开始流式发送。
     pub fn enable_auto_report(&mut self, interval_ms: u32) -> Result<bool, String> {
+        self.enable_auto_report_cancellable(interval_ms, None)
+    }
+
+    /// 可取消版 [`Self::enable_auto_report`]：发 `$RI`、等应答及补发 `G4 P0` 同步前均复查 `cancel`，
+    /// 命中后立刻中止并交由调用方走实时急停收尾。
+    pub fn enable_auto_report_cancellable(
+        &mut self,
+        interval_ms: u32,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<bool, String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err("用户取消，停止开启自动上报".into());
+        }
+        if self.sequential_channel_dirty {
+            return Err(
+                "控制器顺序信道此前未完成响应排空（$CD/$RI 超时残留），拒绝开启自动上报并禁止发送，请重连设备"
+                    .into(),
+            );
+        }
         if self.features.is_none() {
             return Ok(false);
         }
         let interval_ms = interval_ms.max(50);
         self.transport.write_line(&format!("$RI={interval_ms}"))?;
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err("用户取消，停止开启自动上报".into());
+        }
         let mut acks = Vec::new();
-        self.collect_terminal_acks(&mut acks, 1, AUTO_REPORT_ACK_TIMEOUT)?;
+        self.collect_terminal_acks(&mut acks, 1, AUTO_REPORT_ACK_TIMEOUT, cancel)?;
         if acks.is_empty() {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err("用户取消，停止同步自动上报".into());
+            }
             self.transport.write_line("G4 P0")?;
-            self.collect_terminal_acks(&mut acks, 2, AUTO_REPORT_RESYNC_TIMEOUT)?;
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err("用户取消，停止等待自动上报同步".into());
+            }
+            self.collect_terminal_acks(&mut acks, 2, AUTO_REPORT_RESYNC_TIMEOUT, cancel)?;
             if acks.len() < 2 {
-                // 无法判断收到的应答属于哪条命令：保守地认为自动上报可能已开启，交给调用方 `$RI=0` 收尾
+                if cancel.is_some_and(CancellationToken::is_cancelled) {
+                    return Err("用户取消，停止等待自动上报同步".into());
+                }
+                // 无法判断收到的应答属于哪条命令：保守地认为自动上报可能已开启，同时锁定顺序信道，防止迟到 ok 污染后续任务
                 self.auto_report_ms = interval_ms;
                 self.state = DeviceState::Lost;
+                self.sequential_channel_dirty = true;
                 return Err(format!(
                     "$RI 自动上报设置在 {}ms 内未确认，G4 P0 同步也未在 {}ms 内收齐应答，ack 计数无法对齐；未开始发送任何 G-code",
                     AUTO_REPORT_ACK_TIMEOUT.as_millis(),
                     AUTO_REPORT_RESYNC_TIMEOUT.as_millis()
                 ));
             }
+        }
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err("用户取消，停止开启自动上报".into());
         }
         let enabled = acks[0].is_ok();
         self.auto_report_ms = if enabled { interval_ms } else { 0 };
@@ -352,9 +407,13 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         acks: &mut Vec<Result<(), String>>,
         want: usize,
         timeout: Duration,
+        cancel: Option<&CancellationToken>,
     ) -> Result<(), String> {
         let start = Instant::now();
         while acks.len() < want && start.elapsed() < timeout {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err("用户取消，停止等待自动上报确认".into());
+            }
             match self.transport.read_line() {
                 Ok(Some(line)) => {
                     self.last_response_at = Instant::now();
@@ -377,26 +436,48 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         Ok(())
     }
 
-    /// 关闭自动上报（`$RI=0`）。尽力而为：任务结束或断开前调用，不关心结果。
+    /// 关闭自动上报（`$RI=0`）。尽力在窗口内消费其终止应答，若仍未收齐则标记信道未排空。
     pub fn disable_auto_report(&mut self) {
+        let _ = self.disable_auto_report_cancellable(None);
+    }
+
+    /// 可取消版 [`Self::disable_auto_report`]；未取消时返回 `true`，命中取消时跳过或中止并返回 `false`。
+    pub fn disable_auto_report_cancellable(&mut self, cancel: Option<&CancellationToken>) -> bool {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return false;
+        }
         if self.auto_report_ms == 0 {
-            return;
+            return true;
         }
         self.auto_report_ms = 0;
         if self.transport.write_line("$RI=0").is_ok() {
             let start = Instant::now();
+            let mut got_term = false;
+            let mut saw_eof = false;
             while start.elapsed() < Duration::from_millis(800) {
+                if cancel.is_some_and(CancellationToken::is_cancelled) {
+                    return false;
+                }
                 match self.transport.read_line() {
                     Ok(Some(line))
                         if line.eq_ignore_ascii_case("ok") || line.starts_with("error:") =>
                     {
+                        got_term = true;
                         break;
                     }
                     Ok(Some(_)) => continue,
-                    _ => break,
+                    Ok(None) => {
+                        saw_eof = true;
+                        break;
+                    }
+                    Err(_) => continue,
                 }
             }
+            if !got_term && !saw_eof {
+                self.sequential_channel_dirty = true;
+            }
         }
+        !cancel.is_some_and(CancellationToken::is_cancelled)
     }
 
     /// 主动状态轮询的间隔：已开启自动上报时放宽到两倍上报周期作为兜底，否则用调用方给定值。
@@ -407,46 +488,118 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             default
         }
     }
+}
 
+enum IdleCheckError {
+    Alarm(String),
+    Fatal(String),
+}
+
+impl IdleCheckError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Alarm(msg) | Self::Fatal(msg) => msg,
+        }
+    }
+}
+
+enum DrainResult {
+    Terminated,
+    Disconnected,
+    TimedOut,
+}
+
+impl<T: DeviceTransport> DeviceConnection<T> {
+    fn drain_until_terminator(&mut self, timeout: Duration) -> DrainResult {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            match self.transport.read_line() {
+                Ok(Some(line)) => {
+                    self.last_response_at = Instant::now();
+                    if let Some(report) = parse_status_report(&line) {
+                        self.sd_job_active = report.has_sd_job();
+                        if let Some(mpos) = report.mpos {
+                            self.last_mpos = Some(mpos);
+                        }
+                        continue;
+                    }
+                    if line.eq_ignore_ascii_case("ok")
+                        || line.to_ascii_lowercase().starts_with("error:")
+                        || line.starts_with("ALARM:")
+                    {
+                        return DrainResult::Terminated;
+                    }
+                }
+                Ok(None) => return DrainResult::Disconnected,
+                Err(_) => continue,
+            }
+        }
+        DrainResult::TimedOut
+    }
+}
+
+impl<T: DeviceTransport> DeviceConnection<T> {
     /// 自适应功率标尺检查：只要设备 $30 是合法有限正数即通过，并返回设备实际标尺（如 255.0、1000.0 等）。
     pub fn verify_job_ready_adaptive(&mut self, timeout: Duration) -> Result<f64, String> {
+        self.verify_job_ready_adaptive_cancellable(timeout, None)
+    }
+
+    pub fn verify_job_ready_adaptive_cancellable(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<f64, String> {
         let scale = self
             .max_spindle_speed
             .ok_or_else(|| "固件未报告有效的 $30 功率标尺（缺少 $30 或非正数）".to_string())?;
-        self.require_idle(timeout, None)?;
+        self.require_idle_typed(timeout, cancel)
+            .map_err(IdleCheckError::into_message)?;
         Ok(scale)
     }
 
-    /// 断点续雕预检：先做标准空闲检查；若上次急停 `0x18` 让控制器停在无阻断引脚的 `<Alarm>` 锁定态，
-    /// 按用户确认的续雕动作先执行 `$X` 解锁（含等待 `after_unlock` 宏回到 Idle）再复核空闲与坐标。
+    /// 断点续雕预检：先做标准空闲检查；仅当控制器明确处于无阻断引脚的 `<Alarm>` 锁定态时，
+    /// 才执行 `$X` 解锁（含等待 `after_unlock` 宏回到 Idle）再复核空闲与坐标；`Unknown` 等非 Alarm 态拒绝盲目解锁。
     pub fn verify_job_ready_for_resume(&mut self, timeout: Duration) -> Result<f64, String> {
+        self.verify_job_ready_for_resume_cancellable(timeout, None)
+    }
+
+    pub fn verify_job_ready_for_resume_cancellable(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<f64, String> {
         let scale = self
             .max_spindle_speed
             .ok_or_else(|| "固件未报告有效的 $30 功率标尺（缺少 $30 或非正数）".to_string())?;
-        match self.require_idle(timeout, None) {
+        match self.require_idle_typed(timeout, cancel) {
             Ok(()) => {
                 // 已在 Idle 时发送 $X 为固件级空操作（立即回 ok），保持续雕契约一致
-                self.send_line_wait_ack("$X")?;
+                self.send_line_wait_ack_cancellable("$X", cancel)?;
                 Ok(scale)
             }
-            Err(err) if err.starts_with("控制器尚未安全就绪：") => {
-                self.unlock()?;
-                self.require_idle(timeout, None)?;
+            Err(IdleCheckError::Alarm(_)) => {
+                self.unlock_cancellable(cancel)?;
+                self.require_idle_typed(timeout, cancel)
+                    .map_err(IdleCheckError::into_message)?;
                 Ok(scale)
             }
-            Err(err) => Err(err),
+            Err(IdleCheckError::Fatal(err)) => Err(err),
         }
     }
 
-    /// 发送 $CD 读取 FluidNC 的 YAML 配置文件并解析出机械行程与外设引脚
+    /// 发送 $CD 读取 FluidNC 的 YAML 配置文件并解析出机械行程与外设引脚；必须收到终止 `ok`。
     pub fn fetch_fluidnc_config(
         &mut self,
         timeout: Duration,
     ) -> Result<(MachineLimits, MachineFeatures), String> {
+        if self.sequential_channel_dirty {
+            return Err("控制器顺序信道此前未排空，拒绝读取 $CD，请重连设备".into());
+        }
         self.transport.write_line("$CD")?;
         let start = Instant::now();
         let mut yaml_lines = Vec::new();
         let mut terminated = false;
+        let mut saw_eof = false;
         while start.elapsed() < timeout {
             match self.transport.read_line() {
                 Ok(Some(line)) => {
@@ -455,17 +608,58 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         terminated = true;
                         break;
                     }
-                    if line.starts_with("error:") {
+                    if line.to_ascii_lowercase().starts_with("error:") {
                         return Err(format!("设备不支持 $CD 或报错: {line}"));
+                    }
+                    if is_reset_banner(&line) {
+                        self.state = DeviceState::Lost;
+                        return Err(format!("读取 $CD 时控制器复位（{}）", line.trim()));
+                    }
+                    if line.starts_with("ALARM:") {
+                        self.state = DeviceState::Alarm;
+                        return Err(self.explain(&line));
+                    }
+                    if let Some(report) = parse_status_report(&line) {
+                        self.sd_job_active = report.has_sd_job();
+                        if let Some(mpos) = report.mpos {
+                            self.last_mpos = Some(mpos);
+                        }
+                        continue;
                     }
                     yaml_lines.push(line);
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    saw_eof = true;
+                    break;
+                }
                 Err(_) => continue,
             }
         }
-        if !terminated && yaml_lines.is_empty() {
-            return Err("读取 $CD 超时或未响应".into());
+        if !terminated {
+            if saw_eof {
+                return Err(if yaml_lines.is_empty() {
+                    "读取 $CD 超时或未响应".into()
+                } else {
+                    self.state = DeviceState::Disconnected;
+                    "读取 $CD 响应不完整（连接断开，缺少终止 ok）".into()
+                });
+            }
+            match self.drain_until_terminator(Duration::from_millis(150)) {
+                DrainResult::Terminated => {
+                    return Err("读取 $CD 超时（响应延迟已排空并丢弃，未使用半截配置）".into());
+                }
+                DrainResult::Disconnected => {
+                    self.state = DeviceState::Disconnected;
+                    return Err("读取 $CD 超时且连接已断开".into());
+                }
+                DrainResult::TimedOut => {
+                    self.sequential_channel_dirty = true;
+                    self.state = DeviceState::Lost;
+                    return Err(
+                        "读取 $CD 未收到终止 ok（顺序信道存在残留/失步风险，请重连设备）".into(),
+                    );
+                }
+            }
         }
         let raw = yaml_lines.join("\n");
         Ok(parse_fluidnc_yaml(&raw))
@@ -521,22 +715,31 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     }
 
     /// 发送前预检：`?` 一次，要求 Idle、无 SD 作业、无 E/F/D 阻断引脚。
-    /// Run/Jog/Home 直接拒绝（不等待），Hold/Door/Alarm/Sleep/Check 均拒绝并说明原因。
-    fn require_idle(
+    /// Run/Jog/Home 直接拒绝（不等待），Hold/Door/Alarm/Sleep/Check/Unknown 均拒绝并说明原因。
+    fn require_idle_typed(
         &mut self,
         timeout: Duration,
         cancel: Option<&CancellationToken>,
-    ) -> Result<(), String> {
+    ) -> Result<(), IdleCheckError> {
+        if self.sequential_channel_dirty {
+            return Err(IdleCheckError::Fatal(
+                "控制器顺序信道存在未排空残留（$CD/$RI 超时），拒绝执行任务，请重连设备".into(),
+            ));
+        }
         self.transport
-            .write_realtime(RealtimeCommand::StatusQuery)?;
+            .write_realtime(RealtimeCommand::StatusQuery)
+            .map_err(IdleCheckError::Fatal)?;
         let start = Instant::now();
         while start.elapsed() < timeout {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err("用户取消，停止等待控制器".into());
+                return Err(IdleCheckError::Fatal("用户取消，停止等待控制器".into()));
             }
             match self.transport.read_line() {
                 Ok(Some(line)) => {
-                    let report = match self.classify_line(&line, "预检")? {
+                    let report = match self
+                        .classify_line(&line, "预检")
+                        .map_err(IdleCheckError::Fatal)?
+                    {
                         Some(report) => report,
                         None => continue,
                     };
@@ -545,11 +748,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                     let blocking = report.blocking_pins();
                     if !blocking.is_empty() {
                         self.state = DeviceState::Alarm;
-                        return Err(format!(
+                        return Err(IdleCheckError::Fatal(format!(
                             "控制器输入引脚处于触发状态：{}（状态 {}），固件会拒绝解锁与运动，请先复位物理开关",
                             blocking.join("、"),
                             report.raw
-                        ));
+                        )));
                     }
                     match report.activity {
                         MachineActivity::Idle if !report.has_sd_job() => {
@@ -557,57 +760,74 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             return Ok(());
                         }
                         MachineActivity::Idle => {
-                            return Err(format!(
+                            return Err(IdleCheckError::Fatal(format!(
                                 "控制器正在执行 SD 脱机作业 ({})，拒绝启动新任务",
                                 report.raw
-                            ));
+                            )));
                         }
                         MachineActivity::Busy => {
-                            return Err(format!(
+                            return Err(IdleCheckError::Fatal(format!(
                                 "控制器正在运行中 ({})，拒绝启动新任务",
                                 report.raw
-                            ));
+                            )));
                         }
                         MachineActivity::Held => {
                             self.state = DeviceState::Hold;
-                            return Err(format!(
+                            return Err(IdleCheckError::Fatal(format!(
                                 "控制器处于进给保持 ({})，请先恢复或急停后再发送",
                                 report.raw
-                            ));
+                            )));
                         }
                         MachineActivity::DoorOpen => {
                             self.state = DeviceState::Hold;
-                            return Err(format!("安全门打开 ({})，请关门后再发送", report.raw));
+                            return Err(IdleCheckError::Fatal(format!(
+                                "安全门打开 ({})，请关门后再发送",
+                                report.raw
+                            )));
                         }
                         MachineActivity::Sleep => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!("控制器处于休眠 ({})，需要复位唤醒", report.raw));
+                            return Err(IdleCheckError::Fatal(format!(
+                                "控制器处于休眠 ({})，需要复位唤醒",
+                                report.raw
+                            )));
                         }
                         MachineActivity::Check => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!(
+                            return Err(IdleCheckError::Fatal(format!(
                                 "控制器处于 G-code 检查模式 ({})，请先退出检查模式",
                                 report.raw
-                            ));
+                            )));
                         }
-                        MachineActivity::Alarm | MachineActivity::Unknown => {
+                        MachineActivity::Alarm => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!(
-                                "控制器尚未安全就绪：{}，需要人工核验",
+                            return Err(IdleCheckError::Alarm(format!(
+                                "控制器尚未安全就绪：{}，需要解锁或人工核验",
                                 report.raw
-                            ));
+                            )));
+                        }
+                        MachineActivity::Unknown => {
+                            self.state = DeviceState::Alarm;
+                            return Err(IdleCheckError::Fatal(format!(
+                                "控制器返回未知状态（{}），禁止自动解锁，请到设备旁人工核验",
+                                report.raw
+                            )));
                         }
                     }
                 }
                 Ok(None) => {
                     self.state = DeviceState::Disconnected;
-                    return Err("等待 Idle 时连接断开，执行结果未知".into());
+                    return Err(IdleCheckError::Fatal(
+                        "等待 Idle 时连接断开，执行结果未知".into(),
+                    ));
                 }
                 Err(_) => continue,
             }
         }
         self.state = DeviceState::Lost;
-        Err("未收到 Idle 状态，执行结果未知；禁止自动重发".into())
+        Err(IdleCheckError::Fatal(
+            "未收到 Idle 状态，执行结果未知；禁止自动重发".into(),
+        ))
     }
 
     /// 发送文件全部内容后，等待控制器清空规划器缓冲区并恢复 Idle 状态。
@@ -820,9 +1040,26 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err("用户取消，未启动 SD 脱机任务".into());
         }
+        match self.run_sd_file_or_cancel(remote_path, timeout, progress, cancel)? {
+            true => Ok(()),
+            false => Err("用户取消，已停止 SD 脱机任务".into()),
+        }
+    }
+
+    /// 已正常完成返回 true，主动取消返回 false，控制器异常或停机序列失败时返回错误。
+    pub fn run_sd_file_or_cancel(
+        &mut self,
+        remote_path: &str,
+        timeout: Duration,
+        progress: Option<&Arc<JobProgress>>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<bool, String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Ok(false);
+        }
         self.send_line(&format!("$SD/Run={remote_path}"))?;
         self.last_response_at = Instant::now();
-        self.wait_sd_job(timeout, progress, cancel, true)
+        self.wait_sd_job_or_cancel(timeout, progress, cancel, true)
     }
 
     fn wait_sd_job(
@@ -832,6 +1069,19 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         cancel: Option<&CancellationToken>,
         require_start: bool,
     ) -> Result<(), String> {
+        match self.wait_sd_job_or_cancel(timeout, progress, cancel, require_start)? {
+            true => Ok(()),
+            false => Err("用户取消，已停止 SD 脱机任务".into()),
+        }
+    }
+
+    fn wait_sd_job_or_cancel(
+        &mut self,
+        timeout: Duration,
+        progress: Option<&Arc<JobProgress>>,
+        cancel: Option<&CancellationToken>,
+        require_start: bool,
+    ) -> Result<bool, String> {
         /// 发出 `$SD/Run` 后这么久仍空闲且没有任何开始迹象，判定没有启动
         const START_GRACE: Duration = Duration::from_secs(5);
         let mut started = !require_start;
@@ -847,8 +1097,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                 break Err("等待 SD 任务完成超时".to_string());
             }
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                self.cancel()?;
-                break Err("用户取消，已停止 SD 脱机任务".into());
+                // 监控仍在运行，即使最近一份状态报告已没有 SD 字段。
+                break self.cancel_with_sd_monitoring(true).map(|()| false);
             }
             if last_poll.elapsed() >= interval {
                 let _ = self.transport.write_realtime(RealtimeCommand::StatusQuery);
@@ -902,7 +1152,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                                 prog.lines_sent.store(total, Ordering::Relaxed);
                             }
                             self.state = DeviceState::Ready;
-                            break Ok(());
+                            break Ok(true);
                         }
                         MachineActivity::Idle | MachineActivity::Busy => {
                             std::thread::sleep(Duration::from_millis(50));
@@ -937,6 +1187,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     }
 
     pub fn send_line(&self, line: &str) -> Result<(), String> {
+        if self.sequential_channel_dirty {
+            return Err(
+                "控制器顺序信道此前未排空（$CD/$RI 超时残留），拒绝发送，请重连设备".into(),
+            );
+        }
         if self.state != DeviceState::Ready {
             return Err(format!("设备未就绪（当前状态: {:?}）", self.state));
         }
@@ -962,12 +1217,27 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err("用户取消，停止发送".into());
         }
+        match self.send_line_wait_ack_or_cancel(line, cancel)? {
+            true => Ok(()),
+            false => Err("用户取消，停止等待 ACK".into()),
+        }
+    }
+
+    /// 已确认返回 true，主动取消返回 false。读到的报警、复位和断线仍作为错误返回。
+    pub fn send_line_wait_ack_or_cancel(
+        &mut self,
+        line: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<bool, String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Ok(false);
+        }
         self.send_line(line)?;
         self.last_response_at = Instant::now();
         let mut heartbeat_sent = false;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err("用户取消，停止等待 ACK".into());
+                return Ok(false);
             }
             let silent = self.last_response_at.elapsed();
             if silent > Duration::from_millis(500) {
@@ -983,7 +1253,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             match self.transport.read_line() {
                 Ok(Some(response)) if response.eq_ignore_ascii_case("ok") => {
                     self.last_response_at = Instant::now();
-                    return Ok(());
+                    return Ok(true);
                 }
                 Ok(Some(response)) => match self.classify_line(&response, "等待 ACK") {
                     Ok(_) => {
@@ -1006,29 +1276,91 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             .write_realtime(RealtimeCommand::EmergencyStop)?;
         self.state = DeviceState::Alarm;
         self.sd_job_active = false;
+        self.auto_report_ms = 0;
         Ok(())
     }
 
     pub fn cancel(&mut self) -> Result<(), String> {
+        self.cancel_with_sd_monitoring(self.sd_job_active)
+    }
+
+    fn cancel_with_sd_monitoring(&mut self, monitoring_sd: bool) -> Result<(), String> {
         // 1. 立即下发 '!' 进给保持
-        self.transport.write_realtime(RealtimeCommand::FeedHold)?;
-        // 2. 轮询 '?' 状态，等待 Hold:0（硬超时 500ms）
+        let hold = self.transport.write_realtime(RealtimeCommand::FeedHold);
+        // 2. 轮询 '?' 等待停稳，并在 0x18 清空队列前保留最后一份状态报告。
         let start = Instant::now();
         let timeout = Duration::from_millis(500);
-        while start.elapsed() < timeout {
-            self.transport
-                .write_realtime(RealtimeCommand::StatusQuery)?;
-            if let Ok(Some(line)) = self.transport.read_line() {
-                self.last_response_at = Instant::now();
-                if line.contains("Hold:0") || line.contains("Alarm") {
-                    break;
+        let mut pre_reset_report = None;
+        let stopped = hold.and_then(|()| {
+            loop {
+                if start.elapsed() >= timeout {
+                    break if monitoring_sd {
+                        self.state = DeviceState::Lost;
+                        Err("用户取消期间未能确认 SD 作业停稳，执行结果未知".to_owned())
+                    } else {
+                        Ok(())
+                    };
                 }
+                if let Err(error) = self.transport.write_realtime(RealtimeCommand::StatusQuery) {
+                    break Err(error);
+                }
+                match self.transport.read_line() {
+                    Ok(Some(line)) => {
+                        let parsed = if monitoring_sd
+                            || line.starts_with("ALARM:")
+                            || is_reset_banner(&line)
+                        {
+                            match self.classify_line(&line, "等待取消停稳") {
+                                Ok(report) => report,
+                                Err(error) => break Err(error),
+                            }
+                        } else {
+                            self.last_response_at = Instant::now();
+                            parse_status_report(&line)
+                        };
+                        if let Some(report) = parsed {
+                            if !monitoring_sd && let Some(mpos) = report.mpos {
+                                self.last_mpos = Some(mpos);
+                            }
+                            let alarm = report.activity == MachineActivity::Alarm;
+                            let at_rest = report.state == "Hold:0"
+                                || (report.activity == MachineActivity::Idle
+                                    && !report.has_sd_job());
+                            pre_reset_report = Some(report);
+                            if monitoring_sd && alarm {
+                                self.state = DeviceState::Alarm;
+                                break Err(format!("控制器在等待 SD 取消停稳时报告报警：{line}"));
+                            }
+                            if at_rest {
+                                break Ok(());
+                            }
+                        }
+                        if !monitoring_sd && (line.contains("Hold:0") || line.contains("Alarm")) {
+                            break Ok(());
+                        }
+                    }
+                    Ok(None) if monitoring_sd => {
+                        self.state = DeviceState::Disconnected;
+                        break Err("用户取消期间设备连接断开，SD 作业状态未知".to_owned());
+                    }
+                    _ => {}
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
+        });
+        self.last_cancel_report = pre_reset_report;
+        // 即使停稳过程中读到故障，也尽力写复位并保留原故障。
+        let reset = self
+            .transport
+            .write_realtime(RealtimeCommand::EmergencyStop);
+        self.auto_report_ms = 0;
+        if let Err(error) = stopped.and(reset) {
+            // 保留明确的报警或断线状态，其他故障也必须阻断后续顺序指令。
+            if matches!(self.state, DeviceState::Ready | DeviceState::Hold) {
+                self.state = DeviceState::Lost;
+            }
+            return Err(error);
         }
-        // 3. 发送 0x18 软复位
-        self.transport
-            .write_realtime(RealtimeCommand::EmergencyStop)?;
         self.state = DeviceState::Alarm;
         self.sd_job_active = false;
         Ok(())
@@ -1037,27 +1369,39 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 解锁 `$X`：等 `ok`，再等到 Idle。FluidNC 在 `$X` 后会执行 `macros.after_unlock`
     /// （可能含运动），所以 ok 之后不能立刻当作就绪；`Pn:` 含 E/F 时固件会拒绝解锁。
     pub fn unlock(&mut self) -> Result<(), String> {
-        self.recover_with("$X", "解锁", Duration::from_secs(15))
+        self.unlock_cancellable(None)
+    }
+
+    pub fn unlock_cancellable(&mut self, cancel: Option<&CancellationToken>) -> Result<(), String> {
+        self.recover_with_cancellable("$X", "解锁", Duration::from_secs(15), cancel)
     }
 
     /// 回零 `$H`：`Home` 状态视为忙碌持续等待；完成后还会执行 `macros.after_homing`。
     pub fn home(&mut self) -> Result<(), String> {
-        self.recover_with("$H", "回零", Duration::from_secs(120))
+        self.home_cancellable(None)
     }
 
-    fn recover_with(
+    pub fn home_cancellable(&mut self, cancel: Option<&CancellationToken>) -> Result<(), String> {
+        self.recover_with_cancellable("$H", "回零", Duration::from_secs(120), cancel)
+    }
+
+    fn recover_with_cancellable(
         &mut self,
         command: &str,
         label: &str,
         settle_timeout: Duration,
+        cancel: Option<&CancellationToken>,
     ) -> Result<(), String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(format!("用户取消，未执行{label}"));
+        }
         if self.sd_job_active {
             return Err(format!(
                 "{label}拒绝执行：控制器正在执行 SD 脱机作业，请先急停"
             ));
         }
         self.state = DeviceState::Ready;
-        if let Err(e) = self.send_line_wait_ack(command) {
+        if let Err(e) = self.send_line_wait_ack_cancellable(command, cancel) {
             if self.state == DeviceState::Ready {
                 self.state = DeviceState::Alarm;
             }
@@ -1073,7 +1417,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         } else {
             settle_timeout
         };
-        self.wait_until_idle(timeout, None).map_err(|e| {
+        self.wait_until_idle(timeout, cancel).map_err(|e| {
             if has_macro {
                 format!("{label}后固件自动宏尚未结束或出错：{e}")
             } else {

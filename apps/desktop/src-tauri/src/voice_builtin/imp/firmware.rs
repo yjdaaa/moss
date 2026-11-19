@@ -21,71 +21,109 @@ impl moss_voice_server::firmware::FirmwareHost for DesktopFirmwareHost {
         current: &moss_voice_server::firmware::DeviceFirmware<'_>,
     ) -> Option<moss_voice_server::firmware::FirmwarePush> {
         use moss_voice_server::firmware::{FirmwarePush, PushDecision};
-        let (version, token, decision) = self.decide(device_id, current)?;
-        match decision {
+        let resolved = self.decide_offer(device_id, current)?;
+        match resolved.decision {
             PushDecision::Send { force } => Some(FirmwarePush {
-                version,
-                token,
+                version: resolved.version,
+                token: resolved.token,
                 force,
             }),
             PushDecision::AlreadyRunning | PushDecision::Skip => None,
         }
     }
     fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>> {
-        let db = self.db.lock().ok()?;
-        let offer = db.firmware_offer_by_token(token, now()).ok()??;
-        // 令牌只给这台设备：下载方必须是这台已允许设备最近一次请求 OTA 的地址
-        let device = db.voice_device(&offer.device_id).ok()??;
-        if !device.is_allowed() || device.last_ip != peer {
-            return None;
-        }
-        drop(db);
-        let bytes = std::fs::read(self.dir.join(format!("{}.bin", offer.artifact_sha256))).ok()?;
-        if sha256_hex(&bytes) != offer.artifact_sha256 {
-            return None;
-        }
-        let db = self.db.lock().ok()?;
-        if offer.download_status == "pending" {
-            let _ = db.update_firmware_download_if_revision(
-                &offer.delivery_id,
-                offer.revision,
-                "downloading",
-                now(),
-            );
-        }
-        Some(bytes)
+        self.fetch_with_after_read(token, peer, || {})
     }
     fn reported(&self, device_id: &str, current: &moss_voice_server::firmware::DeviceFirmware<'_>) {
-        // 设备上跑的就是推送的这一份（按 ELF 哈希；旧固件没有哈希时按版本号）才记为已升级
-        if let Some((version, _, moss_voice_server::firmware::PushDecision::AlreadyRunning)) =
-            self.decide(device_id, current)
+        // 设备上跑的就是推送的这一份（按 ELF 哈希；旧固件没有哈希时按版本号）且绑定推送单号与镜像哈希才记为已升级
+        if let Some(resolved) = self.decide_offer(device_id, current)
+            && resolved.decision == moss_voice_server::firmware::PushDecision::AlreadyRunning
             && let Ok(db) = self.db.lock()
         {
-            let _ = db.firmware_device_reported(device_id, &version, now());
+            let _ = db.firmware_delivery_reported(
+                &resolved.delivery_id,
+                device_id,
+                &resolved.artifact_sha256,
+                &resolved.version,
+                now(),
+            );
         }
     }
 }
 
+struct OfferDecision {
+    delivery_id: String,
+    version: String,
+    token: String,
+    artifact_sha256: String,
+    decision: moss_voice_server::firmware::PushDecision,
+}
+
 impl DesktopFirmwareHost {
-    /// 这台设备的有效推送（版本、令牌）以及对它上报的当前固件该怎么办。
-    fn decide(
+    fn fetch_with_after_read(
+        &self,
+        token: &str,
+        peer: &str,
+        after_read: impl FnOnce(),
+    ) -> Option<Vec<u8>> {
+        let offer = {
+            let db = self.db.lock().ok()?;
+            let offer = db.firmware_offer_by_token(token, now()).ok()??;
+            // 令牌只给这台设备：下载方必须是这台已允许设备最近一次请求 OTA 的地址
+            let device = db.voice_device(&offer.device_id).ok()??;
+            if !device.is_allowed() || device.last_ip != peer {
+                return None;
+            }
+            offer
+        };
+        let bytes = std::fs::read(self.dir.join(format!("{}.bin", offer.artifact_sha256))).ok()?;
+        if sha256_hex(&bytes) != offer.artifact_sha256 {
+            return None;
+        }
+        after_read();
+        // 放锁读盘后复验授权、令牌、修订和镜像；仅首次下载执行 pending → downloading CAS。
+        let db = self.db.lock().ok()?;
+        let current_offer = db.firmware_offer_by_token(token, now()).ok()??;
+        if current_offer.delivery_id != offer.delivery_id
+            || current_offer.revision != offer.revision
+            || current_offer.download_status != offer.download_status
+            || current_offer.device_id != offer.device_id
+            || current_offer.artifact_sha256 != offer.artifact_sha256
+        {
+            return None;
+        }
+        let device = db.voice_device(&current_offer.device_id).ok()??;
+        if !device.is_allowed() || device.last_ip != peer {
+            return None;
+        }
+        if current_offer.download_status == "pending"
+            && !db
+                .update_firmware_download_if_revision(
+                    &current_offer.delivery_id,
+                    current_offer.revision,
+                    "downloading",
+                    now(),
+                )
+                .ok()?
+        {
+            return None;
+        }
+        Some(bytes)
+    }
+
+    /// 这台设备的有效推送（单号、版本、令牌、镜像哈希）以及对它上报的当前固件该怎么办。
+    fn decide_offer(
         &self,
         device_id: &str,
         current: &moss_voice_server::firmware::DeviceFirmware<'_>,
-    ) -> Option<(String, String, moss_voice_server::firmware::PushDecision)> {
-        let (version, token, artifact, never_downloaded) = {
+    ) -> Option<OfferDecision> {
+        let (row, token) = {
             let db = self.db.lock().ok()?;
-            let (version, token) = db.active_firmware_offer(device_id, now()).ok()??;
-            let row = db.firmware_offer_by_token(&token, now()).ok()??;
-            (
-                version,
-                token,
-                row.artifact_sha256,
-                row.download_status == "pending",
-            )
+            db.active_firmware_offer_row(device_id, now()).ok()??
         };
+        let never_downloaded = row.download_status == "pending";
         // 只读文件开头的应用描述，不把整份固件读进来
-        let push_elf = std::fs::File::open(self.dir.join(format!("{artifact}.bin")))
+        let push_elf = std::fs::File::open(self.dir.join(format!("{}.bin", row.artifact_sha256)))
             .ok()
             .and_then(|mut file| {
                 use std::io::Read;
@@ -94,12 +132,18 @@ impl DesktopFirmwareHost {
                 moss_voice_server::firmware::image_elf_sha256(&head)
             });
         let decision = moss_voice_server::firmware::decide_push(
-            &version,
+            &row.firmware_version,
             push_elf.as_deref(),
             current,
             never_downloaded,
         );
-        Some((version, token, decision))
+        Some(OfferDecision {
+            delivery_id: row.delivery_id,
+            version: row.firmware_version,
+            token,
+            artifact_sha256: row.artifact_sha256,
+            decision,
+        })
     }
 }
 
@@ -421,5 +465,171 @@ mod firmware_host_tests {
             host.offer("dev", &running("1.0.0", None)).is_none(),
             "升级完成后不再下发"
         );
+    }
+
+    #[test]
+    fn interrupted_fetch_retries_but_mid_read_revoke_or_cancel_still_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+        let mut bytes_a = vec![0u8; 2048];
+        bytes_a[0] = 0xE9;
+        bytes_a[176..208].copy_from_slice(&[0x11; 32]);
+        let mut bytes_b = vec![0u8; 2048];
+        bytes_b[0] = 0xE9;
+        bytes_b[176..208].copy_from_slice(&[0x22; 32]);
+        let (sha_a, sha_b) = (sha256_hex(&bytes_a), sha256_hex(&bytes_b));
+        let (elf_a, elf_b) = ("11".repeat(32), "22".repeat(32));
+        std::fs::write(dir.path().join(format!("{sha_a}.bin")), &bytes_a).unwrap();
+        std::fs::write(dir.path().join(format!("{sha_b}.bin")), &bytes_b).unwrap();
+
+        let (tok_a, tok_b) = ("a".repeat(32), "b".repeat(32));
+        {
+            let guard = db.lock().unwrap();
+            guard
+                .voice_device_seen("dev", "client", "board", "1.0.0", "192.168.1.9", now())
+                .unwrap();
+            guard
+                .set_voice_device_status("dev", laser_runtime::VOICE_DEVICE_ALLOWED, now())
+                .unwrap();
+            guard
+                .add_firmware_artifact(&sha_a, "1.1.0", "", 2048, now())
+                .unwrap();
+            guard
+                .add_firmware_artifact(&sha_b, "1.1.0", "", 2048, now())
+                .unwrap();
+            guard
+                .create_firmware_offer("fw-a", "dev", &sha_a, "1.1.0", &tok_a, now() + 60.0, now())
+                .unwrap();
+        }
+        let host = DesktopFirmwareHost {
+            db: db.clone(),
+            dir: dir.path().to_path_buf(),
+        };
+
+        // 1. 首次下载后模拟中断，重查 OTA 后可重新下载且不重复推进 revision
+        assert_eq!(host.fetch(&tok_a, "192.168.1.9").unwrap().len(), 2048);
+        let current = moss_voice_server::firmware::DeviceFirmware {
+            version: "1.0",
+            elf_sha256: None,
+        };
+        let offered = host
+            .offer("dev", &current)
+            .expect("设备重启后应继续收到同一推送");
+        assert_eq!(offered.token, tok_a);
+        assert!(
+            host.fetch(&tok_a, "192.0.2.20").is_none(),
+            "重试仍须匹配设备来源"
+        );
+        assert_eq!(host.fetch(&tok_a, "192.168.1.9").unwrap(), bytes_a);
+        assert_eq!(
+            host.db
+                .lock()
+                .unwrap()
+                .firmware_offer_by_token(&tok_a, now())
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
+
+        // 2. 新建同版本镜像 fw-b（fw-a 仍是 downloading），读盘放锁期间并发撤销设备 -> 拒发且 fw-b 维持 pending
+        let tok_c = "c".repeat(32);
+        db.lock()
+            .unwrap()
+            .create_firmware_offer(
+                "fw-b",
+                "dev",
+                &sha_b,
+                "1.1.0",
+                &tok_b,
+                now() + 60.0,
+                now() + 1.0,
+            )
+            .unwrap();
+        assert!(
+            host.fetch_with_after_read(&tok_b, "192.168.1.9", || {
+                db.lock()
+                    .unwrap()
+                    .set_voice_device_status(
+                        "dev",
+                        laser_runtime::VOICE_DEVICE_REVOKED,
+                        now() + 2.0,
+                    )
+                    .unwrap();
+            })
+            .is_none(),
+            "读盘期间设备被撤销时不得返回镜像"
+        );
+        // 恢复允许，再测读盘放锁期间 CAS 被并发取消/抢占 -> 拒发
+        db.lock()
+            .unwrap()
+            .set_voice_device_status("dev", laser_runtime::VOICE_DEVICE_ALLOWED, now() + 3.0)
+            .unwrap();
+        assert!(
+            host.fetch_with_after_read(&tok_b, "192.168.1.9", || {
+                db.lock()
+                    .unwrap()
+                    .cancel_firmware_offer("fw-b", now() + 4.0)
+                    .unwrap();
+            })
+            .is_none(),
+            "读盘期间推送被取消时不得返回镜像"
+        );
+
+        // 3. 重新下发 fw-c（镜像 B，同版本 1.1.0），设备先报旧镜像 elf_a 不得错关 fw-c，报 elf_b 只关 fw-c 且不误改 fw-a
+        db.lock()
+            .unwrap()
+            .create_firmware_offer(
+                "fw-c",
+                "dev",
+                &sha_b,
+                "1.1.0",
+                &tok_c,
+                now() + 60.0,
+                now() + 5.0,
+            )
+            .unwrap();
+        host.reported("dev", &running("1.1.0", Some(&elf_a)));
+        let rows_mid = db.lock().unwrap().list_firmware_deliveries().unwrap();
+        let fw_c_mid = rows_mid.iter().find(|r| r.delivery_id == "fw-c").unwrap();
+        assert_eq!(fw_c_mid.device_report_status, "not_reported");
+
+        assert_eq!(host.fetch(&tok_c, "192.168.1.9").unwrap().len(), 2048);
+        host.reported("dev", &running("1.1.0", Some(&elf_b)));
+        let rows_after = db.lock().unwrap().list_firmware_deliveries().unwrap();
+        let fw_a_after = rows_after.iter().find(|r| r.delivery_id == "fw-a").unwrap();
+        let fw_c_after = rows_after.iter().find(|r| r.delivery_id == "fw-c").unwrap();
+        assert_eq!(fw_c_after.device_report_status, "reported");
+        assert_eq!(fw_c_after.download_status, "downloaded");
+        assert_eq!(fw_c_after.revision, 2);
+        assert!(
+            host.fetch(&tok_c, "192.168.1.9").is_none(),
+            "上报完成后原下载令牌不得再下载固件"
+        );
+        {
+            let guard = db.lock().unwrap();
+            assert!(
+                guard
+                    .firmware_offer_by_token(&tok_c, now())
+                    .unwrap()
+                    .is_none(),
+                "上报完成后按原令牌查不到有效推送"
+            );
+            assert_eq!(
+                guard
+                    .active_firmware_offer_row("dev", now())
+                    .unwrap()
+                    .map(|(r, token)| (r.delivery_id, token)),
+                Some(("fw-a".to_owned(), tok_a)),
+                "fw-c 已关闭，仅 fw-a 仍保持未上报有效状态"
+            );
+            assert!(
+                !guard
+                    .firmware_delivery_reported("fw-c", "dev", &sha_b, "1.1.0", now())
+                    .unwrap(),
+                "令牌作废且已上报的 fw-c 不得重复核销"
+            );
+        }
+        assert_eq!(fw_a_after.device_report_status, "not_reported");
     }
 }

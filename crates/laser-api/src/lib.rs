@@ -14,6 +14,7 @@ mod voice_authority;
 mod access;
 mod auth;
 mod connection;
+mod draw_state;
 mod engrave_route;
 mod events;
 mod files;
@@ -95,6 +96,8 @@ pub struct ApiService {
     target_open_locks: TargetOpenLocks,
     material_write_lock: std::sync::Mutex<()>,
     feedback_adoption: std::sync::Mutex<()>,
+    draw_state_lock: std::sync::Mutex<()>,
+    draw_state_memory: std::sync::Mutex<draw_state::DrawStateRecord>,
     transport_factory: TransportFactory,
     /// `MOSS_ALLOWED_ORIGINS` 额外允许的浏览器来源（精确匹配，已拒绝 `*`）。
     extra_allowed_origins: Vec<String>,
@@ -123,6 +126,8 @@ pub struct ApiService {
     /// 语音与接入点调用激光工具时没给串口号 / IP，就用它（2026-11-08 用户决定）。
     verified_connection: std::sync::RwLock<Option<serde_json::Value>>,
     voice_sessions: voice_authority::VoiceSessions,
+    /// 宿主关停门禁：关停清点前置位，拒绝所有新启动的连接、发码与设备操作（急停现有在途/待确认通道除外）。
+    shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn unix_seconds() -> u64 {

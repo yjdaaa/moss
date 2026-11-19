@@ -189,17 +189,19 @@ impl ApprovalService {
         Ok(changed)
     }
 
-    /// 经审批的发送作业已开始：记进展为 `running`，供重启时识别“发送中被中断”（A-33）。
+    /// 经审批的发送作业已开始：记进展为 `running` 并绑定 `job_id`，供重启时识别“发送中被中断”（A-33）。
     pub fn mark_running(&self, approval_id: &str, job_id: &str) -> Result<(), ApprovalError> {
         let db = self.lock()?;
         let outcome = ApprovalOutcome {
-            success: true,
+            success: false,
             message: "已开始执行，等待加工完成".into(),
             job_id: Some(job_id.to_owned()),
             error_code: None,
             phase: Some(ApprovalPhase::Running),
         };
-        db.set_approval_outcome(approval_id, &outcome, self.now())?;
+        if !db.set_approval_outcome(approval_id, &outcome, self.now())? {
+            return Err(status_error(&db, approval_id)?);
+        }
         Ok(())
     }
 
@@ -628,17 +630,23 @@ impl ApprovalService {
             drop(tx);
             return Err(status_error(&db, approval_id)?);
         }
-        if record.kind == ApprovalKind::ExternalTool {
-            db.set_approval_outcome(
-                approval_id,
-                &ApprovalOutcome {
-                    success: false,
-                    message: "外部调用正在执行，尚未收到结果".into(),
-                    phase: Some(ApprovalPhase::Running),
-                    ..Default::default()
-                },
-                now,
-            )?;
+        let initial_message = if record.kind == ApprovalKind::ExternalTool {
+            "外部调用正在执行，尚未收到结果"
+        } else {
+            "审批已放行，正在执行物理操作"
+        };
+        if !db.set_approval_outcome(
+            approval_id,
+            &ApprovalOutcome {
+                success: false,
+                message: initial_message.into(),
+                phase: Some(ApprovalPhase::Running),
+                ..Default::default()
+            },
+            now,
+        )? {
+            drop(tx);
+            return Err(status_error(&db, approval_id)?);
         }
         db.append_audit(&audit_entry(
             now,
@@ -657,13 +665,20 @@ impl ApprovalService {
     pub fn record_outcome(
         &self,
         approval_id: &str,
-        outcome: ApprovalOutcome,
+        mut outcome: ApprovalOutcome,
     ) -> Result<ApprovalRecord, ApprovalError> {
         let db = self.lock()?;
         let now = self.now();
         let record = db
             .get_approval(approval_id)?
             .ok_or(ApprovalError::NotFound)?;
+        if record.kind != ApprovalKind::HomeControl && outcome.phase.is_none() {
+            outcome.phase = Some(if outcome.success {
+                ApprovalPhase::Completed
+            } else {
+                ApprovalPhase::Failed
+            });
+        }
         // HA controls are strictly one-shot, including terminal outcomes.
         // Never allow a later success to overwrite an unknown result.
         if record.kind == ApprovalKind::HomeControl {

@@ -116,7 +116,8 @@ impl ApprovalRow {
 /// v18：删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），
 /// 补齐 `workflows`、`approvals`、`material_aliases` 高频查询索引。
 /// v19（2026-11-12 n81）：新增有界语音对话记录表 `voice_chat_logs`（说了什么、工具调用、回了什么，上限 500 条）。
-pub const SCHEMA_VERSION: i64 = 19;
+/// v20（2026-11-18）：`voice_devices` 增加 `status_revision` 递增修订号，用于 USB 配网并发撤销 CAS 校验。
+pub const SCHEMA_VERSION: i64 = 20;
 
 const AUDIT_LOG_MAX_ROWS: i64 = 2000;
 const APPROVALS_TERMINAL_MAX_ROWS: i64 = 500;
@@ -214,6 +215,9 @@ pub struct VoiceDeviceRecord {
     /// 最近一次实际拾音模式（schema 15）：`{"mode":"realtime"}`；固件在设备端 AEC 开启时才选 realtime
     pub listen_json: Option<String>,
     pub listen_at: Option<f64>,
+    /// 设备状态与绑定修订号（schema 20）：每次登记、允许/撤销或换绑递增，用于拦截 USB 并发撤销覆盖
+    #[serde(default)]
+    pub status_revision: i64,
 }
 
 impl VoiceDeviceRecord {
@@ -237,7 +241,7 @@ pub const VOICE_SNAPSHOT_LISTEN: &str = "listen";
 
 const VOICE_SNAPSHOT_MAX_BYTES: usize = 8 * 1024;
 
-const VOICE_DEVICE_COLUMNS: &str = "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at";
+const VOICE_DEVICE_COLUMNS: &str = "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at, status_revision";
 
 fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDeviceRecord> {
     Ok(VoiceDeviceRecord {
@@ -259,6 +263,7 @@ fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDevic
         status_at: row.get(15)?,
         listen_json: row.get(16)?,
         listen_at: row.get(17)?,
+        status_revision: row.get(18)?,
     })
 }
 
@@ -919,6 +924,24 @@ impl RuntimeDb {
                  INSERT INTO schema_version(version,applied_at) VALUES(19,unixepoch());"
             )?;
         }
+        if current.unwrap_or(0) < 20 {
+            // 2026-11-18：voice_devices 增加状态修订号 status_revision，绑定 USB 配网起始登记修订并阻止并发撤销覆盖。
+            let existing = {
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
+                statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if !existing.iter().any(|name| name == "status_revision") {
+                tx.execute_batch(
+                    "ALTER TABLE voice_devices ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(20,unixepoch());",
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1481,11 +1504,14 @@ impl RuntimeDb {
         Ok(records)
     }
 
-    /// 启动恢复专用：只筛出已消费但执行阶段仍停留在 `running` 的中断审批，避免全表搬进内存。
+    /// 启动恢复专用：筛出已消费但缺少终态或仍停留在 `running` 的中断审批，避免全表搬进内存。
     pub fn list_running_executed_approvals(&self) -> Result<Vec<ApprovalRecord>, SchemaError> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {APPROVAL_COLUMNS} FROM approvals \
-             WHERE status='executed' AND json_extract(outcome, '$.phase')='running' \
+             WHERE status='executed' \
+               AND (outcome IS NULL \
+                    OR json_extract(outcome, '$.phase') IS NULL \
+                    OR json_extract(outcome, '$.phase') NOT IN ('completed', 'cancelled', 'failed', 'unknown')) \
              ORDER BY created_at ASC, approval_id ASC"
         ))?;
         let rows = statement.query_map([], ApprovalRow::read)?;
@@ -1611,8 +1637,8 @@ impl RuntimeDb {
         match existing {
             None => {
                 tx.execute(
-                    "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen, status_revision)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)",
                     params![device_id, client_id, VOICE_DEVICE_PENDING, model, firmware_version, last_ip, now],
                 )?;
             }
@@ -1651,13 +1677,17 @@ impl RuntimeDb {
     }
 
     /// 物理 USB 配网后按芯片 MAC 重绑 `client_id` 并设为已允许，同时保留原本已知的板型（仅在空 `model` 时填芯片名）。
+    /// 若设备在库中已为 `revoked`，且未勾 `unrevoke` 或库中 `status_revision` 与起始绑定修订 `expected_revision` 不一致，
+    /// 事务内拒绝覆盖最新撤销状态，作废残留审批并返回 `Ok(None)`。
     pub fn bind_usb_voice_device(
         &self,
         device_id: &str,
         client_id: &str,
         fallback_model: &str,
+        expected_revision: Option<i64>,
+        unrevoke: bool,
         now: f64,
-    ) -> Result<VoiceDeviceRecord, SchemaError> {
+    ) -> Result<Option<VoiceDeviceRecord>, SchemaError> {
         if device_id.trim().is_empty() || client_id.trim().is_empty() {
             return Err(SchemaError::InvalidRecord(
                 "设备 MAC 与 Client-Id 不能为空".into(),
@@ -1673,9 +1703,13 @@ impl RuntimeDb {
             .optional()?;
         match existing {
             None => {
+                if expected_revision.is_some() {
+                    tx.commit()?;
+                    return Ok(None);
+                }
                 tx.execute(
-                    "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen, decided_at)
-                     VALUES(?1, ?2, ?3, ?4, '', '', ?5, ?5, ?5)",
+                    "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen, decided_at, status_revision)
+                     VALUES(?1, ?2, ?3, ?4, '', '', ?5, ?5, ?5, 1)",
                     params![
                         device_id,
                         client_id,
@@ -1686,6 +1720,17 @@ impl RuntimeDb {
                 )?;
             }
             Some(record) => {
+                if record.status == VOICE_DEVICE_REVOKED
+                    && (!unrevoke || expected_revision != Some(record.status_revision))
+                {
+                    tx.execute(
+                        "UPDATE approvals SET status='expired', updated_at=?2
+                         WHERE source='voice' AND session_id=?1 AND status IN ('pending','approved')",
+                        params![device_id, now],
+                    )?;
+                    tx.commit()?;
+                    return Ok(None);
+                }
                 let rebinding = record.client_id != client_id;
                 let next_model = if record.model.trim().is_empty() {
                     fallback_model.to_owned()
@@ -1697,8 +1742,13 @@ impl RuntimeDb {
                 } else {
                     now
                 };
+                let next_revision = if record.status != VOICE_DEVICE_ALLOWED || rebinding {
+                    record.status_revision + 1
+                } else {
+                    record.status_revision
+                };
                 tx.execute(
-                    "UPDATE voice_devices SET client_id=?2, status=?3, model=?4, last_seen=?5, decided_at=?6
+                    "UPDATE voice_devices SET client_id=?2, status=?3, model=?4, last_seen=?5, decided_at=?6, status_revision=?7
                      WHERE device_id=?1",
                     params![
                         device_id,
@@ -1706,7 +1756,8 @@ impl RuntimeDb {
                         VOICE_DEVICE_ALLOWED,
                         next_model,
                         now,
-                        decided_at
+                        decided_at,
+                        next_revision
                     ],
                 )?;
                 if rebinding {
@@ -1724,7 +1775,7 @@ impl RuntimeDb {
             voice_device_from_row,
         )?;
         tx.commit()?;
-        Ok(record)
+        Ok(Some(record))
     }
 
     /// 记录设备快照（schema 14）。未知种类或超长 JSON 返回 `false`，不写库也不报错。
@@ -1792,7 +1843,7 @@ impl RuntimeDb {
         }
         let tx = self.connection.unchecked_transaction()?;
         let found = tx.execute(
-            "UPDATE voice_devices SET status=?2, decided_at=?3 WHERE device_id=?1",
+            "UPDATE voice_devices SET status=?2, decided_at=?3, status_revision=status_revision+1 WHERE device_id=?1",
             params![device_id, status, now],
         )? > 0;
         if found && status != VOICE_DEVICE_ALLOWED {

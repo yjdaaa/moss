@@ -32,6 +32,8 @@ fn sha_ok(sha: &str) -> bool {
 }
 /// 推送仍有效：未上报新版本、未到期、未取消（取消即清空令牌）。
 const ACTIVE: &str = "device_report_status='not_reported' AND download_status IN ('pending','downloading','unknown') AND token IS NOT NULL AND expires_at > ?";
+/// 下载令牌仅在待下载或下载中有效，允许同一设备在中断后重试。
+const RETRYABLE_DOWNLOAD: &str = "device_report_status='not_reported' AND download_status IN ('pending','downloading') AND token IS NOT NULL AND expires_at > ?";
 
 impl RuntimeDb {
     /// 登记导入的固件（同一 SHA-256 重复导入不变）。
@@ -145,12 +147,26 @@ impl RuntimeDb {
         now: f64,
     ) -> Result<Option<(String, String)>, SchemaError> {
         Ok(self.connection.query_row(
-            &format!("SELECT firmware_version,token FROM voice_firmware_delivery WHERE device_id=?1 AND {} ORDER BY updated_at DESC LIMIT 1", ACTIVE.replace('?', "?2")),
+            &format!("SELECT firmware_version,token FROM voice_firmware_delivery WHERE device_id=?1 AND {} ORDER BY updated_at DESC, rowid DESC LIMIT 1", ACTIVE.replace('?', "?2")),
             params![device_id, now],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?)
     }
 
+    /// 设备请求 OTA 或上报版本时：取该设备当前最新有效推送的完整行与下载令牌。
+    pub fn active_firmware_offer_row(
+        &self,
+        device_id: &str,
+        now: f64,
+    ) -> Result<Option<(FirmwareOfferRow, String)>, SchemaError> {
+        Ok(self.connection.query_row(
+            &format!("SELECT delivery_id,device_id,artifact_sha256,firmware_version,download_status,revision,token FROM voice_firmware_delivery WHERE device_id=?1 AND {} ORDER BY updated_at DESC, rowid DESC LIMIT 1", ACTIVE.replace('?', "?2")),
+            params![device_id, now],
+            |r| Ok((FirmwareOfferRow { delivery_id: r.get(0)?, device_id: r.get(1)?, artifact_sha256: r.get(2)?, firmware_version: r.get(3)?, download_status: r.get(4)?, revision: r.get(5)? }, r.get(6)?)),
+        ).optional()?)
+    }
+
+    /// 按设备绑定的下载令牌查询可首次下载或重试的有效推送。
     pub fn firmware_offer_by_token(
         &self,
         token: &str,
@@ -160,13 +176,40 @@ impl RuntimeDb {
             return Ok(None);
         }
         Ok(self.connection.query_row(
-            &format!("SELECT delivery_id,device_id,artifact_sha256,firmware_version,download_status,revision FROM voice_firmware_delivery WHERE token=?1 AND {}", ACTIVE.replace('?', "?2")),
+            &format!("SELECT delivery_id,device_id,artifact_sha256,firmware_version,download_status,revision FROM voice_firmware_delivery WHERE token=?1 AND {}", RETRYABLE_DOWNLOAD.replace('?', "?2")),
             params![token, now],
             |r| Ok(FirmwareOfferRow { delivery_id: r.get(0)?, device_id: r.get(1)?, artifact_sha256: r.get(2)?, firmware_version: r.get(3)?, download_status: r.get(4)?, revision: r.get(5)? }),
         ).optional()?)
     }
 
-    /// 设备上报的版本等于有效推送的版本：记为已上报（已升级），令牌作废。
+    /// 绑定推送单号与镜像 SHA-256 核销设备上报的新版本：只更新匹配的这一笔推送，不误伤同版本不同镜像的其他推送。
+    pub fn firmware_delivery_reported(
+        &self,
+        delivery_id: &str,
+        device_id: &str,
+        artifact_sha256: &str,
+        version: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        if delivery_id.is_empty()
+            || device_id.is_empty()
+            || !sha_ok(artifact_sha256)
+            || version.is_empty()
+            || !now.is_finite()
+        {
+            return Err(invalid("固件上报参数无效"));
+        }
+        Ok(self.connection.execute(
+            "UPDATE voice_firmware_delivery SET device_report_status='reported',
+               download_status=CASE WHEN download_status IN ('downloading','unknown') THEN 'downloaded' ELSE download_status END,
+               token=NULL, revision=revision+1, updated_at=?5
+             WHERE delivery_id=?1 AND device_id=?2 AND artifact_sha256=?3 AND firmware_version=?4
+               AND device_report_status='not_reported' AND token IS NOT NULL",
+            params![delivery_id, device_id, artifact_sha256, version, now],
+        )? == 1)
+    }
+
+    /// 设备上报的版本等于有效推送的版本：记为已上报（已升级），令牌作废（最多更新最近一条）。
     pub fn firmware_device_reported(
         &self,
         device_id: &str,
@@ -177,7 +220,11 @@ impl RuntimeDb {
             "UPDATE voice_firmware_delivery SET device_report_status='reported',
                download_status=CASE WHEN download_status IN ('downloading','unknown') THEN 'downloaded' ELSE download_status END,
                token=NULL, revision=revision+1, updated_at=?3
-             WHERE device_id=?1 AND firmware_version=?2 AND device_report_status='not_reported' AND token IS NOT NULL",
+             WHERE delivery_id = (
+               SELECT delivery_id FROM voice_firmware_delivery
+               WHERE device_id=?1 AND firmware_version=?2 AND device_report_status='not_reported' AND token IS NOT NULL
+               ORDER BY updated_at DESC, rowid DESC LIMIT 1
+             )",
             params![device_id, version, now],
         )? > 0)
     }
@@ -343,6 +390,94 @@ mod tests {
         assert!(
             !db.has_active_firmware_download(12.0).unwrap(),
             "撤销 token=NULL 后即便 download_status 仍为 downloading 也不得阻塞"
+        );
+    }
+
+    #[test]
+    fn interrupted_download_can_retry_and_report_binds_delivery_and_sha256() {
+        let db = RuntimeDb::open_memory().unwrap();
+        let sha_a = "a".repeat(64);
+        let sha_b = "b".repeat(64);
+        let tok_a = "1".repeat(32);
+        let tok_b = "2".repeat(32);
+        db.add_firmware_artifact(&sha_a, "2.1.0", "", 2048, 1.0)
+            .unwrap();
+        db.add_firmware_artifact(&sha_b, "2.1.0", "", 2048, 1.0)
+            .unwrap();
+
+        db.create_firmware_offer("del-a", "dev1", &sha_a, "2.1.0", &tok_a, 100.0, 10.0)
+            .unwrap();
+        assert_eq!(
+            db.firmware_offer_by_token(&tok_a, 11.0)
+                .unwrap()
+                .map(|r| r.delivery_id),
+            Some("del-a".to_owned())
+        );
+        // 中断后同一设备可再次取得同一推送，修订保持不变
+        assert!(
+            db.update_firmware_download_if_revision("del-a", 0, "downloading", 12.0)
+                .unwrap()
+        );
+        let retry = db.firmware_offer_by_token(&tok_a, 12.0).unwrap().unwrap();
+        assert_eq!(retry.download_status, "downloading");
+        assert_eq!(retry.revision, 1);
+        assert_eq!(retry.artifact_sha256, sha_a);
+
+        // 再创建同版本不同镜像的 pending 推送（del-a 因已是 downloading 仍留在表里）
+        db.create_firmware_offer("del-b", "dev1", &sha_b, "2.1.0", &tok_b, 100.0, 20.0)
+            .unwrap();
+        assert_eq!(
+            db.active_firmware_offer_row("dev1", 21.0)
+                .unwrap()
+                .map(|(r, _)| r.delivery_id),
+            Some("del-b".to_owned())
+        );
+
+        // 绑定错配 sha256 或错配 delivery_id 时不误更新任何记录
+        assert!(
+            !db.firmware_delivery_reported("del-b", "dev1", &sha_a, "2.1.0", 22.0)
+                .unwrap()
+        );
+        assert!(
+            !db.firmware_delivery_reported("del-a", "dev1", &sha_b, "2.1.0", 22.0)
+                .unwrap()
+        );
+
+        // 只上报 del-b / sha_b：只关闭 del-b，同版本的 del-a 仍保持未上报
+        assert!(
+            db.firmware_delivery_reported("del-b", "dev1", &sha_b, "2.1.0", 23.0)
+                .unwrap()
+        );
+        let rows = db.list_firmware_deliveries().unwrap();
+        let del_a = rows.iter().find(|r| r.delivery_id == "del-a").unwrap();
+        let del_b = rows.iter().find(|r| r.delivery_id == "del-b").unwrap();
+        assert_eq!(del_b.device_report_status, "reported");
+        assert_eq!(del_b.revision, 1);
+        assert!(
+            db.firmware_offer_by_token(&tok_b, 23.0).unwrap().is_none(),
+            "上报后 del-b 原下载令牌不可再拉取推送"
+        );
+        assert_eq!(
+            db.active_firmware_offer_row("dev1", 23.0)
+                .unwrap()
+                .map(|(r, token)| (r.delivery_id, token)),
+            Some(("del-a".to_owned(), tok_a)),
+            "del-b 关闭后不再作为活跃推送，只剩 del-a 保持原令牌有效"
+        );
+        assert!(
+            !db.firmware_delivery_reported("del-b", "dev1", &sha_b, "2.1.0", 24.0)
+                .unwrap(),
+            "已上报并清空令牌的 del-b 不可重复核销"
+        );
+        assert_eq!(del_a.device_report_status, "not_reported");
+        assert_eq!(del_a.download_status, "downloading");
+        assert!(
+            db.delete_firmware_artifact(&sha_b, 24.0).unwrap(),
+            "del-b 关闭后对应镜像不再被活跃推送占用"
+        );
+        assert!(
+            !db.delete_firmware_artifact(&sha_a, 24.0).unwrap(),
+            "仍处于未上报 downloading 的 del-a 继续锁定镜像"
         );
     }
 }

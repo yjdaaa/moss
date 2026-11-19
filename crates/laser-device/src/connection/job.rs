@@ -21,9 +21,13 @@ impl CancellationToken {
 #[derive(Debug, Default)]
 pub struct JobProgress {
     pub lines_sent: AtomicUsize,
+    /// 经规划器状态或空闲回检确认实际完成执行的行数（不高于 `lines_sent`，避免 `ok` 入队未刻行在续雕时被跳过）。
+    pub lines_completed: AtomicUsize,
     pub total_lines: AtomicUsize,
     pub updated_at_millis: AtomicU64,
     pub awaiting_completion: AtomicBool,
+    /// 短作业已登记急停目标，握手和预检尚未结束。
+    pub preflighting: AtomicBool,
     pub last_status_report: std::sync::Mutex<Option<String>>,
     /// 走边框被暂停（进给保持 `!`）还没继续：只用于界面显示（2026-11-18）
     pub paused: AtomicBool,
@@ -148,45 +152,132 @@ impl<T: DeviceTransport> JobWorker<T> {
         lines: impl IntoIterator<Item = String>,
         rx_buffer_size: usize,
     ) -> Result<usize, String> {
+        if self.cancel_if_requested()? {
+            return Ok(0);
+        }
         // FluidNC 可主动周期上报状态（$RI），替代 500ms 心跳轮询；旧 GRBL 返回 error:3 时自动关闭。
         // 必须在首行 G-code 之前完成并消费掉它的 ok，否则会与行 ack 计数错位；无法确认时直接报错不发送。
-        let auto_report = match self.device.enable_auto_report(200) {
+        let auto_report = match self
+            .device
+            .enable_auto_report_cancellable(200, Some(&self.cancel))
+        {
             Ok(enabled) => enabled,
             Err(e) => {
-                self.device.disable_auto_report();
+                if e.starts_with("用户取消，") {
+                    self.finalize_auto_report_or_cancel(true)?;
+                    return Ok(0);
+                }
+                let _ = self.finalize_auto_report_or_cancel(true);
                 return Err(e);
             }
         };
-        let result = self.stream_lines_inner(lines, rx_buffer_size);
-        if auto_report {
-            self.device.disable_auto_report();
+        let mut acked_count = 0;
+        match self.stream_lines_inner(lines, rx_buffer_size, &mut acked_count) {
+            Ok(true) => Ok(acked_count),
+            Err(error) => {
+                // 报警、复位或断线优先于同时到达的取消，收尾不能把真实故障改成“已取消”。
+                let _ = self.finalize_auto_report_or_cancel(auto_report);
+                Err(error)
+            }
+            Ok(false) => {
+                self.finalize_auto_report_or_cancel(auto_report)?;
+                Ok(acked_count)
+            }
         }
-        result
     }
 
+    /// 检查取消位；若已取消则走实时急停收尾并返回 `Ok(true)`。
+    fn cancel_if_requested(&mut self) -> Result<bool, String> {
+        if self.cancel.is_cancelled() {
+            self.device.cancel()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// 收尾检查：若已取消则走实时急停，不再写 `$RI=0`；否则按需关闭自动上报并在期间遇取消时急停。
+    fn finalize_auto_report_or_cancel(
+        &mut self,
+        disable_auto_report: bool,
+    ) -> Result<bool, String> {
+        if self.cancel_if_requested()? {
+            return Ok(true);
+        }
+        if disable_auto_report
+            && !self
+                .device
+                .disable_auto_report_cancellable(Some(&self.cancel))
+        {
+            self.device.cancel()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// 检查取消位；若已取消则执行实时急停并按控制器 `Hold:0|Ln` 证据记录已完成行数，返回 `Ok(true)`。
+    fn cancel_with_proven_completion(
+        &mut self,
+        use_numbered_wire: bool,
+        acked_count: usize,
+    ) -> Result<bool, String> {
+        if self.cancel_if_requested()? {
+            self.record_cancelled_completion(use_numbered_wire, acked_count);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// 返回 `Ok(true)` 表示已在内部因取消走完 `device.cancel()`，外层不得再写 `$RI=0`。
     fn stream_lines_inner(
         &mut self,
         lines: impl IntoIterator<Item = String>,
         rx_buffer_size: usize,
-    ) -> Result<usize, String> {
-        let mut lines_iter = lines.into_iter().peekable();
+        acked_count: &mut usize,
+    ) -> Result<bool, String> {
+        self.progress.lines_completed.store(0, Ordering::Relaxed);
+        let prepared_lines: Vec<String> = lines
+            .into_iter()
+            .map(|raw| {
+                if (self.scale_factor - 1.0).abs() > 1e-6 {
+                    rescale_gcode_line_s(&raw, self.scale_factor)
+                } else {
+                    raw
+                }
+            })
+            .collect();
+        let use_numbered_wire = self
+            .device
+            .features
+            .as_ref()
+            .is_some_and(|f| f.use_line_numbers)
+            && !prepared_lines.is_empty()
+            && prepared_lines.iter().enumerate().all(|(idx, line)| {
+                let trimmed = line.trim_start();
+                !trimmed.is_empty()
+                    && !trimmed.starts_with('$')
+                    && !trimmed.starts_with(['N', 'n'])
+                    && format!("N{} {line}", idx + 1).len() <= crate::MAX_GCODE_LINE_BYTES
+            });
+
+        let mut lines_iter = prepared_lines.into_iter().enumerate().peekable();
         let mut in_flight: VecDeque<usize> = VecDeque::new();
         let mut chars_in_buffer: usize = 0;
         let mut window = self.device.rx_window(rx_buffer_size);
-        let mut acked_count: usize = 0;
         let mut heartbeat_sent = false;
 
         while lines_iter.peek().is_some() || !in_flight.is_empty() {
             // 1. 检查取消令牌
-            if self.cancel.is_cancelled() {
-                self.device.cancel()?;
-                return Ok(acked_count);
+            if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+                return Ok(true);
             }
 
-            // 2. 填充 RX 缓冲区：只要缓冲区还有空间且有待发行，就持续写入
-            while let Some(raw_line) = lines_iter.peek() {
-                let line = if (self.scale_factor - 1.0).abs() > 1e-6 {
-                    rescale_gcode_line_s(raw_line, self.scale_factor)
+            // 2. 填充 RX 缓冲区：只要缓冲区还有空间且有待发行，就持续写入；每次写入前都重查取消令牌
+            while let Some((idx, raw_line)) = lines_iter.peek() {
+                if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+                    return Ok(true);
+                }
+                let line = if use_numbered_wire {
+                    format!("N{} {raw_line}", idx + 1)
                 } else {
                     raw_line.clone()
                 };
@@ -195,11 +286,14 @@ impl<T: DeviceTransport> JobWorker<T> {
                 if chars_in_buffer + line_len <= window.size()
                     || (chars_in_buffer == 0 && in_flight.is_empty())
                 {
+                    // 在途顺序写成功返回后可能已触发取消，下一笔写前必须复查取消位
+                    if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+                        return Ok(true);
+                    }
                     let _ = lines_iter.next();
                     if let Err(e) = self.device.send_line(&line) {
-                        if self.cancel.is_cancelled() {
-                            self.device.cancel()?;
-                            return Ok(acked_count);
+                        if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+                            return Ok(true);
                         }
                         return Err(e);
                     }
@@ -208,6 +302,11 @@ impl<T: DeviceTransport> JobWorker<T> {
                 } else {
                     break;
                 }
+            }
+
+            // 末行或满窗退出内层后也立刻复查，避免取消后继续发心跳或阻塞读响应
+            if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+                return Ok(true);
             }
 
             // 3. 监控失联超时并发送心跳
@@ -232,7 +331,7 @@ impl<T: DeviceTransport> JobWorker<T> {
                     if let Some(len) = in_flight.pop_front() {
                         chars_in_buffer = chars_in_buffer.saturating_sub(len);
                     }
-                    acked_count += 1;
+                    *acked_count += 1;
                     self.progress.lines_sent.fetch_add(1, Ordering::Relaxed);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -290,12 +389,46 @@ impl<T: DeviceTransport> JobWorker<T> {
                 self.device
                     .wait_until_idle(Duration::from_secs(30), Some(&self.cancel))
             });
-        if self.cancel.is_cancelled() {
-            self.device.cancel()?;
-            return Ok(acked_count);
+        if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
+            return Ok(true);
         }
         completion?;
-        Ok(acked_count)
+        self.progress
+            .lines_completed
+            .store(*acked_count, Ordering::Relaxed);
+        Ok(false)
+    }
+
+    /// 取消停机后，只采信固件在 `Hold:0` 静止状态直接汇报且已加顺序 `N` 行号的 `Ln:N` 边界；
+    /// 禁止用 ACK、Bf 占用数、异步 Idle 或任何估算推断已完成行数，不能证实则一律记 0（上层 `can_resume=false`）。
+    fn record_cancelled_completion(&self, use_numbered_wire: bool, acked_count: usize) {
+        let completed = self.device_proven_completed_count(use_numbered_wire, acked_count);
+        self.progress
+            .lines_completed
+            .store(completed, Ordering::Relaxed);
+    }
+
+    fn device_proven_completed_count(&self, use_numbered_wire: bool, acked_count: usize) -> usize {
+        if !use_numbered_wire || acked_count == 0 {
+            return 0;
+        }
+        let Some(report) = self.device.last_cancel_report.as_ref() else {
+            return 0;
+        };
+        if !report.blocking_pins().is_empty()
+            || report.has_sd_job()
+            || report.activity != crate::MachineActivity::Held
+            || !report.raw.contains("Hold:0")
+        {
+            return 0;
+        }
+        let Some(ln) = report.line_number else {
+            return 0;
+        };
+        if ln == 0 || ln > acked_count {
+            return 0;
+        }
+        ln - 1
     }
 }
 

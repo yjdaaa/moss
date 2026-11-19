@@ -46,7 +46,7 @@ impl ActiveJob {
 
 /// 短作业（走边框）的开始回执（2026-11-18，技术书 r52）：内置语音在后台线程里发起走边框，
 /// 等到“这一次”真正开始就先回话；等不及放弃后，同一次请求不得再让机器动。
-/// 由发起请求的线程登记（[`watch_short_jobs_on_this_thread`]），`run_short_device_job` 在登记活动作业的同一把锁内读写。
+/// 由发起请求的线程登记（[`watch_short_jobs_on_this_thread`]），`run_short_device_job` 通过预检后在回执锁内检查是否放弃并发布作业编号。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ShortJobStart {
     #[default]
@@ -281,8 +281,7 @@ pub(crate) fn default_transport_factory() -> TransportFactory {
 }
 
 impl ApiService {
-    /// 当前正在下发的作业数量。
-    /// 正在进行的走边框作业编号（`framing-…`）。内置语音据此在边框开始走时先回话（2026-11-18）。
+    /// 已登记的走边框作业编号（`framing-…`），含仍在握手或预检的急停目标。
     pub fn active_framing_job_ids(&self) -> Vec<String> {
         self.active_jobs
             .lock()

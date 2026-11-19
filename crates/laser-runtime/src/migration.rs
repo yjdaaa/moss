@@ -142,32 +142,25 @@ pub fn run_migration(
 
     let records = collect_records(&source_roots)?;
     let target_db_path = options.target_root.join("moss.sqlite");
-    let target_read = if target_db_path.is_file() {
-        Some(rusqlite::Connection::open_with_flags(
-            &target_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+    let (runtime, work_db) = if options.dry_run {
+        (None, open_dry_run_db(&target_db_path)?)
     } else {
-        None
-    };
-    let runtime = if !options.dry_run {
-        Some(
-            RuntimeRoot::resolve(Some(&options.target_root), None).map_err(|error| {
-                MigrationError::InvalidArgument(format!("运行目录不可用：{error:?}"))
-            })?,
+        let runtime = RuntimeRoot::resolve(Some(&options.target_root), None).map_err(|error| {
+            MigrationError::InvalidArgument(format!("运行目录不可用：{error:?}"))
+        })?;
+        let db = RuntimeDb::open(&runtime.database)?;
+        (
+            Some(runtime),
+            WorkingDb {
+                db,
+                _temp_dir: None,
+            },
         )
-    } else {
-        None
     };
-    let db = if let Some(runtime) = runtime.as_ref() {
-        Some(RuntimeDb::open(&runtime.database)?)
-    } else {
-        None
-    };
-    if let Some(db) = db.as_ref() {
+    if let Some(runtime) = runtime.as_ref() {
         for (source, hash, size) in &upload_entries {
-            let relative_name = upload_name(source, hash, &runtime.as_ref().unwrap().uploads)?;
-            let destination = runtime.as_ref().unwrap().uploads.join(&relative_name);
+            let relative_name = upload_name(source, hash, &runtime.uploads)?;
+            let destination = runtime.uploads.join(&relative_name);
             if !destination.exists() {
                 std::fs::copy(source, &destination)?;
                 report.counts.added += 1;
@@ -175,7 +168,7 @@ pub fn run_migration(
                 report.counts.skipped += 1;
             }
             let id = hex::encode(Sha256::digest(source.to_string_lossy().as_bytes()));
-            db.connection.execute(
+            work_db.db.connection.execute(
                 "INSERT OR IGNORE INTO uploads(upload_id,path,sha256,size_bytes,created_at) VALUES(?1,?2,?3,?4,unixepoch())",
                 rusqlite::params![id, relative_name, hash, *size as i64],
             )?;
@@ -188,26 +181,18 @@ pub fn run_migration(
     };
     if let Some(val) = &material_value {
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-        if options.dry_run {
-            let mem_db = RuntimeDb::open_memory()?;
-            let counts = mem_db.import_material_json(val, mat_policy, now)?;
-            let entry = report.tables.entry("materials".into()).or_default();
-            entry.added = counts.added;
-            entry.skipped = counts.skipped;
-            entry.conflicts = counts.conflicts;
-        } else if let Some(db) = db.as_ref() {
-            let counts = db.import_material_json(val, mat_policy, now)?;
-            let entry = report.tables.entry("materials".into()).or_default();
-            entry.added = counts.added;
-            entry.skipped = counts.skipped;
-            entry.conflicts = counts.conflicts;
-        }
+        let counts = work_db.db.import_material_json(val, mat_policy, now)?;
+        let entry = report.tables.entry("materials".into()).or_default();
+        entry.added = counts.added;
+        entry.skipped = counts.skipped;
+        entry.conflicts = counts.conflicts;
     }
     let historical_roots = if options.historical_roots.is_empty() {
         source_roots.clone()
     } else {
         options.historical_roots.clone()
     };
+    let store = SqliteStore::new(&work_db.db);
     for (kind, mut record) in records {
         remap_record_paths(
             kind,
@@ -217,24 +202,22 @@ pub fn run_migration(
             &mut report,
         );
         let table_name = format!("{kind:?}").to_lowercase();
-        let (action, changed) = existing_record_action(target_read.as_ref(), &record)?;
+        let action = existing_record_action(&work_db.db.connection, &record)?;
         let counts = report.tables.entry(table_name).or_default();
-        match action.as_str() {
-            "skip" => counts.skipped += 1,
-            "conflict" => {
+        match action {
+            RecordAction::Skip => {
+                counts.skipped += 1;
+                continue;
+            }
+            RecordAction::Conflict => {
                 counts.conflicts += 1;
                 if options.on_conflict == ConflictPolicy::Keep {
                     continue;
                 }
             }
-            _ => counts.added += 1,
+            RecordAction::Add => counts.added += 1,
         }
-        if !options.dry_run
-            && let Some(db) = db.as_ref()
-        {
-            let store = SqliteStore::new(db);
-            store.put(&changed)?;
-        }
+        store.put(&record)?;
     }
     let report_path = options.target_root.join(format!(
         "migration-{}.json",
@@ -351,6 +334,7 @@ fn walk_json_files(root: &Path) -> Result<Vec<PathBuf>, MigrationError> {
             files.push(path);
         }
     }
+    files.sort();
     Ok(files)
 }
 
@@ -394,13 +378,174 @@ fn normalize_old_job(kind: RecordKind, payload: &mut Value) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordAction {
+    Add,
+    Skip,
+    Conflict,
+}
+
+const SNAPSHOT_ROOT: &str = ".moss-migration-dryrun";
+const SNAPSHOT_PREFIX: &str = "moss-migration-dryrun-";
+const SNAPSHOT_MARKER: &str = ".moss-snapshot";
+
+struct TempSnapshotDir {
+    path: PathBuf,
+    // 直到关闭快照并清理目录才释放，避免并行试跑误删活跃快照。
+    _lock: std::fs::File,
+}
+
+fn private_dir_builder() -> std::fs::DirBuilder {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+}
+
+impl TempSnapshotDir {
+    fn create(base: &Path) -> Result<Self, MigrationError> {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        match private_dir_builder().create(base) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(base)?;
+                if !metadata.is_dir() {
+                    return Err(MigrationError::InvalidArgument("临时快照根目录无效".into()));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o077 != 0 {
+                        return Err(MigrationError::InvalidArgument(
+                            "临时快照根目录可被其他用户访问".into(),
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(base.join("cleanup.lock"))?;
+        lock.lock()?;
+        for entry in std::fs::read_dir(base)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(suffix) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(SNAPSHOT_PREFIX))
+            else {
+                continue;
+            };
+            let mut parts = suffix.split('-');
+            if parts
+                .by_ref()
+                .take(3)
+                .filter(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .count()
+                == 3
+                && parts.next().is_none()
+                && entry.file_type()?.is_dir()
+                && std::fs::symlink_metadata(entry.path().join(SNAPSHOT_MARKER))
+                    .is_ok_and(|meta| meta.is_file())
+            {
+                std::fs::remove_dir_all(entry.path())?;
+            }
+        }
+
+        let pid = std::process::id();
+        for _ in 0..32 {
+            let seq = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let candidate = base.join(format!("{SNAPSHOT_PREFIX}{pid}-{nanos}-{seq}"));
+            match private_dir_builder().create(&candidate) {
+                Ok(()) => {
+                    let temp_dir = Self {
+                        path: candidate,
+                        _lock: lock,
+                    };
+                    std::fs::File::create(temp_dir.path.join(SNAPSHOT_MARKER))?;
+                    return Ok(temp_dir);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(MigrationError::Io(error)),
+            }
+        }
+        Err(MigrationError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "无法创建临时快照目录",
+        )))
+    }
+}
+
+impl Drop for TempSnapshotDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+struct WorkingDb {
+    // 必须先释放 db（关闭 SQLite 句柄），再清理临时快照目录。
+    db: RuntimeDb,
+    _temp_dir: Option<TempSnapshotDir>,
+}
+
+fn vacuum_readonly_snapshot(
+    target_db_path: &Path,
+    snapshot_path: &Path,
+) -> Result<(), MigrationError> {
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let source = rusqlite::Connection::open_with_flags(target_db_path, flags)?;
+    source.busy_timeout(std::time::Duration::from_secs(5))?;
+    let snapshot_str = snapshot_path
+        .to_str()
+        .ok_or_else(|| MigrationError::InvalidArgument("临时快照路径包含非 UTF-8 字符".into()))?;
+    source.execute("VACUUM INTO ?1", [snapshot_str])?;
+    Ok(())
+}
+
+fn open_dry_run_db(target_db_path: &Path) -> Result<WorkingDb, MigrationError> {
+    let base = target_db_path.with_file_name(SNAPSHOT_ROOT);
+    if !target_db_path.is_file() {
+        // 数据库被移走也要清掉上一轮崩溃遗留的快照。
+        if base.exists() {
+            TempSnapshotDir::create(&base)?;
+        }
+        return Ok(WorkingDb {
+            db: RuntimeDb::open_memory()?,
+            _temp_dir: None,
+        });
+    }
+    let temp_dir = TempSnapshotDir::create(&base)?;
+    let snapshot_path = temp_dir.path.join("snapshot.sqlite");
+    vacuum_readonly_snapshot(target_db_path, &snapshot_path).map_err(|error| {
+        MigrationError::InvalidArgument(format!(
+            "无法通过只读 VACUUM INTO 获取目标库一致性快照（{}）：{error:?}",
+            target_db_path.display()
+        ))
+    })?;
+    let db = RuntimeDb::open(&snapshot_path)?;
+
+    Ok(WorkingDb {
+        db,
+        _temp_dir: Some(temp_dir),
+    })
+}
+
 fn existing_record_action(
-    connection: Option<&rusqlite::Connection>,
+    connection: &rusqlite::Connection,
     record: &StoredRecord,
-) -> Result<(String, StoredRecord), MigrationError> {
-    let Some(connection) = connection else {
-        return Ok(("add".into(), record.clone()));
-    };
+) -> Result<RecordAction, MigrationError> {
     let (table, key) = record.kind.table();
     let raw: Option<String> = connection
         .query_row(
@@ -410,13 +555,13 @@ fn existing_record_action(
         )
         .optional()?;
     let Some(raw) = raw else {
-        return Ok(("add".into(), record.clone()));
+        return Ok(RecordAction::Add);
     };
     let existing: Value = serde_json::from_str(&raw)?;
     if existing == record.payload {
-        Ok(("skip".into(), record.clone()))
+        Ok(RecordAction::Skip)
     } else {
-        Ok(("conflict".into(), record.clone()))
+        Ok(RecordAction::Conflict)
     }
 }
 
@@ -592,6 +737,51 @@ pub fn scan_uploads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dry_run_keeps_snapshot_private_and_removes_orphans() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("moss.sqlite");
+        let db = RuntimeDb::open(&target).unwrap();
+        db.connection
+            .execute("CREATE TABLE dry_run_probe (id INT)", [])
+            .unwrap();
+        db.connection
+            .execute("INSERT INTO dry_run_probe VALUES (42)", [])
+            .unwrap();
+        let base = root.path().join(SNAPSHOT_ROOT);
+        let stale = base.join("moss-migration-dryrun-1-2-3");
+        private_dir_builder().create(&base).unwrap();
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::File::create(stale.join(SNAPSHOT_MARKER)).unwrap();
+        std::fs::write(stale.join("snapshot.sqlite"), b"stale snapshot").unwrap();
+        let unrelated = base.join("moss-migration-dryrun-1-2-4");
+        std::fs::create_dir(&unrelated).unwrap();
+
+        let snapshot = open_dry_run_db(&target).unwrap();
+        let path = snapshot._temp_dir.as_ref().unwrap().path.clone();
+        assert_eq!(path.parent(), Some(base.as_path()));
+        assert!(!stale.exists());
+        assert!(unrelated.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [&base, &path] {
+                assert_eq!(
+                    std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        let value: i64 = snapshot
+            .db
+            .connection
+            .query_row("SELECT id FROM dry_run_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 42);
+        drop(snapshot);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn version_normalization_is_strict_about_unknown_values() {
@@ -815,5 +1005,466 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending_status, "failed");
+    }
+
+    #[test]
+    fn same_batch_duplicate_records_respect_keep_and_overwrite_with_dry_run() {
+        let source_a = tempfile::tempdir().unwrap();
+        let source_b = tempfile::tempdir().unwrap();
+        let wf_dir_a = source_a.path().join(".runtime/laser_workflows");
+        let wf_dir_b = source_b.path().join(".runtime/laser_workflows");
+        std::fs::create_dir_all(&wf_dir_a).unwrap();
+        std::fs::create_dir_all(&wf_dir_b).unwrap();
+
+        let write_wf = |dir: &Path, filename: &str, id: &str, status: &str, updated_at: i64| {
+            std::fs::write(
+                dir.join(filename),
+                serde_json::to_vec(&serde_json::json!({
+                    "workflow_id": id,
+                    "status": status,
+                    "source_type": "image",
+                    "input": {"material": "椴木", "thickness_mm": "3"},
+                    "created_at": 1,
+                    "updated_at": updated_at
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+
+        // 同批同目录内重复不同内容 + 跨 source_roots 重复相同内容
+        write_wf(&wf_dir_a, "01_wf_diff.json", "wf_diff", "preview_ready", 10);
+        write_wf(&wf_dir_a, "02_wf_diff.json", "wf_diff", "completed", 20);
+        write_wf(&wf_dir_a, "wf_same.json", "wf_same", "preview_ready", 10);
+        write_wf(&wf_dir_b, "wf_same.json", "wf_same", "preview_ready", 10);
+
+        let target_keep = tempfile::tempdir().unwrap();
+        let mut keep_opts = MigrationOptions {
+            source_root: source_a.path().to_path_buf(),
+            source_roots: vec![source_a.path().to_path_buf(), source_b.path().to_path_buf()],
+            target_root: target_keep.path().to_path_buf(),
+            historical_roots: vec![source_a.path().to_path_buf(), source_b.path().to_path_buf()],
+            dry_run: true,
+            on_conflict: ConflictPolicy::Keep,
+        };
+
+        let (dry_keep, _) = run_migration(&keep_opts).unwrap();
+        assert!(!target_keep.path().join("moss.sqlite").exists());
+        assert!(!target_keep.path().join("moss.lock").exists());
+        assert_eq!(
+            dry_keep.tables.get("workflow"),
+            Some(&MigrationCounts {
+                added: 2,
+                skipped: 1,
+                conflicts: 1,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+
+        keep_opts.dry_run = false;
+        let (first_keep, _) = run_migration(&keep_opts).unwrap();
+        assert_eq!(
+            first_keep.tables.get("workflow"),
+            dry_keep.tables.get("workflow")
+        );
+
+        let keep_db = RuntimeDb::open(target_keep.path().join("moss.sqlite")).unwrap();
+        let kept_status: String = keep_db
+            .connection
+            .query_row(
+                "SELECT status FROM workflows WHERE workflow_id='wf_diff'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_status, "preview_ready");
+        drop(keep_db);
+
+        let (second_keep, _) = run_migration(&keep_opts).unwrap();
+        assert_eq!(
+            second_keep.tables.get("workflow"),
+            Some(&MigrationCounts {
+                added: 0,
+                skipped: 3,
+                conflicts: 1,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+
+        let target_overwrite = tempfile::tempdir().unwrap();
+        let mut overwrite_opts = MigrationOptions {
+            target_root: target_overwrite.path().to_path_buf(),
+            dry_run: true,
+            on_conflict: ConflictPolicy::Overwrite,
+            ..keep_opts.clone()
+        };
+        let (dry_overwrite, _) = run_migration(&overwrite_opts).unwrap();
+        assert!(!target_overwrite.path().join("moss.sqlite").exists());
+        assert_eq!(
+            dry_overwrite.tables.get("workflow"),
+            Some(&MigrationCounts {
+                added: 2,
+                skipped: 1,
+                conflicts: 1,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+
+        overwrite_opts.dry_run = false;
+        let (first_overwrite, _) = run_migration(&overwrite_opts).unwrap();
+        assert_eq!(
+            first_overwrite.tables.get("workflow"),
+            dry_overwrite.tables.get("workflow")
+        );
+        let overwrite_db = RuntimeDb::open(target_overwrite.path().join("moss.sqlite")).unwrap();
+        let overwritten_status: String = overwrite_db
+            .connection
+            .query_row(
+                "SELECT status FROM workflows WHERE workflow_id='wf_diff'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(overwritten_status, "completed");
+        drop(overwrite_db);
+
+        let (second_overwrite, _) = run_migration(&overwrite_opts).unwrap();
+        assert_eq!(
+            second_overwrite.tables.get("workflow"),
+            Some(&MigrationCounts {
+                added: 0,
+                skipped: 2,
+                conflicts: 2,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn dry_run_uses_target_snapshot_with_wal_and_custom_materials_without_touching_target() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let runtime_src = source.path().join(".runtime");
+        let wf_dir = runtime_src.join("laser_workflows");
+        std::fs::create_dir_all(&wf_dir).unwrap();
+
+        let target_db_path = target.path().join("moss.sqlite");
+        let target_db = RuntimeDb::open(&target_db_path).unwrap();
+        // 禁止自动 checkpoint，确保后续写入留存在 WAL 中由试跑快照读取。
+        target_db
+            .connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        target_db
+            .import_material_json(
+                &serde_json::json!({
+                    "version": 1,
+                    "materials": {
+                        "自定义桦木": {
+                            "aliases": [],
+                            "thicknesses": {
+                                "3": {
+                                    "cut": {
+                                        "laser_min_power": 0,
+                                        "laser_max_power": 750,
+                                        "feed_rate": 420,
+                                        "travel_rate": 3000,
+                                        "threshold": -1,
+                                        "passes": 1,
+                                        "pixel_size_mm": 0.1
+                                    }
+                                }
+                            }
+                        },
+                        "椴木": {
+                            "aliases": [],
+                            "thicknesses": {
+                                "3": {
+                                    "cut": {
+                                        "laser_min_power": 0,
+                                        "laser_max_power": 910,
+                                        "feed_rate": 310,
+                                        "travel_rate": 3000,
+                                        "threshold": -1,
+                                        "passes": 1,
+                                        "pixel_size_mm": 0.1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }),
+                MaterialConflictPolicy::Overwrite,
+                100.0,
+            )
+            .unwrap();
+        let store = SqliteStore::new(&target_db);
+        store
+            .put(&StoredRecord {
+                kind: RecordKind::Workflow,
+                id: "wf_existing".into(),
+                status: Some("completed".into()),
+                payload: serde_json::json!({
+                    "workflow_id": "wf_existing",
+                    "status": "completed",
+                    "source_type": "image",
+                    "input": {"material": "自定义桦木", "thickness_mm": "3"},
+                    "created_at": 1,
+                    "updated_at": 5
+                }),
+            })
+            .unwrap();
+
+        let wal_len = target
+            .path()
+            .join("moss.sqlite-wal")
+            .metadata()
+            .unwrap()
+            .len();
+        assert!(wal_len > 0, "fixture 写入应保留在 WAL 中");
+
+        std::fs::write(
+            runtime_src.join("lasergrbl_materials.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "materials": {
+                    "自定义桦木": {
+                        "aliases": [],
+                        "thicknesses": {
+                            "3": {
+                                "cut": {
+                                    "laser_min_power": 0,
+                                    "laser_max_power": 750,
+                                    "feed_rate": 420,
+                                    "travel_rate": 3000,
+                                    "threshold": -1,
+                                    "passes": 1,
+                                    "pixel_size_mm": 0.1
+                                }
+                            }
+                        }
+                    },
+                    "椴木": {
+                        "aliases": [],
+                        "thicknesses": {
+                            "3": {
+                                "cut": {
+                                    "laser_min_power": 0,
+                                    "laser_max_power": 800,
+                                    "feed_rate": 300,
+                                    "travel_rate": 3000,
+                                    "threshold": -1,
+                                    "passes": 1,
+                                    "pixel_size_mm": 0.1
+                                }
+                            }
+                        }
+                    },
+                    "胡桃木": {
+                        "aliases": [],
+                        "thicknesses": {
+                            "2": {
+                                "cut": {
+                                    "laser_min_power": 0,
+                                    "laser_max_power": 650,
+                                    "feed_rate": 500,
+                                    "travel_rate": 3000,
+                                    "threshold": -1,
+                                    "passes": 1,
+                                    "pixel_size_mm": 0.1
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(
+            wf_dir.join("wf_existing.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "workflow_id": "wf_existing",
+                "status": "completed",
+                "source_type": "image",
+                "input": {"material": "自定义桦木", "thickness_mm": "3"},
+                "created_at": 1,
+                "updated_at": 5
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            wf_dir.join("01_wf_batch.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "workflow_id": "wf_batch",
+                "status": "preview_ready",
+                "source_type": "image",
+                "input": {"material": "胡桃木", "thickness_mm": "2"},
+                "created_at": 2,
+                "updated_at": 6
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            wf_dir.join("02_wf_batch.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "workflow_id": "wf_batch",
+                "status": "failed",
+                "source_type": "image",
+                "input": {"material": "胡桃木", "thickness_mm": "2"},
+                "created_at": 2,
+                "updated_at": 7
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut options = MigrationOptions {
+            source_root: source.path().to_path_buf(),
+            source_roots: vec![source.path().to_path_buf()],
+            target_root: target.path().to_path_buf(),
+            historical_roots: vec![source.path().to_path_buf()],
+            dry_run: true,
+            on_conflict: ConflictPolicy::Keep,
+        };
+
+        let (dry, _) = run_migration(&options).unwrap();
+        assert_eq!(
+            dry.tables.get("materials"),
+            Some(&MigrationCounts {
+                added: 1,
+                skipped: 1,
+                conflicts: 1,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+        assert_eq!(
+            dry.tables.get("workflow"),
+            Some(&MigrationCounts {
+                added: 1,
+                skipped: 1,
+                conflicts: 1,
+                stale: 0,
+                uploads: 0,
+            })
+        );
+
+        // dry-run 不得修改真实库内容或创建运行目录锁/子目录
+        assert!(!target.path().join("moss.lock").exists());
+        assert!(!target.path().join("uploads").exists());
+        let walnut_count: i64 = target_db
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM materials WHERE name='胡桃木'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(walnut_count, 0);
+        let basswood_power: i32 = target_db
+            .connection
+            .query_row(
+                "SELECT laser_max_power FROM material_params
+                 WHERE material_name='椴木' AND thickness_key='3' AND laser_mode='cut' AND engraving_mode=''",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(basswood_power, 910);
+        let batch_count: i64 = target_db
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM workflows WHERE workflow_id='wf_batch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(batch_count, 0);
+
+        drop(target_db);
+
+        let (dry_closed, _) = run_migration(&options).unwrap();
+        assert_eq!(
+            dry_closed.tables.get("materials"),
+            dry.tables.get("materials")
+        );
+        assert_eq!(
+            dry_closed.tables.get("workflow"),
+            dry.tables.get("workflow")
+        );
+
+        options.dry_run = false;
+        let (real, _) = run_migration(&options).unwrap();
+        assert_eq!(real.tables.get("materials"), dry.tables.get("materials"));
+        assert_eq!(real.tables.get("workflow"), dry.tables.get("workflow"));
+
+        let verify_db = RuntimeDb::open(&target_db_path).unwrap();
+        let walnut_after: i64 = verify_db
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM materials WHERE name='胡桃木'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(walnut_after, 1);
+        let basswood_after: i32 = verify_db
+            .connection
+            .query_row(
+                "SELECT laser_max_power FROM material_params
+                 WHERE material_name='椴木' AND thickness_key='3' AND laser_mode='cut' AND engraving_mode=''",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(basswood_after, 910);
+        let batch_status: String = verify_db
+            .connection
+            .query_row(
+                "SELECT status FROM workflows WHERE workflow_id='wf_batch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(batch_status, "preview_ready");
+    }
+
+    #[test]
+    fn dry_run_fails_explicitly_when_readonly_vacuum_snapshot_fails() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let bad_db = target.path().join("moss.sqlite");
+        std::fs::write(&bad_db, b"not a valid sqlite database").unwrap();
+
+        let options = MigrationOptions {
+            source_root: source.path().to_path_buf(),
+            source_roots: vec![source.path().to_path_buf()],
+            target_root: target.path().to_path_buf(),
+            historical_roots: vec![source.path().to_path_buf()],
+            dry_run: true,
+            on_conflict: ConflictPolicy::Keep,
+        };
+        let err = run_migration(&options).unwrap_err();
+        match err {
+            MigrationError::InvalidArgument(message) => {
+                assert!(
+                    message.contains("VACUUM INTO"),
+                    "unexpected error: {message}"
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&bad_db).unwrap(),
+            b"not a valid sqlite database"
+        );
     }
 }

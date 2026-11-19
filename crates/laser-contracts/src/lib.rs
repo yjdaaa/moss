@@ -1299,3 +1299,231 @@ mod caller_context_tests {
         assert_eq!(CallerContext::Loopback.label(), "loopback");
     }
 }
+
+/// 校验并规范化小智 MCP 接入点 URL：只接受无占位符且带主机的 `ws://` 或 `wss://` 地址。
+pub fn parse_mcp_endpoint_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.contains('<') {
+        return None;
+    }
+    let (scheme, rest) = trimmed.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("ws") && !scheme.eq_ignore_ascii_case("wss") {
+        return None;
+    }
+    let raw_authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if raw_authority.trim().is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "ws" | "wss") || !parsed.has_host() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// 从接入点 URL 的查询参数中读取指定键的值（用于提取 `token` 等）。
+pub fn mcp_query_param(endpoint: &str, key: &str) -> Option<String> {
+    let parsed = url::Url::parse(endpoint.trim()).ok()?;
+    parsed
+        .query_pairs()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// 按 URL 解析脱敏 userinfo（用户名/密码）、全部查询参数及 fragment，用于日志、遥测与页面显示。
+pub fn redact_mcp_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(parsed) = url::Url::parse(trimmed)
+        && let Some(host) = parsed.host_str()
+    {
+        let mut out = String::with_capacity(trimmed.len());
+        out.push_str(parsed.scheme());
+        out.push_str("://");
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            out.push_str("***@");
+        }
+        out.push_str(host);
+        if let Some(port) = parsed.port() {
+            out.push(':');
+            out.push_str(&port.to_string());
+        }
+        out.push_str(parsed.path());
+        if let Some(query) = parsed.query() {
+            let masked_pairs: Vec<String> = query
+                .split('&')
+                .filter(|seg| !seg.is_empty())
+                .map(|seg| match seg.split_once('=') {
+                    Some((k, _)) if !k.is_empty() => format!("{k}=***"),
+                    _ => "***".to_owned(),
+                })
+                .collect();
+            if !masked_pairs.is_empty() {
+                out.push('?');
+                out.push_str(&masked_pairs.join("&"));
+            }
+        }
+        if parsed.fragment().is_some() {
+            out.push_str("#***");
+        }
+        return out;
+    }
+    // 不可解析时 fail-closed：剥除 query/fragment 并遮蔽 authority 中的 userinfo
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        let base = rest.split(['?', '#']).next().unwrap_or("");
+        let (auth, path) = match base.find('/') {
+            Some(idx) => (&base[..idx], &base[idx..]),
+            None => (base, ""),
+        };
+        let safe_auth = match auth.rsplit_once('@') {
+            Some((_, host)) => format!("***@{host}"),
+            None => auth.to_owned(),
+        };
+        let had_query = rest.contains('?');
+        return format!(
+            "{scheme}://{safe_auth}{path}{}",
+            if had_query { "?***" } else { "" }
+        );
+    }
+    "[REDACTED]".to_owned()
+}
+
+/// 抹除错误或日志文本中带出的接入点 URL 凭据（含 userinfo、全部查询参数值与 fragment）。
+pub fn scrub_endpoint_secrets(text: &str, endpoint: &str) -> String {
+    let mut scrubbed = text.to_owned();
+    let trimmed_endpoint = endpoint.trim();
+    if !trimmed_endpoint.is_empty() {
+        scrubbed = scrubbed.replace(trimmed_endpoint, &redact_mcp_endpoint(trimmed_endpoint));
+    }
+    // 替换文本中出现的任意完整 URL（如底层连接库自动拼接后的形式）
+    let mut out = String::with_capacity(scrubbed.len());
+    let mut cursor = 0;
+    while cursor < scrubbed.len() {
+        let rest = &scrubbed[cursor..];
+        let next_scheme = ["wss://", "ws://", "https://", "http://"]
+            .into_iter()
+            .filter_map(|scheme| rest.find(scheme))
+            .min();
+        let Some(rel) = next_scheme else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..rel]);
+        let start = cursor + rel;
+        let tail = &scrubbed[start..];
+        let end_rel = tail
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | ',')
+            })
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end_rel];
+        out.push_str(&redact_mcp_endpoint(candidate));
+        cursor = start + end_rel;
+    }
+    scrubbed = out;
+    // 再按 endpoint 解析出独立残留的凭据片段（如单独回显的 token / 密码 / 参数值）
+    if let Ok(parsed) = url::Url::parse(trimmed_endpoint) {
+        let mut secrets = Vec::new();
+        if !parsed.username().is_empty() && parsed.username().len() >= 4 {
+            secrets.push(parsed.username().to_owned());
+        }
+        if let Some(pass) = parsed.password().filter(|p| !p.is_empty()) {
+            secrets.push(pass.to_owned());
+        }
+        for (k, v) in parsed.query_pairs() {
+            if !v.is_empty() && (k == "token" || v.len() >= 4) {
+                secrets.push(v.into_owned());
+            }
+        }
+        if let Some(query) = parsed.query() {
+            for seg in query.split('&') {
+                if let Some((k, v)) = seg.split_once('=')
+                    && !v.is_empty()
+                    && (k == "token" || v.len() >= 4)
+                {
+                    secrets.push(v.to_owned());
+                }
+            }
+        }
+        if let Some(frag) = parsed.fragment().filter(|f| f.len() >= 4) {
+            secrets.push(frag.to_owned());
+        }
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        secrets.dedup();
+        for secret in secrets {
+            scrubbed = scrubbed.replace(&secret, "***");
+        }
+    } else if let Some((_, token)) = trimmed_endpoint.split_once("token=") {
+        let val = token.split('&').next().unwrap_or("");
+        if !val.is_empty() {
+            scrubbed = scrubbed.replace(val, "***");
+        }
+    }
+    scrubbed
+}
+
+#[cfg(test)]
+mod mcp_endpoint_redaction_tests {
+    use super::{
+        mcp_query_param, parse_mcp_endpoint_url, redact_mcp_endpoint, scrub_endpoint_secrets,
+    };
+
+    #[test]
+    fn parse_mcp_endpoint_accepts_ws_wss_and_rejects_placeholders() {
+        assert_eq!(
+            parse_mcp_endpoint_url("  wss://example.invalid/mcp?k=fake1&token=fake2  ").as_deref(),
+            Some("wss://example.invalid/mcp?k=fake1&token=fake2")
+        );
+        assert_eq!(
+            parse_mcp_endpoint_url("ws://127.0.0.1:9001/ws").as_deref(),
+            Some("ws://127.0.0.1:9001/ws")
+        );
+        for bad in [
+            "",
+            "   ",
+            "wss://example.invalid/mcp?token=<placeholder>",
+            "https://example.invalid/mcp",
+            "wss:///missing-host",
+        ] {
+            assert!(parse_mcp_endpoint_url(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn redact_and_scrub_mask_userinfo_all_query_params_and_fragment() {
+        let endpoint =
+            "wss://fakeuser:fakepass@example.invalid:8443/mcp?k=fake1&token=fake2&bare#fragpart";
+        assert_eq!(mcp_query_param(endpoint, "token").as_deref(), Some("fake2"));
+        let redacted = redact_mcp_endpoint(endpoint);
+        assert_eq!(
+            redacted,
+            "wss://***@example.invalid:8443/mcp?k=***&token=***&***#***"
+        );
+        for secret in ["fakeuser", "fakepass", "fake1", "fake2", "bare", "fragpart"] {
+            assert!(!redacted.contains(secret), "{secret} leaked in {redacted}");
+        }
+
+        // Fail-closed fallback on unparseable URL still strips userinfo and query/fragment
+        let broken = "wss://fakeuser:fakepass@bad host/mcp?k=fake1#fragpart";
+        let redacted_broken = redact_mcp_endpoint(broken);
+        assert!(redacted_broken.starts_with("wss://***@bad host/mcp?***"));
+        for secret in ["fakeuser", "fakepass", "fake1", "fragpart"] {
+            assert!(
+                !redacted_broken.contains(secret),
+                "{secret} leaked in {redacted_broken}"
+            );
+        }
+
+        // Scrub embedded URLs and standalone echoed credential pieces
+        let raw_err = format!(
+            "connect {endpoint} failed (user=fakeuser pass=fakepass k=fake1 t=fake2 frag=fragpart)"
+        );
+        let scrubbed = scrub_endpoint_secrets(&raw_err, endpoint);
+        for secret in ["fakeuser", "fakepass", "fake1", "fake2", "fragpart"] {
+            assert!(!scrubbed.contains(secret), "{secret} leaked in {scrubbed}");
+        }
+        assert!(scrubbed.contains("wss://***@example.invalid:8443/mcp?k=***&token=***&***#***"));
+    }
+}

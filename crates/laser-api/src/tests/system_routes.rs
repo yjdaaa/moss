@@ -96,7 +96,12 @@ fn settings_route_never_accepts_export_dir() {
 fn mcp_status_reports_only_real_telemetry() {
     // A-72：已配置但从未连接——不得出现任何编造值
     let empty = laser_contracts::McpTelemetrySnapshot::default();
-    let status = mcp_status_json(Some("wss://example.test/mcp/?token=secret"), &empty, 19);
+    let status = mcp_status_json(
+        Some("wss://example.test/mcp/?token=secret"),
+        &empty,
+        19,
+        true,
+    );
     assert_eq!(status["configured"], true);
     assert_eq!(status["connected"], false);
     assert_eq!(status["endpoint"], "wss://example.test/mcp/?token=***");
@@ -110,7 +115,7 @@ fn mcp_status_reports_only_real_telemetry() {
     assert!(!status.to_string().contains("16:00:02"));
 
     // 未配置
-    let unconfigured = mcp_status_json(None, &empty, 20);
+    let unconfigured = mcp_status_json(None, &empty, 20, true);
     assert_eq!(unconfigured["configured"], false);
     assert_eq!(unconfigured["endpoint"], "");
     assert_eq!(unconfigured["tools_count"], 20);
@@ -134,7 +139,7 @@ fn mcp_status_reports_only_real_telemetry() {
         }],
         ..Default::default()
     };
-    let status = mcp_status_json(Some("wss://example.test/mcp/"), &live, 19);
+    let status = mcp_status_json(Some("wss://example.test/mcp/"), &live, 19, true);
     assert_eq!(status["connected"], true);
     assert_eq!(status["client_info"], "client-a v1.2");
     assert_eq!(
@@ -146,7 +151,77 @@ fn mcp_status_reports_only_real_telemetry() {
     // NV8：各接入点的状态
     assert_eq!(status["endpoints"][0]["id"], "primary");
     assert_eq!(status["endpoints"][0]["connections"], 2);
-    assert_eq!(empty_endpoints(&mcp_status_json(None, &empty, 19)), 0);
+    assert_eq!(empty_endpoints(&mcp_status_json(None, &empty, 19, true)), 0);
+}
+
+#[test]
+fn mcp_status_hides_endpoint_and_telemetry_when_details_hidden() {
+    let endpoint = "wss://fakeuser:fakepass@example.invalid/mcp?k=fake1&token=fake2#frag";
+    let telemetry = laser_contracts::McpTelemetrySnapshot {
+        connected: true,
+        client_name: "client-a".into(),
+        client_version: "1.2".into(),
+        last_request: "tools/list".into(),
+        last_request_time: "10:00:00".into(),
+        messages_count: 7,
+        recent_events: vec!["10:00:00 [RECV] fake1".into()],
+        protocol_version: "2024-11-05".into(),
+        endpoints: vec![laser_contracts::EndpointLink {
+            id: "primary".into(),
+            endpoint: endpoint.into(),
+            connected: true,
+            connected_at: None,
+            connections: 1,
+            last_error: Some("dial fakeuser".into()),
+            client: String::new(),
+        }],
+        ..Default::default()
+    };
+
+    let public_view = mcp_status_json(Some(endpoint), &telemetry, 19, false);
+    assert_eq!(public_view["configured"], true);
+    assert_eq!(public_view["connected"], true);
+    assert_eq!(public_view["tools_count"], 19);
+    assert_eq!(public_view["endpoint"], "");
+    assert_eq!(public_view["client_info"], "");
+    assert_eq!(public_view["last_request"], "");
+    assert_eq!(public_view["last_request_time"], "");
+    assert_eq!(public_view["messages_count"], 0);
+    assert_eq!(public_view["protocol_version"], "");
+    assert_eq!(public_view["recent_events"], serde_json::json!([]));
+    assert_eq!(public_view["endpoints"], serde_json::json!([]));
+    let raw_public = public_view.to_string();
+    for secret in [
+        "example.invalid",
+        "fakeuser",
+        "fakepass",
+        "fake1",
+        "fake2",
+        "frag",
+    ] {
+        assert!(
+            !raw_public.contains(secret),
+            "{secret} leaked in {raw_public}"
+        );
+    }
+
+    let authed_view = mcp_status_json(Some(endpoint), &telemetry, 19, true);
+    assert_eq!(
+        authed_view["endpoint"],
+        "wss://***@example.invalid/mcp?k=***&token=***#***"
+    );
+    assert_eq!(
+        authed_view["endpoints"][0]["endpoint"],
+        "wss://***@example.invalid/mcp?k=***&token=***#***"
+    );
+    assert_eq!(authed_view["messages_count"], 7);
+    let raw_authed = authed_view.to_string();
+    for secret in ["fakeuser", "fakepass", "fake1", "fake2", "frag"] {
+        assert!(
+            !raw_authed.contains(secret),
+            "{secret} leaked in {raw_authed}"
+        );
+    }
 }
 
 fn empty_endpoints(status: &serde_json::Value) -> usize {
@@ -400,6 +475,88 @@ Content-Length: 30
 {"mcp_endpoint":"http://invalid"}"#;
     let resp_invalid = String::from_utf8(service.handle_http(invalid)).unwrap();
     assert!(resp_invalid.contains("\"success\":false"));
+}
+
+#[test]
+fn non_loopback_system_info_hides_mcp_details_until_authenticated() {
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = "wss://fakeuser:fakepass@example.invalid/mcp?k=fake1&token=fake2";
+    std::fs::write(
+        temp.path().join("settings.json"),
+        serde_json::json!({ "mcp_endpoint": endpoint }).to_string(),
+    )
+    .unwrap();
+    let auth = std::sync::Arc::new(AuthManager::new());
+    let challenge = auth.issue_code(unix_seconds()).unwrap();
+    let (token, _) = auth
+        .pair("10.0.0.8", &challenge.code, unix_seconds())
+        .unwrap();
+    let service = ApiService::new(
+        laser_runtime::LaserSettings {
+            default_connection_mode: "network".into(),
+            engraving_mode: "raster".into(),
+            web_host: "0.0.0.0".into(),
+            web_port: 9666,
+            material_params_file: None,
+        },
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_auth(auth);
+
+    // 1. 非回环未鉴权：允许 /api/system/info，但隐藏 MCP endpoint 和遥测细节
+    let anon = parse_json_response(&service.handle_http_from(
+        b"GET /api/system/info HTTP/1.1\r\nHost: 192.168.1.10:9666\r\n\r\n",
+        false,
+        "10.0.0.8",
+        None,
+    ));
+    assert_eq!(anon["success"], true);
+    assert_eq!(anon["result"]["mcp"]["configured"], true);
+    assert_eq!(anon["result"]["mcp"]["endpoint"], "");
+    assert_eq!(anon["result"]["mcp"]["endpoints"], serde_json::json!([]));
+    assert_eq!(
+        anon["result"]["mcp"]["recent_events"],
+        serde_json::json!([])
+    );
+    assert_eq!(anon["result"]["mcp"]["messages_count"], 0);
+    let raw_anon = anon.to_string();
+    for secret in ["example.invalid", "fakeuser", "fakepass", "fake1", "fake2"] {
+        assert!(!raw_anon.contains(secret), "{secret} leaked in {raw_anon}");
+    }
+
+    // 2. 非回环携带无效 Bearer token：仍隐藏 MCP 敏感细节
+    let bad_auth = parse_json_response(&service.handle_http_from(
+        b"GET /api/system/info HTTP/1.1\r\nHost: 192.168.1.10:9666\r\nAuthorization: Bearer invalid-token\r\n\r\n",
+        false,
+        "10.0.0.8",
+        None,
+    ));
+    assert_eq!(bad_auth["success"], true);
+    assert_eq!(bad_auth["result"]["mcp"]["endpoint"], "");
+
+    // 3. 非回环携带合法 Bearer token：返回脱敏后的 endpoint（userinfo 和全部 query 参数已遮蔽）
+    let req_authed = format!(
+        "GET /api/system/info HTTP/1.1\r\nHost: 192.168.1.10:9666\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let authed = parse_json_response(&service.handle_http_from(
+        req_authed.as_bytes(),
+        false,
+        "10.0.0.8",
+        None,
+    ));
+    assert_eq!(authed["success"], true);
+    assert_eq!(
+        authed["result"]["mcp"]["endpoint"],
+        "wss://***@example.invalid/mcp?k=***&token=***"
+    );
+    let raw_authed = authed.to_string();
+    for secret in ["fakeuser", "fakepass", "fake1", "fake2"] {
+        assert!(
+            !raw_authed.contains(secret),
+            "{secret} leaked in {raw_authed}"
+        );
+    }
 }
 
 #[test]
@@ -846,4 +1003,167 @@ fn jev_test_requires_operator_session_and_status_redacts_masked_key() {
         bridge_update["detail"]["error_code"], "desktop_session_required",
         "{bridge_update}"
     );
+}
+
+#[test]
+fn draw_state_persists_across_port_changes_and_enforces_caller_and_validation_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_path = temp.path().to_path_buf();
+    let service = cors_test_service().with_runtime_path(runtime_path.clone());
+
+    let (code, initial) = desktop_request(&service, "GET", "/api/draw/state", None, None);
+    assert_eq!(code, 200, "{initial}");
+    assert_eq!(initial["result"]["exists"], false);
+    assert!(initial["result"]["scene"].is_null());
+
+    let fp = "a".repeat(64);
+    let (code, saved) = desktop_request(
+        &service,
+        "POST",
+        "/api/draw/state",
+        Some(&serde_json::json!({
+            "scene": "{\"version\":1,\"elements\":[{\"id\":\"r1\"}]}",
+            "last_preview": "{\"workflowId\":\"wf-1\",\"sceneRev\":\"r1:1:1\",\"formSig\":\"{}\"}",
+            "form": { "material": "椴木", "width_mm": "80" },
+            "last_accepted_fingerprint": fp.to_ascii_uppercase(),
+        })),
+        None,
+    );
+    assert_eq!(code, 200, "{saved}");
+    assert_eq!(saved["result"]["exists"], true);
+    assert_eq!(saved["result"]["last_accepted_fingerprint"], fp);
+
+    // 部分字段补丁不得清掉已保存的画布和预览指针
+    let (code, patched) = desktop_request(
+        &service,
+        "POST",
+        "/api/draw/state",
+        Some(&serde_json::json!({
+            "form": { "width_mm": "120" }
+        })),
+        None,
+    );
+    assert_eq!(code, 200, "{patched}");
+    assert_eq!(
+        patched["result"]["scene"],
+        "{\"version\":1,\"elements\":[{\"id\":\"r1\"}]}"
+    );
+    assert_eq!(patched["result"]["form"]["material"], "椴木");
+    assert_eq!(patched["result"]["form"]["width_mm"], "120");
+
+    // 模拟桌面端端口回退重启后的新 ApiService 实例（仅共享同一 RuntimeRoot）
+    let restarted = cors_test_service().with_runtime_path(runtime_path);
+    let (code, reloaded) = desktop_request(&restarted, "GET", "/api/draw/state", None, None);
+    assert_eq!(code, 200, "{reloaded}");
+    assert_eq!(reloaded["result"]["exists"], true);
+    assert_eq!(
+        reloaded["result"]["last_preview"],
+        "{\"workflowId\":\"wf-1\",\"sceneRev\":\"r1:1:1\",\"formSig\":\"{}\"}"
+    );
+    assert_eq!(reloaded["result"]["form"]["material"], "椴木");
+    assert_eq!(reloaded["result"]["last_accepted_fingerprint"], fp);
+
+    // 失败路径：非法参数返回 400；局域网（LAN）读写与语音/MCP 桥全部 403
+    let (code, bad_form) = desktop_request(
+        &restarted,
+        "POST",
+        "/api/draw/state",
+        Some(&serde_json::json!({ "form": { "bad-key!": "x" } })),
+        None,
+    );
+    assert_eq!(code, 400, "{bad_form}");
+    let (code, bad_fp) = desktop_request(
+        &restarted,
+        "POST",
+        "/api/draw/state",
+        Some(&serde_json::json!({ "last_accepted_fingerprint": "not-hex" })),
+        None,
+    );
+    assert_eq!(code, 400, "{bad_fp}");
+
+    let parse_with_status = |raw: Vec<u8>| -> (u16, serde_json::Value) {
+        let status = String::from_utf8_lossy(&raw[9..12]).parse::<u16>().unwrap();
+        (status, parse_json_response(&raw))
+    };
+
+    let (lan_read_status, lan_read) = parse_with_status(restarted.handle_http_with_ctx(
+        b"GET /api/draw/state HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n",
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "phone-1".into(),
+        },
+    ));
+    assert_eq!(lan_read_status, 403, "{lan_read}");
+    assert_eq!(lan_read["success"], false, "{lan_read}");
+    assert!(
+        lan_read["result"].as_str().unwrap_or("").contains("本机"),
+        "{lan_read}"
+    );
+
+    let (lan_write_status, lan_write) = parse_with_status(restarted.handle_http_with_ctx(
+        b"POST /api/draw/state HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: 2\r\n\r\n{}",
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "phone-1".into(),
+        },
+    ));
+    assert_eq!(lan_write_status, 403, "{lan_write}");
+    assert_eq!(lan_write["success"], false, "{lan_write}");
+    assert!(
+        lan_write["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("局域网")
+            || lan_write["result"].as_str().unwrap_or("").contains("只读"),
+        "{lan_write}"
+    );
+
+    let (bridge_read_status, bridge_read) = parse_with_status(restarted.handle_http_with_ctx(
+        b"GET /api/draw/state HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n",
+        laser_contracts::CallerContext::McpBridge,
+    ));
+    assert_eq!(bridge_read_status, 403, "{bridge_read}");
+    assert_eq!(bridge_read["success"], false, "{bridge_read}");
+}
+
+#[test]
+fn draw_state_recovers_corrupt_files_and_discards_connection_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("draw_state.json");
+    let service = cors_test_service().with_runtime_path(root.path().to_path_buf());
+    // GET 和 POST 都应自行处理损坏文件，逐个保留原始字节。
+    std::fs::write(&file, "{broken").unwrap();
+    let (code, empty) = desktop_request(&service, "GET", "/api/draw/state", None, None);
+    assert_eq!(code, 200, "{empty}");
+    assert_eq!(empty["result"]["exists"], false);
+    std::fs::write(&file, r#"{"scene":42}"#).unwrap();
+    let (code, saved) = desktop_request(
+        &service,
+        "POST",
+        "/api/draw/state",
+        Some(&serde_json::json!({ "form": {
+            "material": "椴木", "network_host": "example.invalid", "port": "COM9",
+            "host": "example.invalid", "network_telnet_port": "23",
+            "connection_mode": "network", "token": {"test_value": true}
+        }})),
+        None,
+    );
+    assert_eq!(code, 200, "{saved}");
+    assert_eq!(
+        saved["result"]["form"],
+        serde_json::json!({"material":"椴木"})
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(stored["form"], serde_json::json!({"material":"椴木"}));
+    let mut backups = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("draw_state.json.corrupt-")
+        })
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect::<Vec<_>>();
+    backups.sort_unstable();
+    assert_eq!(backups, [r#"{"scene":42}"#, "{broken"]);
 }

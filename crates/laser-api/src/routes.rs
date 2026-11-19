@@ -99,16 +99,17 @@ impl ApiService {
                     || route.starts_with("/assets/")
                     || route.starts_with("/vendor/")));
         let mut pairing_id = None;
-        if !loopback && !public_route {
-            let Some(auth) = self.auth.as_ref() else {
-                return http_json(401, failure("需要 Bearer 鉴权", None));
-            };
-            let Some(token) = authorization.as_deref() else {
-                return http_json(401, failure("需要 Bearer 鉴权", None));
-            };
-            match auth.authorize(token) {
-                Ok(id) => pairing_id = Some(id),
-                Err(_) => return http_json(401, failure("Bearer 鉴权失败", None)),
+        if !loopback {
+            if let Some(auth) = self.auth.as_ref()
+                && let Some(token) = authorization.as_deref()
+                && let Ok(id) = auth.authorize(token)
+            {
+                pairing_id = Some(id);
+            } else if !public_route {
+                if self.auth.is_none() || authorization.is_none() {
+                    return http_json(401, failure("需要 Bearer 鉴权", None));
+                }
+                return http_json(401, failure("Bearer 鉴权失败", None));
             }
         }
         // 桌面会话头（技术书 §5.3）：只在回环连接上有效，值不对时 403，前端重新取会话后只重试一次
@@ -337,6 +338,10 @@ impl ApiService {
 
             let mcp_endpoint = configured_mcp_endpoint(self.runtime_path.as_deref());
             let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
+            let include_mcp_details = !matches!(
+                &ctx,
+                laser_contracts::CallerContext::Lan { pairing_id } if pairing_id.is_empty()
+            );
             // 严格模式下接入点不列出永不开放的 R4 工具（与 laser_mcp::tools_list_for 一致）
             // 用户关闭的工具同样不列出（NV8）
             let tools_count = laser_tools::ToolCatalog::from_environment()
@@ -359,7 +364,7 @@ impl ApiService {
                     "preferred_port": preferred,
                     "is_fallback": actual != preferred,
                     "web_host": self.settings.web_host,
-                    "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count),
+                    "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count, include_mcp_details),
                     // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端内置语音服务
                     // 上报，官方链路或未知时为 null（技术书 §9.4.5）
                     "voice": voice_status_json(self.runtime_path.as_deref())
@@ -848,6 +853,29 @@ impl ApiService {
                     serde_json::Value::String(ctx.label().to_owned()),
                 );
             }
+            if creates_preview
+                && let Some(req_wf_id) = object
+                    .get("workflow_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            {
+                let _transition = crate::workflow::record_transition_guard();
+                if let Some((status, msg, code)) = self.with_effective_store(|store| {
+                    crate::workflow::preview_workflow_id_conflict(
+                        store,
+                        &self.active_jobs,
+                        &self.launching_workflows,
+                        &req_wf_id,
+                    )
+                }) {
+                    return http_json(
+                        status,
+                        failure(msg, Some(serde_json::json!({"error_code": code}))),
+                    );
+                }
+            }
             if route == "/api/text-task/generate" {
                 let effective_library = match self.effective_material_library() {
                     Ok(lib) => lib,
@@ -951,6 +979,7 @@ impl ApiService {
                 }
             }
             let send_roots = self.send_gcode_roots();
+            let requested_spec = self.connection_spec_from_request(&object);
             let launcher =
                 |workflow_id: &str,
                  gcode_path: std::path::PathBuf,
@@ -966,12 +995,22 @@ impl ApiService {
                     &send_roots,
                     &self.active_jobs,
                     &self.launching_workflows,
+                    &requested_spec,
                     &launcher,
                 )
             });
         }
         // 低功率点射（2026-11-16）：只给界面上的人用，语音 / MCP / 网关 / 审批重放一律拒绝
         if method == "POST" && route == "/api/device/pointer-fire" {
+            if self.is_shutdown_requested() {
+                return http_json(
+                    503,
+                    failure(
+                        "服务正在关闭，已拒绝点射操作",
+                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                    ),
+                );
+            }
             let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
@@ -999,6 +1038,21 @@ impl ApiService {
                     Ok(a) => a,
                     Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
                 };
+            let args_action = args.action.trim().to_ascii_lowercase();
+            if self.is_shutdown_requested()
+                && !matches!(
+                    args_action.as_str(),
+                    "emergency_stop" | "soft_reset" | "pause" | "stop_framing"
+                )
+            {
+                return http_json(
+                    503,
+                    failure(
+                        "服务正在关闭，已拒绝新的设备安全动作",
+                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                    ),
+                );
+            }
             // 继续走边框（2026-11-18）：先确认、找到正在走的那次边框，再建审批或执行——
             // 没有边框在走、未确认都不建废审批；审批绑定这次作业的 job_id 与它的设备连接
             if args.action.trim().eq_ignore_ascii_case("resume")
@@ -1031,10 +1085,20 @@ impl ApiService {
                     Ok(authority) => authority,
                     Err((status, body)) => return http_json(status, body),
                 };
-                if let approval::R3Authority::Approval(record) = &authority
-                    && let Some(connection) = record.connection.as_ref()
-                {
-                    apply_connection_to_safe_action(&mut args, connection);
+                if let approval::R3Authority::Approval(record) = &authority {
+                    match record.connection.as_ref() {
+                        Some(connection) => apply_connection_to_safe_action(&mut args, connection),
+                        None => {
+                            let (status, body) =
+                                approval::error_response(&approval::ApprovalError::Mismatch);
+                            self.finish_r3_authority(
+                                &authority,
+                                &Err((status, body.clone())),
+                                None,
+                            );
+                            return http_json(status, body);
+                        }
+                    }
                 }
             }
             let job_id = object.get("job_id").and_then(serde_json::Value::as_str);
@@ -1129,6 +1193,15 @@ impl ApiService {
             return http_json(200, success(result));
         }
         if method == "POST" && route == "/api/device/framing" {
+            if self.is_shutdown_requested() {
+                return http_json(
+                    503,
+                    failure(
+                        "服务正在关闭，已拒绝走边框操作",
+                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                    ),
+                );
+            }
             let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
@@ -1383,6 +1456,35 @@ impl ApiService {
                     Err(error) => {
                         http_json(500, failure(format!("保存雕刻路线失败：{error}"), None))
                     }
+                };
+            }
+        }
+        // 创作画板持久化状态（#24）：落盘到运行目录 draw_state.json，端口变更后仍可恢复（仅本机桌面 / 回环可读写；局域网与其余非本机调用方返回 403）
+        if route == "/api/draw/state" {
+            if !matches!(
+                ctx,
+                laser_contracts::CallerContext::Desktop | laser_contracts::CallerContext::Loopback
+            ) {
+                return http_json(403, failure("画板状态只能在本机界面访问", None));
+            }
+            if method == "GET" {
+                return match self.read_draw_state() {
+                    Ok((record, exists)) => {
+                        http_json(200, success(record.to_response_json(exists)))
+                    }
+                    Err(error) => http_json(500, failure(error, None)),
+                };
+            }
+            if method == "POST" {
+                let object = match parse_json_object(&body[..content_length], 8 * 1024 * 1024) {
+                    Ok(value) => value,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                return match self.update_draw_state(&object) {
+                    Ok((record, exists)) => {
+                        http_json(200, success(record.to_response_json(exists)))
+                    }
+                    Err((status, error)) => http_json(status, failure(error, None)),
                 };
             }
         }

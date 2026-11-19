@@ -350,7 +350,11 @@ fn workflow_resume_action_safely_resumes_remaining_code() {
         },
         "send_result": {
             "success": false,
+            "target": "127.0.0.1:23",
             "lines_sent": 2,
+            "lines_completed": 2,
+            "resumable_from_line": 2,
+            "resume_boundary_source": "device_hold_ln",
             "total_lines": 5,
             "can_resume": true
         }
@@ -406,6 +410,122 @@ fn workflow_resume_action_safely_resumes_remaining_code() {
     );
     assert_eq!(bad_res["success"], false);
     assert_eq!(bad_res["detail"]["error_code"], "workflow_completed");
+}
+
+#[test]
+fn cancelling_a_resumed_job_without_new_execution_proof_cannot_resume_again() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct NoExecutionProofGrbl {
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+        resumed_laser_line_seen: Arc<AtomicBool>,
+    }
+    impl laser_device::DeviceTransport for NoExecutionProofGrbl {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut responses = self.responses.lock().unwrap();
+            if line == "$$" {
+                responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if !self.resumed_laser_line_seen.load(Ordering::Acquire) {
+                if line.starts_with("G1 X20") {
+                    self.resumed_laser_line_seen.store(true, Ordering::Release);
+                } else {
+                    responses.push_back("ok".into());
+                }
+            }
+            Ok(())
+        }
+
+        fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+            if command == laser_device::RealtimeCommand::StatusQuery {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .push_back("<Idle|MPos:0,0,0>".into());
+            }
+            Ok(())
+        }
+
+        fn read_line(&self) -> Result<Option<String>, String> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(Some)
+                .ok_or_else(|| "timed out".into())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let gcode = "G21\nG90\nG0 X0 Y0\nG1 X20 F1000\nM5\n";
+    std::fs::write(dir.path().join("resume_twice.gcode"), gcode).unwrap();
+    let sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
+    let seen = Arc::new(AtomicBool::new(false));
+    let factory_seen = seen.clone();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(dir.path().to_path_buf())
+    .with_preview_roots(vec![dir.path().to_path_buf()])
+    .with_transport_factory(Arc::new(move |_| {
+        Ok(Box::new(NoExecutionProofGrbl {
+            responses: Default::default(),
+            resumed_laser_line_seen: factory_seen.clone(),
+        }))
+    }));
+    let id = "resume-twice";
+    service.workflows.lock().unwrap().insert(
+        id.into(),
+        serde_json::json!({
+            "workflow_id": id,
+            "status": "cancelled",
+            "artifacts": { "gcode_file": "resume_twice.gcode", "gcode_sha256": sha },
+            "confirmation_snapshot": { "gcode_file": "resume_twice.gcode", "gcode_sha256": sha },
+            "send_result": {
+                "target": "127.0.0.1:23", "lines_sent": 2, "lines_completed": 2,
+                "resumable_from_line": 2, "resume_boundary_source": "device_hold_ln",
+                "total_lines": 5, "can_resume": true
+            }
+        }),
+    );
+    let resume = serde_json::json!({
+        "action": "resume", "workflow_id": id, "confirmed": true,
+        "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23
+    });
+    let started = post_json(&service, "/api/workflow", &resume);
+    assert_eq!(started["success"], true, "{started}");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !seen.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "续雕应开始下发剩余刀路");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let cancelled = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "cancel", "workflow_id": id
+        }),
+    );
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.active_job_count() != 0 {
+        assert!(Instant::now() < deadline, "取消后作业应收尾");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let terminal = wait_for_status(&service, id, "cancelled");
+    let sent = &terminal["result"]["send_result"];
+    assert_eq!(sent["can_resume"], false, "{terminal}");
+    assert_eq!(sent["resumable_from_line"], 0, "{terminal}");
+    assert_eq!(sent["resume_boundary_source"], "unproven", "{terminal}");
+    let rejected = post_json(&service, "/api/workflow", &resume);
+    assert_eq!(
+        rejected["detail"]["error_code"], "workflow_not_resumable",
+        "{rejected}"
+    );
 }
 
 /// 走边框用的假设备：实时状态固定为 `status`，记录写入的每一行。
@@ -1142,7 +1262,7 @@ fn workflow_resume_requires_confirmed_true_and_verifies_physical_gcode_sha() {
             "status": "cancelled",
             "artifacts": { "gcode_file": "resume_gate.gcode", "gcode_sha256": expected_sha },
             "confirmation_snapshot": { "gcode_file": "resume_gate.gcode", "gcode_sha256": expected_sha },
-            "send_result": { "success": false, "lines_sent": 2, "total_lines": 5, "can_resume": true }
+            "send_result": { "success": false, "target": "tcp://127.0.0.1:23", "lines_sent": 2, "lines_completed": 2, "resumable_from_line": 2, "resume_boundary_source": "device_hold_ln", "total_lines": 5, "can_resume": true }
         });
         if use_store {
             let db = std::sync::Arc::new(std::sync::Mutex::new(
@@ -1209,7 +1329,7 @@ fn workflow_resume_requires_confirmed_true_and_verifies_physical_gcode_sha() {
             "status": "cancelled",
             "artifacts": { "gcode_file": "resume_gate.gcode", "gcode_sha256": expected_sha },
             "confirmation_snapshot": { "gcode_file": "resume_gate.gcode", "gcode_sha256": expected_sha },
-            "send_result": { "success": false, "lines_sent": 2, "total_lines": 5, "can_resume": true }
+            "send_result": { "success": false, "target": "tcp://127.0.0.1:23", "lines_sent": 2, "lines_completed": 2, "resumable_from_line": 2, "resume_boundary_source": "device_hold_ln", "total_lines": 5, "can_resume": true }
         });
         if let Some(store) = service.store.as_ref() {
             store
@@ -1348,6 +1468,591 @@ fn resume_reconstructs_g92_offset_modals_and_rejects_sd_offline() {
     assert_eq!(rejected["detail"]["error_code"], "workflow_not_resumable");
 }
 
+#[test]
+fn resume_target_equivalence_blocks_cross_machine_and_tampered_resume_skips_unlock() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let gcode = "G21\nG90\nG0 X0 Y0\nG1 X10 Y10 F1000\nM5\n";
+    let gcode_path = gen_dir.join("dual_target.gcode");
+    std::fs::write(&gcode_path, gcode).unwrap();
+    let expected_sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
+
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir.clone()])
+    .with_transport_factory(recording_transport_factory(100, written.clone()));
+
+    let insert_wf = |id: &str, target: &str| {
+        service.workflows.lock().unwrap().insert(
+            id.into(),
+            serde_json::json!({
+                "workflow_id": id,
+                "status": "cancelled",
+                "artifacts": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+                "confirmation_snapshot": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+                "send_result": {
+                    "success": false,
+                    "target": target,
+                    "lines_sent": 4,
+                    "lines_completed": 2,
+                    "resumable_from_line": 2,
+                    "resume_boundary_source": "device_hold_ln",
+                    "total_lines": 5,
+                    "can_resume": true
+                }
+            }),
+        );
+    };
+
+    // 1. TCP 等价历史串 tcp://127.0.0.1:23 与规范串 127.0.0.1:23 互通，且仅从 resumable_from_line=2 续刻（不用 ACK=4）
+    insert_wf("wf-tcp-legacy", "tcp://127.0.0.1:23");
+    let ok_tcp = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume",
+            "workflow_id": "wf-tcp-legacy",
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": 23
+        }),
+    );
+    assert_eq!(ok_tcp["success"], true, "{ok_tcp}");
+    assert_eq!(ok_tcp["result"]["send_result"]["lines_sent"], 2);
+    wait_for_status(&service, "wf-tcp-legacy", "completed");
+
+    // 2. TCP 换主机、换端口或无意义 target 必须被拦截
+    insert_wf("wf-tcp-mismatch", "127.0.0.1:23");
+    for (host, port) in [("127.0.0.2", 23), ("127.0.0.1", 24)] {
+        let bad = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "resume",
+                "workflow_id": "wf-tcp-mismatch",
+                "confirmed": true,
+                "connection_mode": "network",
+                "network_host": host,
+                "network_telnet_port": port
+            }),
+        );
+        assert_eq!(bad["success"], false, "{host}:{port}");
+        assert_eq!(bad["detail"]["error_code"], "workflow_not_resumable");
+    }
+
+    // 3. 串口双目标兼容：serial:COM3:115200 匹配 com3@115200，但拒绝 COM4 或 9600 波特率
+    insert_wf("wf-serial-equiv", "serial:COM3:115200");
+    let ok_serial = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume",
+            "workflow_id": "wf-serial-equiv",
+            "confirmed": true,
+            "connection_mode": "serial",
+            "port": "com3",
+            "baudrate": 115200
+        }),
+    );
+    assert_eq!(ok_serial["success"], true, "{ok_serial}");
+    wait_for_status(&service, "wf-serial-equiv", "completed");
+
+    insert_wf("wf-serial-bad", "COM3@115200");
+    for (port, baud) in [("COM4", 115200), ("COM3", 9600)] {
+        let bad = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "resume",
+                "workflow_id": "wf-serial-bad",
+                "confirmed": true,
+                "connection_mode": "serial",
+                "port": port,
+                "baudrate": baud
+            }),
+        );
+        assert_eq!(bad["success"], false, "{port}@{baud}");
+        assert_eq!(bad["detail"]["error_code"], "workflow_not_resumable");
+    }
+
+    insert_wf("wf-garbage-target", "invalid://garbage");
+    let bad_garbage = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume",
+            "workflow_id": "wf-garbage-target",
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1"
+        }),
+    );
+    assert_eq!(
+        bad_garbage["detail"]["error_code"],
+        "workflow_not_resumable"
+    );
+
+    // 3b. 缺失安全来源标记 resume_boundary_source=device_hold_ln 的旧版 ACK-only 记录必须拒绝续雕
+    service.workflows.lock().unwrap().insert(
+        "wf-legacy-ack-only".into(),
+        serde_json::json!({
+            "workflow_id": "wf-legacy-ack-only",
+            "status": "cancelled",
+            "artifacts": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+            "confirmation_snapshot": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+            "send_result": {
+                "success": false,
+                "target": "127.0.0.1:23",
+                "lines_sent": 3,
+                "resumable_from_line": 3,
+                "total_lines": 5,
+                "can_resume": true
+            }
+        }),
+    );
+    let legacy_rejected = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume",
+            "workflow_id": "wf-legacy-ack-only",
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1"
+        }),
+    );
+    assert_eq!(legacy_rejected["success"], false);
+    assert_eq!(
+        legacy_rejected["detail"]["error_code"],
+        "workflow_not_resumable"
+    );
+
+    // 4. 建连期内磁盘 G-code 被篡改（TOCTOU）必须在发送 $X 解锁前被拒
+    let toctou_written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base_toctou = recording_transport_factory(100, toctou_written.clone());
+    let gcode_path_clone = gcode_path.clone();
+    let toctou_service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(gen_dir)
+    .with_preview_roots(vec![temp.path().join("generated")])
+    .with_transport_factory(std::sync::Arc::new(move |spec| {
+        std::fs::write(&gcode_path_clone, "G21\nG90\nG0 X99 Y99\n").unwrap();
+        base_toctou(spec)
+    }));
+    toctou_service.workflows.lock().unwrap().insert(
+        "wf-resume-toctou".into(),
+        serde_json::json!({
+            "workflow_id": "wf-resume-toctou",
+            "status": "cancelled",
+            "artifacts": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+            "confirmation_snapshot": { "gcode_file": "dual_target.gcode", "gcode_sha256": expected_sha },
+            "send_result": {
+                "success": false,
+                "target": "127.0.0.1:23",
+                "lines_sent": 2,
+                "lines_completed": 2,
+                "resumable_from_line": 2,
+                "resume_boundary_source": "device_hold_ln",
+                "total_lines": 5,
+                "can_resume": true
+            }
+        }),
+    );
+    let toctou_res = post_json(
+        &toctou_service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume",
+            "workflow_id": "wf-resume-toctou",
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1"
+        }),
+    );
+    assert_eq!(toctou_res["detail"]["error_code"], "send_gate_rejected");
+    assert!(
+        !toctou_written.lock().unwrap().iter().any(|l| l == "$X"),
+        "篡改刀路绝不能提前触发 $X 解锁: {:?}",
+        *toctou_written.lock().unwrap()
+    );
+}
+
+#[test]
+fn missing_frozen_sha_and_preview_id_collision_are_blocked() {
+    for use_db in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let gen_dir = temp.path().join("generated");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("old.gcode"), "G21\nG0 X1 Y1\nM5\n").unwrap();
+
+        let mut service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(gen_dir.clone())
+        .with_preview_roots(vec![gen_dir]);
+        if use_db {
+            let db = std::sync::Arc::new(std::sync::Mutex::new(
+                laser_runtime::RuntimeDb::open_memory().unwrap(),
+            ));
+            service = service.with_runtime_db(db);
+        }
+
+        // 1. 缺冻结 SHA 的老记录不得在 confirm_send 当刻现场补算放行
+        let legacy = serde_json::json!({
+            "workflow_id": "wf-legacy-no-sha",
+            "status": "preview_ready",
+            "artifacts": { "gcode_file": "old.gcode", "gcode_sha256": "" },
+            "confirmation_snapshot": { "gcode_file": "old.gcode", "gcode_sha256": "" }
+        });
+        service
+            .with_effective_store(|store| {
+                store.put(&laser_runtime::StoredRecord {
+                    kind: laser_runtime::RecordKind::Workflow,
+                    id: "wf-legacy-no-sha".into(),
+                    status: Some("preview_ready".into()),
+                    payload: legacy.clone(),
+                })
+            })
+            .unwrap();
+        let rejected_send = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "confirm_send",
+                "workflow_id": "wf-legacy-no-sha",
+                "confirmed": true
+            }),
+        );
+        assert_eq!(rejected_send["success"], false, "use_db={use_db}");
+        assert_eq!(
+            rejected_send["detail"]["error_code"], "confirmation_snapshot_missing",
+            "use_db={use_db}: {rejected_send}"
+        );
+
+        // 2. preview 传冲突的 workflow_id 绝不能覆盖现有/在途记录
+        let collision = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "workflow_id": "wf-legacy-no-sha",
+                "source_type": "gcode",
+                "gcode_file": "old.gcode",
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+        );
+        assert_eq!(collision["success"], false, "use_db={use_db}: {collision}");
+        assert_eq!(
+            collision["detail"]["error_code"], "workflow_id_conflict",
+            "use_db={use_db}: {collision}"
+        );
+    }
+}
+
+#[test]
+fn preflight_registers_framing_for_abort_and_shutdown_rejects_new_requests() {
+    // 1. framing 在 handshake 阶段即进入 active_jobs，期间触发关停清点与急停可实时中止并拒接后续请求
+    let handshake_entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_seen_by_device = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resume_seen_by_device = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct BlockingHandshakeTransport {
+        entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        estop_seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        resume_seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl laser_device::DeviceTransport for BlockingHandshakeTransport {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            self.entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+            if command == laser_device::RealtimeCommand::EmergencyStop {
+                self.estop_seen
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if command == laser_device::RealtimeCommand::Resume {
+                self.resume_seen
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Err("timed out".into())
+        }
+    }
+    let he = handshake_entered.clone();
+    let es = cancel_seen_by_device.clone();
+    let rs = resume_seen_by_device.clone();
+    let service = std::sync::Arc::new(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(move |_| {
+            Ok(Box::new(BlockingHandshakeTransport {
+                entered: he.clone(),
+                estop_seen: es.clone(),
+                resume_seen: rs.clone(),
+            }))
+        })),
+    );
+    let svc_for_thread = service.clone();
+    let framing_thread = std::thread::spawn(move || {
+        post_json(
+            &svc_for_thread,
+            "/api/device/framing",
+            &serde_json::json!({
+                "connection_mode": "network",
+                "network_host": "127.0.0.1",
+                "max_x": 10,
+                "max_y": 10
+            }),
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !handshake_entered.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        service.active_job_count(),
+        1,
+        "走边框在 $$ 握手未结束前就必须进入 active_jobs"
+    );
+    let resume = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "resume", "confirmed": true}),
+    );
+    assert_eq!(resume["success"], false, "{resume}");
+    assert!(!resume_seen_by_device.load(std::sync::atomic::Ordering::SeqCst));
+
+    service.request_shutdown();
+    service.abort_all_active_jobs().unwrap();
+    let framing_res = framing_thread.join().unwrap();
+    assert_eq!(framing_res["success"], false);
+    assert!(cancel_seen_by_device.load(std::sync::atomic::Ordering::SeqCst));
+
+    // 2. 置位关停门禁后，新的走边框与安全动作必须返回 host_shutting_down 且不得再调用 transport_factory
+    let denied = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+    );
+    assert_eq!(denied["success"], false);
+    assert_eq!(denied["detail"]["error_code"], "host_shutting_down");
+
+    let denied_framing = post_json(
+        &service,
+        "/api/device/framing",
+        &serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10}),
+    );
+    assert_eq!(denied_framing["success"], false);
+    assert_eq!(denied_framing["detail"]["error_code"], "host_shutting_down");
+}
+
+#[test]
+fn cancel_path_error_reports_failed_with_fallback_0x18_and_safe_home_registers_active() {
+    // 1. 取消期间如果 device.cancel() 自身失败，send 绝不能伪报安全取消，必须标 failed/can_resume=false 并补发 0x18
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let gcode = "G21\nG90\nG1 X10 F1000\nG1 X20\nM5\n";
+    std::fs::write(gen_dir.join("err_cancel.gcode"), gcode).unwrap();
+    let sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
+
+    #[derive(Clone)]
+    struct CancelHoldFailsTransport {
+        responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+        fallback_estop_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl laser_device::DeviceTransport for CancelHoldFailsTransport {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut r = self.responses.lock().unwrap();
+            if line == "$$" {
+                r.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if line == "$CD" {
+                r.push_back("ok".into());
+            } else {
+                // 让发送行在阻塞读中等待外部 cancel
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                r.push_back("ok".into());
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+            if command == laser_device::RealtimeCommand::StatusQuery {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .push_back("<Idle|MPos:0,0,0>".into());
+            } else if command == laser_device::RealtimeCommand::FeedHold {
+                return Err("feedhold write broken".into());
+            } else if command == laser_device::RealtimeCommand::EmergencyStop {
+                self.fallback_estop_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(self.responses.lock().unwrap().pop_front())
+        }
+    }
+
+    let estops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let estops_clone = estops.clone();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir])
+    .with_transport_factory(std::sync::Arc::new(move |_| {
+        Ok(Box::new(CancelHoldFailsTransport {
+            responses: Default::default(),
+            fallback_estop_count: estops_clone.clone(),
+        }))
+    }));
+    service.workflows.lock().unwrap().insert(
+        "wf-cancel-err".into(),
+        serde_json::json!({
+            "workflow_id": "wf-cancel-err",
+            "status": "preview_ready",
+            "artifacts": { "gcode_file": "err_cancel.gcode", "gcode_sha256": sha },
+            "confirmation_snapshot": { "gcode_file": "err_cancel.gcode", "gcode_sha256": sha },
+        }),
+    );
+    let started = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "confirm_send",
+            "workflow_id": "wf-cancel-err",
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1"
+        }),
+    );
+    assert_eq!(started["success"], true, "{started}");
+    let _ = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({"action": "cancel", "workflow_id": "wf-cancel-err"}),
+    );
+    let failed = wait_for_status(&service, "wf-cancel-err", "failed");
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert_eq!(
+        failed["result"]["send_result"]["can_resume"], false,
+        "{failed}"
+    );
+    assert!(
+        failed["result"]["send_result"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("feedhold write broken"),
+        "{failed}"
+    );
+    assert!(
+        estops.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "取消路径报错分支也必须补发急停 0x18 兜底"
+    );
+
+    // 2. 独立 /api/safe-action home 执行期间必须登记进 active_jobs 并可被 abort_all_active_jobs 急停中止
+    let home_entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let home_estop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct BlockingHomeTransport {
+        entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        estop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+    impl laser_device::DeviceTransport for BlockingHomeTransport {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut r = self.responses.lock().unwrap();
+            if line == "$$" {
+                r.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if line == "$CD" {
+                r.push_back("ok".into());
+            } else if line == "$H" {
+                r.push_back("ok".into());
+                self.entered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+            if command == laser_device::RealtimeCommand::EmergencyStop {
+                self.estop.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            if let Some(line) = self.responses.lock().unwrap().pop_front() {
+                return Ok(Some(line));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if self.estop.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(None)
+            } else {
+                Ok(Some("<Home|MPos:0,0,0>".into()))
+            }
+        }
+    }
+    let he = home_entered.clone();
+    let hes = home_estop.clone();
+    let home_svc = std::sync::Arc::new(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(move |_| {
+            Ok(Box::new(BlockingHomeTransport {
+                entered: he.clone(),
+                estop: hes.clone(),
+                responses: Default::default(),
+            }))
+        })),
+    );
+    let svc2 = home_svc.clone();
+    let home_thread = std::thread::spawn(move || {
+        post_json(
+            &svc2,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "home",
+                "confirmed": true,
+                "connection_mode": "network",
+                "host": "127.0.0.1"
+            }),
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !home_entered.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        home_svc.active_job_count(),
+        1,
+        "独立 home 期间必须登记在 active_jobs"
+    );
+    home_svc.abort_all_active_jobs().unwrap();
+    let home_res = home_thread.join().unwrap();
+    assert_eq!(home_res["success"], false, "{home_res}");
+    assert!(home_estop.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 /// 走边框途中暂停 / 继续 / 停止（2026-11-18，技术书 r52）：暂停发 `!` 并在停止目标里显示 paused；
 /// 继续必须 confirmed=true 才发 `~`；停止走边框取消作业并先进给保持；正式加工、没有边框时拒绝。
 #[test]
@@ -1467,4 +2172,282 @@ fn stop_framing_cancels_a_running_framing_job() {
         "{result}"
     );
     assert_eq!(service.active_job_count(), 0);
+}
+
+/// 在首条 G21 已写出、正要读应答时注入取消。可同时给出控制器报警。
+fn cancel_at_first_g21(
+    service: ApiService,
+    alarm: bool,
+    written: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    events: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> ApiService {
+    use laser_device::{DeviceTransport, RealtimeCommand};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct CancelAtAck {
+        transport: Box<dyn DeviceTransport>,
+        jobs: ActiveJobs,
+        alarm: bool,
+        pending: AtomicBool,
+        injected: AtomicBool,
+        held: AtomicBool,
+        events: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+    impl DeviceTransport for CancelAtAck {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            if line == "G21" && !self.injected.swap(true, Ordering::SeqCst) {
+                self.pending.store(true, Ordering::SeqCst);
+            }
+            self.transport.write_line(line)
+        }
+        fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+            match command {
+                RealtimeCommand::FeedHold => {
+                    self.held.store(true, Ordering::SeqCst);
+                    self.events.lock().unwrap().push(b'!');
+                }
+                RealtimeCommand::StatusQuery => self.events.lock().unwrap().push(b'?'),
+                RealtimeCommand::EmergencyStop => self.events.lock().unwrap().push(0x18),
+                _ => {}
+            }
+            self.transport.write_realtime(command)
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            if self.pending.swap(false, Ordering::SeqCst) {
+                self.jobs
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .unwrap()
+                    .cancel
+                    .cancel();
+                return if self.alarm {
+                    Ok(Some("ALARM:1".into()))
+                } else {
+                    Err("timed out".into())
+                };
+            }
+            if self.held.swap(false, Ordering::SeqCst) {
+                self.events.lock().unwrap().push(b'H');
+                return Ok(Some("<Hold:0|MPos:0,0,0>".into()));
+            }
+            self.transport.read_line()
+        }
+    }
+    let jobs = service.active_jobs.clone();
+    let factory = recording_transport_factory(100, written);
+    service.with_transport_factory(std::sync::Arc::new(move |spec| {
+        Ok(Box::new(CancelAtAck {
+            transport: factory(spec)?,
+            jobs: jobs.clone(),
+            alarm,
+            pending: Default::default(),
+            injected: Default::default(),
+            held: Default::default(),
+            events: events.clone(),
+        }))
+    }))
+}
+
+fn seed_review_send(service: &ApiService, root: &std::path::Path, workflow_id: &str, resume: bool) {
+    let gcode = "G21\nG90\nG0 X0 Y0\nG1 X20 F1000\nM5\n";
+    std::fs::write(root.join("review.gcode"), gcode).unwrap();
+    let sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
+    service.workflows.lock().unwrap().insert(
+        workflow_id.into(),
+        serde_json::json!({
+            "workflow_id": workflow_id,
+            "status": if resume { "cancelled" } else { "preview_ready" },
+            "artifacts": { "gcode_file": "review.gcode", "gcode_sha256": sha },
+            "confirmation_snapshot": { "gcode_file": "review.gcode", "gcode_sha256": sha },
+            "send_result": {
+                "target": "127.0.0.1:23", "lines_sent": 2, "lines_completed": 2,
+                "resumable_from_line": 2, "resume_boundary_source": "device_hold_ln",
+                "total_lines": 5, "can_resume": true
+            }
+        }),
+    );
+}
+
+#[test]
+fn alarm_during_cancel_stays_failed_for_send_and_framing() {
+    let root = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = cancel_at_first_g21(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(root.path().to_path_buf())
+        .with_preview_roots(vec![root.path().to_path_buf()]),
+        true,
+        Default::default(),
+        events.clone(),
+    );
+    seed_review_send(&service, root.path(), "alarm-send", false);
+    let started = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "confirm_send", "workflow_id": "alarm-send", "confirmed": true,
+            "connection_mode": "network", "host": "127.0.0.1",
+        }),
+    );
+    assert_eq!(started["success"], true, "{started}");
+    let failed = wait_for_status(&service, "alarm-send", "failed");
+    let send = &failed["result"]["send_result"];
+    assert_eq!(send["cancelled"], false, "{failed}");
+    assert!(
+        send["error"].as_str().unwrap().contains("ALARM:1"),
+        "{failed}"
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .windows(4)
+            .any(|w| w == [b'!', b'?', b'H', 0x18])
+    );
+
+    events.lock().unwrap().clear();
+    let (code, frame) = post_with_ctx(
+        &service,
+        "/api/device/framing",
+        &serde_json::json!({
+            "connection_mode": "network", "host": "127.0.0.1", "max_x": 10, "max_y": 10,
+        }),
+        laser_contracts::CallerContext::Loopback,
+    );
+    assert_eq!(code, 500, "{frame}");
+    assert_eq!(frame["detail"]["error_code"], "framing_failed");
+    assert_eq!(frame["detail"]["cancelled"], false);
+    assert!(
+        frame["result"].as_str().unwrap().contains("ALARM:1"),
+        "{frame}"
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .windows(4)
+            .any(|w| w == [b'!', b'?', b'H', 0x18])
+    );
+}
+
+#[test]
+fn resume_modal_header_cancel_waits_for_hold_before_reset() {
+    let root = tempfile::tempdir().unwrap();
+    let written: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = cancel_at_first_g21(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(root.path().to_path_buf())
+        .with_preview_roots(vec![root.path().to_path_buf()]),
+        false,
+        written.clone(),
+        events.clone(),
+    );
+    seed_review_send(&service, root.path(), "modal-cancel", true);
+    let started = post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "resume", "workflow_id": "modal-cancel", "confirmed": true,
+            "connection_mode": "network", "host": "127.0.0.1",
+        }),
+    );
+    assert_eq!(started["success"], true, "{started}");
+    let terminal = wait_for_status(&service, "modal-cancel", "cancelled");
+    let send = &terminal["result"]["send_result"];
+    assert_eq!(send["cancelled"], true, "{terminal}");
+    assert_eq!(send["can_resume"], false, "{terminal}");
+    assert_eq!(send["lines_sent"], 2);
+    let written = written.lock().unwrap();
+    assert_eq!(
+        written.last().map(String::as_str),
+        Some("G21"),
+        "{written:?}"
+    );
+    let events = events.lock().unwrap();
+    let first_hold = events.iter().position(|byte| *byte == b'!').unwrap();
+    assert_eq!(&events[first_hold..], &[b'!', b'?', b'H', 0x18]);
+}
+
+#[test]
+fn shutdown_allows_emergency_stop_and_soft_reset_for_unregistered_device() {
+    let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let opened = fake.clone();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(opened.clone()))));
+    service.request_shutdown();
+    assert_eq!(service.active_job_count(), 0);
+    for action in ["emergency_stop", "soft_reset"] {
+        let result = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": action, "confirmed": true, "connection_mode": "network", "host": "127.0.0.1",
+            }),
+        );
+        assert_eq!(result["success"], true, "{result}");
+    }
+    assert!(fake.lines().is_empty());
+    assert_eq!(fake.realtime(), [0x18, 0x18]);
+}
+
+#[test]
+fn shutdown_during_open_drops_unwritten_transport_for_send_framing_and_home() {
+    for (route, body) in [
+        (
+            "/api/safe-action",
+            serde_json::json!({"action":"home","confirmed":true}),
+        ),
+        (
+            "/api/workflow",
+            serde_json::json!({"action":"confirm_send","confirmed":true,"workflow_id":"shutdown-open"}),
+        ),
+        (
+            "/api/device/framing",
+            serde_json::json!({"max_x":10,"max_y":10}),
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
+        let opened = fake.clone();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown = flag.clone();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(root.path().to_path_buf())
+        .with_preview_roots(vec![root.path().to_path_buf()])
+        .with_shutdown_flag(flag)
+        .with_transport_factory(std::sync::Arc::new(move |_| {
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+            Ok(Box::new(opened.clone()))
+        }));
+        seed_review_send(&service, root.path(), "shutdown-open", false);
+        let mut body = body;
+        body["connection_mode"] = "network".into();
+        body["host"] = "127.0.0.1".into();
+        let result = post_json(&service, route, &body);
+        assert_eq!(result["success"], false, "{route}: {result}");
+        assert!(
+            service.is_shutdown_requested(),
+            "{route} 必须实际进入建连工厂"
+        );
+        assert!(
+            fake.lines().is_empty() && fake.realtime().is_empty(),
+            "{route} 不得对新连接写任何字节"
+        );
+        assert_eq!(service.active_job_count(), 0);
+    }
 }

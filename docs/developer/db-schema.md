@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 19（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at` 并创建 6 个基础索引；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory`（§3.19）与 NV17 `voice_firmware_delivery`（§3.18）；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57）；v18 删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），并新增 `workflows(updated_at DESC, workflow_id ASC)`、`approvals(created_at DESC, approval_id DESC)`、`approvals(status, created_at DESC, approval_id DESC)`、`material_aliases(material_name)` 索引；v19 新增有界语音对话记录表 `voice_chat_logs`（§3.20）与索引 `voice_chat_logs_at(at_ms DESC, id DESC)`（n81，实时与启动定额保留最近 500 条） |
+| version | INTEGER PK | 当前 20（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at` 并创建 6 个基础索引；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory`（§3.19）与 NV17 `voice_firmware_delivery`（§3.18）；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57）；v18 删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），并新增 `workflows(updated_at DESC, workflow_id ASC)`、`approvals(created_at DESC, approval_id DESC)`、`approvals(status, created_at DESC, approval_id DESC)`、`material_aliases(material_name)` 索引；v19 新增有界语音对话记录表 `voice_chat_logs`（§3.20）与索引 `voice_chat_logs_at(at_ms DESC, id DESC)`（n81，实时与启动定额保留最近 500 条）；v20 为 `voice_devices` 增加状态递增修订列 `status_revision INTEGER NOT NULL DEFAULT 0`（§3.13，防止 USB 自动放行与并发撤销互相覆盖） |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -343,7 +343,7 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 | `voice_firmware_delivery.device_report_status` | TEXT DEFAULT 'not_reported' | v9。not_reported / reported |
 | `voice_firmware_delivery.revision` / `updated_at` | INTEGER / REAL | v9。每次状态变化 revision+1 |
 | `voice_firmware_delivery.firmware_version` | TEXT NOT NULL DEFAULT '' | 这次推送的固件版本；设备上报同版本才算升级（旧记录为空串） |
-| `voice_firmware_delivery.token` | TEXT NULL | 一次性下载令牌（32 位十六进制），部分唯一索引 `voice_firmware_token`；取消或上报后置空 |
+| `voice_firmware_delivery.token` | TEXT NULL | 设备绑定的下载令牌（32 位十六进制）。宿主仍在运行时，`downloading` 的同一有效推送允许重试。部分唯一索引 `voice_firmware_token`；取消或上报后置空 |
 | `voice_firmware_delivery.expires_at` | REAL NOT NULL DEFAULT 0 | 推送到期时间；过期的推送不再下发也不再可下载（旧记录为 0，视为已失效） |
 
 `RuntimeDb`（`firmware_store.rs`）：`add_firmware_artifact`（同 SHA-256 重复导入不变）、`list_firmware_artifacts`、`delete_firmware_artifact`（还有有效推送时返回 false 不删除）、`create_firmware_offer`（同一设备尚未开始下载的旧推送被替换；版本必须与已导入固件一致）、`active_firmware_offer`、`firmware_offer_by_token`、`firmware_device_reported`（上报新版本即置为已上报并作废令牌）、`cancel_firmware_offer`（未开始下载的删除，已开始下载的作废令牌并保留记录）。v13 迁移在事务内先查 `pragma_table_info` 再决定是否加列，失败回滚后可以重试。
@@ -421,17 +421,17 @@ pub trait RuntimeStore {
 | materials / material_aliases / material_params(_history) | `/api/material-lab/manage`（save/delete/import）、`select-cell` | `/v1/material-lab/bootstrap`、`/api/material-lab/export`、`/api/ui/material-*` |
 | uploads | 无（仅迁移器） | 无 |
 | audit_log | `laser-api` 审批服务（`ApprovalService`）、`laser-host` 进程内后端（接入点 R4 拒绝），实时定额最多保留 2000 条 | `RuntimeDb::recent_audit`（测试） |
-| voice_chat_logs | 桌面端 `voice_builtin::DbRegistry::record_chat_turn`（经凭据脱敏后按轮追加，实时与启动定额最多保留 500 条；`voice_local_save({clear_debug_traces:true})` 清空） | 桌面端主窗口 `voice_builtin_status`（最多取最近 200 条） |
+| voice_chat_logs | 桌面端 `voice_builtin::DbRegistry::record_chat_turn`（经凭据脱敏后按轮追加，实时与启动定额最多保留 500 条；`voice_local_save({clear_debug_traces:true})` 清空并使此前已开始的轮次失效） | 桌面端主窗口 `voice_builtin_status`（最多取最近 200 条） |
 
 ## 7. 迁移流程（`moss-host migrate --from <旧根>`）
 
-1. 普通迁移先按本节 `schema_version` 规则升级目标数据库 schema；schema 迁移失败则停止，不进入数据导入。`--dry-run` 只检查待执行的 schema 和数据迁移，不写入任何 schema 或业务数据。
+1. 普通迁移先按本节 `schema_version` 规则升级目标数据库 schema；schema 迁移失败则停止，不进入数据导入。`--dry-run` 不写入生产库的数据、运行锁或上传目录：目标 `moss.sqlite` 存在时统一经由 SQLite 只读连接执行 `VACUUM INTO` 建立一致性临时快照（包含尚未 checkpoint 的 WAL 已提交数据，无法取得一致快照时直接报错而不退回原始文件复制）。快照写入目标运行目录的 `.moss-migration-dryrun/`（Unix 权限 0700）。正常退出删除快照，下一次试跑拿到目录锁后清理带归属标记的遗留快照。目标库不存在时初始化临时内存库与内置预设，再执行与普通迁移一致的 schema 升级、材料冲突与记录去重规则。
 2. 读旧根下的数据目录，只读。历史布局不统一：早期记录把 `.lasergrbl_text_tasks/` 放在仓库根下，现布局在 `.runtime/` 下，同一根内两种布局并存；按步骤 3 的布局映射定位，不假设单一布局。
 3. 路径重映射分两步：a) 历史根前缀替换——`--from` 可传多个历史根（实测 payload 同时含当前源目录与更早的 `moss-xiaozhi-mcp-main` 两代根，产物路径引用共 1581 处）；b) 目录布局映射——`<根>/.lasergrbl_text_tasks/` → `<根>/.runtime/lasergrbl_text_tasks/`。替换后文件不存在则该记录 `stale=1`。仅做单根前缀替换实测 1037 处 stale（约 65%），两步映射后仅 3 处缺失，迁移验收以此为基线并在报告中逐条列出。根从命令参数传入，不硬编码。
-4. 按 §3 逐表导入。主键已存在时：payload 完全相同跳过；不同则以 `updated_at` 新者为准，旧者进 `_history`（材料表除外，走 §8 冲突规则）。旧 job 的 `pending`、`running`、`queued` 状态一律强制改写为 `failed`（或等价终态），并在 canonical payload 的 `detail`/`result` 中写入“旧系统未完成任务，迁移时安全终止”；无法关联 workflow、缺少 G-code SHA 或缺少确认快照的旧 job 同样不得进入发送队列。
-5. 材料库：先按 §3.6.1 播种内置预设，再读 `LASER_MATERIAL_PARAMS_FILE`。文件缺失不是错误，报告记 `materials: preset_only`。顶层 `version` 按 §3.6.2 宽松归一化，无法归一化则整个文件判为数据错误：不导入任何材料，文件路径与原始值写入报告 `errors`，迁移其余表继续。内置格子的 `null`/`{}` 墓碑按 §3.6.1 第 3 条处理并计数。
-6. `uploads` 扫描目录建索引，计算 SHA-256。
-7. `--dry-run` 只输出计划：各表新增/跳过/冲突/stale 数量，材料冲突逐格清单；不得写入 schema 或业务数据。
+4. 按 §3 逐表导入，并在同一工作库（普通迁移为目标库，试跑为临时快照库）上实时判重与写入。主键已存在时（含同批多来源或同目录重复主键，以及目标库已有或首次新建后同批再遇的记录）：payload 完全相同记跳过；不同记冲突，按 `--on-conflict keep|overwrite` 决定保留已有/首条记录还是覆盖写入（材料表走 §3.6 冲突规则与 `material_params_history`）。旧 job 的 `pending`、`running`、`queued` 状态一律强制改写为 `failed`（或等价终态），并在 canonical payload 的 `detail`/`result` 中写入“旧系统未完成任务，迁移时安全终止”；无法关联 workflow、缺少 G-code SHA 或缺少确认快照的旧 job 同样不得进入发送队列。
+5. 材料库：先按 §3.6.1 播种内置预设（目标库已存在时保留其已有定制与删改），再读 `LASER_MATERIAL_PARAMS_FILE`。文件缺失不是错误，报告记 `materials: preset_only`。顶层 `version` 按 §3.6.2 宽松归一化，无法归一化则整个文件判为数据错误：不导入任何材料，文件路径与原始值写入报告 `errors`，迁移其余表继续。内置格子的 `null`/`{}` 墓碑按 §3.6.1 第 3 条处理并计数。
+6. `uploads` 扫描目录建索引，计算 SHA-256（仅普通迁移复制文件并写入 `uploads` 表）。
+7. `--dry-run` 基于上述临时快照执行完整试跑并输出计划：各表与材料库的新增/跳过/冲突/stale 数量与实际迁移保持一致；不得修改目标数据库的数据、创建 `moss.lock` 或写入 `uploads/`。MOSS 写出迁移报告 JSON。SQLite 只读打开 WAL 模式的库时，也可能在目标目录生成 `moss.sqlite-wal` 和 `moss.sqlite-shm` 协调文件。
 8. 输出迁移报告到目标运行目录的 `migration-<时间戳>.json`。
 9. 幂等：重复执行结果相同。
 

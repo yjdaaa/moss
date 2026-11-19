@@ -1357,6 +1357,49 @@ pub fn update_voice<R>(
     update_voice_with_jev_feedback(settings_file, |voice| mutate(voice).map(|out| (out, None)))
 }
 
+/// 在全局 `SETTINGS_WRITE` 锁保护下更新顶层与 `voice` 字段时可选同步的顶层键。
+#[derive(Debug, Default)]
+pub struct RootVoiceUpdate {
+    pub endpoint: Option<Option<String>>,
+    pub extra_endpoints: Option<Vec<String>>,
+    pub disabled_tools: Option<Vec<String>>,
+    pub jev_feedback: Option<bool>,
+}
+
+/// 在全局 `SETTINGS_WRITE` 锁保护下读取最新 `settings.json` 与 `voice` 子分区，
+/// 仅在锁内修改本次涉及的字段并写回，避免锁外读取的旧整份快照覆盖并发隐私/功能开关。
+pub fn update_voice_with_root<R, E>(
+    settings_file: &Path,
+    mutate: impl FnOnce(
+        &serde_json::Map<String, serde_json::Value>,
+        &mut VoiceSettings,
+    ) -> Result<(R, RootVoiceUpdate), E>,
+    map_io_err: impl Fn(String) -> E,
+) -> Result<R, E> {
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = read_root_checked(settings_file).map_err(&map_io_err)?;
+        let mut voice: VoiceSettings = root
+            .get("voice")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        // n75：写回前先迁移旧角色编号，避免把旧值原样写回
+        migrate_personas(&mut voice.builtin_local);
+        let (out, update) = mutate(&root, &mut voice)?;
+        apply_voice_to_root(
+            &mut root,
+            &voice,
+            update.endpoint.as_ref().map(|v| v.as_deref()),
+            update.extra_endpoints.as_deref(),
+            update.disabled_tools.as_deref(),
+            update.jev_feedback,
+        )
+        .map_err(&map_io_err)?;
+        write_root(settings_file, &root).map_err(map_io_err)?;
+        Ok(out)
+    })
+}
+
 /// 在全局 `SETTINGS_WRITE` 锁保护下原子更新 `voice` 子分区与可选顶层 `jev_enabled`。
 pub fn update_voice_with_jev_feedback<R>(
     settings_file: &Path,
@@ -1494,7 +1537,10 @@ pub fn disabled_tools(settings_file: &Path) -> Vec<String> {
     string_list(&read_root(settings_file), "mcp_disabled_tools")
 }
 
-fn string_list(root: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
+pub(crate) fn string_list(
+    root: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Vec<String> {
     root.get(key)
         .and_then(serde_json::Value::as_array)
         .map(|items| {

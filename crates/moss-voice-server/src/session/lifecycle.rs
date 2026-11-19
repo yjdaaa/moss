@@ -19,6 +19,7 @@ impl<'a> Session<'a> {
             self.shared.state.finish_timing(timing);
             if turn.kind == TurnKind::Answer
                 && self.shared.state.debug_enabled()
+                && let Some(captured_epoch) = turn.debug_capture_epoch
                 && let Some(raw_asr) = turn.debug_raw_asr.take()
             {
                 let corrected_asr = turn
@@ -42,8 +43,8 @@ impl<'a> Session<'a> {
                 } else {
                     turn.debug_text_reply.join("")
                 };
-                if let Some(scrubbed) =
-                    self.shared.state.finish_debug_trace(crate::TurnDebugTrace {
+                if let Some((scrubbed, epoch)) = self.shared.state.finish_debug_trace_with_epoch(
+                    crate::TurnDebugTrace {
                         id: 0,
                         at_ms,
                         device_id: self.device_id.into(),
@@ -58,9 +59,10 @@ impl<'a> Session<'a> {
                         outcome: outcome.into(),
                         truncated: false,
                         tools_dropped: 0,
-                    })
-                {
-                    self.shared.registry.record_chat_turn(&scrubbed);
+                    },
+                    captured_epoch,
+                ) {
+                    self.shared.registry.record_chat_turn_at(&scrubbed, epoch);
                 }
             }
         }

@@ -105,6 +105,10 @@ impl AuthManager {
                 Some(hex::encode(Sha256::digest(raw.as_bytes())))
             }
         };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "auth state lock poisoned".to_owned())?;
         if let Some(path) = self.runtime_path.as_deref() {
             let hash_clone = next_hash.clone();
             update_runtime_settings(Some(path), |current| match hash_clone {
@@ -119,10 +123,6 @@ impl AuthManager {
                 }
             })?;
         }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "auth state lock poisoned".to_owned())?;
         state.static_pin_hash = next_hash;
         state.failures.clear();
         state.locked_until.clear();
@@ -140,17 +140,17 @@ impl AuthManager {
         self.state.lock().map(|s| s.tokens.len()).unwrap_or(0)
     }
 
-    /// 撤销所有已配对设备的长久连接 Token。
+    /// 撤销所有已配对设备的长久连接 Token（在 state 锁内同步写盘，防止与并发配对互相覆盖）。
     pub fn revoke_all_tokens(&self) -> Result<usize, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "auth state lock poisoned".to_owned())?;
         if let Some(path) = self.runtime_path.as_deref() {
             update_runtime_settings(Some(path), |current| {
                 current.remove("lan_paired_tokens");
             })?;
         }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "auth state lock poisoned".to_owned())?;
         let count = state.tokens.len();
         state.tokens.clear();
         Ok(count)
@@ -163,65 +163,65 @@ impl AuthManager {
         now: u64,
     ) -> Result<(String, String), AuthError> {
         let code = code.trim();
-        let (token, pairing_id, tokens_snapshot) = {
-            let mut state = self.state.lock().map_err(|_| AuthError::Internal)?;
-            if state
-                .locked_until
-                .get(source_ip)
-                .is_some_and(|until| *until > now)
-            {
-                return Err(AuthError::Locked(state.locked_until[source_ip] - now));
+        let mut state = self.state.lock().map_err(|_| AuthError::Internal)?;
+        if state
+            .locked_until
+            .get(source_ip)
+            .is_some_and(|until| *until > now)
+        {
+            return Err(AuthError::Locked(state.locked_until[source_ip] - now));
+        }
+        let dynamic_valid =
+            !state.used && now < state.expires_at && !state.code.is_empty() && code == state.code;
+        let static_valid = code.len() == 6
+            && code.bytes().all(|b| b.is_ascii_digit())
+            && state
+                .static_pin_hash
+                .as_deref()
+                .is_some_and(|expected| expected == hex::encode(Sha256::digest(code.as_bytes())));
+        if !dynamic_valid && !static_valid {
+            let entry = state
+                .failures
+                .entry(source_ip.to_string())
+                .or_insert((0, now));
+            entry.0 += 1;
+            if entry.0 >= 5 {
+                state.locked_until.insert(source_ip.to_string(), now + 900);
             }
-            let dynamic_valid = !state.used
-                && now < state.expires_at
-                && !state.code.is_empty()
-                && code == state.code;
-            let static_valid = code.len() == 6
-                && code.bytes().all(|b| b.is_ascii_digit())
-                && state.static_pin_hash.as_deref().is_some_and(|expected| {
-                    expected == hex::encode(Sha256::digest(code.as_bytes()))
-                });
-            if !dynamic_valid && !static_valid {
-                let entry = state
-                    .failures
-                    .entry(source_ip.to_string())
-                    .or_insert((0, now));
-                entry.0 += 1;
-                if entry.0 >= 5 {
-                    state.locked_until.insert(source_ip.to_string(), now + 900);
-                }
-                return Err(AuthError::Invalid);
-            }
-            if dynamic_valid {
-                state.used = true;
-            }
-            state.failures.remove(source_ip);
-            state.locked_until.remove(source_ip);
-            let mut bytes = [0u8; 32];
-            getrandom::fill(&mut bytes).map_err(|_| AuthError::Internal)?;
-            let token = base64::engine::general_purpose::STANDARD.encode(bytes);
-            let token_hash = hex::encode(Sha256::digest(bytes));
-            let pairing_id = format!("pair-{}", &token_hash[..12]);
-            if state.tokens.len() >= 64
-                && let Some(first_key) = state.tokens.keys().next().cloned()
-            {
-                state.tokens.remove(&first_key);
-            }
-            state.tokens.insert(token_hash, pairing_id.clone());
-            (token, pairing_id, state.tokens.clone())
-        };
+            return Err(AuthError::Invalid);
+        }
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| AuthError::Internal)?;
+        let token = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let token_hash = hex::encode(Sha256::digest(bytes));
+        let pairing_id = format!("pair-{}", &token_hash[..12]);
+        let mut next_tokens = state.tokens.clone();
+        if next_tokens.len() >= 64
+            && let Some(first_key) = next_tokens.keys().next().cloned()
+        {
+            next_tokens.remove(&first_key);
+        }
+        next_tokens.insert(token_hash, pairing_id.clone());
+        // 在 state 锁内同步写盘并校验结果，确保内存与 settings.json 不会因并发撤销而分叉
         if let Some(path) = self.runtime_path.as_deref() {
-            let map: serde_json::Map<String, serde_json::Value> = tokens_snapshot
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
+            let map: serde_json::Map<String, serde_json::Value> = next_tokens
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                 .collect();
-            let _ = update_runtime_settings(Some(path), |current| {
+            update_runtime_settings(Some(path), |current| {
                 current.insert(
                     "lan_paired_tokens".to_owned(),
                     serde_json::Value::Object(map),
                 );
-            });
+            })
+            .map_err(|_| AuthError::Internal)?;
         }
+        if dynamic_valid {
+            state.used = true;
+        }
+        state.failures.remove(source_ip);
+        state.locked_until.remove(source_ip);
+        state.tokens = next_tokens;
         Ok((token, pairing_id))
     }
 

@@ -7,6 +7,8 @@ pub(super) struct DbRegistry {
     pub(super) db: Arc<Mutex<laser_runtime::RuntimeDb>>,
     pub(super) host: Arc<laser_host::HostApplication>,
     pub(super) settings_file: std::path::PathBuf,
+    pub(super) chat_log_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) chat_log_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(super) fn ensure_device_token_secret(db: &laser_runtime::RuntimeDb) -> Result<Vec<u8>, String> {
@@ -125,23 +127,53 @@ impl DeviceRegistry for DbRegistry {
 
     /// n81：将已脱敏的语音对话轮次持久化写入本机 SQLite `voice_chat_logs`（上限 500 条）。
     fn record_chat_turn(&self, trace: &moss_voice_server::TurnDebugTrace) {
-        let tools_json = serde_json::to_string(&trace.tools).unwrap_or_else(|_| "[]".to_owned());
-        let record = laser_runtime::VoiceChatLogRecord {
-            id: 0,
-            at_ms: i64::try_from(trace.at_ms).unwrap_or(i64::MAX),
-            device_id: trace.device_id.clone(),
-            session_id: trace.session_id.clone(),
-            turn: i64::try_from(trace.turn).unwrap_or(i64::MAX),
-            raw_asr: trace.raw_asr.clone(),
-            corrected_asr: trace.corrected_asr.clone(),
-            reply: trace.reply.clone(),
-            spoken: trace.spoken.clone(),
-            tools_json,
-            outcome: trace.outcome.clone(),
-            truncated: trace.truncated,
-            tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
-        };
+        let epoch = self
+            .chat_log_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.record_chat_turn_at(trace, epoch);
+    }
+
+    fn record_chat_turn_at(&self, trace: &moss_voice_server::TurnDebugTrace, captured_epoch: u64) {
         if let Ok(db) = self.db.lock() {
+            if !self
+                .chat_log_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+                || captured_epoch
+                    != self
+                        .chat_log_epoch
+                        .load(std::sync::atomic::Ordering::Acquire)
+                || !moss_voice::settings::load(&self.settings_file)
+                    .builtin_local
+                    .chat_log_enabled
+            {
+                return;
+            }
+            let scrubbed_tools: Vec<moss_voice_server::DebugToolTrace> = trace
+                .tools
+                .iter()
+                .map(|t| moss_voice_server::DebugToolTrace {
+                    name: t.name.clone(),
+                    arguments: moss_voice_server::scrub_debug_text(&t.arguments),
+                    result: moss_voice_server::scrub_debug_text(&t.result),
+                })
+                .collect();
+            let tools_json =
+                serde_json::to_string(&scrubbed_tools).unwrap_or_else(|_| "[]".to_owned());
+            let record = laser_runtime::VoiceChatLogRecord {
+                id: 0,
+                at_ms: i64::try_from(trace.at_ms).unwrap_or(i64::MAX),
+                device_id: trace.device_id.clone(),
+                session_id: trace.session_id.clone(),
+                turn: i64::try_from(trace.turn).unwrap_or(i64::MAX),
+                raw_asr: moss_voice_server::scrub_debug_text(&trace.raw_asr),
+                corrected_asr: moss_voice_server::scrub_debug_text(&trace.corrected_asr),
+                reply: moss_voice_server::scrub_debug_text(&trace.reply),
+                spoken: moss_voice_server::scrub_debug_text(&trace.spoken),
+                tools_json,
+                outcome: trace.outcome.clone(),
+                truncated: trace.truncated,
+                tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
+            };
             let _ = db.append_voice_chat_log(&record);
         }
     }

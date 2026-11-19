@@ -46,57 +46,56 @@ pub(crate) fn workflow_send_blocked_reason(status: Option<&str>) -> Option<&'sta
 }
 
 /// 发送准入预检（规格 §8/§22）：把 workflow 记录中的刀路文件名限定在 RuntimeRoot 允许目录内解析为物理文件，
-/// 读取（或首次冻结）快照 SHA，交给 `laser_device::authorize_send` 以物理文件重算比对。
+/// 严格读取记录里已冻结的 64 位 SHA-256 指纹（拒绝用发码当刻磁盘文件现场补算 SHA），
+/// 再交给 `laser_device::authorize_send` 以物理文件重算比对。
 /// 返回 (preflight, 冻结的 SHA-256, 记录中的刀路文件名)。
 pub(crate) fn build_send_preflight(
     payload: &serde_json::Value,
     send_roots: &[std::path::PathBuf],
 ) -> Result<(laser_device::SendPreflight, String, String), String> {
-    let gcode_file = payload
+    let artifact_file = payload
         .get("artifacts")
         .and_then(|a| a.get("gcode_file"))
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .get("confirmation_snapshot")
-                .and_then(|c| c.get("gcode_file"))
-                .and_then(|v| v.as_str())
-        })
-        .or_else(|| {
-            payload
-                .get("input")
-                .and_then(|i| i.get("gcode_file"))
-                .and_then(|v| v.as_str())
-        })
-        .unwrap_or("")
-        .trim();
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let snapshot_file = payload
+        .get("confirmation_snapshot")
+        .and_then(|c| c.get("gcode_file"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let (Some(a), Some(s)) = (artifact_file, snapshot_file)
+        && a != s
+    {
+        return Err("artifacts 与 confirmation_snapshot 的刀路文件名不一致，拒绝发送".into());
+    }
+    let gcode_file = snapshot_file.or(artifact_file).unwrap_or("");
     if gcode_file.is_empty() {
-        return Err("当前 workflow 没有 G-code 刀路文件，拒绝发送".into());
+        return Err("当前 workflow 缺少冻结的 G-code 刀路快照（请重新预览生成）".into());
     }
     let gcode_path = resolve_gcode_file(std::path::Path::new(gcode_file), send_roots)
         .map_err(|_| "G-code 刀路文件不存在或不在允许目录内，拒绝发送".to_string())?;
-    let stored_sha = payload
-        .get("artifacts")
-        .and_then(|a| a.get("gcode_sha256"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .get("confirmation_snapshot")
-                .and_then(|c| c.get("gcode_sha256"))
-                .and_then(|v| v.as_str())
-        })
-        .map(str::trim)
-        .filter(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
-        .map(str::to_owned);
-    let expected_sha256 = match stored_sha {
-        Some(sha) => sha,
-        None => {
-            // 快照尚未冻结 SHA：以当前物理文件首次冻结，之后每次发送都必须与之一致
-            let bytes =
-                std::fs::read(&gcode_path).map_err(|e| format!("读取 G-code 文件失败: {e}"))?;
-            hex::encode(Sha256::digest(&bytes))
-        }
+    let valid_sha = |v: Option<&serde_json::Value>| -> Option<String> {
+        v.and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|sha| sha.to_ascii_lowercase())
     };
+    let artifact_sha = valid_sha(payload.get("artifacts").and_then(|a| a.get("gcode_sha256")));
+    let snapshot_sha = valid_sha(
+        payload
+            .get("confirmation_snapshot")
+            .and_then(|c| c.get("gcode_sha256")),
+    );
+    if let (Some(a), Some(s)) = (artifact_sha.as_deref(), snapshot_sha.as_deref())
+        && a != s
+    {
+        return Err("artifacts 与 confirmation_snapshot 的 G-code SHA-256 不一致，拒绝发送".into());
+    }
+    let expected_sha256 = snapshot_sha.or(artifact_sha).ok_or_else(|| {
+        "当前记录缺少冻结的 64 位 G-code SHA-256 指纹（老数据请重新预览生成确认快照）".to_string()
+    })?;
     let preflight = laser_device::SendPreflight {
         status: "pending".into(),
         expected_sha256: expected_sha256.clone(),
@@ -150,7 +149,7 @@ pub(crate) fn freeze_confirmation_snapshot(
 /// （全工作区并行测试负载下复现）。只在任务启动与结束时各持有一次，开销可以忽略。
 static RECORD_TRANSITION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn record_transition_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn record_transition_guard() -> std::sync::MutexGuard<'static, ()> {
     RECORD_TRANSITION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -480,6 +479,60 @@ fn reject_client_resume_line(
     })
 }
 
+pub(crate) fn preview_workflow_id_conflict(
+    store: &dyn laser_runtime::RuntimeStore,
+    jobs: &ActiveJobs,
+    reservations: &LaunchReservations,
+    workflow_id: &str,
+) -> Option<(u16, String, &'static str)> {
+    let busy_in_ram = jobs
+        .lock()
+        .map(|g| g.contains_key(workflow_id))
+        .unwrap_or(true)
+        || reservations
+            .lock()
+            .map(|r| r.active.contains_key(workflow_id))
+            .unwrap_or(true);
+    if busy_in_ram {
+        return Some((
+            409,
+            format!("workflow {workflow_id} 正在启动或发送中，禁止预览覆盖"),
+            "device_busy",
+        ));
+    }
+    for kind in [
+        laser_runtime::RecordKind::Workflow,
+        laser_runtime::RecordKind::Calibration,
+    ] {
+        match store.get(kind, workflow_id) {
+            Ok(Some(existing)) => {
+                let st = existing
+                    .status
+                    .as_deref()
+                    .or_else(|| existing.payload.get("status").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                if matches!(st, "sending" | "running" | "preparing" | "processing") {
+                    return Some((
+                        409,
+                        format!("workflow {workflow_id} 正在发送中，禁止预览覆盖"),
+                        "device_busy",
+                    ));
+                }
+                return Some((
+                    409,
+                    format!("workflow {workflow_id} 已存在（状态 {st}），请使用新 ID 创建预览"),
+                    "workflow_id_conflict",
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Some((500, "检查 workflow_id 是否已存在失败".into(), "store_error"));
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn handle_workflow_store_request(
     store: &dyn laser_runtime::RuntimeStore,
     route: &str,
@@ -487,6 +540,7 @@ pub(crate) fn handle_workflow_store_request(
     send_roots: &[std::path::PathBuf],
     jobs: &ActiveJobs,
     reservations: &LaunchReservations,
+    requested_spec: &Result<laser_device::ConnectionSpec, String>,
     launch: SendLauncher<'_>,
 ) -> Vec<u8> {
     let action = if route == "/api/text-task/generate" {
@@ -523,8 +577,22 @@ pub(crate) fn handle_workflow_store_request(
     }
     match action {
         "preview" | "plan" | "create" => {
-            let workflow_id = requested_id.unwrap_or_else(next_workflow_id);
-            let artifacts = object
+            let _transition = record_transition_guard();
+            let workflow_id = match requested_id {
+                Some(id) => {
+                    if let Some((status, msg, code)) =
+                        preview_workflow_id_conflict(store, jobs, reservations, &id)
+                    {
+                        return http_json(
+                            status,
+                            failure(msg, Some(serde_json::json!({"error_code": code}))),
+                        );
+                    }
+                    id
+                }
+                None => next_workflow_id(),
+            };
+            let mut artifacts = object
                 .get("_artifacts")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
@@ -546,15 +614,40 @@ pub(crate) fn handle_workflow_store_request(
             let gcode_name = artifacts
                 .get("gcode_file")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let gcode_sha = artifacts
+                .map(str::trim)
+                .unwrap_or("")
+                .to_owned();
+            let mut gcode_sha = artifacts
                 .get("gcode_sha256")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(str::trim)
+                .filter(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|sha| sha.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !gcode_name.is_empty() && gcode_sha.is_empty() {
+                let Ok(gcode_path) =
+                    resolve_gcode_file(std::path::Path::new(&gcode_name), send_roots)
+                else {
+                    return http_json(
+                        400,
+                        failure("预览刀路文件不存在或不在允许目录内，无法冻结 SHA-256", None),
+                    );
+                };
+                let Ok(bytes) = std::fs::read(&gcode_path) else {
+                    return http_json(400, failure("读取预览刀路文件失败，无法冻结 SHA-256", None));
+                };
+                gcode_sha = hex::encode(Sha256::digest(&bytes));
+                if let Some(art_map) = artifacts.as_object_mut() {
+                    art_map.insert(
+                        "gcode_sha256".into(),
+                        serde_json::Value::String(gcode_sha.clone()),
+                    );
+                }
+            }
             let material = input.get("material").and_then(|v| v.as_str()).unwrap_or("");
             let thickness =
                 parse_float(input.get("thickness_mm"), "thickness_mm", 3.0).unwrap_or(3.0);
-            let confirmation_snapshot = if !gcode_name.is_empty() {
+            let confirmation_snapshot = if !gcode_name.is_empty() && !gcode_sha.is_empty() {
                 serde_json::json!({
                     "gcode_file": gcode_name,
                     "gcode_sha256": gcode_sha,
@@ -755,7 +848,7 @@ pub(crate) fn handle_workflow_store_request(
                 .cloned()
                 .unwrap_or_default();
             if send_result.get("mode").and_then(|v| v.as_str()) == Some("sd_offline")
-                || send_result.get("can_resume").and_then(|v| v.as_bool()) == Some(false)
+                || send_result.get("can_resume").and_then(|v| v.as_bool()) != Some(true)
                 || object.get("offline_sd").and_then(|v| v.as_bool()) == Some(true)
             {
                 return http_json(
@@ -766,25 +859,84 @@ pub(crate) fn handle_workflow_store_request(
                     ),
                 );
             }
-            let lines_sent = send_result
-                .get("lines_sent")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let total_lines = send_result
-                .get("total_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            if lines_sent == 0 || (total_lines > 0 && lines_sent >= total_lines) {
+            let original_target = send_result
+                .get("target")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let Some(orig_target) = original_target else {
+                return http_json(
+                    400,
+                    failure(
+                        "原任务记录缺少连接目标锁定信息（target），禁止跨设备或盲目续雕，请重新发起确认发送",
+                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                    ),
+                );
+            };
+            let req_spec = match requested_spec {
+                Ok(spec) => spec,
+                Err(e) => {
+                    return http_json(
+                        400,
+                        failure(
+                            format!("连接参数无效: {e}"),
+                            Some(serde_json::json!({"error_code": "connection_params_invalid"})),
+                        ),
+                    );
+                }
+            };
+            if !req_spec.matches_target(orig_target) {
                 return http_json(
                     400,
                     failure(
                         format!(
-                            "该任务尚未开始或已完成（断点: {lines_sent}/{total_lines}），无法断点续雕"
+                            "续雕连接目标（{}）与原任务锁定设备（{orig_target}）不一致，禁止用旧断点/坐标对新目标续雕",
+                            req_spec.describe()
                         ),
                         Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
                     ),
                 );
             }
+            let total_lines = send_result
+                .get("total_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let boundary_source = send_result
+                .get("resume_boundary_source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let resumable_from_line = send_result
+                .get("resumable_from_line")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let lines_completed = send_result
+                .get("lines_completed")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let lines_acked = send_result
+                .get("lines_sent")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let proven_boundary = match (boundary_source, resumable_from_line, lines_completed) {
+                ("device_hold_ln", Some(resumable), Some(completed))
+                    if resumable > 0
+                        && resumable == completed
+                        && (total_lines == 0 || resumable < total_lines)
+                        && lines_acked.is_none_or(|acked| resumable <= acked) =>
+                {
+                    Some(resumable)
+                }
+                _ => None,
+            };
+            let Some(resume_line) = proven_boundary else {
+                return http_json(
+                    400,
+                    failure(
+                        "该任务断点缺少设备直接证实来源（resume_boundary_source=device_hold_ln），拒绝按未知或入队 ACK 续雕，请重新发起确认发送",
+                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                    ),
+                );
+            };
 
             let _launch_guard = match reserve_workflow_launch(
                 jobs,
@@ -865,7 +1017,7 @@ pub(crate) fn handle_workflow_store_request(
             {
                 resume_object.insert("_origin_mpos".into(), origin_mpos);
             }
-            resume_object.insert("start_from_line".into(), serde_json::json!(lines_sent));
+            resume_object.insert("start_from_line".into(), serde_json::json!(resume_line));
             let snapshot_before_launch = stored.payload.clone();
             let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, &resume_object) {
                 Ok(value) => value,
@@ -911,25 +1063,31 @@ pub(crate) fn handle_workflow_store_request(
             let cancel_epoch_before = current_cancel_epoch(reservations, &workflow_id);
             match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
                 Ok(Some(mut stored)) => {
-                    let has_gcode = stored
-                        .payload
-                        .get("artifacts")
-                        .and_then(|a| a.get("gcode_file").or_else(|| a.get("gcode_sha256")))
-                        .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-                        || stored
-                            .payload
-                            .get("confirmation_snapshot")
-                            .is_some_and(|v| !v.is_null())
-                        || stored
-                            .payload
-                            .get("input")
-                            .and_then(|i| i.get("gcode_file"))
-                            .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+                    let has_frozen_snapshot = |obj: Option<&serde_json::Value>| -> bool {
+                        let Some(map) = obj.and_then(|v| v.as_object()) else {
+                            return false;
+                        };
+                        let has_file = map
+                            .get("gcode_file")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.trim().is_empty());
+                        let has_sha = map
+                            .get("gcode_sha256")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .is_some_and(|sha| {
+                                sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+                            });
+                        has_file && has_sha
+                    };
+                    let has_gcode =
+                        has_frozen_snapshot(stored.payload.get("confirmation_snapshot"))
+                            || has_frozen_snapshot(stored.payload.get("artifacts"));
                     if !has_gcode {
                         return http_json(
                             400,
                             failure(
-                                "当前 workflow 没有可确认发送的 G-code 快照",
+                                "当前 workflow 没有有效的冻结 G-code 快照（缺少文件或 64 位 SHA-256 指纹），请重新预览生成",
                                 Some(
                                     serde_json::json!({"error_code": "confirmation_snapshot_missing"}),
                                 ),

@@ -151,7 +151,6 @@ impl VoiceCenter {
             .switching
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut voice = self.settings();
         let text = |key: &str| {
             patch
                 .get(key)
@@ -159,6 +158,8 @@ impl VoiceCenter {
                 .map(str::trim)
         };
         let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
+
+        let mut port_updates: Vec<(&str, u16)> = Vec::new();
         for (key, label) in [
             ("builtin_ws_port", "内置服务设备连接端口"),
             ("builtin_http_port", "内置服务 OTA 端口"),
@@ -171,35 +172,18 @@ impl VoiceCenter {
                     .filter(|port| (1..=65535).contains(port))
                     .ok_or_else(|| invalid(&format!("{label}必须在 1 ~ 65535 之间")))?
                     as u16;
-                match key {
-                    "builtin_ws_port" => voice.builtin_ws_port = port,
-                    "builtin_http_port" => voice.builtin_http_port = port,
-                    "builtin_mqtt_port" => voice.builtin_mqtt_port = port,
-                    _ => voice.builtin_udp_port = port,
-                }
+                port_updates.push((key, port));
             }
         }
-        if let Some(enabled) = patch.get("builtin_mqtt_enabled") {
-            voice.builtin_mqtt_enabled = enabled
-                .as_bool()
-                .ok_or_else(|| invalid("常连模式开关格式不正确"))?;
-        }
-        if voice.builtin_ws_port == voice.builtin_http_port {
-            return Err(invalid("内置服务的两个端口不能相同"));
-        }
-        // n71：常连 MQTT 端口与另外两个 TCP 端口不能相同，也不能是 8883（小智固件见到 8883 会改走加密连接，连不上）
-        if voice.builtin_mqtt_port == 8883 {
-            return Err(invalid(
-                "常连模式 MQTT 端口不能用 8883（小智固件会改走加密连接）",
-            ));
-        }
-        if voice.builtin_mqtt_port == voice.builtin_ws_port
-            || voice.builtin_mqtt_port == voice.builtin_http_port
-        {
-            return Err(invalid(
-                "常连模式 MQTT 端口不能和设备连接端口、OTA 端口相同",
-            ));
-        }
+        let mqtt_enabled_patch = patch
+            .get("builtin_mqtt_enabled")
+            .map(|enabled| {
+                enabled
+                    .as_bool()
+                    .ok_or_else(|| invalid("常连模式开关格式不正确"))
+            })
+            .transpose()?;
+
         // 官方接入点：就是当前 `mcp_endpoint`（改了立即重连）
         let mut official_change: Option<Option<String>> = None;
         if let Some(endpoint) = text("official_mcp_endpoint").filter(|value| !value.is_empty()) {
@@ -217,93 +201,170 @@ impl VoiceCenter {
         {
             official_change = Some(None);
         }
-        // 附加接入点（NV8）
-        let mut extras = settings::extra_mcp_endpoints(&self.settings_file);
-        let mut extras_changed = false;
-        if let Some(endpoint) = text("add_extra_mcp_endpoint").filter(|value| !value.is_empty()) {
-            if !valid_ws(endpoint) {
-                return Err(invalid(
-                    "附加接入点必须以 ws:// 或 wss:// 开头，且不含占位符",
-                ));
-            }
-            let primary = settings::mcp_endpoint(&self.settings_file);
-            if extras.iter().any(|existing| existing == endpoint)
-                || primary.as_deref() == Some(endpoint)
-            {
-                return Err(invalid("这个接入点已经在列表中"));
-            }
-            if extras.len() >= MAX_EXTRA_ENDPOINTS {
-                return Err(invalid(&format!("附加接入点最多 {MAX_EXTRA_ENDPOINTS} 个")));
-            }
-            extras.push(endpoint.to_owned());
-            extras_changed = true;
+
+        let add_extra = text("add_extra_mcp_endpoint")
+            .filter(|value| !value.is_empty())
+            .map(|endpoint| {
+                if !valid_ws(endpoint) {
+                    return Err(invalid(
+                        "附加接入点必须以 ws:// 或 wss:// 开头，且不含占位符",
+                    ));
+                }
+                Ok(endpoint.to_owned())
+            })
+            .transpose()?;
+        let remove_extra = text("remove_extra_mcp_endpoint")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        let disabled_tools_patch: Option<Vec<String>> = patch
+            .get("disabled_tools")
+            .map(|names| {
+                names
+                    .as_array()
+                    .ok_or_else(|| invalid("disabled_tools 必须是工具名列表"))?
+                    .iter()
+                    .map(|name| {
+                        name.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| invalid("disabled_tools 必须是工具名列表"))
+                    })
+                    .collect::<Result<Vec<String>, _>>()
+            })
+            .transpose()?;
+
+        let full_list_patch = patch
+            .get("mcp_full_tool_list")
+            .map(|full| {
+                full.as_bool()
+                    .ok_or_else(|| invalid("完整工具开关格式不正确"))
+            })
+            .transpose()?;
+
+        struct SaveOutcome {
+            reconnect: bool,
+            full_list_changed_to: Option<bool>,
         }
-        if let Some(id) = text("remove_extra_mcp_endpoint").filter(|value| !value.is_empty()) {
-            let index = id
-                .strip_prefix("extra-")
-                .and_then(|number| number.parse::<usize>().ok())
-                .filter(|number| (1..=extras.len()).contains(number))
-                .ok_or_else(|| invalid("没有这个附加接入点"))?;
-            extras.remove(index - 1);
-            extras_changed = true;
-        }
-        // 工具开关（NV8）：先由后端校验并立即生效，写文件失败时恢复原来的名单
-        let previous_tools = settings::disabled_tools(&self.settings_file);
-        let mut tools_change: Option<Vec<String>> = None;
-        if let Some(names) = patch.get("disabled_tools") {
-            let names: Vec<String> = names
-                .as_array()
-                .ok_or_else(|| invalid("disabled_tools 必须是工具名列表"))?
-                .iter()
-                .map(|name| {
-                    name.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| invalid("disabled_tools 必须是工具名列表"))
-                })
-                .collect::<Result<_, _>>()?;
-            let applied = self
-                .hooks
-                .apply_disabled_tools(&names)
-                .map_err(|message| invalid(&message))?;
-            if applied != previous_tools {
-                tools_change = Some(applied);
-            }
-        }
-        // n72 完整 / 精简工具清单：换了就重连小智桥，让接入点重新拿工具清单
-        let mut full_list_changed = false;
-        if let Some(full) = patch.get("mcp_full_tool_list") {
-            let full = full
-                .as_bool()
-                .ok_or_else(|| invalid("完整工具开关格式不正确"))?;
-            full_list_changed = full != voice.mcp_full_tool_list;
-            voice.mcp_full_tool_list = full;
-        }
-        let mut reconnect = false;
-        let endpoint_to_write = official_change.map(|change| {
-            reconnect = settings::mcp_endpoint(&self.settings_file) != change;
-            change
-        });
-        reconnect |= extras_changed || tools_change.is_some() || full_list_changed;
-        let saved = settings::save_all(
+
+        let mut tools_rollback: Option<Vec<String>> = None;
+        let saved = settings::update_voice_with_root(
             &self.settings_file,
-            &voice,
-            endpoint_to_write
-                .as_ref()
-                .map(|endpoint| endpoint.as_deref()),
-            extras_changed.then_some(extras.as_slice()),
-            tools_change.as_deref(),
+            |root, voice| {
+                for (key, port) in &port_updates {
+                    match *key {
+                        "builtin_ws_port" => voice.builtin_ws_port = *port,
+                        "builtin_http_port" => voice.builtin_http_port = *port,
+                        "builtin_mqtt_port" => voice.builtin_mqtt_port = *port,
+                        _ => voice.builtin_udp_port = *port,
+                    }
+                }
+                if let Some(enabled) = mqtt_enabled_patch {
+                    voice.builtin_mqtt_enabled = enabled;
+                }
+                if voice.builtin_ws_port == voice.builtin_http_port {
+                    return Err(invalid("内置服务的两个端口不能相同"));
+                }
+                // n71：常连 MQTT 端口与另外两个 TCP 端口不能相同，也不能是 8883（小智固件见到 8883 会改走加密连接，连不上）
+                if voice.builtin_mqtt_port == 8883 {
+                    return Err(invalid(
+                        "常连模式 MQTT 端口不能用 8883（小智固件会改走加密连接）",
+                    ));
+                }
+                if voice.builtin_mqtt_port == voice.builtin_ws_port
+                    || voice.builtin_mqtt_port == voice.builtin_http_port
+                {
+                    return Err(invalid(
+                        "常连模式 MQTT 端口不能和设备连接端口、OTA 端口相同",
+                    ));
+                }
+
+                // 附加接入点（NV8）：在设置锁内读最新列表
+                let primary = root
+                    .get("mcp_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let mut extras = settings::string_list(root, "mcp_extra_endpoints");
+                let mut extras_changed = false;
+                if let Some(endpoint) = &add_extra {
+                    if extras.iter().any(|existing| existing == endpoint)
+                        || primary == Some(endpoint.as_str())
+                    {
+                        return Err(invalid("这个接入点已经在列表中"));
+                    }
+                    if extras.len() >= MAX_EXTRA_ENDPOINTS {
+                        return Err(invalid(&format!("附加接入点最多 {MAX_EXTRA_ENDPOINTS} 个")));
+                    }
+                    extras.push(endpoint.clone());
+                    extras_changed = true;
+                }
+                if let Some(id) = &remove_extra {
+                    let index = id
+                        .strip_prefix("extra-")
+                        .and_then(|number| number.parse::<usize>().ok())
+                        .filter(|number| (1..=extras.len()).contains(number))
+                        .ok_or_else(|| invalid("没有这个附加接入点"))?;
+                    extras.remove(index - 1);
+                    extras_changed = true;
+                }
+
+                let mut tools_change: Option<Vec<String>> = None;
+                if let Some(names) = &disabled_tools_patch {
+                    let previous_tools = settings::string_list(root, "mcp_disabled_tools");
+                    let applied = self
+                        .hooks
+                        .apply_disabled_tools(names)
+                        .map_err(|message| invalid(&message))?;
+                    if applied != previous_tools {
+                        tools_rollback = Some(previous_tools);
+                        tools_change = Some(applied);
+                    }
+                }
+
+                let mut full_list_changed_to = None;
+                if let Some(full) = full_list_patch
+                    && full != voice.mcp_full_tool_list
+                {
+                    voice.mcp_full_tool_list = full;
+                    full_list_changed_to = Some(full);
+                }
+
+                let mut reconnect = false;
+                let endpoint_to_write = official_change.inspect(|change| {
+                    reconnect = primary != change.as_deref();
+                });
+                reconnect |=
+                    extras_changed || tools_change.is_some() || full_list_changed_to.is_some();
+
+                Ok((
+                    SaveOutcome {
+                        reconnect,
+                        full_list_changed_to,
+                    },
+                    settings::RootVoiceUpdate {
+                        endpoint: endpoint_to_write,
+                        extra_endpoints: extras_changed.then_some(extras),
+                        disabled_tools: tools_change,
+                        jev_feedback: None,
+                    },
+                ))
+            },
+            |error| CenterError::new("voice_settings_write_failed", 500, error),
         );
-        if let Err(error) = saved {
-            if tools_change.is_some() {
-                let _ = self.hooks.apply_disabled_tools(&previous_tools);
+        let outcome = match saved {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                if let Some(previous_tools) = tools_rollback {
+                    let _ = self.hooks.apply_disabled_tools(&previous_tools);
+                }
+                return Err(err);
             }
-            return Err(CenterError::new("voice_settings_write_failed", 500, error));
-        }
-        if full_list_changed {
-            self.hooks.apply_full_tool_list(voice.mcp_full_tool_list);
+        };
+        if let Some(full) = outcome.full_list_changed_to {
+            self.hooks.apply_full_tool_list(full);
         }
         // `reconnected`：本次保存是否重新发起了接入点连接（且有桥启动）；握手结果看 `bridge.connected`
-        let reconnected = reconnect && self.hooks.restart_bridge();
+        let reconnected = outcome.reconnect && self.hooks.restart_bridge();
         let mut status = self.status();
         if let Some(object) = status.as_object_mut() {
             object.insert("reconnected".into(), reconnected.into());
@@ -360,21 +421,39 @@ impl VoiceCenter {
         Ok(changes)
     }
 
-    /// 执行链路切换：接入点与严格模式都不变；切入内置时启动内置服务，失败时恢复 `settings.json`
-    /// 并停止内置服务；离开内置时停止内置服务。
+    /// 执行链路切换：接入点与严格模式都不变；切入内置时启动内置服务，失败时在设置锁内只回滚 `mode`
+    /// 并停止内置服务（不覆盖并发修改的隐私开关）；离开内置时停止内置服务。
     pub fn set_mode(&self, target: VoiceMode) -> CenterResult<serde_json::Value> {
         let _guard = self
             .switching
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_voice = self.settings();
-        if old_voice.mode == target {
-            return Ok(self.status());
-        }
-        let mut new_voice = old_voice.clone();
-        new_voice.mode = target;
+        let prev_mode = match settings::update_voice(&self.settings_file, |voice| {
+            if voice.mode == target {
+                return Ok(None);
+            }
+            let prev = voice.mode;
+            voice.mode = target;
+            Ok(Some(prev))
+        }) {
+            Ok(Some(prev)) => prev,
+            Ok(None) => return Ok(self.status()),
+            Err(error) => {
+                if target == VoiceMode::Builtin {
+                    self.hooks.builtin_stop();
+                }
+                return Err(CenterError::new(
+                    "voice_mode_switch_failed",
+                    500,
+                    format!("保存设置失败：{error}；已保留切换前的状态"),
+                ));
+            }
+        };
         let rollback = |reason: String| -> CenterError {
-            let _ = settings::save(&self.settings_file, &old_voice);
+            let _ = settings::update_voice(&self.settings_file, |voice| {
+                voice.mode = prev_mode;
+                Ok(())
+            });
             if target == VoiceMode::Builtin {
                 self.hooks.builtin_stop();
             }
@@ -384,9 +463,6 @@ impl VoiceCenter {
                 format!("{reason}；已回滚到切换前的状态"),
             )
         };
-        if let Err(error) = settings::save(&self.settings_file, &new_voice) {
-            return Err(rollback(format!("保存设置失败：{error}")));
-        }
         match target {
             VoiceMode::Builtin => {
                 if let Err(error) = self.hooks.builtin_start() {
@@ -986,5 +1062,155 @@ mod tests {
                 .code,
             "voice_settings_invalid"
         );
+    }
+
+    #[test]
+    fn save_settings_and_mode_rollback_preserve_concurrent_privacy_switches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+
+        settings::update_voice(&file, |voice| {
+            voice.mode = VoiceMode::Official;
+            voice.builtin_agents.enabled = true;
+            voice.builtin_memory_enabled = true;
+            voice.builtin_person_memory_enabled = true;
+            voice.builtin_context.retrieval = true;
+            Ok(())
+        })
+        .unwrap();
+
+        struct ConcurrentToggleHost {
+            inner: FakeHost,
+        }
+        impl HostHooks for ConcurrentToggleHost {
+            fn strict_mode(&self) -> bool {
+                self.inner.strict_mode()
+            }
+            fn strict_from_env(&self) -> bool {
+                self.inner.strict_from_env()
+            }
+            fn restart_bridge(&self) -> bool {
+                self.inner.restart_bridge()
+            }
+            fn bridge_connected(&self) -> bool {
+                self.inner.bridge_connected()
+            }
+            fn set_device_sessions(&self, sessions: Option<u32>) {
+                self.inner.set_device_sessions(sessions)
+            }
+            fn builtin_start(&self) -> Result<(), String> {
+                // 模拟切换中途用户并发关闭隐私/Agent/记忆开关
+                settings::update_voice(&self.inner.settings_file, |voice| {
+                    voice.builtin_agents.enabled = false;
+                    voice.builtin_memory_enabled = false;
+                    voice.builtin_person_memory_enabled = false;
+                    voice.builtin_context.retrieval = false;
+                    Ok(())
+                })
+                .unwrap();
+                Err("模拟启动失败".into())
+            }
+            fn builtin_stop(&self) {
+                self.inner.builtin_stop()
+            }
+            fn apply_disabled_tools(&self, names: &[String]) -> Result<Vec<String>, String> {
+                self.inner.apply_disabled_tools(names)
+            }
+            fn apply_full_tool_list(&self, full: bool) {
+                self.inner.apply_full_tool_list(full)
+            }
+        }
+
+        let host = Arc::new(ConcurrentToggleHost {
+            inner: FakeHost {
+                settings_file: file.clone(),
+                ..Default::default()
+            },
+        });
+        let center = Arc::new(VoiceCenter::new(dir.path(), host.clone()));
+
+        // 1) set_mode(Builtin) 启动失败回滚时，只回滚 mode，不得抹掉启动期间并发关闭的隐私开关
+        let err = center.set_mode(VoiceMode::Builtin).unwrap_err();
+        assert_eq!(err.code, "voice_mode_switch_failed");
+        let after_rollback = settings::load(&file);
+        assert_eq!(after_rollback.mode, VoiceMode::Official);
+        assert!(!after_rollback.builtin_agents.enabled);
+        assert!(!after_rollback.builtin_memory_enabled);
+        assert!(!after_rollback.builtin_person_memory_enabled);
+        assert!(!after_rollback.builtin_context.retrieval);
+
+        // 2) save_settings 与并发 update_voice 竞争时互不覆盖
+        let file_bg = file.clone();
+        let bg = std::thread::spawn(move || {
+            for i in 0..20 {
+                settings::update_voice(&file_bg, |voice| {
+                    voice.builtin_agents.enabled = i % 2 == 0;
+                    voice.builtin_memory_enabled = i == 19;
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        for i in 0..20 {
+            let port = 8100 + i;
+            center
+                .save_settings(&serde_json::json!({
+                    "builtin_ws_port": port,
+                    "mcp_full_tool_list": i % 2 == 1
+                }))
+                .unwrap();
+        }
+        bg.join().unwrap();
+
+        let after_race = settings::load(&file);
+        assert_eq!(after_race.builtin_ws_port, 8119);
+        assert!(after_race.mcp_full_tool_list);
+        assert!(after_race.builtin_memory_enabled);
+        assert!(!after_race.builtin_agents.enabled);
+
+        // 3) settings.json 损坏或写入失败时，工具开关与完整列表运行态缓存均不能留脏状态
+        center
+            .save_settings(&serde_json::json!({"disabled_tools": ["material_params_tool"]}))
+            .unwrap();
+        assert_eq!(
+            *host.inner.disabled.lock().unwrap(),
+            vec!["material_params_tool".to_string()]
+        );
+        assert!(host.inner.full_tools.load(Ordering::SeqCst));
+
+        // 用目录占住临时文件路径，稳定触发写盘失败（含 root 和 Windows）。
+        let blocked_temp = file.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::create_dir(&blocked_temp).unwrap();
+        let dir_err = center
+            .save_settings(&serde_json::json!({
+                "disabled_tools": ["open_app_tool"],
+                "mcp_full_tool_list": false
+            }))
+            .unwrap_err();
+        std::fs::remove_dir(&blocked_temp).unwrap();
+        assert_eq!(dir_err.code, "voice_settings_write_failed");
+        assert_eq!(
+            *host.inner.disabled.lock().unwrap(),
+            vec!["material_params_tool".to_string()],
+            "写盘失败后必须把内存 disabled_tools 回滚到旧值"
+        );
+        assert!(
+            host.inner.full_tools.load(Ordering::SeqCst),
+            "写盘失败时 mcp_full_tool_list 运行态缓存不得提前改动"
+        );
+
+        std::fs::write(&file, "{broken json").unwrap();
+        let write_err = center
+            .save_settings(&serde_json::json!({
+                "disabled_tools": ["open_app_tool"],
+                "mcp_full_tool_list": false
+            }))
+            .unwrap_err();
+        assert_eq!(write_err.code, "voice_settings_write_failed");
+        assert_eq!(
+            *host.inner.disabled.lock().unwrap(),
+            vec!["material_params_tool".to_string()]
+        );
+        assert!(host.inner.full_tools.load(Ordering::SeqCst));
     }
 }

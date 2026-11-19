@@ -107,25 +107,41 @@ impl AgentCoordinator {
     fn configuration(&self) -> moss_voice::settings::BuiltinAgents {
         moss_voice::settings::load(&self.settings_file).builtin_agents
     }
-    fn snapshot(&self, kind: Provider, exe: &Path) -> Result<CapabilitySnapshot, AgentError> {
+    fn cached_snapshot_entry(
+        &self,
+        exe: &Path,
+        ignore_negative_ttl: bool,
+    ) -> Result<Option<Option<CapabilitySnapshot>>, AgentError> {
         let meta = std::fs::metadata(exe).map_err(|_| AgentError::CapabilityMissing)?;
         let key = (meta.modified().ok(), meta.len());
+        let cache = self
+            .snapshots
+            .lock()
+            .map_err(|_| AgentError::CapabilityMissing)?;
+        if let Some((modified, len, cached_at, snapshot)) = cache.get(exe)
+            && (*modified, *len) == key
         {
-            let cache = self
-                .snapshots
-                .lock()
-                .map_err(|_| AgentError::CapabilityMissing)?;
-            if let Some((modified, len, cached_at, snapshot)) = cache.get(exe)
-                && (*modified, *len) == key
-            {
-                if let Some(snap) = snapshot {
-                    return Ok(snap.clone());
+            match snapshot {
+                Some(snap) => return Ok(Some(Some(snap.clone()))),
+                None if ignore_negative_ttl
+                    || cached_at.elapsed() < std::time::Duration::from_secs(5) =>
+                {
+                    return Ok(Some(None));
                 }
-                if cached_at.elapsed() < std::time::Duration::from_secs(5) {
-                    return Err(AgentError::CapabilityMissing);
-                }
+                None => {}
             }
         }
+        Ok(None)
+    }
+
+    fn snapshot(&self, kind: Provider, exe: &Path) -> Result<CapabilitySnapshot, AgentError> {
+        match self.cached_snapshot_entry(exe, false)? {
+            Some(Some(snap)) => return Ok(snap),
+            Some(None) => return Err(AgentError::CapabilityMissing),
+            None => {}
+        }
+        let meta = std::fs::metadata(exe).map_err(|_| AgentError::CapabilityMissing)?;
+        let key = (meta.modified().ok(), meta.len());
         let probed = (self.probe)(kind, exe);
         if let Ok(after) = std::fs::metadata(exe)
             && (after.modified().ok(), after.len()) == key
@@ -138,7 +154,12 @@ impl AgentCoordinator {
         }
         probed.ok_or(AgentError::CapabilityMissing)
     }
-    fn prepare(&self, kind: Provider, task: &str) -> Result<AgentPlan, AgentError> {
+
+    fn prepare_with_version(
+        &self,
+        kind: Provider,
+        task: &str,
+    ) -> Result<(AgentPlan, String), AgentError> {
         let config = self.configuration();
         if !config.enabled {
             return Err(AgentError::Disabled);
@@ -154,6 +175,40 @@ impl AgentCoordinator {
         let (executable, _source) = resolve_with_detector(cli, kind, &*self.detector)?;
         let workspace = workspace(Path::new(&config.workspace), &self.sensitive)?;
         let snapshot = self.snapshot(kind, &executable)?;
+        let plan = build_plan(
+            kind,
+            executable,
+            workspace,
+            task,
+            &snapshot.version,
+            &snapshot.help,
+        )?;
+        Ok((plan, snapshot.version))
+    }
+
+    fn prepare(&self, kind: Provider, task: &str) -> Result<AgentPlan, AgentError> {
+        self.prepare_with_version(kind, task).map(|(plan, _)| plan)
+    }
+
+    /// 仅基于配置、路径检查和内存快照缓存构造计划，绝不启动外部 CLI 探测进程（用于运行中轮询等热路径）。
+    fn prepare_cached(&self, kind: Provider, task: &str) -> Result<AgentPlan, AgentError> {
+        let config = self.configuration();
+        if !config.enabled {
+            return Err(AgentError::Disabled);
+        }
+        let api = self.api.upgrade().ok_or(AgentError::Disabled)?;
+        if !api.strict_mode() {
+            return Err(AgentError::StrictModeRequired);
+        }
+        let cli = match kind {
+            Provider::Codex => &config.codex_executable,
+            Provider::ClaudeCode => &config.claude_executable,
+        };
+        let (executable, _source) = resolve_with_detector(cli, kind, &*self.detector)?;
+        let workspace = workspace(Path::new(&config.workspace), &self.sensitive)?;
+        let Some(Some(snapshot)) = self.cached_snapshot_entry(&executable, true)? else {
+            return Err(AgentError::CapabilityMissing);
+        };
         build_plan(
             kind,
             executable,
@@ -162,6 +217,44 @@ impl AgentCoordinator {
             &snapshot.version,
             &snapshot.help,
         )
+    }
+
+    /// 组装语音工具清单前的只读前置判定：TurnGate 放行与审批前禁止启动同步冷 CLI 探测。
+    /// 若缓存已有有效快照则校验参数，缓存明确失败则隐藏；冷未命中只校验配置、路径与工作目录。
+    fn tool_ready_without_probe(&self, kind: Provider) -> bool {
+        let config = self.configuration();
+        if !config.enabled {
+            return false;
+        }
+        let Some(api) = self.api.upgrade() else {
+            return false;
+        };
+        if !api.strict_mode() {
+            return false;
+        }
+        let cli = match kind {
+            Provider::Codex => &config.codex_executable,
+            Provider::ClaudeCode => &config.claude_executable,
+        };
+        let Ok((executable, _)) = resolve_with_detector(cli, kind, &*self.detector) else {
+            return false;
+        };
+        let Ok(workspace) = workspace(Path::new(&config.workspace), &self.sensitive) else {
+            return false;
+        };
+        match self.cached_snapshot_entry(&executable, true) {
+            Ok(Some(Some(snapshot))) => build_plan(
+                kind,
+                executable,
+                workspace,
+                "测试",
+                &snapshot.version,
+                &snapshot.help,
+            )
+            .is_ok(),
+            Ok(Some(None)) | Err(_) => false,
+            Ok(None) => true,
+        }
     }
     fn kind_from(name: &str) -> Result<Provider, AgentError> {
         match name {
@@ -242,20 +335,64 @@ impl AgentCoordinator {
             })
     }
     /// 每个已配置或本机自动读取到的 CLI 现在能不能用（不能用时给出原因代码）。
+    /// 关闭状态与未开启严格模式时不触发同步冷 CLI 探测。
     fn providers(&self) -> Vec<Value> {
         let config = self.configuration();
-        [(Provider::Codex,&config.codex_executable),(Provider::ClaudeCode,&config.claude_executable)].into_iter()
-         .filter(|(kind,path)|!path.trim().is_empty()||(self.detector)(*kind).is_some())
-         .map(|(kind,path)|{
-            let resolved=resolve_with_detector(path,kind,&*self.detector).ok();
-            let source=resolved.as_ref().map(|(_,src)|src.as_str()).unwrap_or("configured");
-            let exe_str=resolved.as_ref().map(|(exe,_)|exe.to_string_lossy().into_owned());
-            let version=resolved.as_ref().and_then(|(exe,_)|self.snapshot(kind,exe).ok()).map(|s|s.version);
-            match self.prepare(kind,"检测") {
-              Ok(_)=>json!({"provider":kind.as_str(),"ready":true,"version":version,"source":source,"executable":exe_str}),
-              Err(error)=>json!({"provider":kind.as_str(),"ready":false,"version":version,"source":source,"executable":exe_str,"error_code":error.code()}),
+        if !config.enabled {
+            return Vec::new();
+        }
+        let strict = self.api.upgrade().is_some_and(|api| api.strict_mode());
+        [
+            (Provider::Codex, &config.codex_executable),
+            (Provider::ClaudeCode, &config.claude_executable),
+        ]
+        .into_iter()
+        .filter(|(kind, path)| !path.trim().is_empty() || (self.detector)(*kind).is_some())
+        .map(|(kind, path)| {
+            let resolved = resolve_with_detector(path, kind, &*self.detector).ok();
+            let source = resolved
+                .as_ref()
+                .map(|(_, src)| src.as_str())
+                .unwrap_or("configured");
+            let exe_str = resolved
+                .as_ref()
+                .map(|(exe, _)| exe.to_string_lossy().into_owned());
+            if !strict {
+                return json!({
+                    "provider": kind.as_str(),
+                    "ready": false,
+                    "version": Value::Null,
+                    "source": source,
+                    "executable": exe_str,
+                    "error_code": AgentError::StrictModeRequired.code(),
+                });
             }
-         }).collect()
+            match self.prepare_with_version(kind, "检测") {
+                Ok((_, version)) => json!({
+                    "provider": kind.as_str(),
+                    "ready": true,
+                    "version": version,
+                    "source": source,
+                    "executable": exe_str,
+                }),
+                Err(error) => {
+                    let cached_version = resolved
+                        .as_ref()
+                        .and_then(|(exe, _)| self.cached_snapshot_entry(exe, false).ok().flatten())
+                        .flatten()
+                        .map(|s| s.version);
+                    json!({
+                        "provider": kind.as_str(),
+                        "ready": false,
+                        "version": cached_version,
+                        "source": source,
+                        "executable": exe_str,
+                        "error_code": error.code(),
+                    })
+                }
+            }
+        })
+        .collect()
     }
     #[cfg(test)]
     fn fake_for_tests(
@@ -314,10 +451,14 @@ impl AgentRuns for AgentCoordinator {
             ("agent_codex", Provider::Codex),
             ("agent_claude_code", Provider::ClaudeCode),
         ];
-        let tools=names.iter().filter(|(_,kind)|self.prepare(*kind,"测试").is_ok()).map(|(name,_)|{
-        json!({"name":name,"description":"让本机 Agent 在选定的工作目录里完成任务（可以读写该目录的文件），每次都要在电脑上批准；使用已安装 CLI 的账户，可能产生模型费用。",
-            "inputSchema":{"type":"object","properties":{"task":{"type":"string","maxLength":4000}},"required":["task"],"additionalProperties":false}})
-    }).collect::<Vec<_>>();
+        let tools = names
+            .iter()
+            .filter(|(_, kind)| self.tool_ready_without_probe(*kind))
+            .map(|(name, _)| {
+                json!({"name":name,"description":"让本机 Agent 在选定的工作目录里完成任务（可以读写该目录的文件），每次都要在电脑上批准；使用已安装 CLI 的账户，可能产生模型费用。",
+                    "inputSchema":{"type":"object","properties":{"task":{"type":"string","maxLength":4000}},"required":["task"],"additionalProperties":false}})
+            })
+            .collect::<Vec<_>>();
         json!({"tools":tools})
     }
     fn call(&self, context: &CallerContext, name: &str, arguments: &Value) -> ToolCallResult {
@@ -506,7 +647,7 @@ impl AgentRuns for AgentCoordinator {
                     let ok = api.voice_session_allowed(&ctx_device(&ctx), &ctx_session(&ctx))
                         && api.strict_mode()
                         && me
-                            .prepare(plan.provider, &plan.stdin)
+                            .prepare_cached(plan.provider, &plan.stdin)
                             .is_ok_and(|current| current.config_revision == plan.config_revision);
                     checks_ok.set(ok);
                     ok
@@ -611,7 +752,7 @@ impl AgentRuns for AgentCoordinator {
             "claude_executable":(self.detector)(Provider::ClaudeCode).map(|p|p.to_string_lossy().into_owned()),
         });
         json!({"enabled":config.enabled && strict,"configured":config.enabled,"strict_mode":strict,
-        "detected":detected,"providers":self.providers(),"runs":safe,"reason":if strict {"configured_or_pending"}else{"agent_strict_mode_required"}})
+        "detected":detected,"providers":self.providers(),"runs":safe,"reason":if !config.enabled {"agent_disabled"} else if strict {"configured_or_pending"} else {"agent_strict_mode_required"}})
     }
     fn voice_digest(&self) -> Value {
         let active: HashMap<String, Arc<super::AgentLiveProgress>> = self
@@ -1450,5 +1591,130 @@ mod tests {
         assert_eq!(digest[0]["provider"], "codex");
         assert_eq!(digest[0]["status"], "completed");
         assert_eq!(digest[0]["output_lines"], 17);
+    }
+
+    /// #12：关闭态、非严格模式、冷缓存 `tools()` 与运行中 `prepare_cached` 均不得触发同步冷 CLI 探测；
+    /// 只有严格模式且已开启时，显式工具调用才会触发单次能力探测并等待桌面审批（不会提前运行 `runner`）。
+    #[test]
+    fn disabled_non_strict_tools_and_alive_cache_never_trigger_cold_cli_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let approvals = Arc::new(ApprovalService::new(db.clone()));
+        let api = Arc::new(
+            ApiService::new(
+                laser_runtime::LaserSettings {
+                    default_connection_mode: "network".into(),
+                    engraving_mode: "raster".into(),
+                    web_host: "127.0.0.1".into(),
+                    web_port: 9666,
+                    material_params_file: None,
+                },
+                builtin_material_library(),
+            )
+            .with_runtime_db(db.clone())
+            .with_approval_service(approvals.clone())
+            .with_strict_mode(false),
+        );
+        db.lock()
+            .unwrap()
+            .voice_device_seen("d", "c", "", "", "", 100.0)
+            .unwrap();
+        api.set_voice_device_status("d", laser_runtime::VOICE_DEVICE_ALLOWED, 101.0)
+            .unwrap();
+        let _permit = api.register_voice_session("d", "c", "s").unwrap();
+
+        let workdir = dir.path().join("agent-ws");
+        std::fs::create_dir(&workdir).unwrap();
+        let binary = dir.path().join(Provider::Codex.expected_binary());
+        std::fs::write(&binary, b"fake-codex-v1").unwrap();
+        let mut settings = moss_voice::settings::VoiceSettings::default();
+        settings.builtin_agents = moss_voice::settings::BuiltinAgents {
+            enabled: false,
+            workspace: workdir.to_string_lossy().into_owned(),
+            codex_executable: binary.to_string_lossy().into_owned(),
+            claude_executable: String::new(),
+        };
+        let settings_path = dir.path().join("settings.json");
+        moss_voice::settings::save(&settings_path, &settings).unwrap();
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = probe_calls.clone();
+        let help = "--ask-for-approval --sandbox --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd --json --color";
+        let probe: CapabilityProbe = Arc::new(move |_, _| {
+            calls_ref.fetch_add(1, AtomicOrdering::SeqCst);
+            Some(CapabilitySnapshot {
+                version: "codex-cli 0.159.0".into(),
+                help: help.into(),
+            })
+        });
+        let runner_calls = Arc::new(AtomicUsize::new(0));
+        struct CountingRunner(Arc<AtomicUsize>);
+        impl AgentRunner for CountingRunner {
+            fn run(
+                &self,
+                _: &AgentPlan,
+                _: &dyn Fn() -> bool,
+            ) -> Result<String, (AgentError, String)> {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok("ok".into())
+            }
+        }
+        let manager = Arc::new_cyclic(|me| AgentCoordinator {
+            api: Arc::downgrade(&api),
+            db: db.clone(),
+            settings_file: settings_path.clone(),
+            sensitive: vec![],
+            probe,
+            detector: Arc::new(|_| None),
+            snapshots: Mutex::new(HashMap::new()),
+            runner: Arc::new(CountingRunner(runner_calls.clone())),
+            running: Mutex::new(HashMap::new()),
+            finished_metrics: Mutex::new(HashMap::new()),
+            me: me.clone(),
+        });
+        api.set_agent_runs(manager.clone()).unwrap();
+
+        // 1. 关闭态查状态与查工具：零探测
+        let disabled_status = manager.status();
+        assert_eq!(disabled_status["enabled"], false);
+        assert_eq!(disabled_status["providers"], json!([]));
+        assert_eq!(manager.tools()["tools"].as_array().unwrap().len(), 0);
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 0);
+
+        // 2. 开启但未进严格模式：查状态（含检测原因）与查工具均零探测
+        settings.builtin_agents.enabled = true;
+        moss_voice::settings::save(&settings_path, &settings).unwrap();
+        let non_strict_status = manager.status();
+        assert_eq!(non_strict_status["reason"], "agent_strict_mode_required");
+        assert_eq!(
+            non_strict_status["providers"][0]["error_code"],
+            "agent_strict_mode_required"
+        );
+        assert_eq!(manager.tools()["tools"].as_array().unwrap().len(), 0);
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 0);
+
+        // 3. 进入严格模式但缓存仍冷：tools() 列工具及 prepare_cached 均不触发同步探测
+        api.set_strict_mode(true);
+        let listed = manager.tools();
+        assert_eq!(listed["tools"].as_array().unwrap().len(), 1);
+        assert!(manager.prepare_cached(Provider::Codex, "ping").is_err());
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 0);
+
+        // 4. 真正进入 call_agent_tool（处于 TurnGate 与审批创建路径）才触发一次探测，且仍需桌面审批才运行 runner
+        let ctx = CallerContext::Voice {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        };
+        let call_res = api.call_agent_tool(&ctx, "agent_codex", &json!({"task": "check logs"}));
+        assert!(call_res.success, "{}", call_res.result);
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(runner_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            approvals
+                .list(Some(ApprovalStatus::Pending), 5)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

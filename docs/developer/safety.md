@@ -32,25 +32,27 @@
 0. **严格模式授权**（`MOSS_FUSION_STRICT=true` 时，技术书 §6.2；默认关闭，关闭时本步不读取任何数据、不改变判定）：**开关在语音中心顶部（n27，n28 修订，2026-10-18）**——点开需二次确认；开启与关闭都立即生效，并把值写入运行目录 `.env` 的 `MOSS_FUSION_STRICT`（保留其他行与注释，原子写）。关闭会同时更新启动快照与运行时值（`set_strict_from_env` + `set_strict_mode`），所以不存在“要重启才生效”的中间态；语音链路切换（官方 ↔ 内置）不改严格模式（2026-11-17 起自建链路连同“自建链路强制开启、不能关闭 `strict_mode_locked`”一起删除）。唯一检查点 `require_r3_authority`（`crates/laser-api/src/approval/strict.rs`）。桌面会话放行；小智桥接 / 局域网配对 / 网关只创建审批并返回 HTTP 202 `approval_required`，不连接设备；本机回环无凭据返回 403 `strict_mode_blocked`；以审批身份执行时（不论严格模式开关）按当前要素与审批保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。无本地数据库时 503 `approval_unavailable`（失败即拒绝）。同一检查点也接在 `/api/safe-action` 的 R3 动作（`laser_contracts::safe_action_requires_approval`：除查询、急停、软复位、关激光、倍率复位与降低外一律视为 R3）与 `/api/device/framing`。`/api/device/pointer-fire` 不进审批，严格模式下只放行桌面会话（`require_desktop_when_strict`，见 §3 其他固定规则）。停止类动作永不追加条件。
 1. HTTP 层要求 `confirmed=true`，否则 400；`laser-mcp` 在转发前同样检查。
 2. `authorize_send`：记录处于 `pending`；重新读取物理 G-code 文件计算 SHA-256 并与冻结值比对；存在有效 workflow 快照或 calibration SHA。改材料、厚度、文件、策略、参数或连接目标后必须重新预览。
-3. 同一设备已有在途作业：409 `device_busy`。
-4. 打开传输失败：`device_unreachable`。
+3. 同一设备已有在途作业：409 `device_busy`；宿主正在关闭时拒绝新作业并返回 503 `host_shutting_down`。刚建立且未写入指令的连接直接释放。急停与软复位仍可为明确指定的设备建连发送。
+4. 打开传输失败：`device_unreachable`；打开连接后立即登记活动通道与取消令牌（`framing`、`pointer-fire` 与独立 `safe-action` 的 `home`/`unlock`/移动同口径），覆盖握手、`$CD` 与预检全窗口。
 5. 有界握手（3 秒）：发 `$$` 并消费到终止 `ok`，要求 `$32=1`，读取 `$30`、`$10`；失败 `device_not_ready`。握手无响应时提示可能正在跑 SD 脱机作业。
-6. `$CD` 读取 FluidNC 配置；旧 GRBL 静默跳过。
-7. 自适应预检：`$30` 必须为有限正数，非 1000 时按 `$30/1000` 在发送流水线中换算 S 值，原文件与 SHA 门禁不变；不写 `$30` / `$32`。发 `?` 要求 Idle，拒绝 Run/Jog/Home/Hold/Door/Sleep/Check/Alarm、SD 运行标记及 `Pn:` 含 `E`/`F`/`D`；失败 `device_preflight_failed`。
-8. 设备预检后再读取物理 G-code，与确认快照的 SHA-256 重新比对；不一致返回 `send_gate_rejected`，不写入加工行。**任务范围复核**（2026-11-06）：按这份内容计算激光头走过的 X/Y 范围（`laser_core::gcode::motion_extents`，跟踪 G90/G91、G20/G21、`G92` 改原点与 G2/G3 圆弧，快速移动也计入），宽或高超过握手 `$130/$131` 或 `$CD` `max_travel_mm` 报告的行程时返回 400 `job_exceeds_travel`，不写入加工行；固件未报告行程或文件含 `G53` / `G28` / `G30` / `G10` 等无法从文件得知终点的指令时跳过本项、交给固件软限位。任务以开始时激光头位置为原点，因此只比较宽高、不判断起点位置。`/api/device/framing` 同样复核。之后的流式发送和 SD 上传只使用这份已比对的内存内容。行校验剥注释、丢空行；超过 254 字节或含非 ASCII 拒绝整个文件（`gcode_line_invalid`）；空文件拒绝（`gcode_empty`）。
-9. 流式发送后保持作业占用，`G4 P0` 同步 ACK 与后续 Idle 都通过才标记 `completed`。断线、复位横幅（`Grbl `、`[MSG:INFO: Restarting]`、`[VER:`）、报警或无法确认状态都是"执行结果未知"，不自动重发。
-10. `cancel` 只停止后续发送并走取消序列；`0x18` 走实时通道，不排队；写入成功不证明物理停机。`0x18` 不替代硬件急停。
+6. `$CD` 读取 FluidNC 配置（必须收到终止 `ok`，超时排空并按字段叠加覆盖 `$$` 行程而不擦除其余轴）；旧 GRBL 返回 `error:3` 时静默跳过；未排空时拒绝续发顺序指令。
+7. 物理 G-code 二次读取、SHA-256 与行程复核优先于 `$X` 解锁；续雕预检采用枚举区分 `<Alarm>` 与 `<Unknown>`，`<Unknown>` 等非报警态禁止自动 `$X` 解锁。自适应预检要求 `$30` 为有限正数并按 `$30/1000` 换算 S 值，发 `?` 要求 Idle，拒绝 Run/Jog/Home/Hold/Door/Sleep/Check/Alarm/Unknown、SD 运行标记及 `Pn:` 含 `E`/`F`/`D`；失败 `device_preflight_failed`。
+8. **任务范围与快照冻结**：`build_send_preflight` 严禁在缺少冻结 SHA 时现算磁盘文件哈希，必须有 `confirmation_snapshot`/`artifacts` 冻结的 64 位 SHA-256（老数据须重新预览生成）。计算激光头走过的 X/Y 范围（`laser_core::gcode::motion_extents`），宽或高超限返回 400 `job_exceeds_travel`（`/api/device/framing` 同样复核）。行校验剥注释、丢空行；超过 254 字节或含非 ASCII 拒绝整个文件（`gcode_line_invalid`）；空文件拒绝（`gcode_empty`）。
+9. 流式发送窗口内每次写入前重查取消令牌；完成后保持作业占用，`G4 P0` 同步 ACK 与后续 Idle 都通过才标记 `completed`。断线、复位横幅（`Grbl `、`[MSG:INFO: Restarting]`、`[VER:`）、报警或取消路径本身报错（此时必须记为 `failed`、`can_resume=false` 并尽力补发 `0x18`，绝不伪报安全停机）都是“执行结果未知”，不自动重发。故障与取消同时到达时保留原故障。续雕模态头和运行中的 SD 作业遇主动取消时，先发 `!` 等待停稳报告，再发 `0x18`。
+10. `cancel` 只停止后续发送并走取消序列；`0x18` 走实时通道，不排队；中途取消仅采信启用 `use_line_numbers: true` + `N` 顺序行号下设备在 `Hold:0` 静止状态直接汇报的 `Ln:K` 边界（已完成 `K-1` 行，禁止用 ACK、`Bf:` 占用数或异步 `Idle` 估算断点，不能证实则 `can_resume=false`。续雕后再次取消也必须有本轮的新完成行证明），并在 `resume` 时按结构化连接标识锁定原目标与开工坐标系 `origin_mpos`；写入成功不证明物理停机。`0x18` 不替代硬件急停。
 
 其他固定规则：
 
+- TCP 和串口共用有界读行。连续拼接半行满 500 毫秒后向上层返回读超时，并保留已读取的半行。已经开始的底层读取仍由传输自身的单次超时约束。上层可继续检查取消位和各阶段的截止时间。
 - 生成、预览、推荐参数、反馈调参、走边框预览 G-code 都不等于启动机器。例外是 `/api/device/framing`：它真实驱动机器沿外接矩形运动，改动时按发送链路对待。2026-10-14 起默认 `power=0` 不出光（弱光需显式传 `power`），与完整发送相同做同设备占用检查、握手与 Idle 预检，运行期间登记为活动作业 `framing-…`，顶栏急停与带 `job_id` 的 `emergency_stop` 可停止；失败或被停止后保留为“待确认停止”目标。语音 / 小智只能经 `laser_workflow_tool(action=frame)` 按预览走边框（2026-11-18，技术书 r51）：范围只取预览记录的 `frame_mm`、服务端锁死 `power=0`（带非 0 功率直接拒绝）、必须 `confirmed=true` 并先过与 `confirm_send` 相同的状态与物理 SHA-256 门禁；不得开放让模型自填坐标或功率的走边框入口。走边框途中可 `pause`（`!`）/ `resume`（`~`，须确认，严格模式 R3）/ `stop_framing`（先 `!` 再取消、停稳后 0x18），只作用于 `framing-…` 作业，正式加工不得用这套暂停（r52）。
 - `laser_safe_action_tool` 中 `status`、进给/功率倍率，以及走边框途中的 `pause` / `stop_framing`（只让机器停下，2026-11-18）不需要确认；其余动作必须 `confirmed=true`（或 `dry_run=true` 只返回计划），走边框的 `resume` 同样必须确认。
 - 两点对位（2026-11-16，[api-contracts.md](api-contracts.md) §3.13a）：`/api/registration/read-position` 只走 `status`（实时 `?`），丢弃请求里的运动字段，不得改成会发 G-code 行的实现；点动沿用 `/api/safe-action relative_move` 与其确认 / R3 授权。`/api/registration/preview` 只生成：原刀路先按冻结 SHA-256 核对，变换结果是新文件、新 SHA 的 `preview_ready` workflow，发送走完整门禁；变换器遇到机床坐标、坐标系切换、英制、非 XY 平面、`$` 命令等一律拒绝而不是猜测。新任务以第 2 个标记点为开始位置（`G92 X0 Y0`），前端生成前复核激光头仍在该点，软件无法保证开刻时激光头没被挪动，确认框的“对刀起点”写明这一点。画板任务同样可对位（2026-11-16，技术书 r42）：结果带画板视图，发送仍走画板确认框、`confirmed=true` 与全部门禁，内容指纹换成新刀路 SHA，不绕过重复发送防呆。
 - 低功率点射（2026-11-16，技术书 r42，[api-contracts.md](api-contracts.md) §3.13b）：`/api/device/pointer-fire` 会真实出光。不变量：① 只接受工作台身份，语音 / MCP 桥 / 网关 / 审批重放不论严格模式一律 403 `pointer_fire_not_allowed`，不得加进 `ToolCatalog`、`laser_safe_action_tool` 或任何语音工具；桌面版（启用了桌面会话）里不带会话的本机回环一律 403 `desktop_session_required`（r43）；② 严格模式下只有桌面会话可用，不创建审批；③ 功率上限 S10（0~1000 标尺 1%，按 `$30` 换算）、时长上限 200 ms，越界拒绝不截断，必须 `confirmed=true`；④ 与走边框相同的占用检查、握手、Idle 预检与活动作业登记（`pointer-…`），失败或取消补发 0x18 并保留为待确认停止目标；⑤ 必须用 `M3`（`M4` 原地不出光），关光行 `M5 S0` 与开光行一起写入控制器缓冲区，不得拆成两次请求或改成“等用户松手再关”。前端默认关闭，每次点射都弹确认框，本页第一次附护目镜与反光提醒。不得把上限放宽来“看得更清楚”。
 - 网络完整任务只走 Telnet；SD 脱机模式的 HTTP 只用于把文件上传到 SD 卡。
 - SD 上传后核对固件返回的文件哈希；固件不返回哈希（未启用 HashFS）时**拒绝 `$SD/Run`**，任务记为 failed（2026-10-14 用户决定，此前为继续执行并警告）。软件比对通过也不能当作实机验收。
+- SD 取消期间持续按脱机监控处理，即使状态报告已去掉 `SD:` 字段。`<Alarm|…>`、`ALARM:N`、迟到的 `error:N`、复位、断线或未能确认停稳均记为 `failed`，保留故障原因并尽力发送 `0x18`。
 - 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径；`resolve_connection_spec` 只在参数缺失时回退到 `GRBL_DEFAULT_PORT` / `LASER_NETWORK_HOST`，且忽略含 `<` 的占位值。
-- 局域网 token 只在内存；配对码只允许回环签发。
+- 局域网配对 token 哈希与固定码哈希在 `AuthManager` 的 `state` 锁内同步持久化到 `settings.json`（写盘失败中止变更，支持全部撤销；临时配对码只在内存）；配对码只允许回环签发。
 
 ## 4. 当前边界与已知未接线项
 
@@ -60,7 +62,7 @@
 
 - `laser-api` 的文字、图片、G-code workflow 预览，以及 workflow / 标定矩阵发送和断点恢复，都会调用 `laser_core::safety::evaluate_material`。PVC 与明确危险材料直接返回 `material_safety_blocked`；仅写“塑料”等成分不明描述时要求澄清。小智提示词仍负责对话层确认与实物复核，后端也会独立拒绝，不依赖提示词是否遵守。
 - 画板、图片与文字预览都按机器幅面（默认 100 × 100 mm，请求可覆盖）限制尺寸（2026-11-06 起画板不再使用 400 mm 画布）；发送前另按固件报告的行程复核刀路范围（`job_exceeds_travel`）。生成的文字任务默认以激光头所在位置为木牌（图案）中心（`G92 X<半宽> Y<半高>`），图片任务以激光头位置为图片左下角。
-- 经审批执行的发送在开始前把审批结果记为“发送中”（`phase=running`），发送线程结束时写回完成 / 失败 / 取消；进程在发送中崩溃后，启动恢复把这类审批记为失败、`error_code=result_unknown`，workflow 同时被记为 failed，任何一方都不会自动重发（A-33）。
+- 经审批执行的动作在消费审批的同一事务里先原子写入 `phase=running`，发送入口 `mark_running` 绑定 `job_id` 失败时拒发并写入失败终态；进程重启后，恢复逻辑把所有仍处于 `running` 或缺失终态阶段的 `executed` 审批标为失败、`error_code=result_unknown`，workflow 同时记为 failed，任何一方都不会自动重发（A-33）。
 - 内置语音（NV4）以 `CallerContext::Voice` 调用工具。运动与出光（R3）**跟随 `MOSS_FUSION_STRICT`**（2026-10-07 用户决定）：开启时只生成审批（来源 `voice`），关闭时与官方接入点相同，模型带 `confirmed=true` 即执行——此时唯一的确认是系统提示要求模型先复述参数、等用户口头确认，没有桌面批准。2026-11-06 起（技术书 r18）AI（语音、小智接入点、网关）生成的每个预览都会在桌面弹出预览窗（`AiPreviewCenter`），用户可在窗内勾选现场确认后“同意开刻”或取消；严格模式开启时只能在界面同意，关闭时口头确认后 AI 仍可 `confirm_send`。文字生成工具的 `confirmed + send_after_generate` 不再顺带发送，只生成预览。R4 与未分级工具（命令执行、打开应用、快捷键、打开网站）**不论开关都拒绝**（`HostBackend::always_deny_r4`），返回 `tool_not_allowed` 并记审计 `voice:<设备>`；工具清单与严格模式下的接入点相同（`laser_host::voice_tools_list`）。停止类动作照常立即执行。
 - 语音抢跑闸门（2026-11-13 n86，规则见 [`AGENTS.md`](../../AGENTS.md)）：`moss-voice-server::conversation` 的 `TurnGate` 允许对话任务在确认用户说完之前先开跑；大模型发起的每批工具调用（含退出工具）执行前都等 `Turn::wait_release` 放行，`hold_llm` 轮次（对正在播的回答插话）连大模型请求也等；会话放弃这一轮时任务原地等待被中止，`ToolLatch` 保证“已开始执行工具”与“作废重来”只发生其一，同一工具不会被执行两遍。新增由大模型触发、有副作用的执行路径必须排在闸门之后；只有整句停止快路径（§4.1）可以不过闸门。
 - 记住的连接（n73，`laser_verified_connection`）只来自工作台身份的真实握手成功；只在调用方没给任何连接参数时补上，补全发生在门禁之前，审批与发送前握手、SHA 重算照旧绑定补全后的目标。不得让语音或接入点自己的检查改写它。
@@ -85,6 +87,7 @@
 
 - **开启与审批条件**：生产使用 `production_runner()`。① 用户在语音中心“扩展 → Claude Code / Codex”打开开关并填写专用工作目录（CLI 路径可手动填写或留空由 `detect_cli` 自动读取本机原生二进制，拒绝 `.cmd`/`.js`/`.sh`/`#!` 脚本；迁移后旧路径不存在时由 `resolve_with_detector` 重新适配，不合法文件仍严格拒绝）；② 只在严格模式（`MOSS_FUSION_STRICT`）下暴露工具，未开启时 `agent_codex` / `agent_claude_code` 不出现在工具列表里且服务端拒绝；③ 每次运行须在桌面审批卡单独批准，审批前不启动子进程，摘要绑定 provider、工作目录、实际规范化 CLI 路径与版本、配置 revision 与任务，批准时重算，不一致即拒绝。
 - **进程树隔离边界与剩余风险**：Windows 进程树受 Job Object 约束（挂起创建 → 加入 kill-on-close Job → 恢复），macOS / Linux 受独立进程组约束（`process_group(0)` / `setpgid(0, 0)` + `stdin` 下发前二次授权复核 + 环境变量白名单 `CLI_ENV_KEYS` + 结束/取消/超时时 `kill(-pgid, SIGKILL)` 轮询 `ESRCH` 整组回收），禁止自动启用提权沙箱或修改 OS ACL。**剩余风险**：CLI 自身与 OS 进程组均不限制读取工作目录外文件或网络，工作目录必须是可公开给模型看的目录，不得在文档或界面声称已实现机密文件隔离。
+- **CLI 能力探测**：探测用固定参数，两个输出管道共用一次探测预算。Windows 的探测进程如果仍在运行且无法加入 Job Object，会尝试终止探测并返回无结果。
 - **Docker 与 `model_proxy` 离线夹具（未接入生产）**：`scripts/agent-sandbox/test-container-isolation.ps1`、`moss-agent/src/docker_plan.rs` 与 `moss-agent::model_proxy` 仅作离线安全测试夹具。测试容器须保持 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8`、非 root 与唯一只读合成工作区挂载；严禁加 `--privileged`、`CAP_SYS_ADMIN`、`seccomp=unconfined`，严禁挂载 MOSS 目录、用户主目录、Docker socket 或真实长期密钥。详见 [本机 Agent Docker 隔离](../integration/agent-sandbox-docker-security.md)。
 
 ### 4.3 本地音乐（NV14）隔离边界
@@ -101,7 +104,7 @@
 ### 4.5 主窗口特权命令、本地敏感 ACL 与固件 OTA（NV17）
 
 - **主窗口精确来源固定与敏感 ACL**：主窗口导航到本机 `http://127.0.0.1:<端口>/`，capability 中仅静态配置 `remote:["http://127.0.0.1:*"]` 挡不住其他本机端口页面。因此三类特权命令均须在 Rust 入口校验精确来源：① `get_desktop_session`、常规语音启停/配置、导出与托盘命令由 `default.json` 授权并在函数内校验 `require_main_window` 或 `require_trusted_app_window`；② 本机 Agent、第三方 MCP、本地音乐、视觉扩展命令各自在 `capabilities/voice-{agent,mcp,music,vision}.json`（`windows:["main"]` + 回环 `remote`）授权并校验 `require_main_window`；③ 私人记忆、插件凭据、声纹、家居、长期记忆、固件、唤醒词与 USB 配网命令集中在 `capabilities/voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`），开头用 `require_private_settings_window` / `window_is_trusted_main` 校验，严禁放入 `default.json`（`windows:["*"]`）。新增主窗口特权命令须同步加入 `apps/desktop/src-tauri/src/lib.rs` 的 `main_window_commands_pin_backend_origin`（或 `require_private_settings_window` / `frontend/tests/voicePrivacyAcl.test.mjs`）检查清单；安装后 Windows WebView2 授权链仍需真实页面核验。
-- **固件 OTA（NV17）与语音 sidecar（NV18）**：OTA 回包只在设备已允许且存在用户逐台确认的推送时才带 `firmware{version,url}`（`ServerConfig::firmware` 为 `None` 时不下发，严禁按模型自报 `device-id` 推送）。导入与推送仅在主窗口语音中心由用户操作：只接受 ESP32 应用镜像（`0xE9` 头、偏移 32 的 `0xABCD5432`、1～5 段数字版本，单件 ≤16MiB、总计 ≤256MiB），落盘 `firmware/<sha256>.bin`，要求候选版本高于设备上报版本，有效期 24 小时。下载 `/xiaozhi/firmware/{token}.bin` 只认 32 位十六进制一次性令牌并核对请求来源 IP 与设备最近一次 OTA 请求一致，发送前重算 SHA-256；重放、篡改、路径穿越、未允许设备一律 404。**下载完成不等于刷写成功**，只有设备随后上报目标版本才记为“已升级”；真实刷写需另行授权并具备串口重刷兜底。语音 sidecar 专用安装包（`scripts/voice-helper/`）因 `sherpa-onnx`/`espeak-ng` 完整许可与对应源码审计未闭环（且已暂停排期），**不得对外分发**；详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 与 [`docs/developer/voice-helper-license-audit.md`](voice-helper-license-audit.md)。
+- **固件 OTA（NV17）与语音 sidecar（NV18）**：OTA 回包只在设备已允许且存在用户逐台确认的推送时才带 `firmware{version,url}`（`ServerConfig::firmware` 为 `None` 时不下发，严禁按模型自报 `device-id` 推送）。导入与推送仅在主窗口语音中心由用户操作：只接受 ESP32 应用镜像（`0xE9` 头、偏移 32 的 `0xABCD5432`、1～5 段数字版本，单件 ≤16MiB、总计 ≤256MiB），落盘 `firmware/<sha256>.bin`，要求候选版本高于设备上报版本，有效期 24 小时。下载 `/xiaozhi/firmware/{token}.bin` 只认 绑定推送的 32 位十六进制令牌。相同授权在下载中可重试，发送前复核最近一次 OTA 来源、设备许可、推送修订和镜像 SHA-256。取消、上报完成、到期、篡改、路径穿越或未允许设备一律 404。**下载完成不等于刷写成功**，只有设备随后上报目标版本才记为“已升级”；真实刷写需另行授权并具备串口重刷兜底。语音 sidecar 专用安装包（`scripts/voice-helper/`）因 `sherpa-onnx`/`espeak-ng` 完整许可与对应源码审计未闭环（且已暂停排期），**不得对外分发**；详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 与 [`docs/developer/voice-helper-license-audit.md`](voice-helper-license-audit.md)。
 
 ## 5. 测试要求
 

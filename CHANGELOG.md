@@ -4,6 +4,43 @@
 
 ## [Unreleased]
 
+### 修正 2026-11-18 审查遗留问题
+
+- **现象**。关停或取消竞态会漏发急停、误报作业状态，固件中断后下载失效。画板恢复、工作台调参与原生许可门禁也有边界问题，包括 SD 取消期间的故障误报和改名复制 ORT 源码归档绕过去重。
+- **根因与修复**。按设备保留停止通道，区分取消与控制器故障，补齐审批终态、IPv6 续雕、预览编号与画板存档处理。固件允许同一授权重试，诊断脱敏支持转义键值和重复处理，迁移快照放进运行目录下的私有子目录。工作台按原对位任务及实际调参值更新预览，发布按平台核验许可与证据。
+  SD 监控将作业上下文传入取消序列，保留报警、迟到的 `error:N`、复位及断线为 `failed`。Node 与 PowerShell 门禁按验过的实际 SHA-256 拒绝重复 ORT 源码归档。
+- **验证**。新增 FakeGrbl、临时数据库、画板和工作台单测及许可脚本回归。当前沙箱限制本机回环监听，完整工作区与调度器用例未全绿。未连接实机或执行跨平台发布。
+  SD 取消期间的状态报警、延迟错误、`SD:` 字段消失后断线及 ORT 归档改名复制回归通过。本机无 PowerShell，Windows 审计脚本待实跑。
+- **关联**。`crates/laser-{api,device,mcp,runtime}`、`crates/moss-voice{,-providers}`、桌面固件处理、`frontend/src`、`.github/workflows/release*.yml`、`scripts/voice-helper`。
+
+### FakeGrbl 端到端测试按本轮宿主就绪并统一收尾（2026-11-18）
+
+- **现象**：宿主提前退出、启动失败或收到中断时，调度器可能探测上轮端口、无限等待，或遗留测试进程。通过符号链接进入脚本时可能没有运行用例就退出成功。
+- **根因与修复**：只探测本轮宿主输出的完整回环地址，绑定启动时限和退出信号。统一回收测试子进程和模拟器，确认退出后清理临时目录。子测失败状态会传出，入口使用真实路径识别。
+- **验证**：调度器模拟故障回归 5 项通过，FakeGrbl API 与界面回环 40 项通过。Windows 原生收尾待验。
+- **关联**：`scripts/test_e2e.mjs`、`scripts/tests/test-e2e.test.mjs`、`docs/developer/standards.md`。
+
+### 限制 Agent 探测和设备半行读取的等待时间（2026-11-18）
+
+- **现象** Agent 探测退出后仍可能等继承的输出管道关闭。设备持续分段返回半行时，握手或读取应答可能迟迟无法回到上层检查超时。
+- **根因与修复** Agent 的两个输出管道共用探测总预算，Windows 下尝试终止无法加入 Job 的运行中探测进程。TCP 和串口共用的读行器到达拼接预算后返回超时，保留合法半行供下次读取。
+- **验证** `moss-agent` 52 项通过、2 项忽略，`laser-device` 传输层 9 项通过。两个包的 Clippy 通过。Windows Job Object 和物理设备待验。
+- **关联** `crates/moss-agent/src/{lib,windows_process}.rs`、`crates/laser-device/src/transport.rs`。
+
+### 阻断无新证明的再次续雕、清空后补写日志和错误的 APK 签名（2026-11-18）
+
+- **现象** 再次取消续雕时可能沿用旧断点。清空日志后，已在途的旧语音轮次可能补写。正式 APK 仅验证签名有效性时看不出签名者是否相同。
+- **根因与修复** 每次续雕单独要求新的可信完成行。日志在轮次启动时绑定清空代次，旧轮次在收尾时拒绝追加。发布工作流比较 APK 的唯一签名证书与配置证书的 SHA-256。
+- **验证** Rust 全量 1,399 项、FakeGrbl 端到端 40 项、交付脚本 39 项通过。真实停机与正式签名安装待验。
+- **关联** `crates/laser-api/src/send.rs`、`crates/moss-voice-server/src/state.rs`、`.github/workflows/release.yml`。
+
+### 保留语音走边框的开始回执和停止通道（2026-11-18）
+
+- **现象**：预检需要提前登记急停目标，暂停和继续仍须等待预检。退出时语音与 HTTP 对停止走边框的处理需要一致。
+- **根因与修复**：预检先登记，检查通过后才允许继续并通知语音开始。关闭期间拒绝新的走边框、继续及其他新作业。已登记的作业仍可停止，急停和软复位也可连接明确指定的设备。
+- **验证**：FakeGrbl 夹具验证预检阶段拒绝继续并保留急停，也验证关闭后拒绝启动新边框且语音仍可停止原作业。
+- **关联**：`crates/laser-api/src/{routes,safe_action,jobs}.rs`、`crates/laser-host/src/lib.rs`。
+
 ### 修正走边框暂停 / 继续 / 停止的审查问题：暂停超过 30 秒不再被自动急停，“取消”改道收窄（2026-11-18）
 
 - **现象**：agy 审查本日走边框改动发现：① FluidNC 收尾等待阶段暂停超过 30 秒会被判“空闲超时”并自动发 0x18；② 走边框途中任何来源的 workflow 取消都会改成停边框，会吞掉另一台设备正在启动的加工取消、让界面“取消这个任务”假成功；③ 严格模式下“继续”缺默认连接时建不起审批，批准的设备与实际收到 `~` 的作业可能不一致，局域网把 202 待批准显示成“走边框继续”；④ 停止走边框的进给保持写失败仍报“已停止”，停稳收尾期间能被“继续”重新加速；⑤ 内置语音等待开始的 60 秒长于语音工具 30 秒超时，放弃后机器仍可能动，且会把别处同时开始的走边框当成自己的；⑥ 按预览走边框漏了材料安全复核，`power: null` 被误拒；⑦ 提示词修改记录、安全文档、无后台兜底文案与 Jev 筛选遗漏。
@@ -24,6 +61,54 @@
 - **根因与修复**：`laser_workflow_tool` 新增 `action=frame`（R3）：只带预览的 `workflow_id` 与 `confirmed=true`；后端先过与 `confirm_send` 相同的状态与物理刀路 SHA-256 门禁，范围只取预览记录的 `frame_mm`（请求自带的坐标、轮廓、速度不用），固定以激光头当前位置为原点、`power=0` 不出光（带非 0 功率 400 `framing_light_not_allowed`）、速度 2000，再交给 `/api/device/framing` 同一套处理（严格模式建走边框审批）；走完不改任务状态，可再走或接着确认开始。未确认 400 `confirmation_required`，没有范围（如导入 G-code）400 `framing_not_available`。内置语音提示词与工具用法、小智控制台提示词（1992 / 2000 字）同步：走边框只问“确认走边框吗”，一次确认只做一个动作。行为变更：新增一个 R3 工具动作，默认值与既有接口不变。
 - **验证**：`laser-api` 新增 2 项（按预览范围空走不出光、自带坐标被忽略、走完仍可发送、刀路被改 / 已取消 / 无预览在连接设备前拒绝；严格模式只建审批、批准后执行）；`laser-mcp` 新增 1 项（未确认或缺编号不触达后端、确认后带连接转发）；`laser-contracts` 分级断言。未实机走边框。
 - **关联**：`crates/laser-api/src/safe_action.rs`（`workflow_frame`、`framing_with_authority`）、`crates/laser-api/src/routes.rs`、`crates/laser-mcp/src/lib.rs`、`crates/laser-contracts/src/risk.rs`、`crates/laser-tools/src/lib.rs`、`crates/moss-voice-server/src/conversation.rs`、`tests/golden/mcp_tools_compact.json`、`docs/integration/xiaozhi-prompts/latest.md`。
+### 急停后停止继续填充控制器发送窗口（2026-11-18）
+
+- **现象**：发送线程的一笔顺序写已在途时，取消与实时复位可能先到达。原发送循环还可能继续提交下一笔写。
+- **根因与修复**：`JobWorker` 在每笔顺序写前和填窗结束后复查取消位，走已有实时停机收尾。
+- **验证**：`laser-device` 70 项通过，覆盖在途写成功返回后的取消和 FluidNC 自动上报期间取消。实机未验。
+- **关联**：`crates/laser-device/src/connection/job.rs` 和 `connection/job/tests.rs`。
+
+### 正式发版检查原生语音许可、Android 固定签名和 macOS 历史标签（2026-11-18）
+
+- **现象**：发布流程能在许可审核未闭环时上传离线语音包、把临时签名的 Android APK 当作正式版，或把当前分支的 macOS 构建挂到旧标签。
+- **根因与修复**：发版增加许可门禁和固定签名校验，手动 macOS 构建先绑定目标标签。门禁未通过时仍可提供普通 macOS DMG，`latest.json` 省略 `darwin-aarch64`、`darwin-x86_64` 和 `windows-x86_64-offline-voice`，避免覆盖已有离线语音。CI 补 Windows 界面 E2E、独立 helper 测试和 Android release 烟测。
+- **验证**：脚本单测 38 项和更新相关前端单测 10 项通过，工作流 YAML 与 macOS 脚本语法通过。Windows、Android 跨平台运行及实际签名、安装、分发未验。
+- **关联**：`.github/workflows/{ci,release,release-macos}.yml`、`scripts/voice-helper/`、`scripts/build-macos-installer.sh` 和 `scripts/tests/release-gates.test.mjs`。
+
+### 修复常驻画板隐藏后拦截顶栏急停导致跨页双设备误停画板设备（2026-11-18）
+
+- **现象**：创作画板（`#draw-keepalive`）打开一次后常驻 DOM 并先于后续页面注册急停监听；切到雕刻工作台、数字孪生或材料实验室等配置了另一台设备的页面后按顶栏急停，隐藏画板仍返回自身 `workflowId`/`target` 并消费 `estopBus` 事件，导致误停画板设备、当前可见页面设备漏发 `0x18`。
+- **根因与修复**：隐藏画板空闲时让当前页处理。在途画板作业保留发送时的设备，并与当前页按目标各自处理。后端已登记的后台作业仍通过顶栏按原通道停止。同步更新 `main.jsx` 注释、`docs/developer/frontend-behavior.md` 契约，并补充 `globalEstop.test.mjs` 双设备切页 fake-bus 回归与 `workbench.ui.test.mjs` `[UI-07]` 端到端用例。
+- **验证**：前端 lint、构建与 343 项单测通过。新 release 宿主的回环 FakeGrbl 和无头 Chrome E2E 40 项通过，含存档带旧连接的双设备切页 `[UI-07]`。桌面快更与实机未执行。
+- **关联**：`frontend/src/pages/DrawPage.jsx`、`frontend/src/main.jsx`、`frontend/tests/globalEstop.test.mjs`、`frontend/tests/e2e/workbench.ui.test.mjs`、`docs/developer/frontend-behavior.md`。
+
+### 发送、走边框与续雕统一核验设备和刀路（2026-11-18）
+
+- **现象**：预检和独立设备动作有登记空档，旧刀路可能没有冻结签名，迟到的控制器应答会干扰后续命令，已入队的行可能被当成已完成。
+- **根因与修复**：设备动作在预检前登记取消通道，宿主关停先关闭接纳。发送与续雕先核对冻结的刀路、连接目标及适用的机床原点。旧记录缺签名或确切断点时需重新预览确认。顺序通道限制响应长度并处理超时残留，审批消费时写入运行状态。
+- **验证**：根工作区 1,384 项通过，FakeGrbl E2E 40 项通过，覆盖取消、审批、迟到应答和续雕。实机固件与物理停机时间待验。
+- **关联**：`crates/laser-device/src/{connection,transport,protocol}.rs`、`crates/laser-api/src/{safe_action,send,workflow,resume,approval}.rs`、`crates/laser-host/src/lib.rs`。
+
+### 撤销、隐私开关及第三方接入点在并发时保持生效（2026-11-18）
+
+- **现象**：局域网配对或 USB 绑定能覆盖并发撤销，固件下载与回执可能使用旧记录，语音切换和调试记录也可能沿用旧开关。匿名系统信息返回了接入点细节。
+- **根因与修复**：撤销与落库共用同步边界，固件下载和回执绑定当前授权、修订和镜像。语音设置只保存涉及的字段，调试日志清除和落库复核当前生效代次。匿名信息隐藏第三方接入细节，URL、日志和出错回显统一脱敏。Agent 关闭时不在状态查询启动能力探测。
+- **验证**：覆盖配对写盘、设备撤销、虚构凭据、模型切换失败、调试日志与本机 Agent 的合成用例；真实第三方服务、硬件及 Windows 进程回收待验。
+- **关联**：`crates/laser-api/src/{auth,settings}.rs`、`crates/moss-{voice,voice-server,agent,usb-provision}/`、`apps/desktop/src-tauri/src/voice_builtin/imp/`。
+
+### 迁移试跑采用真实库快照并去重（2026-11-18）
+
+- **现象**：同批重复记录可能绕过 `keep`，空库试跑漏掉已有材料及原有冲突。
+- **根因与修复**：试跑用 SQLite 从只读源取得一致性快照，包含已提交的 WAL 数据。按正在迁移的工作库即时判重；快照失败明确中止。
+- **验证**：`cargo test --offline --locked -p laser-runtime migration::` 9 项通过，包含试跑保持原库、快照失败、重复记录及重跑。
+- **关联**：`crates/laser-runtime/src/migration.rs`、`docs/developer/db-schema.md`。
+
+### 画板恢复预览时保留当前设备，待审批动作显示真实状态（2026-11-18）
+
+- **现象**：挂载或换端口后可能丢失上次画板内容。迟到结果还能盖住新预览，部分入口把待审批当成已经执行。
+- **根因与修复**：画板用本机运行目录恢复内容和非设备表单，用请求代次校验预览结果，设备目标继续按当前浏览器配置读取。工作台、画板、AI 预览和材料实验室显示待审批，批准后的执行和进度由审批中心负责。该审批路径未回写画板的防重复发送指纹。
+- **验证**：前端 343 项单测及 40 项 FakeGrbl E2E 通过，含存档旧连接、走边框和双设备急停。桌面端实际端口冲突待验。
+- **关联**：`frontend/src/{pages/DrawPage.jsx,drawScenePersist.js,approvalState.js}`、`crates/laser-api/src/{draw_state,routes}.rs`。
 
 ### 创作画板工具栏新增一键“清空画布”，清空后可撤销（2026-11-18）
 

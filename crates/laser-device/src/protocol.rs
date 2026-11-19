@@ -13,6 +13,40 @@ pub struct MachineLimits {
     pub junction_deviation_mm: Option<f64>,
 }
 
+impl MachineLimits {
+    /// 按字段叠加覆盖：仅当 `preferred` 显式给出某项参数时才覆盖原值，避免 `$CD` 单轴配置擦掉 `$$` 的其余轴行程。
+    pub fn merge_prefer(&mut self, preferred: &Self) {
+        if preferred.x_travel_mm.is_some() {
+            self.x_travel_mm = preferred.x_travel_mm;
+        }
+        if preferred.y_travel_mm.is_some() {
+            self.y_travel_mm = preferred.y_travel_mm;
+        }
+        if preferred.z_travel_mm.is_some() {
+            self.z_travel_mm = preferred.z_travel_mm;
+        }
+        if preferred.x_max_rate_mm_per_min.is_some() {
+            self.x_max_rate_mm_per_min = preferred.x_max_rate_mm_per_min;
+        }
+        if preferred.y_max_rate_mm_per_min.is_some() {
+            self.y_max_rate_mm_per_min = preferred.y_max_rate_mm_per_min;
+        }
+        if preferred.x_accel_mm_s2.is_some() {
+            self.x_accel_mm_s2 = preferred.x_accel_mm_s2;
+        }
+        if preferred.y_accel_mm_s2.is_some() {
+            self.y_accel_mm_s2 = preferred.y_accel_mm_s2;
+        }
+        if preferred.junction_deviation_mm.is_some() {
+            self.junction_deviation_mm = preferred.junction_deviation_mm;
+        }
+    }
+
+    pub fn has_xy_travel(&self) -> bool {
+        self.x_travel_mm.is_some() || self.y_travel_mm.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MachineFeatures {
     pub has_air_assist: bool,
@@ -186,6 +220,8 @@ pub struct StatusReport {
     pub mpos: Option<(f64, f64, f64)>,
     /// `WPos:x,y,z` 工件坐标（mm）
     pub wpos: Option<(f64, f64, f64)>,
+    /// `Ln:N` 当前正在执行的行号（`use_line_numbers: true` 时报告）
+    pub line_number: Option<usize>,
     pub raw: String,
 }
 
@@ -248,11 +284,14 @@ pub fn parse_status_report(line: &str) -> Option<StatusReport> {
         planner_free: None,
         mpos: None,
         wpos: None,
+        line_number: None,
         raw: line.trim().to_string(),
     };
     for field in fields {
         if let Some(pins) = field.strip_prefix("Pn:") {
             report.pins = pins.trim().to_string();
+        } else if let Some(ln) = field.strip_prefix("Ln:") {
+            report.line_number = ln.trim().parse::<usize>().ok().filter(|n| *n > 0);
         } else if let Some(mpos) = field.strip_prefix("MPos:") {
             report.mpos = parse_xyz_triplet(mpos);
         } else if let Some(wpos) = field.strip_prefix("WPos:") {
@@ -311,10 +350,12 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
             continue;
         }
         if current_section == "axes" && indent <= 4 && trimmed.ends_with(':') {
-            // 只认轴名（x / y / z / a / b / c）；`homing:`、`motor0:` 这类子段不改当前轴
+            // 只认轴名（x / y / z / a / b / c）；同级非轴段重置 current_axis，`homing:`/`motor0:` 子段不改当前轴
             let name = trimmed.trim_end_matches(':').trim();
             if matches!(name, "x" | "y" | "z" | "a" | "b" | "c") {
                 current_axis = name;
+            } else if indent <= 2 {
+                current_axis = "";
             }
             continue;
         }
@@ -379,7 +420,7 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
                 continue;
             }
             if key == "max_travel_mm" {
-                if let Ok(num) = val.parse::<f64>() {
+                if let Some(num) = positive() {
                     match current_axis {
                         "x" => limits.x_travel_mm = Some(num),
                         "y" => limits.y_travel_mm = Some(num),

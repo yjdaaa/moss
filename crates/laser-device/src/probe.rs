@@ -67,15 +67,11 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
                 }
                 Err(_) => (None, None),
             };
-            let limits = match yaml_limits {
-                Some(l) if l.x_travel_mm.is_some() || l.y_travel_mm.is_some() => Some(l),
-                _ if fallback_limits.x_travel_mm.is_some()
-                    || fallback_limits.y_travel_mm.is_some() =>
-                {
-                    Some(fallback_limits)
-                }
-                _ => None,
-            };
+            let mut merged_limits = fallback_limits;
+            if let Some(l) = yaml_limits {
+                merged_limits.merge_prefer(&l);
+            }
+            let limits = (merged_limits != MachineLimits::default()).then_some(merged_limits);
             let mut summary = format!("{label} 握手成功 ({target})，固件 $32=1 激光模式就绪");
             if device.reports_buffer_state() == Some(false) {
                 summary.push_str("；$10 未开启缓冲汇报（建议设 $10=3），发送窗口保持保守值（串口 127 字节，网络 FluidNC 不超过 256 字节）");

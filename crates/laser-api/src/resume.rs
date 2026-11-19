@@ -2,6 +2,7 @@ pub(crate) struct ResumePlan {
     pub(crate) preamble: Vec<String>,
     pub(crate) modal_spindle_s: Option<f64>,
     pub(crate) resume_in_cut_motion: bool,
+    pub(crate) requires_physical_origin: bool,
 }
 
 pub(crate) fn parse_mpos_value(val: Option<&serde_json::Value>) -> Option<(f64, f64, f64)> {
@@ -275,10 +276,15 @@ pub(crate) fn build_resume_plan(
     }
 
     let modal_spindle_s = (spindle_mode != "M5" && last_s > 0.0).then_some(last_s);
+    let requires_physical_origin = has_g92_x
+        || has_g92_y
+        || (!known_work_x && phys_x.abs() > 1e-4)
+        || (!known_work_y && phys_y.abs() > 1e-4);
     ResumePlan {
         preamble,
         modal_spindle_s,
         resume_in_cut_motion: motion_mode != "G0",
+        requires_physical_origin,
     }
 }
 

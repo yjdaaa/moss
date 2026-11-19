@@ -51,6 +51,8 @@ impl ApiService {
             target_open_locks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             material_write_lock: std::sync::Mutex::new(()),
             feedback_adoption: std::sync::Mutex::new(()),
+            draw_state_lock: std::sync::Mutex::new(()),
+            draw_state_memory: std::sync::Mutex::new(Default::default()),
             transport_factory: default_transport_factory(),
             extra_allowed_origins: Vec::new(),
             serial_port_lister: std::sync::Arc::new(enumerate_system_serial_ports),
@@ -66,6 +68,7 @@ impl ApiService {
             full_tool_list: std::sync::atomic::AtomicBool::new(false),
             verified_connection: std::sync::RwLock::new(None),
             voice_sessions: Default::default(),
+            shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -183,6 +186,40 @@ impl ApiService {
     pub fn with_transport_factory(mut self, factory: TransportFactory) -> Self {
         self.transport_factory = factory;
         self
+    }
+
+    /// 绑定宿主退出的原子关停标记。置位后拒收新作业，急停和软复位仍可建连。
+    pub fn with_shutdown_flag(
+        mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.shutdown_requested = flag;
+        self
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_shutdown_requested(&self) -> bool {
+        self.shutdown_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn open_device_transport(
+        &self,
+        spec: &laser_device::ConnectionSpec,
+    ) -> Result<Box<dyn laser_device::DeviceTransport>, String> {
+        if self.is_shutdown_requested() {
+            return Err("服务正在关闭，已拒绝建立新的设备连接".to_owned());
+        }
+        let transport = (self.transport_factory)(spec)?;
+        if self.is_shutdown_requested() {
+            // 新连接尚未写过指令，直接释放，避免打断控制器自己的 SD 任务。
+            return Err("建立设备连接期间服务进入关闭流程，已拒绝继续使用新连接".to_owned());
+        }
+        Ok(transport)
     }
 
     pub fn with_runtime_path(mut self, runtime_path: std::path::PathBuf) -> Self {

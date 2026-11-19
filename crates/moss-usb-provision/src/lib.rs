@@ -68,6 +68,8 @@ pub struct KnownDeviceView {
     pub status: String,
     pub model: String,
     pub firmware_version: String,
+    #[serde(default)]
+    pub status_revision: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +92,9 @@ pub enum UsbProvisionRequest {
         /// 这台板子在 MOSS 里被撤销过时，自动允许还必须显式确认“解除撤销”
         #[serde(default)]
         unrevoke: bool,
+        /// 读取板子时见到的登记修订号，防止写入前/中发生的更新一次撤销被旧界面勾选的 `unrevoke` 覆盖
+        #[serde(default)]
+        expected_status_revision: Option<i64>,
         #[serde(default)]
         patch: XiaozhiNvsPatch,
     },
@@ -600,6 +605,7 @@ fn lookup_known_device(db: &Mutex<RuntimeDb>, mac_lower: &str) -> Option<KnownDe
         status: rec.status,
         model: rec.model,
         firmware_version: rec.firmware_version,
+        status_revision: rec.status_revision,
     })
 }
 
@@ -660,17 +666,10 @@ fn execute_inspect<S: UsbFlasherSession>(
     }))
 }
 
-fn execute_write<S: UsbFlasherSession>(
-    port_name: &str,
-    expected_mac: Option<&str>,
+fn validate_write_preconditions(
     confirmed: bool,
-    auto_allow: bool,
-    unrevoke: bool,
-    base_patch: &XiaozhiNvsPatch,
-    mut session: S,
-    db: &Mutex<RuntimeDb>,
-    device_secret: DeviceSecret,
-) -> Result<(Value, UsbChipInfo, Option<String>, bool), CenterError> {
+    expected_mac: Option<&str>,
+) -> Result<&str, CenterError> {
     if !confirmed {
         return Err(CenterError::new(
             "usb_confirm_required",
@@ -678,7 +677,7 @@ fn execute_write<S: UsbFlasherSession>(
             "写入 Flash 前必须完成界面二次确认",
         ));
     }
-    let expected_mac = expected_mac
+    expected_mac
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -687,7 +686,28 @@ fn execute_write<S: UsbFlasherSession>(
                 400,
                 "请先读取板子信息，核对芯片 MAC 后再写入",
             )
-        })?;
+        })
+}
+
+fn execute_write<S: UsbFlasherSession>(
+    port_name: &str,
+    expected_mac: Option<&str>,
+    confirmed: bool,
+    auto_allow: bool,
+    unrevoke: bool,
+    expected_status_revision: Option<i64>,
+    base_patch: &XiaozhiNvsPatch,
+    mut session: S,
+    db: &Mutex<RuntimeDb>,
+    device_secret: DeviceSecret,
+) -> Result<(Value, UsbChipInfo, Option<String>, bool), CenterError> {
+    let expected_mac = match validate_write_preconditions(confirmed, expected_mac) {
+        Ok(mac) => mac,
+        Err(err) => {
+            let _ = session.finish_reset();
+            return Err(err);
+        }
+    };
 
     let info = session.info();
     if !info.mac_address.eq_ignore_ascii_case(expected_mac) {
@@ -744,17 +764,24 @@ fn execute_write<S: UsbFlasherSession>(
     // ESP32-P4 上报的设备号是协处理器的 Wi-Fi MAC，与这里读到的芯片 MAC 不同（固件 `system_info.cc`）：
     // 按读到的 MAC 放行会多出一条对不上的“已允许”记录，真设备仍是待允许。这类板子不自动放行。
     let mac_mismatch_chip = info.chip.eq_ignore_ascii_case("esp32p4");
-    let known_status = lookup_known_device(db, &info.mac_address).map(|d| d.status);
+    let known_at_start = lookup_known_device(db, &info.mac_address);
+    let start_status = known_at_start.as_ref().map(|d| d.status.as_str());
+    let start_revision = known_at_start.as_ref().map(|d| d.status_revision);
+    let bound_revision = expected_status_revision.or(start_revision);
     if auto_allow
         && !mac_mismatch_chip
-        && known_status.as_deref() == Some(laser_runtime::VOICE_DEVICE_REVOKED)
-        && !unrevoke
+        && start_status == Some(laser_runtime::VOICE_DEVICE_REVOKED)
+        && (!unrevoke || bound_revision != start_revision)
     {
         let _ = session.finish_reset();
         return Err(CenterError::new(
             "usb_device_revoked",
             409,
-            "这台小智在 MOSS 里被撤销过：要自动允许，请在确认时勾选“解除撤销”；不想放行就取消勾选“自动允许”后再写入",
+            if unrevoke {
+                "这台小智在读取确认后发生了新的撤销状态变更，请重新读取板子信息并核对授权后再写入"
+            } else {
+                "这台小智在 MOSS 里被撤销过：要自动允许，请在确认时勾选“解除撤销”；不想放行就取消勾选“自动允许”后再写入"
+            },
         ));
     }
     let bind_moss = auto_allow && !mac_mismatch_chip && !clearing_ota && !clearing_ws;
@@ -790,6 +817,19 @@ fn execute_write<S: UsbFlasherSession>(
         }
     };
 
+    if bind_moss
+        && let Some(current_known) = lookup_known_device(db, &info.mac_address)
+        && current_known.status == laser_runtime::VOICE_DEVICE_REVOKED
+        && (!unrevoke || bound_revision != Some(current_known.status_revision))
+    {
+        let _ = session.finish_reset();
+        return Err(CenterError::new(
+            "usb_device_revoked",
+            409,
+            "这台小智在配网写入期间发生了新的撤销状态变更，已中止写入；要自动允许，请重新读取确认并在勾选“解除撤销”后再写入",
+        ));
+    }
+
     if let Err(err) = write_verified(&mut session, nvs_part.offset, &image, &nvs_raw) {
         let _ = session.finish_reset();
         return Err(err);
@@ -802,9 +842,23 @@ fn execute_write<S: UsbFlasherSession>(
         let guard = db
             .lock()
             .map_err(|_| CenterError::new("db_lock_failed", 500, "数据库锁失败"))?;
-        guard
-            .bind_usb_voice_device(&info.mac_address, &client_id, &info.chip, ts)
+        let bound = guard
+            .bind_usb_voice_device(
+                &info.mac_address,
+                &client_id,
+                &info.chip,
+                bound_revision,
+                unrevoke,
+                ts,
+            )
             .map_err(|err| CenterError::new("usb_db_failed", 500, db_error(err)))?;
+        if bound.is_none() {
+            return Err(CenterError::new(
+                "usb_device_revoked",
+                409,
+                "这台小智在配网写入期间发生了新的撤销授权，MOSS 已保留最新撤销状态未自动允许；板端已写入预签凭据，如需清除请取消勾选“自动允许”后重新刷写，或在确认时重新核对并勾选“解除撤销”后再写入",
+            ));
+        }
     }
 
     let view = inspect_xiaozhi_nvs(&store);
@@ -870,6 +924,7 @@ where
             confirmed,
             auto_allow,
             unrevoke,
+            expected_status_revision,
             patch,
         } => {
             let port_name = port.trim();
@@ -881,6 +936,7 @@ where
                     "有小智设备正在下载升级固件，为防中断刷写已暂时禁止 USB 配网",
                 ));
             }
+            validate_write_preconditions(*confirmed, expected_mac.as_deref())?;
             let session = connect_fn(port_name)?;
             let (val, info, ota_written, bound) = execute_write(
                 port_name,
@@ -888,6 +944,7 @@ where
                 *confirmed,
                 *auto_allow,
                 *unrevoke,
+                *expected_status_revision,
                 patch,
                 session,
                 db,
@@ -1856,6 +1913,7 @@ mod tests {
                 true,
                 true,
                 false,
+                None,
                 &XiaozhiNvsPatch {
                     new_wifi: Some(moss_xiaozhi_proto::nvs::NewWifiPatch {
                         ssid: "NewHome".into(),
@@ -1893,6 +1951,7 @@ mod tests {
             true,
             false,
             false,
+            None,
             &XiaozhiNvsPatch::default(),
             &mut session,
             &db,
@@ -1914,6 +1973,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             &XiaozhiNvsPatch::default(),
             &mut session,
             &db,
@@ -1947,6 +2007,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             &XiaozhiNvsPatch::default(),
             &mut session,
             &db,
@@ -2040,6 +2101,210 @@ mod tests {
                 .unwrap()
                 .status,
             laser_runtime::VOICE_DEVICE_ALLOWED
+        );
+    }
+
+    /// #13：confirmed 为假或缺少 expected_mac 时，必须在 connect_fn 打开串口进入下载模式前直接拒绝。
+    #[test]
+    fn write_rejects_unconfirmed_or_missing_mac_before_opening_serial_port() {
+        let db = Mutex::new(RuntimeDb::open_memory().unwrap());
+        let secret = || Ok(vec![b'k'; 32]);
+        for (req_json, expected_code) in [
+            (
+                json!({
+                    "action": "write",
+                    "port": "/dev/cu.usbmodem14201",
+                    "expected_mac": "aa:bb:cc:00:11:22",
+                    "confirmed": false,
+                    "auto_allow": false
+                }),
+                "usb_confirm_required",
+            ),
+            (
+                json!({
+                    "action": "write",
+                    "port": "/dev/cu.usbmodem14201",
+                    "confirmed": true,
+                    "auto_allow": false
+                }),
+                "usb_expected_mac_required",
+            ),
+            (
+                json!({
+                    "action": "write",
+                    "port": "/dev/cu.usbmodem14201",
+                    "expected_mac": "   ",
+                    "confirmed": true,
+                    "auto_allow": false
+                }),
+                "usb_expected_mac_required",
+            ),
+        ] {
+            let req: UsbProvisionRequest = serde_json::from_value(req_json).unwrap();
+            let err = execute_usb_provision_with(
+                &req,
+                fake_ports(),
+                None,
+                false,
+                &db,
+                &secret,
+                |_| -> Result<FlakySession, CenterError> {
+                    panic!("前置校验未通过时不得打开串口进入下载模式");
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err.code, expected_code);
+        }
+    }
+
+    /// #10：烧录期间并发撤销（即使旧调用方带 unrevoke:true）或携带过期 status_revision 都不得覆盖最新撤销。
+    #[test]
+    fn concurrent_revocation_is_preserved_across_write_even_with_unrevoke() {
+        struct RevokeMidWrite<'a> {
+            inner: FlakySession,
+            db: &'a Mutex<RuntimeDb>,
+            mac: &'a str,
+            on_write_ts: f64,
+        }
+        impl UsbFlasherSession for RevokeMidWrite<'_> {
+            fn info(&self) -> UsbChipInfo {
+                self.inner.info()
+            }
+            fn read_region(&mut self, offset: u32, size: u32) -> Result<Vec<u8>, CenterError> {
+                self.inner.read_region(offset, size)
+            }
+            fn write_region(&mut self, offset: u32, data: &[u8]) -> Result<(), CenterError> {
+                self.inner.write_region(offset, data)?;
+                self.db
+                    .lock()
+                    .unwrap()
+                    .set_voice_device_status(
+                        self.mac,
+                        laser_runtime::VOICE_DEVICE_REVOKED,
+                        self.on_write_ts,
+                    )
+                    .unwrap();
+                Ok(())
+            }
+            fn flash_md5(&mut self, offset: u32, size: u32) -> Result<[u8; 16], CenterError> {
+                self.inner.flash_md5(offset, size)
+            }
+            fn finish_reset(&mut self) -> Result<(), CenterError> {
+                self.inner.finish_reset()
+            }
+        }
+
+        let secret = || Ok(vec![b'k'; 32]);
+        for unrevoke in [false, true] {
+            let db = Mutex::new(RuntimeDb::open_memory().unwrap());
+            {
+                let guard = db.lock().unwrap();
+                guard
+                    .voice_device_seen(
+                        "aa:bb:cc:00:11:22",
+                        "old-client",
+                        "board",
+                        "2.0.0",
+                        "192.168.1.9",
+                        1.0,
+                    )
+                    .unwrap();
+                guard
+                    .set_voice_device_status(
+                        "aa:bb:cc:00:11:22",
+                        laser_runtime::VOICE_DEVICE_ALLOWED,
+                        2.0,
+                    )
+                    .unwrap();
+            }
+            let req = write_request(true, unrevoke);
+            let err =
+                execute_usb_provision_with(&req, fake_ports(), None, false, &db, &secret, |_| {
+                    Ok(RevokeMidWrite {
+                        inner: flaky("esp32s3", 0, 0, false),
+                        db: &db,
+                        mac: "aa:bb:cc:00:11:22",
+                        on_write_ts: 3.0,
+                    })
+                })
+                .unwrap_err();
+            assert_eq!(err.code, "usb_device_revoked");
+            assert!(
+                err.message.contains("取消勾选“自动允许”") && err.message.contains("重新刷写"),
+                "并发撤销拒绝时必须提示重刷清除板端预签凭据：{}",
+                err.message
+            );
+            assert_eq!(
+                db.lock()
+                    .unwrap()
+                    .voice_device("aa:bb:cc:00:11:22")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                laser_runtime::VOICE_DEVICE_REVOKED
+            );
+        }
+
+        // 读取时记下的修订已过期（期间经历了“允许 -> 再次撤销”）：即使勾了 unrevoke 且带旧 expected_status_revision 仍拒绝
+        let db = Mutex::new(RuntimeDb::open_memory().unwrap());
+        let stale_rev = {
+            let guard = db.lock().unwrap();
+            guard
+                .voice_device_seen("aa:bb:cc:00:11:22", "c", "board", "2.0.0", "", 1.0)
+                .unwrap();
+            guard
+                .set_voice_device_status(
+                    "aa:bb:cc:00:11:22",
+                    laser_runtime::VOICE_DEVICE_REVOKED,
+                    2.0,
+                )
+                .unwrap();
+            let rev = guard
+                .voice_device("aa:bb:cc:00:11:22")
+                .unwrap()
+                .unwrap()
+                .status_revision;
+            guard
+                .set_voice_device_status(
+                    "aa:bb:cc:00:11:22",
+                    laser_runtime::VOICE_DEVICE_ALLOWED,
+                    3.0,
+                )
+                .unwrap();
+            guard
+                .set_voice_device_status(
+                    "aa:bb:cc:00:11:22",
+                    laser_runtime::VOICE_DEVICE_REVOKED,
+                    4.0,
+                )
+                .unwrap();
+            rev
+        };
+        let stale_req: UsbProvisionRequest = serde_json::from_value(json!({
+            "action": "write",
+            "port": "/dev/cu.usbmodem14201",
+            "expected_mac": "aa:bb:cc:00:11:22",
+            "confirmed": true,
+            "auto_allow": true,
+            "unrevoke": true,
+            "expected_status_revision": stale_rev,
+            "patch": { "ota_url": "http://192.168.1.50:9666/xiaozhi/ota/" }
+        }))
+        .unwrap();
+        let err =
+            execute_usb_provision_with(&stale_req, fake_ports(), None, false, &db, &secret, |_| {
+                Ok(flaky("esp32s3", 0, 0, false))
+            })
+            .unwrap_err();
+        assert_eq!(err.code, "usb_device_revoked");
+        assert_eq!(
+            db.lock()
+                .unwrap()
+                .voice_device("aa:bb:cc:00:11:22")
+                .unwrap()
+                .unwrap()
+                .status,
+            laser_runtime::VOICE_DEVICE_REVOKED
         );
     }
 

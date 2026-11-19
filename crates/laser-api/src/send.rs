@@ -67,6 +67,15 @@ impl ApiService {
         object: &serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
+        if self.is_shutdown_requested() {
+            return Err((
+                503,
+                failure(
+                    "服务正在关闭，已拒绝新的加工发送请求",
+                    Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                ),
+            ));
+        }
         let voice_permit = self.voice_permit(ctx)?;
         // 严格模式检查点（技术书 §6.2）：workflow confirm_send / send / resume、文字任务发送、
         // 标定矩阵发送都经过这里。严格模式关闭且不是审批执行时直接走原逻辑，不读取任何额外数据（A-40）。
@@ -103,25 +112,29 @@ impl ApiService {
                 summary,
             },
         )?;
-        let result = match &authority {
+        let result = (|| match &authority {
             approval::R3Authority::Approval(record) => match record.connection.as_ref() {
                 Some(connection) => {
                     let effective = approval::object_with_connection(object, connection);
-                    // 先记“发送中”，作业结束时由发送线程写回结果；进程若在此期间中断，
-                    // 重启时据此把审批记为“结果未知”，不重放（技术书 §5.5，A-33）
-                    let hook: Option<JobTerminalHook> = self.approvals.clone().map(|service| {
-                        if let Err(error) = service.mark_running(&record.approval_id, workflow_id) {
-                            eprintln!(
-                                "[laser-api] 审批 {} 记录发送中状态失败: {}",
-                                record.approval_id,
-                                error.message()
-                            );
+                    // 先记“发送中”，写库失败时立即拒发，杜绝未落库盲发（#6）
+                    let service = match self.approvals.clone() {
+                        Some(s) => s,
+                        None => {
+                            return Err(approval::error_response(
+                                &approval::ApprovalError::Unavailable("审批服务不可用".into()),
+                            ));
                         }
-                        let approval_id = record.approval_id.clone();
-                        Box::new(move |status: &str, send_result: &serde_json::Value| {
+                    };
+                    if let Err(error) = service.mark_running(&record.approval_id, workflow_id) {
+                        return Err(approval::error_response(&error));
+                    }
+                    let approval_id = record.approval_id.clone();
+                    let hook: Option<JobTerminalHook> = Some(Box::new(
+                        move |status: &str, send_result: &serde_json::Value| {
                             service.record_job_result(&approval_id, status, send_result);
-                        }) as JobTerminalHook
-                    });
+                        },
+                    )
+                        as JobTerminalHook);
                     self.launch_send_job_unchecked(
                         kind,
                         workflow_id,
@@ -143,7 +156,7 @@ impl ApiService {
                 None,
                 voice_permit,
             ),
-        };
+        })();
         // 成功时的结果由发送线程在作业结束时写回；这里只记录没能启动的情况
         if result.is_err() {
             self.finish_r3_authority(&authority, &result, Some(workflow_id));
@@ -277,6 +290,15 @@ impl ApiService {
                 )
             }
         };
+        if self.is_shutdown_requested() {
+            return Err((
+                503,
+                failure(
+                    "服务正在关闭，已拒绝建立新的发送任务",
+                    Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                ),
+            ));
+        }
         if voice_permit
             .as_ref()
             .is_some_and(|permit| !permit.load(Ordering::Acquire))
@@ -298,36 +320,6 @@ impl ApiService {
                 ),
             ));
         }
-        // 按设备目标串行化“释放旧待确认停止句柄 -> 打开独占新句柄”，杜绝同串口并发关闭/打开竞争。
-        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
-            let open_mutex = target_open_mutex(&self.target_open_locks, &target);
-            let _open_guard = open_mutex
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            release_uncertain_target_handle(&self.uncertain_jobs, &target);
-            let opened = (self.transport_factory)(&spec).map_err(|e| {
-                (
-                    400,
-                    failure(
-                        format!("设备连接失败 ({target}): {e}"),
-                        Some(serde_json::json!({"error_code": "device_unreachable"})),
-                    ),
-                )
-            })?;
-            std::sync::Arc::from(opened)
-        };
-        let mut device = laser_device::DeviceConnection::new(transport.clone());
-        device
-            .handshake_with_deadline(std::time::Duration::from_secs(3))
-            .map_err(|e| {
-                (
-                    400,
-                    failure(
-                        format!("设备握手未通过 ({target}): {e}"),
-                        Some(serde_json::json!({"error_code": "device_not_ready"})),
-                    ),
-                )
-            })?;
         let start_from_line = object
             .get("start_from_line")
             .and_then(|v| v.as_u64())
@@ -341,107 +333,97 @@ impl ApiService {
                 ),
             ));
         }
+        // 开连接前先做一轮 G-code 读取、SHA-256 校验与行准备，避免不合格/已篡改任务触发设备打开与解锁
+        let read_and_verify_gcode =
+            || -> Result<(String, Vec<u8>, String, Vec<String>), (u16, serde_json::Value)> {
+                let text = std::fs::read_to_string(&gcode_path)
+                    .map_err(|e| (500, failure(format!("读取 G-code 文件失败: {e}"), None)))?;
+                let gcode_bytes = text.as_bytes().to_vec();
+                use sha2::Digest;
+                let actual_sha = hex::encode(sha2::Sha256::digest(&gcode_bytes));
+                if !actual_sha.eq_ignore_ascii_case(expected_sha) {
+                    return Err((
+                        400,
+                        failure(
+                            "G-code SHA-256 与确认快照不一致，拒绝发送",
+                            Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                        ),
+                    ));
+                }
+                let prepared = laser_device::prepare_gcode_lines(&text).map_err(|e| {
+                    (
+                        400,
+                        failure(
+                            format!("G-code 发送前校验未通过: {e}"),
+                            Some(serde_json::json!({"error_code": "gcode_line_invalid"})),
+                        ),
+                    )
+                })?;
+                let lines = prepared.lines;
+                if lines.is_empty() {
+                    return Err((
+                        400,
+                        failure(
+                            "G-code 文件为空，拒绝发送",
+                            Some(serde_json::json!({"error_code": "gcode_empty"})),
+                        ),
+                    ));
+                }
+                if start_from_line >= lines.len() {
+                    return Err((
+                        400,
+                        failure(
+                            format!("断点行号 {start_from_line} 超出总行数 {}", lines.len()),
+                            Some(serde_json::json!({"error_code": "invalid_resume_line"})),
+                        ),
+                    ));
+                }
+                Ok((text, gcode_bytes, actual_sha, lines))
+            };
+        let (_, _, _, initial_lines) = read_and_verify_gcode()?;
 
-        // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；旧 GRBL 静默跳过
-        device.load_features(std::time::Duration::from_secs(3));
-        let preflight_res = if start_from_line > 0 {
-            device.verify_job_ready_for_resume(std::time::Duration::from_secs(3))
-        } else {
-            device.verify_job_ready_adaptive(std::time::Duration::from_secs(3))
+        // 按设备目标串行化“释放旧待确认停止句柄 -> 打开独占新句柄”，杜绝同串口并发关闭/打开竞争。
+        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
+            let open_mutex = target_open_mutex(&self.target_open_locks, &target);
+            let _open_guard = open_mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.is_shutdown_requested() {
+                return Err((
+                    503,
+                    failure(
+                        "服务正在关闭，已拒绝建立新的设备连接",
+                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                    ),
+                ));
+            }
+            release_uncertain_target_handle(&self.uncertain_jobs, &target);
+            let opened = self.open_device_transport(&spec).map_err(|e| {
+                let status = if self.is_shutdown_requested() {
+                    503
+                } else {
+                    400
+                };
+                let code = if self.is_shutdown_requested() {
+                    "host_shutting_down"
+                } else {
+                    "device_unreachable"
+                };
+                (
+                    status,
+                    failure(
+                        format!("设备连接失败 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": code})),
+                    ),
+                )
+            })?;
+            std::sync::Arc::from(opened)
         };
-        let device_scale = preflight_res.map_err(|e| {
-            (
-                400,
-                failure(
-                    format!("加工前检查未通过 ({target}): {e}"),
-                    Some(serde_json::json!({"error_code": "device_preflight_failed"})),
-                ),
-            )
-        })?;
-        let current_mpos = device.last_mpos;
-        let origin_mpos = if start_from_line == 0 {
-            current_mpos
-        } else {
-            parse_mpos_value(object.get("_origin_mpos"))
-        };
-        let scale_factor = device_scale / 1000.0;
-        let text = std::fs::read_to_string(&gcode_path)
-            .map_err(|e| (500, failure(format!("读取 G-code 文件失败: {e}"), None)))?;
-        let gcode_bytes = text.as_bytes().to_vec();
-        use sha2::Digest;
-        let actual_sha = hex::encode(sha2::Sha256::digest(&gcode_bytes));
-        if !actual_sha.eq_ignore_ascii_case(expected_sha) {
-            return Err((
-                400,
-                failure(
-                    "G-code SHA-256 与确认快照不一致，拒绝发送",
-                    Some(serde_json::json!({"error_code": "send_gate_rejected"})),
-                ),
-            ));
-        }
-        let expected_sha = actual_sha;
-        if let Err(error) = check_job_fits_machine(&text, &device.travel_limits) {
-            return Err((
-                400,
-                failure(
-                    format!("{error}（{target}）"),
-                    Some(serde_json::json!({"error_code": "job_exceeds_travel"})),
-                ),
-            ));
-        }
-
-        let prepared = laser_device::prepare_gcode_lines(&text).map_err(|e| {
-            (
-                400,
-                failure(
-                    format!("G-code 发送前校验未通过: {e}"),
-                    Some(serde_json::json!({"error_code": "gcode_line_invalid"})),
-                ),
-            )
-        })?;
-        let lines: Vec<String> = prepared.lines;
-        if prepared.comment_stripped_lines > 0 {
-            eprintln!(
-                "[laser-api] workflow {workflow_id}: 已剥离 {} 行注释、跳过 {} 行空行/纯注释后发送（SHA 门禁仍校验原文件）",
-                prepared.comment_stripped_lines, prepared.skipped_lines
-            );
-        }
-        if lines.is_empty() {
-            return Err((
-                400,
-                failure(
-                    "G-code 文件为空，拒绝发送",
-                    Some(serde_json::json!({"error_code": "gcode_empty"})),
-                ),
-            ));
-        }
-        if start_from_line >= lines.len() {
-            return Err((
-                400,
-                failure(
-                    format!("断点行号 {start_from_line} 超出总行数 {}", lines.len()),
-                    Some(serde_json::json!({"error_code": "invalid_resume_line"})),
-                ),
-            ));
-        }
-        if voice_permit
-            .as_ref()
-            .is_some_and(|permit| !permit.load(Ordering::Acquire))
-        {
-            return Err((
-                403,
-                failure(
-                    "预检期间设备授权已撤销，未开始加工",
-                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
-                ),
-            ));
-        }
-        // SD 脱机文件与流式发送使用同一功率标尺：设备 $30 不是 1000 时，上传按标尺换算后的已校验行，
-        // 并以实际上传字节的 SHA-256 做固件侧哈希门禁（原文件 SHA 已在上面与确认快照比对）。
-        let (sd_upload_bytes, sd_upload_sha) =
-            sd_offline_upload_payload(gcode_bytes, &expected_sha, &lines, scale_factor);
+        // 开连接后立刻登记 ActiveJob，覆盖握手 / $CD / $X / 二次哈希复核全预检窗口，使急停与退出可实时中止
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
-        progress.total_lines.store(lines.len(), Ordering::Relaxed);
+        progress
+            .total_lines
+            .store(initial_lines.len(), Ordering::Relaxed);
         progress
             .lines_sent
             .store(start_from_line, Ordering::Relaxed);
@@ -455,18 +437,25 @@ impl ApiService {
             started_at: std::time::Instant::now(),
             spec: Some(spec.clone()),
         });
-        let target_for_thread = target.clone();
-        let spec_for_thread = spec.clone();
-        let cleared_uncertain = {
+        {
             let mut jobs = self
                 .active_jobs
                 .lock()
                 .map_err(|_| (500, failure("活动任务注册表不可用", None)))?;
+            if self.is_shutdown_requested() {
+                return Err((
+                    503,
+                    failure(
+                        "服务正在关闭，已中止发码预检",
+                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                    ),
+                ));
+            }
             if cancel.is_cancelled() {
                 return Err((
                     409,
                     failure(
-                        "预检期间任务已被取消，未下发刀路",
+                        "预检前任务已被取消，未下发刀路",
                         Some(serde_json::json!({"error_code": "workflow_cancelled"})),
                     ),
                 ));
@@ -486,6 +475,187 @@ impl ApiService {
                     ),
                 ));
             }
+            jobs.insert(workflow_id.to_owned(), job.clone());
+        }
+        struct SendPreflightGuard {
+            active_jobs: ActiveJobs,
+            uncertain_jobs: UncertainJobs,
+            job: std::sync::Arc<ActiveJob>,
+            spec: laser_device::ConnectionSpec,
+            armed: bool,
+        }
+        impl Drop for SendPreflightGuard {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                if self.job.cancel.is_cancelled() {
+                    let _ = self
+                        .job
+                        .transport
+                        .write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                    let uncertain_entry =
+                        UncertainJob::from_active(&self.job, Some(self.spec.clone()));
+                    let mut jobs = self
+                        .active_jobs
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut uncertain = self
+                        .uncertain_jobs
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    jobs.remove(&self.job.workflow_id);
+                    uncertain.retain(|_, old| old.target != uncertain_entry.target);
+                    uncertain.insert(self.job.workflow_id.clone(), uncertain_entry);
+                } else {
+                    let mut jobs = self
+                        .active_jobs
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    jobs.remove(&self.job.workflow_id);
+                }
+            }
+        }
+        let mut preflight_guard = SendPreflightGuard {
+            active_jobs: self.active_jobs.clone(),
+            uncertain_jobs: self.uncertain_jobs.clone(),
+            job: job.clone(),
+            spec: spec.clone(),
+            armed: true,
+        };
+
+        let mut device = laser_device::DeviceConnection::new(transport.clone());
+        device
+            .handshake_with_deadline_cancellable(std::time::Duration::from_secs(3), Some(&cancel))
+            .map_err(|e| {
+                let status = if cancel.is_cancelled() { 409 } else { 400 };
+                let code = if cancel.is_cancelled() {
+                    "workflow_cancelled"
+                } else {
+                    "device_not_ready"
+                };
+                (
+                    status,
+                    failure(
+                        format!("设备握手未通过 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": code})),
+                    ),
+                )
+            })?;
+
+        // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；旧 GRBL 静默跳过
+        device.load_features(std::time::Duration::from_secs(3));
+        // 先于 $X 解锁执行二次物理 SHA-256 与行程复核，杜绝建连期间 TOCTOU 篡改刀路却提前触发 $X 移动（#4）
+        let (text, gcode_bytes, expected_sha, lines) = read_and_verify_gcode()?;
+        progress.total_lines.store(lines.len(), Ordering::Relaxed);
+        if let Err(error) = check_job_fits_machine(&text, &device.travel_limits) {
+            return Err((
+                400,
+                failure(
+                    format!("{error}（{target}）"),
+                    Some(serde_json::json!({"error_code": "job_exceeds_travel"})),
+                ),
+            ));
+        }
+
+        let preflight_res = if start_from_line > 0 {
+            device.verify_job_ready_for_resume_cancellable(
+                std::time::Duration::from_secs(3),
+                Some(&cancel),
+            )
+        } else {
+            device.verify_job_ready_adaptive_cancellable(
+                std::time::Duration::from_secs(3),
+                Some(&cancel),
+            )
+        };
+        let device_scale = preflight_res.map_err(|e| {
+            let status = if cancel.is_cancelled() { 409 } else { 400 };
+            let code = if cancel.is_cancelled() {
+                "workflow_cancelled"
+            } else {
+                "device_preflight_failed"
+            };
+            (
+                status,
+                failure(
+                    format!("加工前检查未通过 ({target}): {e}"),
+                    Some(serde_json::json!({"error_code": code})),
+                ),
+            )
+        })?;
+        let current_mpos = device.last_mpos;
+        let origin_mpos = if start_from_line == 0 {
+            current_mpos
+        } else {
+            let recorded_origin = parse_mpos_value(object.get("_origin_mpos"));
+            if recorded_origin.is_some() && current_mpos.is_none() {
+                return Err((
+                    400,
+                    failure(
+                        "原任务锁定了开工坐标 MPos，但当前设备未上报 MPos（请检查 $10 状态掩码），禁止盲目续雕",
+                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                    ),
+                ));
+            }
+            let plan_preview =
+                build_resume_plan(&lines[..start_from_line], recorded_origin, current_mpos);
+            if plan_preview.requires_physical_origin
+                && (recorded_origin.is_none() || current_mpos.is_none())
+            {
+                return Err((
+                    400,
+                    failure(
+                        "续雕断点前包含 G92 偏移或 G91 增量定位，但缺少原任务开工 MPos 或当前 MPos，禁止盲目续雕",
+                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                    ),
+                ));
+            }
+            recorded_origin
+        };
+        let scale_factor = device_scale / 1000.0;
+        if voice_permit
+            .as_ref()
+            .is_some_and(|permit| !permit.load(Ordering::Acquire))
+        {
+            return Err((
+                403,
+                failure(
+                    "预检期间设备授权已撤销，未开始加工",
+                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
+                ),
+            ));
+        }
+        if self.is_shutdown_requested() {
+            return Err((
+                503,
+                failure(
+                    "服务正在关闭，已终止启动",
+                    Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                ),
+            ));
+        }
+        // SD 脱机文件与流式发送使用同一功率标尺：设备 $30 不是 1000 时，上传按标尺换算后的已校验行，
+        // 并以实际上传字节的 SHA-256 做固件侧哈希门禁（原文件 SHA 已在上面与确认快照比对）。
+        let (sd_upload_bytes, sd_upload_sha) =
+            sd_offline_upload_payload(gcode_bytes, &expected_sha, &lines, scale_factor);
+        let target_for_thread = target.clone();
+        let spec_for_thread = spec.clone();
+        let cleared_uncertain = {
+            let jobs = self
+                .active_jobs
+                .lock()
+                .map_err(|_| (500, failure("活动任务注册表不可用", None)))?;
+            if cancel.is_cancelled() {
+                return Err((
+                    409,
+                    failure(
+                        "预检期间任务已被取消，未下发刀路",
+                        Some(serde_json::json!({"error_code": "workflow_cancelled"})),
+                    ),
+                ));
+            }
+            drop(jobs);
             let mut uncertain = self
                 .uncertain_jobs
                 .lock()
@@ -499,9 +669,9 @@ impl ApiService {
                     true
                 }
             });
-            jobs.insert(workflow_id.to_owned(), job.clone());
             dropped
         };
+        preflight_guard.armed = false;
         drop(cleared_uncertain);
         drop(transport);
         // 工时自校准（r40）：预览时的原始估算，作业正常完成后与实际用时比较（只读持久化存储，不碰内存表）
@@ -529,6 +699,8 @@ impl ApiService {
                     let mut device = device;
                     if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
                     Err("语音授权已撤销，排队中的加工未执行".to_owned())
+                } else if is_offline_sd && cancel.is_cancelled() {
+                    Ok(0)
                 } else if is_offline_sd {
                     // SD 离线加工流程：
                     // 1. 唯一指纹文件名 /sd/moss_{workflow_id}_{short_sha}.gcode
@@ -575,14 +747,16 @@ impl ApiService {
                         Ok(true) => {
                             // 上传和哈希校验可能耗时很久；真正启动机器前必须再次检查撤销和取消。
                             // 不论结果是否已经上传到 SD，都不能在授权失效后发送 $SD/Run。
-                            if cancel.is_cancelled() || voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
-                                Err("SD 启动前加工已取消或语音授权已撤销，未发送 $SD/Run".to_owned())
+                            if cancel.is_cancelled() {
+                                Ok(0)
+                            } else if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+                                Err("SD 启动前语音授权已撤销，未发送 $SD/Run".to_owned())
                             } else {
                                 // 2026-11-09：$SD/Run 的 ok 要等整个文件跑完才回（FluidNC 推迟应答），
                                 // 发出后直接监控进度、取消与结束，不再“发一行等 ok”
                                 device
-                                    .run_sd_file_and_wait(&remote_path, std::time::Duration::from_secs(7200), Some(&progress), Some(&cancel))
-                                    .map(|_| total)
+                                    .run_sd_file_or_cancel(&remote_path, std::time::Duration::from_secs(7200), Some(&progress), Some(&cancel))
+                                    .map(|completed| if completed { total } else { progress.lines_sent.load(Ordering::Relaxed) })
                                     .map_err(|e| format!("SD 脱机任务未完成: {e}"))
                             }
                         }
@@ -598,17 +772,16 @@ impl ApiService {
                             origin_mpos,
                             current_mpos,
                         );
-                        let mut preamble_res = Ok(());
-                        for cmd in plan.preamble {
-                            if let Err(e) = worker
-                                .device
-                                .send_line_wait_ack_cancellable(&cmd, Some(&cancel))
-                            {
-                                preamble_res = Err(format!("断点续雕恢复模态指令 `{cmd}` 失败: {e}"));
-                                break;
+                        (|| {
+                            for cmd in plan.preamble {
+                                let acked = worker.device.send_line_wait_ack_or_cancel(&cmd, Some(&cancel))
+                                    .map_err(|error| format!("断点续雕恢复模态指令 `{cmd}` 失败: {error}"))?;
+                                if !acked {
+                                    // 模态头也可能已经移动激光头，先进给保持并等停稳，再复位。
+                                    worker.device.cancel()?;
+                                    return Ok(0);
+                                }
                             }
-                        }
-                        preamble_res.and_then(|()| {
                             let mut remaining = lines[start_from_line..].to_vec();
                             apply_modal_spindle_to_remaining(
                                 &mut remaining,
@@ -616,52 +789,113 @@ impl ApiService {
                                 plan.resume_in_cut_motion,
                             );
                             worker.send_lines(remaining)
-                        })
+                        })()
                     } else {
                         worker.send_lines(lines)
                     }
                     }
                 };
-                let sent = progress.lines_sent.load(Ordering::Relaxed);
+                let confirmed_acked = match (&outcome, is_offline_sd) {
+                    (Ok(acked), false) => start_from_line.saturating_add(*acked).min(total),
+                    (Ok(acked), true) => (*acked).min(total),
+                    (Err(_), _) => progress.lines_sent.load(Ordering::Relaxed).min(total),
+                };
+                let round_completed = progress.lines_completed.load(Ordering::Relaxed);
+                let confirmed_completed = match (&outcome, is_offline_sd) {
+                    // 仅当本轮 JobWorker 确认了新完成行时才可加回 start_from_line；
+                    // 断点续雕后再次取消且无新完成行证明时，不得把上轮断点当成本轮已确认进度。
+                    (Ok(_), false) if round_completed > 0 => start_from_line
+                        .saturating_add(round_completed)
+                        .min(confirmed_acked),
+                    (Ok(acked), true) if !cancel.is_cancelled() => (*acked).min(total),
+                    _ => 0,
+                };
                 let last_status_report = progress.status_report();
                 let elapsed_ms = job.started_at.elapsed().as_millis() as u64;
                 let target = target_for_thread;
                 let cancelled_result = || {
-                    let can_resume = !is_offline_sd && sent > 0 && sent < total;
+                    let can_resume =
+                        !is_offline_sd && confirmed_completed > 0 && confirmed_completed < total;
+                    let error_msg = if can_resume {
+                        format!(
+                            "用户急停/取消：已确认完成 {confirmed_completed}/{total} 行（已传输 ACK {confirmed_acked}/{total} 行，可从第 {} 行继续加工）",
+                            confirmed_completed + 1
+                        )
+                    } else if confirmed_acked > 0 && !is_offline_sd {
+                        format!(
+                            "用户急停/取消：已传输 {confirmed_acked}/{total} 行，但规划器/状态未能安全确认已完成行数，禁止盲目断点续雕，请重新发起确认发送"
+                        )
+                    } else if is_offline_sd {
+                        "SD 脱机任务已取消，请到设备旁确认".into()
+                    } else {
+                        "用户取消：已执行 ! → ? → 0x18 安全停机序列".into()
+                    };
                     serde_json::json!({
                         "success": false,
                         "running": false,
                         "cancelled": true,
                         "can_resume": can_resume,
-                        "resumable_from_line": if can_resume { sent } else { 0 },
+                        "resumable_from_line": if can_resume { confirmed_completed } else { 0 },
+                        "resume_boundary_source": if can_resume { "device_hold_ln" } else { "unproven" },
                         "mode": sent_mode,
                         "target": target,
-                        "lines_sent": sent,
+                        "lines_sent": confirmed_acked,
+                        "lines_completed": confirmed_completed,
                         "total_lines": total,
                         "elapsed_ms": elapsed_ms,
-                        "error": if can_resume {
-                            format!("用户急停/取消：已在第 {sent}/{total} 行安全停机（可从第 {} 行继续加工）", sent + 1)
-                        } else {
-                            "用户取消：已执行 ! → ? → 0x18 安全停机序列".into()
-                        }
+                        "error": error_msg,
                     })
                 };
                 let (status, mut send_result) = match outcome {
                     Ok(_) if cancel.is_cancelled() => ("cancelled", cancelled_result()),
                     Ok(_) => (
                         "completed",
-                        serde_json::json!({"success": true, "running": false, "phase": "completed", "mode": sent_mode, "target": target, "lines_sent": sent, "total_lines": total, "elapsed_ms": elapsed_ms}),
+                        serde_json::json!({
+                            "success": true,
+                            "running": false,
+                            "phase": "completed",
+                            "mode": sent_mode,
+                            "target": target,
+                            "lines_sent": confirmed_acked,
+                            "lines_completed": confirmed_completed,
+                            "total_lines": total,
+                            "elapsed_ms": elapsed_ms,
+                        }),
                     ),
-                    Err(_error) if cancel.is_cancelled() => ("cancelled", cancelled_result()),
                     Err(error) => {
-                        let _ = job.transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                        let fallback_estop = job
+                            .transport
+                            .write_realtime(laser_device::RealtimeCommand::EmergencyStop);
                         let diagnostic = laser_device::diagnose_device_message(&error)
                             .map(|d| format!(" ({d})"))
                             .unwrap_or_default();
-                        let error_msg = format!("{error}{diagnostic}");
+                        let fallback_note = match fallback_estop {
+                            Ok(()) => "",
+                            Err(ref estop_err) => {
+                                eprintln!(
+                                    "[laser-api] workflow {wf_id} 急停 0x18 兜底失败: {estop_err}"
+                                );
+                                "；且急停 0x18 兜底发送失败，请立刻按物理急停"
+                            }
+                        };
+                        let error_msg = format!("{error}{diagnostic}{fallback_note}");
                         (
                             "failed",
-                            serde_json::json!({"success": false, "running": false, "mode": sent_mode, "target": target, "lines_sent": sent, "total_lines": total, "elapsed_ms": elapsed_ms, "error": error_msg}),
+                            serde_json::json!({
+                                "success": false,
+                                "running": false,
+                                "cancelled": false,
+                                "can_resume": false,
+                                "resumable_from_line": 0,
+                                "resume_boundary_source": "failed",
+                                "mode": sent_mode,
+                                "target": target,
+                                "lines_sent": confirmed_acked,
+                                "lines_completed": confirmed_completed,
+                                "total_lines": total,
+                                "elapsed_ms": elapsed_ms,
+                                "error": error_msg,
+                            }),
                         )
                     }
                 };

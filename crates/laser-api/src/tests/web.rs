@@ -716,6 +716,62 @@ fn auth_persistent_tokens_and_static_pin_survive_restart_and_support_revoke() {
 }
 
 #[test]
+fn auth_persist_failure_leaves_memory_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthManager::with_runtime_path(temp.path().to_path_buf());
+    auth.set_static_pin(Some("886699")).unwrap();
+    let challenge = auth.issue_code(1_000).unwrap();
+    let (kept_token, _) = auth.pair("192.168.1.50", "886699", 1_010).unwrap();
+
+    // 让 settings.json 写入失败：持久化失败时内存状态不得提前变更，且一次性配对码不得被消费
+    std::fs::write(temp.path().join("settings.json"), b"{corrupt").unwrap();
+    assert_eq!(
+        auth.pair("192.168.1.51", &challenge.code, 1_020),
+        Err(AuthError::Internal)
+    );
+    assert!(auth.set_static_pin(Some("123456")).is_err());
+    assert!(auth.revoke_all_tokens().is_err());
+    assert_eq!(auth.paired_count(), 1);
+    assert!(auth.authorize(&kept_token).is_ok());
+
+    // 恢复正常配置文件后，原先未提交的那次动态配对码仍可正常使用
+    std::fs::write(temp.path().join("settings.json"), b"{}").unwrap();
+    let (new_token, _) = auth.pair("192.168.1.51", &challenge.code, 1_030).unwrap();
+    assert!(auth.authorize(&new_token).is_ok());
+}
+
+#[test]
+fn auth_concurrent_pair_and_revoke_all_stay_consistent_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let auth = std::sync::Arc::new(AuthManager::with_runtime_path(temp.path().to_path_buf()));
+    auth.set_static_pin(Some("886699")).unwrap();
+
+    let pair_auth = auth.clone();
+    let t_pair = std::thread::spawn(move || {
+        for i in 0..40u64 {
+            let _ = pair_auth.pair("192.168.1.60", "886699", 10_000 + i);
+        }
+    });
+    let revoke_auth = auth.clone();
+    let t_revoke = std::thread::spawn(move || {
+        for _ in 0..40 {
+            revoke_auth.revoke_all_tokens().unwrap();
+        }
+    });
+    t_pair.join().unwrap();
+    t_revoke.join().unwrap();
+
+    // 任意并发交叉后重启加载的数量必须与内存一致
+    let reloaded = AuthManager::with_runtime_path(temp.path().to_path_buf());
+    assert_eq!(reloaded.paired_count(), auth.paired_count());
+
+    // 再执行一次全量撤销，重启后绝不能因旧线程快照回写而复活
+    auth.revoke_all_tokens().unwrap();
+    let after_revoke = AuthManager::with_runtime_path(temp.path().to_path_buf());
+    assert_eq!(after_revoke.paired_count(), 0);
+}
+
+#[test]
 fn non_loopback_requests_require_bearer_and_pairing_returns_token() {
     let auth = std::sync::Arc::new(AuthManager::new());
     let challenge = auth.issue_code(unix_seconds()).unwrap();

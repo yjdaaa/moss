@@ -642,3 +642,499 @@ fn unconfirmed_auto_report_ack_aborts_before_streaming() {
     assert!(!lines.iter().any(|l| l == "M5"), "{lines:?}");
     assert_eq!(lines, ["$$", "$RI=200", "G4 P0", "$RI=0"]);
 }
+
+#[derive(Default)]
+struct ControlledWriteGate {
+    armed: bool,
+    writes_after_arm: usize,
+    first_write_in_flight: bool,
+    release_first_write: bool,
+}
+
+/// 受控 FakeGrbl 传输层：卡住 `arm()` 后的第一笔顺序写，同时保持实时通道无锁独立。
+struct ControlledFakeTransport {
+    fake: FakeGrbl,
+    sequential_lock: Mutex<()>,
+    gate: Mutex<ControlledWriteGate>,
+    cv: std::sync::Condvar,
+}
+
+impl ControlledFakeTransport {
+    fn new(fake: FakeGrbl) -> Arc<Self> {
+        Arc::new(Self {
+            fake,
+            sequential_lock: Mutex::new(()),
+            gate: Mutex::new(ControlledWriteGate::default()),
+            cv: std::sync::Condvar::new(),
+        })
+    }
+
+    fn arm(&self) {
+        self.gate.lock().unwrap().armed = true;
+    }
+
+    fn wait_until_first_write_in_flight(&self) {
+        let mut st = self.gate.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !st.first_write_in_flight {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for first sequential write to enter in-flight state"
+            );
+            let (next, _) = self.cv.wait_timeout(st, remaining).unwrap();
+            st = next;
+        }
+    }
+
+    fn release_first_write(&self) {
+        let mut st = self.gate.lock().unwrap();
+        st.release_first_write = true;
+        self.cv.notify_all();
+    }
+
+    fn writes_after_arm(&self) -> usize {
+        self.gate.lock().unwrap().writes_after_arm
+    }
+}
+
+impl DeviceTransport for Arc<ControlledFakeTransport> {
+    fn write_line(&self, line: &str) -> Result<(), String> {
+        let _seq_guard = self.sequential_lock.lock().unwrap();
+        let is_first_armed_write = {
+            let mut st = self.gate.lock().unwrap();
+            if st.armed {
+                st.writes_after_arm += 1;
+                if st.writes_after_arm == 1 {
+                    st.first_write_in_flight = true;
+                    self.cv.notify_all();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if is_first_armed_write {
+            let mut st = self.gate.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !st.release_first_write {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "timed out waiting to release first sequential write"
+                );
+                let (next, _) = self.cv.wait_timeout(st, remaining).unwrap();
+                st = next;
+            }
+        }
+        self.fake.write_line(line)
+    }
+
+    fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+        // 实时通道独立于串行写锁，在途写阻塞期间仍可立即送达
+        self.fake.write_realtime(command)
+    }
+
+    fn read_line(&self) -> Result<Option<String>, String> {
+        self.fake.read_line()
+    }
+}
+
+#[test]
+fn cancellation_during_in_flight_sequential_write_forbids_next_write() {
+    let fake = FakeGrbl::new(["$32=1", "ok", "<Hold:0>"].map(str::to_owned));
+    let transport = ControlledFakeTransport::new(fake.clone());
+    let mut device = DeviceConnection::new(transport.clone());
+    device.handshake().unwrap();
+    transport.arm();
+
+    let token = CancellationToken::default();
+    let mut worker = JobWorker::new(device, token.clone());
+    let worker_handle = std::thread::spawn(move || {
+        let res = worker.send_lines(["G1 X1".into(), "G1 X2".into(), "G1 X3".into()]);
+        (res, worker.device.state())
+    });
+
+    // 1. 等到第一笔正常顺序写已在途（持有顺序锁且尚未完成）
+    transport.wait_until_first_write_in_flight();
+
+    // 2. 在途期间发送实时急停并置取消；实时通道不得等待顺序写锁
+    transport
+        .write_realtime(RealtimeCommand::EmergencyStop)
+        .unwrap();
+    token.cancel();
+
+    // 3. 放行第一笔在途写使其最终成功返回 Ok(())
+    transport.release_first_write();
+
+    let (res, final_state) = worker_handle.join().unwrap();
+    assert_eq!(res.unwrap(), 0);
+    assert_eq!(final_state, DeviceState::Alarm);
+    assert_eq!(
+        transport.writes_after_arm(),
+        1,
+        "第一笔写期间已取消，此后禁止开始下一笔正常顺序写"
+    );
+    assert_eq!(fake.lines(), vec!["$$".to_string(), "G1 X1".to_string()]);
+    assert_eq!(fake.realtime(), vec![0x18, b'!', b'?', 0x18]);
+}
+
+#[test]
+fn fluidnc_cancellation_before_start_or_in_flight_ri_skips_resync_and_disable() {
+    // 1. FluidNC 在调用前已取消：不发 $RI=200，不补 G4 P0，不写 $RI=0
+    let fake = FakeGrbl::new(["$32=1", "ok", "<Hold:0>"].map(str::to_owned));
+    let mut device = DeviceConnection::new(fake.clone());
+    device.handshake().unwrap();
+    device.features = Some(MachineFeatures::default());
+    let token = CancellationToken::default();
+    let mut worker = JobWorker::new(device, token.clone());
+    token.cancel();
+    assert_eq!(worker.send_lines(["G1 X1".into()]).unwrap(), 0);
+    assert_eq!(worker.device.state(), DeviceState::Alarm);
+    assert_eq!(fake.lines(), vec!["$$".to_string()]);
+    assert_eq!(fake.realtime(), vec![b'!', b'?', 0x18]);
+
+    // 2. FluidNC 在 $RI=200 顺序写在途期间被取消且写最终成功：及时走实时收尾，禁止 G4 P0 / G1 / $RI=0
+    let fake = FakeGrbl::new(["$32=1", "ok", "<Hold:0>"].map(str::to_owned));
+    let transport = ControlledFakeTransport::new(fake.clone());
+    let mut device = DeviceConnection::new(transport.clone());
+    device.handshake().unwrap();
+    device.features = Some(MachineFeatures::default());
+    transport.arm();
+
+    let token = CancellationToken::default();
+    let mut worker = JobWorker::new(device, token.clone());
+    let worker_handle = std::thread::spawn(move || {
+        let res = worker.send_lines(["G1 X1".into(), "G1 X2".into()]);
+        (res, worker.device.state(), worker.device.auto_report_ms)
+    });
+
+    transport.wait_until_first_write_in_flight();
+    transport
+        .write_realtime(RealtimeCommand::EmergencyStop)
+        .unwrap();
+    token.cancel();
+    transport.release_first_write();
+
+    let (res, final_state, auto_report_ms) = worker_handle.join().unwrap();
+    assert_eq!(res.unwrap(), 0);
+    assert_eq!(final_state, DeviceState::Alarm);
+    assert_eq!(auto_report_ms, 0);
+    assert_eq!(transport.writes_after_arm(), 1);
+    assert_eq!(fake.lines(), vec!["$$".to_string(), "$RI=200".to_string()]);
+    assert_eq!(fake.realtime(), vec![0x18, b'!', b'?', 0x18]);
+}
+
+#[test]
+fn fluidnc_cancellation_while_waiting_ri_ack_or_streaming_skips_g4_and_ri_zero() {
+    // 1. 等 $RI=200 应答超时/读等待期间取消：立刻走实时收尾，不得等待超时后补 G4 P0 或写 $RI=0
+    struct CancelDuringRiAckWait {
+        fake: FakeGrbl,
+        cancel: CancellationToken,
+        ri_sent: AtomicBool,
+    }
+    impl DeviceTransport for CancelDuringRiAckWait {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            if line.starts_with("$RI=") {
+                self.ri_sent.store(true, Ordering::Release);
+            }
+            self.fake.write_line(line)
+        }
+        fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+            self.fake.write_realtime(cmd)
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            if self.ri_sent.load(Ordering::Acquire) && !self.cancel.is_cancelled() {
+                self.cancel.cancel();
+                return Err("timed out".into());
+            }
+            self.fake.read_line()
+        }
+    }
+
+    let fake = FakeGrbl::new(["$32=1", "ok", "<Hold:0>"].map(str::to_owned));
+    let cancel = CancellationToken::default();
+    let mut device = DeviceConnection::new(CancelDuringRiAckWait {
+        fake: fake.clone(),
+        cancel: cancel.clone(),
+        ri_sent: AtomicBool::new(false),
+    });
+    device.handshake().unwrap();
+    device.features = Some(MachineFeatures::default());
+    let mut worker = JobWorker::new(device, cancel);
+    assert_eq!(worker.send_lines(["G1 X1".into()]).unwrap(), 0);
+    assert_eq!(worker.device.state(), DeviceState::Alarm);
+    assert_eq!(fake.lines(), vec!["$$".to_string(), "$RI=200".to_string()]);
+    assert_eq!(fake.realtime(), vec![b'!', b'?', 0x18]);
+
+    // 2. $RI=200 已成功启用后，在发送流中途取消：走实时收尾后外层也不得再写 $RI=0
+    struct CancelAfterRiInStream {
+        fake: FakeGrbl,
+        cancel: CancellationToken,
+    }
+    impl DeviceTransport for CancelAfterRiInStream {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            self.fake.write_line(line)
+        }
+        fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+            self.fake.write_realtime(cmd)
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let next = self.fake.read_line()?;
+            if next.as_deref() == Some("<Run|Bf:15,1024>") {
+                self.cancel.cancel();
+            }
+            Ok(next)
+        }
+    }
+
+    let fake =
+        FakeGrbl::new(["$32=1", "ok", "ok", "<Run|Bf:15,1024>", "<Hold:0>"].map(str::to_owned));
+    let cancel = CancellationToken::default();
+    let mut device = DeviceConnection::new(CancelAfterRiInStream {
+        fake: fake.clone(),
+        cancel: cancel.clone(),
+    });
+    device.handshake().unwrap();
+    device.features = Some(MachineFeatures::default());
+    let mut worker = JobWorker::new(device, cancel);
+    assert_eq!(worker.send_lines(["M5".into()]).unwrap(), 0);
+    assert_eq!(worker.device.state(), DeviceState::Alarm);
+    assert_eq!(worker.device.auto_report_ms, 0);
+    assert_eq!(
+        fake.lines(),
+        vec!["$$".to_string(), "$RI=200".to_string(), "M5".to_string()]
+    );
+    assert_eq!(fake.realtime(), vec![b'!', b'?', 0x18]);
+}
+
+#[test]
+fn inner_window_rechecks_cancel_before_next_send_and_preserves_cancel_error() {
+    #[derive(Clone)]
+    struct FlipCancelOnFirstSend {
+        sent: Arc<Mutex<Vec<String>>>,
+        responses: Arc<Mutex<std::collections::VecDeque<String>>>,
+        cancel: CancellationToken,
+    }
+    impl DeviceTransport for FlipCancelOnFirstSend {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            self.sent.lock().unwrap().push(line.to_owned());
+            if line != "$$" {
+                self.cancel.cancel();
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, _command: RealtimeCommand) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(self.responses.lock().unwrap().pop_front())
+        }
+    }
+    let cancel = CancellationToken::default();
+    let tr = FlipCancelOnFirstSend {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: Arc::new(Mutex::new(
+            ["$32=1", "ok", "<Hold:0>"].map(str::to_owned).into(),
+        )),
+        cancel: cancel.clone(),
+    };
+    let mut dev = DeviceConnection::new(tr.clone());
+    dev.handshake().unwrap();
+    let mut worker = JobWorker::new(dev, cancel);
+    // 第 1 行已经在途完成写入后才置 cancel，内层循环写入第 2 行前必须重查 cancel 并立刻停止
+    let acked = worker
+        .send_lines(["G1 X1".into(), "G1 X2".into(), "G1 X3".into()])
+        .unwrap();
+    assert_eq!(acked, 0);
+    assert_eq!(
+        *tr.sent.lock().unwrap(),
+        vec!["$$".to_owned(), "G1 X1".to_owned()],
+        "置位 cancel 后内层不得再向窗口写入后续行"
+    );
+
+    // 取消路径自身报错（write_realtime 失败）必须保留 Err，不得返回 Ok
+    struct FailCancelRealtime;
+    impl DeviceTransport for FailCancelRealtime {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, _command: RealtimeCommand) -> Result<(), String> {
+            Err("usb disconnected on abort".into())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(Some("ok".into()))
+        }
+    }
+    let mut dev_fail = DeviceConnection::new(FailCancelRealtime);
+    dev_fail.state = DeviceState::Ready;
+    let tok2 = CancellationToken::default();
+    tok2.cancel();
+    let mut worker2 = JobWorker::new(dev_fail, tok2);
+    let err = worker2.send_lines(["G1 X1".into()]).unwrap_err();
+    assert!(err.contains("usb disconnected"), "{err}");
+}
+
+#[test]
+fn cancel_completion_requires_device_proven_hold_ln_and_blocks_estimates() {
+    // 1. 未开启 use_line_numbers 或无 Hold:0|Ln:K 时（即便收到异步 Idle 或 Bf），lines_completed 必须为 0
+    for status_line in [
+        "<Idle|MPos:0,0,0>",
+        "<Hold:0|MPos:0,0,0|Bf:12,120>",
+        "<Hold:1|MPos:0,0,0|Ln:2>",
+    ] {
+        #[derive(Clone)]
+        struct CancelMidSend {
+            sent_lines: Arc<Mutex<Vec<String>>>,
+            responses: Arc<Mutex<std::collections::VecDeque<String>>>,
+            cancel: CancellationToken,
+            cancel_report: &'static str,
+        }
+        impl DeviceTransport for CancelMidSend {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                let mut sent = self.sent_lines.lock().unwrap();
+                sent.push(line.to_owned());
+                if sent
+                    .iter()
+                    .filter(|l| l.starts_with('G') || l.starts_with('N'))
+                    .count()
+                    == 2
+                {
+                    self.responses.lock().unwrap().push_back("ok".into());
+                } else if line == "$$" {
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                }
+                Ok(())
+            }
+            fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+                if cmd == RealtimeCommand::StatusQuery {
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back(self.cancel_report.into());
+                }
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                let line = self.responses.lock().unwrap().pop_front();
+                // 仅在 4 行均已发出且 read_line 消费到这条加工 ACK 时再置 cancel（握手仅 $$ 不会触发）
+                if line.as_deref() == Some("ok")
+                    && self
+                        .sent_lines
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|l| l.starts_with('G') || l.starts_with('N'))
+                        .count()
+                        == 4
+                {
+                    self.cancel.cancel();
+                }
+                Ok(line)
+            }
+        }
+        let tok = CancellationToken::default();
+        let tr = CancelMidSend {
+            sent_lines: Arc::new(Mutex::new(Vec::new())),
+            responses: Arc::new(Mutex::new(Default::default())),
+            cancel: tok.clone(),
+            cancel_report: status_line,
+        };
+        let mut dev = DeviceConnection::new(tr);
+        dev.handshake().unwrap();
+        let prog = Arc::new(JobProgress::default());
+        let mut worker = JobWorker::with_progress(dev, tok, prog.clone());
+        let acked = worker
+            .send_lines([
+                "G1 X1".into(),
+                "G1 X2".into(),
+                "G1 X3".into(),
+                "G1 X4".into(),
+            ])
+            .unwrap();
+        assert_eq!(acked, 1, "{status_line}");
+        assert_eq!(
+            prog.lines_completed.load(Ordering::Relaxed),
+            0,
+            "未启用行号+Hold:0+Ln 时不得凭 Idle/Bf 猜断点: {status_line}"
+        );
+    }
+
+    // 2. 启用 use_line_numbers 并发送 N1..N4，Hold:0|Ln:3 证实第 1..2 行已完成（第 3 行正受 Hold）
+    #[derive(Clone)]
+    struct NumberedHoldGrbl {
+        sent: Arc<Mutex<Vec<String>>>,
+        responses: Arc<Mutex<std::collections::VecDeque<String>>>,
+        machining_acks: Arc<std::sync::atomic::AtomicUsize>,
+        cancel: CancellationToken,
+    }
+    impl DeviceTransport for NumberedHoldGrbl {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(line.to_owned());
+            if line == "$$" {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if line == "$CD" {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .extend(["use_line_numbers: true", "ok"].map(str::to_owned));
+            } else if line.starts_with("$RI=") || line.starts_with('N') {
+                self.responses.lock().unwrap().push_back("ok".into());
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+            if cmd == RealtimeCommand::StatusQuery {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .push_back("<Hold:0|MPos:2,0,0|Ln:3>".into());
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let line = self.responses.lock().unwrap().pop_front();
+            if line.as_deref() == Some("ok")
+                && self.sent.lock().unwrap().iter().any(|l| l.starts_with('N'))
+                && self.machining_acks.fetch_add(1, Ordering::Relaxed) + 1 == 4
+            {
+                self.cancel.cancel();
+            }
+            Ok(line)
+        }
+    }
+    let tok = CancellationToken::default();
+    let tr = NumberedHoldGrbl {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: Arc::new(Mutex::new(Default::default())),
+        machining_acks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        cancel: tok.clone(),
+    };
+    let mut dev = DeviceConnection::new(tr.clone());
+    dev.handshake().unwrap();
+    assert!(dev.load_features(Duration::from_secs(1)));
+    let prog = Arc::new(JobProgress::default());
+    let mut worker = JobWorker::with_progress(dev, tok, prog.clone());
+    // 这里只传 4 行并在 read_line 消费到第 4 个加工 ACK 时置 cancel（模拟 4 行皆收 ok 后仍在运行/Hold:0|Ln:3）
+    let _ = worker
+        .send_lines([
+            "G1 X1".into(),
+            "G1 X2".into(),
+            "G1 X3".into(),
+            "G1 X4".into(),
+        ])
+        .unwrap();
+    let wire = tr.sent.lock().unwrap().clone();
+    assert!(wire.contains(&"N1 G1 X1".to_owned()), "{wire:?}");
+    assert!(wire.contains(&"N3 G1 X3".to_owned()), "{wire:?}");
+    assert_eq!(prog.lines_completed.load(Ordering::Relaxed), 2);
+}

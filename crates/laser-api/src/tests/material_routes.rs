@@ -1036,6 +1036,10 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         &[],
         &jobs,
         &reservations,
+        &Ok(laser_device::ConnectionSpec::Tcp {
+            host: "127.0.0.1".into(),
+            port: 23,
+        }),
         &|_, _, _, _| unreachable!(),
     );
     let cancel_str = String::from_utf8_lossy(&cancel_bytes);
@@ -1125,6 +1129,10 @@ fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_com
         &[],
         &err_jobs,
         &err_reservations,
+        &Ok(laser_device::ConnectionSpec::Tcp {
+            host: "127.0.0.1".into(),
+            port: 23,
+        }),
         &|_, _, _, _| unreachable!(),
     );
     assert!(String::from_utf8_lossy(&err_bytes).starts_with("HTTP/1.1 500"));

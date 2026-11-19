@@ -112,6 +112,15 @@ impl ApiService {
     /// 局域网扫描（2026-11-09 用户要求）：收集候选后逐台只读识别（`?` + `$I`），只返回按 GRBL / FluidNC
     /// 回应的设备；正在加工或待确认停机的目标不另开连接打扰，单独列出。
     pub(crate) fn discover_verified_controllers(&self) -> serde_json::Value {
+        if self.is_shutdown_requested() {
+            return serde_json::json!({
+                "controllers": [],
+                "busy": [],
+                "checked": 0,
+                "not_controllers": 0,
+                "hint": "服务正在关闭，已拒绝局域网设备扫描",
+            });
+        }
         let busy: std::collections::BTreeMap<String, String> = {
             let mut busy = std::collections::BTreeMap::new();
             if let Ok(jobs) = self.active_jobs.lock() {
@@ -317,6 +326,17 @@ impl ApiService {
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
     ) -> (serde_json::Value, Option<laser_device::ConnectionSpec>) {
+        if self.is_shutdown_requested() {
+            return (
+                serde_json::json!({
+                    "connected": false,
+                    "error_code": "host_shutting_down",
+                    "summary": "服务正在关闭，已拒绝建立连接探测",
+                    "attempts": [],
+                }),
+                None,
+            );
+        }
         let mut verified: Option<laser_device::ConnectionSpec> = None;
         let preferred = object
             .get("connection_mode")

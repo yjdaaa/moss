@@ -868,9 +868,41 @@ pub(crate) fn probe_cli(kind: Provider, exe: &Path) -> Option<engine::Capability
     };
     Some(engine::CapabilitySnapshot { version, help })
 }
-/// 运行一次 CLI 探测命令并取回全部输出。stdout / stderr 在等待退出之前就并发读取；
-/// Windows 放进 kill-on-close Job Object，Unix 放进独立进程组并在超时/结束时整组清理。
+/// 运行一次 CLI 探测命令并取回全部输出。
+/// 进程启动后立即挂接平台守卫（Windows 未挂接 Job 且仍在运行时终止并返回 None；Unix 立即拿进程组守卫），
+/// 再通过有界通道并发读取 stdout / stderr；正常退出与接收双路结果共用同一总超时预算，超时/失败分支发终止且不 join 读线程。
 fn run_probe(exe: &Path, args: &[&str]) -> Option<String> {
+    run_probe_with_timeout(exe, args, std::time::Duration::from_secs(15))
+}
+
+fn recv_probe_output_within_budget(
+    rx: &std::sync::mpsc::Receiver<String>,
+    started: std::time::Instant,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return rx.try_recv().ok();
+    }
+    rx.recv_timeout(remaining).ok()
+}
+
+fn collect_probe_outputs(
+    out_rx: &std::sync::mpsc::Receiver<String>,
+    err_rx: &std::sync::mpsc::Receiver<String>,
+    started: std::time::Instant,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let out = recv_probe_output_within_budget(out_rx, started, timeout)?;
+    let err = recv_probe_output_within_budget(err_rx, started, timeout)?;
+    Some(out + &err)
+}
+
+fn run_probe_with_timeout(
+    exe: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
     let mut command = std::process::Command::new(exe);
     command
         .args(args)
@@ -890,47 +922,76 @@ fn run_probe(exe: &Path, args: &[&str]) -> Option<String> {
         command.process_group(0);
     }
     let mut child = command.spawn().ok()?;
-    let stdout = child.stdout.take()?;
+    #[cfg(windows)]
+    let confined = {
+        let job = windows_process::confine_running_process(child.id());
+        if job.is_none() && !matches!(child.try_wait(), Ok(Some(_))) {
+            if child.kill().is_ok() {
+                let _ = child.wait();
+            }
+            return None;
+        }
+        job
+    };
+    #[cfg(unix)]
+    let confined = unix_process::confine_running_group(child.id());
+
+    let Some(stdout) = child.stdout.take() else {
+        let killed = child.kill().is_ok();
+        #[cfg(any(windows, unix))]
+        drop(confined);
+        if killed {
+            let _ = child.wait();
+        } else {
+            let _ = child.try_wait();
+        }
+        return None;
+    };
     let stderr = child.stderr.take();
-    let out = std::thread::spawn(move || {
+
+    let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(1);
+    let (err_tx, err_rx) = std::sync::mpsc::sync_channel::<String>(1);
+    std::thread::spawn(move || {
         let mut text = String::new();
         let _ = stdout.take(256 * 1024).read_to_string(&mut text);
-        text
+        let _ = out_tx.send(text);
     });
-    let err = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(stderr) = stderr {
             let _ = stderr.take(64 * 1024).read_to_string(&mut text);
         }
-        text
+        let _ = err_tx.send(text);
     });
-    #[cfg(windows)]
-    let confined = windows_process::confine_running_process(child.id());
-    #[cfg(unix)]
-    let confined = unix_process::confine_running_group(child.id());
+
     let started = std::time::Instant::now();
-    let mut timed_out = false;
-    loop {
+    let exited = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < std::time::Duration::from_secs(15) => {
-                std::thread::sleep(std::time::Duration::from_millis(50))
+            Ok(Some(_)) => break true,
+            Ok(None) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    break false;
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(25)));
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                timed_out = true;
-                break;
-            }
+            Err(_) => break false,
         }
-    }
-    let text = out.join().ok()? + &err.join().ok()?;
-    #[cfg(any(windows, unix))]
-    drop(confined);
-    if timed_out {
+    };
+    if !exited {
+        let killed = child.kill().is_ok();
+        #[cfg(any(windows, unix))]
+        drop(confined);
+        if killed {
+            let _ = child.wait();
+        } else {
+            let _ = child.try_wait();
+        }
         return None;
     }
-    Some(text)
+    #[cfg(any(windows, unix))]
+    drop(confined);
+    collect_probe_outputs(&out_rx, &err_rx, started, timeout)
 }
 /// 从 CLI 的 JSON 行输出里取最终回答（Claude Code stream-json 的 `result`，Codex --json 最后一条
 /// `agent_message`）；取不到时原样返回。
@@ -1410,6 +1471,77 @@ mod tests {
         assert!(
             text.contains("NV13_PROBE_DRAIN_TAIL"),
             "必须读到夹具输出的末尾"
+        );
+    }
+
+    /// #12：探测超时必须先释放并回收受限进程树（killing descendant holders of stdio pipes），
+    /// 且超时/失败分支不得 join 读线程，避免被逃逸孙进程拖住。
+    #[test]
+    fn probe_timeout_kills_process_tree_before_joining_pipes() {
+        const NAME: &str = "tests::probe_timeout_kills_process_tree_before_joining_pipes";
+        const SENTINEL: &str = "moss_probe_child_sentinel";
+        if std::env::args().any(|arg| arg == SENTINEL) {
+            if std::env::var_os("MOSS_PROBE_GRANDCHILD").is_some() {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                return;
+            }
+            let exe = std::env::current_exe().unwrap();
+            let mut grandchild = std::process::Command::new(exe)
+                .args(["--exact", NAME, "--skip", SENTINEL])
+                .env("MOSS_PROBE_GRANDCHILD", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let _ = grandchild.kill();
+            let _ = grandchild.wait();
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let started = std::time::Instant::now();
+        let result = run_probe_with_timeout(
+            &exe,
+            &["--exact", NAME, "--skip", SENTINEL],
+            std::time::Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+        assert!(result.is_none(), "超时探测必须返回 None");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "超时必须杀进程树且不 join 读线程，不能被持管道的孙进程拖住：{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn probe_channel_returns_at_shared_deadline() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::{Duration, Instant};
+
+        let (out_tx, out_rx) = sync_channel(1);
+        let (err_tx, err_rx) = sync_channel(1);
+        out_tx.send("stdout\n".to_owned()).unwrap();
+        err_tx.send("stderr\n".to_owned()).unwrap();
+        let output =
+            collect_probe_outputs(&out_rx, &err_rx, Instant::now(), Duration::from_secs(3));
+        assert_eq!(output.as_deref(), Some("stdout\nstderr\n"));
+
+        // 模拟 stdout 刚好到达，而 stderr 发送端仍活着。总预算已耗尽，不能重新开始计时。
+        out_tx.send("stdout".to_owned()).unwrap();
+        let now = Instant::now();
+        let started = now - Duration::from_secs(4);
+        assert!(collect_probe_outputs(&out_rx, &err_rx, started, Duration::from_secs(3)).is_none());
+        assert!(now.elapsed() < Duration::from_secs(2));
+        drop(err_tx);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_confine_running_process_returns_none_for_invalid_pid() {
+        assert!(
+            windows_process::confine_running_process(0).is_none(),
+            "Job 绑定失败必须返回 None，不能把未受控进程继续当作正常探测运行"
         );
     }
     // ==== 手动实机验证（默认被 #[ignore] 跳过，且要求显式给出环境变量，与 NV13_DOCKER_TEST_EXE 同类探针）====

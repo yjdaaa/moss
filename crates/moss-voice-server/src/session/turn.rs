@@ -145,6 +145,7 @@ impl<'a> Session<'a> {
             None
         };
         let is_report = matches!(input, TurnInput::Report { .. });
+        let debug_capture_epoch = self.shared.state.debug_capture_epoch();
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
         let (handle, events) = spawn_turn_gated(
             conversation,
@@ -172,6 +173,7 @@ impl<'a> Session<'a> {
             frames_sent: 0,
             command_hint: gated_answer.then_some(command_hint),
             report: is_report,
+            debug_capture_epoch,
             debug_raw_asr: None,
             debug_corrected_asr: None,
             debug_tools: Vec::new(),

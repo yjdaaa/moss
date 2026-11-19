@@ -623,12 +623,46 @@ fn restart_expires_open_approvals_and_workflow_can_be_reapproved() {
         .service
         .approve(&executed.approval_id, &executed.digest, &executed.digest)
         .unwrap();
-    fixture
+    let consumed_executed = fixture
         .service
         .consume(&executed.approval_id, &executed.digest)
         .unwrap();
+    assert_eq!(
+        consumed_executed.outcome.as_ref().and_then(|o| o.phase),
+        Some(ApprovalPhase::Running),
+        "物理审批一旦消费必须立即原子写入 running 阶段"
+    );
+    // 已记录终态 Completed 的已执行审批在重启后保持 Executed；尚处于 running 的另行恢复为 Failed(Unknown)
+    fixture
+        .service
+        .record_outcome(
+            &executed.approval_id,
+            ApprovalOutcome {
+                success: true,
+                message: "已完成".into(),
+                phase: Some(ApprovalPhase::Completed),
+                ..ApprovalOutcome::default()
+            },
+        )
+        .unwrap();
+    let crashed_mid_action = fixture
+        .service
+        .create(new_approval(Some("crashed-mid-action")))
+        .unwrap();
+    fixture
+        .service
+        .approve(
+            &crashed_mid_action.approval_id,
+            &crashed_mid_action.digest,
+            &crashed_mid_action.digest,
+        )
+        .unwrap();
+    fixture
+        .service
+        .consume(&crashed_mid_action.approval_id, &crashed_mid_action.digest)
+        .unwrap();
 
-    assert_eq!(fixture.service.recover_after_restart().unwrap(), 2);
+    assert_eq!(fixture.service.recover_after_restart().unwrap(), 3);
     assert_eq!(
         fixture.service.get(&approved.approval_id).unwrap().status,
         ApprovalStatus::Expired
@@ -640,6 +674,15 @@ fn restart_expires_open_approvals_and_workflow_can_be_reapproved() {
     assert_eq!(
         fixture.service.get(&executed.approval_id).unwrap().status,
         ApprovalStatus::Executed
+    );
+    let crashed = fixture
+        .service
+        .get(&crashed_mid_action.approval_id)
+        .unwrap();
+    assert_eq!(crashed.status, ApprovalStatus::Failed);
+    assert_eq!(
+        crashed.outcome.as_ref().and_then(|o| o.phase),
+        Some(ApprovalPhase::Unknown)
     );
     assert_eq!(
         fixture
@@ -1048,4 +1091,69 @@ fn ttl_and_input_validation() {
         fixture.service.create(missing).unwrap_err().code(),
         "approval_invalid_request"
     );
+}
+
+#[test]
+fn consume_sets_running_and_restart_recovers_missing_outcome_executed_records() {
+    let fixture = Fixture::new();
+    // 1. SafeAction / Framing 等所有物理类型在 consume 当刻原子写入 phase=running
+    let mut safe_req = new_approval(Some("safe-home"));
+    safe_req.kind = ApprovalKind::SafeAction;
+    let safe_rec = fixture.service.create(safe_req).unwrap();
+    fixture
+        .service
+        .approve(&safe_rec.approval_id, &safe_rec.digest, &safe_rec.digest)
+        .unwrap();
+    let consumed_safe = fixture
+        .service
+        .consume(&safe_rec.approval_id, &safe_rec.digest)
+        .unwrap();
+    assert_eq!(
+        consumed_safe.outcome.as_ref().and_then(|o| o.phase),
+        Some(ApprovalPhase::Running)
+    );
+
+    // 2. mark_running 遇到不存在的 ID（影响 0 行）必须报错而非静默返回 Ok(())
+    let mark_err = fixture
+        .service
+        .mark_running("ap_nonexistent", "wf-x")
+        .unwrap_err();
+    assert_eq!(mark_err, ApprovalError::NotFound);
+
+    // 3. 遗留/异常导致 Executed 但 outcome=NULL 的记录在重启恢复时也必须转为 Failed(Unknown)
+    let raw_executed = fixture
+        .service
+        .create(new_approval(Some("null-outcome")))
+        .unwrap();
+    fixture
+        .service
+        .approve(
+            &raw_executed.approval_id,
+            &raw_executed.digest,
+            &raw_executed.digest,
+        )
+        .unwrap();
+    {
+        let now = *fixture.clock.lock().unwrap();
+        let db = fixture.db.lock().unwrap();
+        assert!(db.consume_approval(&raw_executed.approval_id, now).unwrap());
+    }
+    assert_eq!(
+        fixture
+            .service
+            .get(&raw_executed.approval_id)
+            .unwrap()
+            .status,
+        ApprovalStatus::Executed
+    );
+    assert_eq!(fixture.service.recover_after_restart().unwrap(), 2);
+    for id in [&safe_rec.approval_id, &raw_executed.approval_id] {
+        let rec = fixture.service.get(id).unwrap();
+        assert_eq!(rec.status, ApprovalStatus::Failed, "{id}");
+        assert_eq!(
+            rec.outcome.as_ref().and_then(|o| o.phase),
+            Some(ApprovalPhase::Unknown),
+            "{id}"
+        );
+    }
 }

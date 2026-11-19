@@ -89,6 +89,10 @@ impl BuiltinVoice {
             None => None,
         };
         if debug_enable_patch.is_some() || clear_debug_patch.is_some() {
+            let server_guard = self
+                .server
+                .lock()
+                .map_err(|_| internal("内置语音服务状态锁失败"))?;
             if let Some(enabled) = debug_enable_patch {
                 moss_voice::settings::update_voice(&self.settings_file(), |s| {
                     s.builtin_local.chat_log_enabled = enabled;
@@ -97,22 +101,27 @@ impl BuiltinVoice {
                 .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
                 self.debug_trace_enabled
                     .store(enabled, std::sync::atomic::Ordering::Release);
-            }
-            if clear_debug_patch == Some(true)
-                && let Ok(db) = self.host.db.lock()
-            {
-                let _ = db.clear_voice_chat_logs();
-            }
-            if let Ok(guard) = self.server.lock()
-                && let Some(server) = guard.as_ref()
-            {
-                if let Some(enabled) = debug_enable_patch {
+                if !enabled {
+                    self.chat_log_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if let Some(server) = server_guard.as_ref() {
                     server.set_debug_enabled(enabled);
                 }
-                if clear_debug_patch == Some(true) {
+            }
+            if clear_debug_patch == Some(true) {
+                let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                self.chat_log_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                db.clear_voice_chat_logs().map_err(db_failure)?;
+                if let Some(server) = server_guard.as_ref() {
                     server.clear_debug_traces();
                 }
+            } else if debug_enable_patch == Some(false) {
+                // 等待正在落库的在途 record_chat_turn_at 退出或观测到新开关/代次后再返回
+                let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
             }
+            drop(server_guard);
             let only_debug = patch.as_object().is_some_and(|obj| {
                 obj.keys().all(|k| {
                     matches!(

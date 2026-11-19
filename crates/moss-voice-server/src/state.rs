@@ -61,36 +61,9 @@ pub fn scrub_debug_text(raw: &str) -> String {
     scrub_debug_text_flagged(raw).0
 }
 
-/// 同 [`scrub_debug_text`]，另返回是否截断过（超过 240 字只留前 240 字时为真）。
+/// 同 [`scrub_debug_text`]，另返回是否截断过（超过 2000 字只留前 2000 字时为真）。
 pub fn scrub_debug_text_flagged(raw: &str) -> (String, bool) {
-    let mut out = String::with_capacity(raw.len().min(MAX_DEBUG_TEXT_CHARS));
-    let mut words = raw.split_whitespace().peekable();
-    let mut truncated = false;
-    while let Some(token) = words.next() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        let lower = token.to_ascii_lowercase();
-        let masked = if lower.starts_with("sk-")
-            || lower.contains("token=")
-            || lower.contains("api_key")
-            || lower.contains("apikey")
-            || lower.contains("password")
-            || lower.contains("secret")
-            || lower.starts_with("bearer")
-        {
-            "[REDACTED]"
-        } else {
-            token
-        };
-        out.push_str(masked);
-        let count = out.chars().count();
-        if count >= MAX_DEBUG_TEXT_CHARS {
-            truncated = count > MAX_DEBUG_TEXT_CHARS || words.peek().is_some();
-            break;
-        }
-    }
-    (out.chars().take(MAX_DEBUG_TEXT_CHARS).collect(), truncated)
+    moss_voice_providers::scrub_text_with_options(raw, false, MAX_DEBUG_TEXT_CHARS, false)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -421,14 +394,24 @@ pub struct LiveState {
     sessions: Mutex<BTreeMap<String, SessionView>>,
     log: Arc<DiagnosticsLog>,
     debug_enabled: std::sync::atomic::AtomicBool,
+    debug_epoch: Arc<std::sync::atomic::AtomicU64>,
     debug_traces: Mutex<VecDeque<TurnDebugTrace>>,
 }
 
 impl LiveState {
     /// 事件与耗时写进宿主持有的记录本（服务停止后仍保留）。
+    #[cfg(test)]
     pub fn with_log(log: Arc<DiagnosticsLog>) -> Self {
+        Self::with_log_and_epoch(log, Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
+    pub fn with_log_and_epoch(
+        log: Arc<DiagnosticsLog>,
+        debug_epoch: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         Self {
             log,
+            debug_epoch,
             ..Self::default()
         }
     }
@@ -443,6 +426,12 @@ impl LiveState {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// 在对话轮开始时绑定当前调试记录代次。
+    pub(crate) fn debug_capture_epoch(&self) -> Option<u64> {
+        let epoch = self.debug_epoch.load(std::sync::atomic::Ordering::Acquire);
+        self.debug_enabled().then_some(epoch)
+    }
+
     pub fn set_debug_enabled(&self, enabled: bool) {
         self.debug_enabled
             .store(enabled, std::sync::atomic::Ordering::Release);
@@ -454,10 +443,25 @@ impl LiveState {
     pub fn clear_debug_traces(&self) {
         if let Ok(mut traces) = self.debug_traces.lock() {
             traces.clear();
+            self.debug_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.debug_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    pub fn finish_debug_trace(&self, mut trace: TurnDebugTrace) -> Option<TurnDebugTrace> {
+    #[cfg(test)]
+    pub fn finish_debug_trace(&self, trace: TurnDebugTrace) -> Option<TurnDebugTrace> {
+        self.finish_debug_trace_with_epoch(trace, self.debug_capture_epoch()?)
+            .map(|(scrubbed, _)| scrubbed)
+    }
+
+    pub fn finish_debug_trace_with_epoch(
+        &self,
+        mut trace: TurnDebugTrace,
+        captured_epoch: u64,
+    ) -> Option<(TurnDebugTrace, u64)> {
         if !self.debug_enabled() {
             return None;
         }
@@ -488,17 +492,23 @@ impl LiveState {
             .collect();
         trace.tools_dropped = total_tools.saturating_sub(MAX_DEBUG_TOOLS);
         trace.truncated = truncated || trace.tools_dropped > 0;
-        if let Ok(mut traces) = self.debug_traces.lock() {
+        let epoch = if let Ok(mut traces) = self.debug_traces.lock() {
             if !self.debug_enabled() {
                 traces.clear();
+                return None;
+            }
+            if captured_epoch != self.debug_epoch.load(std::sync::atomic::Ordering::Acquire) {
                 return None;
             }
             traces.push_back(trace.clone());
             while traces.len() > MAX_DEBUG_TRACES {
                 traces.pop_front();
             }
-        }
-        Some(trace)
+            captured_epoch
+        } else {
+            return None;
+        };
+        Some((trace, epoch))
     }
 
     pub fn debug_traces(&self) -> Vec<TurnDebugTrace> {
@@ -912,6 +922,82 @@ mod tests {
 
         state.set_debug_enabled(false);
         assert!(state.debug_traces().is_empty(), "关闭开关立即清空内存缓存");
+
+        // 停用与清空都会推进 epoch，便于持久化侧识别在途/过期轮次
+        let epoch_shared = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let epoch_state =
+            LiveState::with_log_and_epoch(DiagnosticsLog::new(), epoch_shared.clone());
+        epoch_state.set_debug_enabled(true);
+        let (_, ep0) = epoch_state
+            .finish_debug_trace_with_epoch(sample(1), 0)
+            .unwrap();
+        assert_eq!(ep0, 0);
+        epoch_state.clear_debug_traces();
+        assert!(
+            epoch_state
+                .finish_debug_trace_with_epoch(sample(2), ep0)
+                .is_none()
+        );
+        assert!(epoch_state.debug_traces().is_empty());
+        let current_epoch = epoch_state.debug_capture_epoch().unwrap();
+        let (_, ep1) = epoch_state
+            .finish_debug_trace_with_epoch(sample(2), current_epoch)
+            .unwrap();
+        assert_eq!(ep1, 1);
+        epoch_state.set_debug_enabled(false);
+        assert_eq!(epoch_shared.load(std::sync::atomic::Ordering::Acquire), 2);
+        assert!(
+            epoch_state
+                .finish_debug_trace_with_epoch(sample(3), ep1)
+                .is_none()
+        );
+    }
+
+    /// #11：空格分隔、Authorization Bearer、键值引号写法及带凭据 URL 都必须连带掩码实际值。
+    #[test]
+    fn finish_debug_trace_redacts_space_separated_and_kv_credentials() {
+        let state = LiveState::default();
+        state.set_debug_enabled(true);
+        let trace = state
+            .finish_debug_trace(TurnDebugTrace {
+                id: 0,
+                at_ms: 2_000,
+                device_id: "dev-sec".into(),
+                session_id: "s-sec".into(),
+                turn: 1,
+                at: 2,
+                raw_asr: "Bearer fake_val Authorization Bearer fake_bearer2".into(),
+                corrected_asr: "api_key fake_api_val password fake_pw_val --token fake_cli_tok"
+                    .into(),
+                tools: vec![DebugToolTrace {
+                    name: "call".into(),
+                    arguments: r#"{"token":"fake_json_tok","ok":"椴木"}"#.into(),
+                    result: "wss://fakeuser:fakepass@example.invalid/ws?k=fake1&token=fake2".into(),
+                }],
+                reply: "tokens_used: 120 done".into(),
+                spoken: "done".into(),
+                outcome: "done".into(),
+                truncated: false,
+                tools_dropped: 0,
+            })
+            .unwrap();
+        let serialized = serde_json::to_string(&trace).unwrap();
+        for leak in [
+            "fake_val",
+            "fake_bearer2",
+            "fake_api_val",
+            "fake_pw_val",
+            "fake_cli_tok",
+            "fake_json_tok",
+            "fakeuser",
+            "fakepass",
+            "fake1",
+            "fake2",
+        ] {
+            assert!(!serialized.contains(leak), "{leak} leaked in {serialized}");
+        }
+        assert!(serialized.contains("tokens_used: 120"));
+        assert!(serialized.contains("椴木"));
     }
 
     /// n68：错误与警告单独缓冲，日常记录再多也挤不掉；被覆盖的条数如实计数。

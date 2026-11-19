@@ -217,7 +217,8 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                 home_control,
                 lifecycle: Mutex::new(()),
                 server: Arc::new(Mutex::new(None)),
-                debug_trace_enabled: std::sync::atomic::AtomicBool::new(initial_chat_log),
+                debug_trace_enabled: Arc::new(std::sync::atomic::AtomicBool::new(initial_chat_log)),
+                chat_log_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 last_error: Mutex::new(None),
                 diagnostics,
                 music_warning: Mutex::new(None),
@@ -482,25 +483,31 @@ impl BuiltinVoice {
                         udp_port: settings.builtin_udp_port,
                     }),
                 full_font_dir: Some(self.full_font_dir()),
+                debug_epoch: self.chat_log_epoch.clone(),
                 ..defaults
             };
             let registry = Arc::new(DbRegistry {
                 db: self.host.db.clone(),
                 host: self.host.clone(),
                 settings_file: self.settings_file(),
+                chat_log_enabled: self.debug_trace_enabled.clone(),
+                chat_log_epoch: self.chat_log_epoch.clone(),
             });
             let server = VoiceServer::start(config, registry)
                 .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
-            let chat_log_on = settings.builtin_local.chat_log_enabled;
-            self.debug_trace_enabled
-                .store(chat_log_on, std::sync::atomic::Ordering::Release);
-            server.set_debug_enabled(chat_log_on);
             server.prewarm_speech_cache();
             {
                 let mut guard = self
                     .server
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // 同 server 锁重读最新设置，防止启动慢路径期间用户关闭对话记录却被开场旧快照覆盖
+                let chat_log_on = moss_voice::settings::load(&self.settings_file())
+                    .builtin_local
+                    .chat_log_enabled;
+                self.debug_trace_enabled
+                    .store(chat_log_on, std::sync::atomic::Ordering::Release);
+                server.set_debug_enabled(chat_log_on);
                 *guard = Some(server);
             }
             if let Ok(mut slot) = self.helper.lock() {

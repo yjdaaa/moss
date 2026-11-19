@@ -338,6 +338,15 @@ impl crate::ApiService {
                 record.approval_id,
                 error.message()
             );
+            self.emit_event(crate::LaserEvent {
+                level: crate::LaserEventLevel::Warn,
+                text: format!(
+                    "审批 {} 终态写回失败（已保持 running 防止误重放）",
+                    record.approval_id
+                ),
+                hint: Some("请检查运行目录数据库权限与磁盘空间，核对设备实际执行情况".into()),
+                detail: Some(error.message()),
+            });
         }
     }
 }

@@ -181,8 +181,10 @@ mod imp {
         /// 串行化启停与重启编排，避免加载本地模型/扫描音乐时长时间阻塞 `self.server` 状态轮询。
         lifecycle: Mutex<()>,
         server: Arc<Mutex<Option<VoiceServer>>>,
-        /// 仅内存、重启即清的实时对话调试流总开关（默认 false，不落盘）
-        debug_trace_enabled: std::sync::atomic::AtomicBool,
+        /// 仅内存、重启即清的实时对话调试流总开关（与持久配置同步，并与 DbRegistry 共享）
+        debug_trace_enabled: Arc<std::sync::atomic::AtomicBool>,
+        /// 对话记录关闭/清空代次：每次关闭或清表递增，防止在途轮次回写数据库
+        chat_log_epoch: Arc<std::sync::atomic::AtomicU64>,
         memory: Arc<MemoryService>,
         speaker: Arc<moss_voice_server::speaker_enrollment::SpeakerEnrollment>,
         speaker_backend: Arc<DesktopSpeakerBackend>,

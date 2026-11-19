@@ -179,13 +179,16 @@ impl Job {
 }
 
 /// Kill-on-close Job 守卫：把一个已经启动的探测进程（`--version` / `--help`）约束进 Job。
-/// 守卫 drop 时关闭 Job 句柄，任何幸存的探测进程树一起结束，不残留孤儿进程。
-/// 绑定失败（例如进程已属于别的 Job）时返回 None，探测仍照常运行，只是不受 Job 约束。
-pub(super) struct ConfineGuard(
-    #[expect(dead_code, reason = "RAII guard keeps Job handle alive until Drop")] Option<Job>,
-);
-pub(super) fn confine_running_process(pid: u32) -> ConfineGuard {
-    ConfineGuard(try_confine_running_process(pid))
+/// 守卫 drop 时主动终止并关闭 Job 句柄，任何幸存的探测进程树一起结束，不残留孤儿进程。
+/// 绑定失败（例如进程已属于不可嵌套的 Job）时返回 None，由调用方终止并回收子进程。
+pub(super) struct ConfineGuard(Job);
+impl Drop for ConfineGuard {
+    fn drop(&mut self) {
+        let _ = self.0.terminate();
+    }
+}
+pub(super) fn confine_running_process(pid: u32) -> Option<ConfineGuard> {
+    try_confine_running_process(pid).map(ConfineGuard)
 }
 fn try_confine_running_process(pid: u32) -> Option<Job> {
     // SAFETY: PROCESS_SET_QUOTA|PROCESS_TERMINATE 仅用于 Job 绑定与兜底终止；

@@ -275,12 +275,13 @@ fn wait_status_report<T: DeviceTransport>(
     None
 }
 
-fn send_gcode_lines<T: DeviceTransport>(
+fn send_gcode_lines_cancellable<T: DeviceTransport>(
     device: &mut DeviceConnection<T>,
     lines: &[String],
+    cancel: Option<&laser_device::CancellationToken>,
 ) -> Result<(), String> {
     for line in lines {
-        device.send_line_wait_ack(line)?;
+        device.send_line_wait_ack_cancellable(line, cancel)?;
     }
     Ok(())
 }
@@ -298,6 +299,16 @@ pub fn execute_laser_safe_action_with_gate(
     args: &LaserSafeActionArgs,
     opener: &TransportOpener,
     allowed: &dyn Fn() -> bool,
+) -> ToolCallResult {
+    execute_laser_safe_action_with_gate_and_cancel(args, opener, allowed, None)
+}
+
+/// 在授权门禁基础上绑定 `CancellationToken`，确保独立 `home`/`unlock`/点动等动作在握手、自动宏、等 Idle 与行发送全阶段可被急停/退出实时中止。
+pub fn execute_laser_safe_action_with_gate_and_cancel(
+    args: &LaserSafeActionArgs,
+    opener: &TransportOpener,
+    allowed: &dyn Fn() -> bool,
+    cancel: Option<&laser_device::CancellationToken>,
 ) -> ToolCallResult {
     let action = args.action.trim().to_ascii_lowercase();
     let confirmed = args.confirmed.unwrap_or(false);
@@ -461,6 +472,9 @@ pub fn execute_laser_safe_action_with_gate(
     if !allowed() {
         return ToolCallResult::err("语音设备授权已失效，操作未执行");
     }
+    if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) {
+        return ToolCallResult::err("操作在建立设备连接前已取消，未连接设备");
+    }
     let timeout = timeout_from(args.timeout);
     let transport = match opener(&spec, timeout) {
         Ok(transport) => transport,
@@ -468,6 +482,10 @@ pub fn execute_laser_safe_action_with_gate(
     };
     if !allowed() {
         return ToolCallResult::err("连接期间设备授权已失效，操作未执行");
+    }
+    if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) {
+        let _ = transport.write_realtime(RealtimeCommand::EmergencyStop);
+        return ToolCallResult::err("连接期间操作已取消，已发送急停 0x18 兜底");
     }
     let mut device = DeviceConnection::new(transport);
     match plan {
@@ -509,8 +527,16 @@ pub fn execute_laser_safe_action_with_gate(
         Plan::Lines(lines, label) => {
             // 运动/解锁类顺序命令必须先握手：$32=1 门禁 + 设备可响应
             let needs_laser_mode = !matches!(action.as_str(), "unlock" | "laser_off");
-            match device.handshake_with_deadline(timeout) {
+            match device.handshake_with_deadline_cancellable(timeout, cancel) {
                 Ok(_) => {}
+                Err(error) if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) => {
+                    let _ = device
+                        .transport
+                        .write_realtime(RealtimeCommand::EmergencyStop);
+                    return ToolCallResult::err(format!(
+                        "{label} 在握手阶段已取消，已发送急停 0x18 兜底 ({target}): {error}"
+                    ));
+                }
                 Err(error) if needs_laser_mode => {
                     return ToolCallResult::err(format!("{label} 拒绝执行：{error}"));
                 }
@@ -524,32 +550,64 @@ pub fn execute_laser_safe_action_with_gate(
                     device.state = laser_device::DeviceState::Ready;
                 }
             }
+            if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) {
+                let _ = device
+                    .transport
+                    .write_realtime(RealtimeCommand::EmergencyStop);
+                return ToolCallResult::err(format!(
+                    "{label} 在预检阶段已取消，已发送急停 0x18 兜底 ({target})"
+                ));
+            }
             // FluidNC：读取 $CD 以感知 after_unlock / after_homing 自动宏；旧 GRBL 静默跳过
             device.load_features(timeout);
             if !allowed() {
                 return ToolCallResult::err("预检期间设备授权已失效，操作未执行");
             }
+            if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) {
+                let _ = device
+                    .transport
+                    .write_realtime(RealtimeCommand::EmergencyStop);
+                return ToolCallResult::err(format!(
+                    "{label} 已取消，已发送急停 0x18 兜底 ({target})"
+                ));
+            }
             let outcome = match action.as_str() {
                 // 解锁 / 回零：等 ok 后继续等到 Idle（FluidNC 会在其后执行自动宏，Home 状态视为忙碌）
-                "unlock" => device.unlock(),
-                "home" => device.home(),
-                _ => send_gcode_lines(&mut device, &lines),
+                "unlock" => device.unlock_cancellable(cancel),
+                "home" => device.home_cancellable(cancel),
+                _ => send_gcode_lines_cancellable(&mut device, &lines, cancel),
             };
             match outcome {
+                Ok(()) if cancel.is_some_and(laser_device::CancellationToken::is_cancelled) => {
+                    let _ = device
+                        .transport
+                        .write_realtime(RealtimeCommand::EmergencyStop);
+                    ToolCallResult::err(format!(
+                        "{label} 执行期间收到取消/急停，已发送急停 0x18 兜底 ({target})"
+                    ))
+                }
                 Ok(()) => ToolCallResult::with_detail(
                     true,
                     format!("{label} 已执行 ({target})"),
                     lines.join(" | "),
                 ),
                 Err(error) => {
-                    let _ = device
+                    let estop_res = device
                         .transport
                         .write_realtime(RealtimeCommand::EmergencyStop);
                     let diagnostic = laser_device::diagnose_device_message(&error)
                         .map(|d| format!(" ({d})"))
                         .unwrap_or_default();
+                    let estop_note = match estop_res {
+                        Ok(()) => "已发送急停 0x18 兜底",
+                        Err(ref estop_err) => {
+                            return ToolCallResult::err(format!(
+                                "{label} 执行失败 ({target})，且急停 0x18 兜底失败（{estop_err}）: {error}{diagnostic}"
+                            ));
+                        }
+                    };
                     ToolCallResult::err(format!(
-                        "{label} 执行失败 ({target})，已发送急停兜底: {error}{diagnostic}"
+                        "{label} 执行失败 ({target})，{estop_note}: {error}{diagnostic}"
                     ))
                 }
             }

@@ -160,64 +160,337 @@ impl fmt::Display for ProviderError {
     }
 }
 
-/// 诊断文字脱敏（记录与诊断、诊断包共用）：疑似密钥的词、`token=` 一类参数、`Bearer` 后的值、
-/// 地址里的账号密码与查询串替换为 `[REDACTED]`；IPv4 地址替换为 `<ip>`；最长保留 2000 字并标注截断。
+/// 诊断文字脱敏（记录与诊断、诊断包共用）：疑似密钥的词、`token=` / `key: val` 一类键值、
+/// `Bearer` / `Basic` 及敏感标签词后跟随的值、地址里的账号密码与查询串替换为 `[REDACTED]`；
+/// IPv4 地址替换为 `<ip>`；最长保留 2000 字并标注截断。
 pub fn scrub_diagnostic_text(raw: &str) -> String {
-    const MAX_CHARS: usize = 2000;
-    let mut out = String::with_capacity(raw.len().min(MAX_CHARS));
-    let mut previous_bearer = false;
-    for (index, token) in raw.split(' ').enumerate() {
-        if index > 0 {
-            out.push(' ');
-        }
-        let lower = token.to_ascii_lowercase();
-        // `Bearer` 后面紧跟的令牌，或本身看起来像密钥的片段，一律遮掉
-        let masked = if (previous_bearer && !token.is_empty())
-            || lower.starts_with("sk-")
-            || lower.contains("token=")
-            || lower.contains("api_key")
-            || lower.contains("apikey")
-            || lower.contains("api-key")
-            || lower.contains("password")
-            || lower.contains("secret")
-            || lower.contains("authorization")
-        {
-            "[REDACTED]".to_owned()
-        } else if let Some(at) = lower.find("://") {
-            mask_url(token, at)
-        } else {
-            mask_ipv4(token)
-        };
-        previous_bearer = lower == "bearer" || lower == "basic";
-        out.push_str(&masked);
-    }
-    if out.chars().count() > MAX_CHARS {
-        let mut cut: String = out.chars().take(MAX_CHARS).collect();
-        cut.push_str("…（已截断）");
-        return cut;
-    }
-    out
+    scrub_text_with_options(raw, true, 2000, true).0
 }
 
-/// `scheme://user:pass@host:port/path?query` → 去掉账号密码与查询串，主机若是 IP 则替换为 `<ip>`。
-fn mask_url(token: &str, scheme_end: usize) -> String {
+/// 通用文本凭据脱敏：支持键值写法、空白分隔的标签值、URL userinfo/查询串/fragment、
+/// `sk-` 密钥与可选 IPv4 掩码；返回 `(脱敏后文本, 是否超过 max_chars 被截断)`。
+pub fn scrub_text_with_options(
+    raw: &str,
+    mask_ips: bool,
+    max_chars: usize,
+    append_ellipsis: bool,
+) -> (String, bool) {
+    let chars: Vec<char> = raw.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let mut out = String::with_capacity(raw.len().min(max_chars.max(64)));
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some((next_idx, replaced)) = try_mask_url(&chars, &lower, index, mask_ips) {
+            out.push_str(&replaced);
+            index = next_idx;
+            continue;
+        }
+        if let Some((next_idx, replaced)) = try_mask_auth_scheme(&chars, &lower, index) {
+            out.push_str(&replaced);
+            index = next_idx;
+            continue;
+        }
+        if let Some((next_idx, replaced)) = try_mask_kv_or_label(&chars, &lower, index) {
+            out.push_str(&replaced);
+            index = next_idx;
+            continue;
+        }
+        if let Some(next_idx) = try_mask_sk_token(&chars, &lower, index) {
+            out.push_str("[REDACTED]");
+            index = next_idx;
+            continue;
+        }
+        if mask_ips && let Some(next_idx) = try_mask_ipv4(&chars, index) {
+            out.push_str("<ip>");
+            index = next_idx;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+
+    if max_chars > 0 && out.chars().count() > max_chars {
+        let mut cut: String = out.chars().take(max_chars).collect();
+        if append_ellipsis {
+            cut.push_str("…（已截断）");
+        }
+        return (cut, true);
+    }
+    (out, false)
+}
+
+fn is_value_stop(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '&' | '}' | ']' | ')' | ';')
+}
+
+fn is_already_redacted(val: &[char]) -> bool {
+    val.iter().all(|c| *c == '*')
+}
+
+fn starts_with_ascii_slice(lower: &[char], index: usize, needle: &str) -> bool {
+    let bytes = needle.as_bytes();
+    if index + bytes.len() > lower.len() {
+        return false;
+    }
+    lower[index..index + bytes.len()]
+        .iter()
+        .zip(bytes)
+        .all(|(c, b)| *c == char::from(*b))
+}
+
+fn try_mask_url(
+    chars: &[char],
+    lower: &[char],
+    index: usize,
+    mask_ips: bool,
+) -> Option<(usize, String)> {
+    if index > 0 && chars[index - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let scheme = ["https://", "http://", "wss://", "ws://"]
+        .into_iter()
+        .find(|s| starts_with_ascii_slice(lower, index, s))?;
+    let mut end = index + scheme.len();
+    while end < chars.len() {
+        // 已脱敏的 URL 中占位符是完整内容，不能把其括号误认成 URL 结束。
+        if starts_with_ascii_slice(lower, end, "[redacted]") {
+            end += "[redacted]".len();
+        } else if starts_with_ascii_slice(lower, end, "<ip>") {
+            end += "<ip>".len();
+        } else if chars[end].is_whitespace()
+            || matches!(
+                chars[end],
+                '"' | '\'' | '<' | '>' | ')' | ']' | '}' | ',' | ';'
+            )
+        {
+            break;
+        } else {
+            end += 1;
+        }
+    }
+    let raw_url: String = chars[index..end].iter().collect();
+    Some((end, mask_url(&raw_url, scheme.len() - 3, mask_ips)))
+}
+
+fn try_mask_auth_scheme(chars: &[char], lower: &[char], index: usize) -> Option<(usize, String)> {
+    if index > 0 && (chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_') {
+        return None;
+    }
+    let scheme_len = if starts_with_ascii_slice(lower, index, "bearer") {
+        6
+    } else if starts_with_ascii_slice(lower, index, "basic") {
+        5
+    } else {
+        return None;
+    };
+    let mut cursor = index + scheme_len;
+    if cursor >= chars.len() {
+        return None;
+    }
+    if matches!(chars[cursor], ':' | '=') {
+        cursor += 1;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    } else if chars[cursor].is_whitespace() {
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    } else {
+        return None;
+    }
+    if cursor < chars.len() && matches!(chars[cursor], '"' | '\'' | '\\') {
+        cursor += 1;
+    }
+    if starts_with_ascii_slice(lower, cursor, "[redacted]") {
+        return None;
+    }
+    let value_start = cursor;
+    while cursor < chars.len() && !is_value_stop(chars[cursor]) {
+        cursor += 1;
+    }
+    if cursor == value_start || is_already_redacted(&chars[value_start..cursor]) {
+        return None;
+    }
+    let mut replaced: String = chars[index..value_start].iter().collect();
+    replaced.push_str("[REDACTED]");
+    Some((cursor, replaced))
+}
+
+fn try_mask_kv_or_label(chars: &[char], lower: &[char], index: usize) -> Option<(usize, String)> {
+    const STRONG_MARKERS: [&str; 12] = [
+        "client_secret",
+        "private_key",
+        "access_token",
+        "authorization",
+        "api_key",
+        "api-key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "x-api-key",
+        "token",
+    ];
+    let marker = STRONG_MARKERS
+        .into_iter()
+        .find(|m| starts_with_ascii_slice(lower, index, m))?;
+    let after_marker = index + marker.len();
+    if after_marker < chars.len()
+        && (chars[after_marker].is_ascii_alphabetic() || chars[after_marker] == '_')
+    {
+        return None;
+    }
+
+    let mut cursor = after_marker;
+    while cursor < chars.len() && matches!(chars[cursor], '"' | '\'' | '\\') {
+        cursor += 1;
+    }
+    while cursor < chars.len() && matches!(chars[cursor], ' ' | '\t') {
+        cursor += 1;
+    }
+    if cursor < chars.len() && matches!(chars[cursor], ':' | '=') {
+        cursor += 1;
+        while cursor < chars.len() && matches!(chars[cursor], ' ' | '\t' | '"' | '\'' | '\\') {
+            cursor += 1;
+        }
+        return finish_label_mask(chars, lower, index, cursor);
+    }
+
+    // 空白分隔的敏感标签词 + 值（如 `Authorization Bearer fake_val`、`api_key fake_val`、`password fake_val`、`--token fake_val`）
+    let had_ws = chars[after_marker..cursor]
+        .iter()
+        .any(|c| c.is_whitespace());
+    if !had_ws || cursor >= chars.len() {
+        return None;
+    }
+    if matches!(chars[cursor], '"' | '\'' | '\\') {
+        cursor += 1;
+    }
+    finish_label_mask(chars, lower, index, cursor)
+}
+
+fn skip_optional_auth_scheme(chars: &[char], lower: &[char], mut cursor: usize) -> usize {
+    for scheme in ["bearer", "basic"] {
+        if starts_with_ascii_slice(lower, cursor, scheme) {
+            let s_end = cursor + scheme.len();
+            if s_end < chars.len() && chars[s_end].is_whitespace() {
+                cursor = s_end;
+                while cursor < chars.len() && matches!(chars[cursor], ' ' | '\t') {
+                    cursor += 1;
+                }
+                if cursor < chars.len() && matches!(chars[cursor], '"' | '\'' | '\\') {
+                    cursor += 1;
+                }
+                return cursor;
+            }
+        }
+    }
+    cursor
+}
+
+fn finish_label_mask(
+    chars: &[char],
+    lower: &[char],
+    index: usize,
+    cursor: usize,
+) -> Option<(usize, String)> {
+    let mut val_start = skip_optional_auth_scheme(chars, lower, cursor);
+    if starts_with_ascii_slice(lower, val_start, "[redacted]") {
+        return None;
+    }
+    let mut val_end = val_start;
+    while val_end < chars.len()
+        && !is_value_stop(chars[val_end])
+        && !(chars[val_end] == '\\' && chars.get(val_end + 1) == Some(&'"'))
+    {
+        val_end += 1;
+    }
+    if val_end == val_start && val_start > cursor {
+        // 形如 `Authorization: Bearer` 后面没有实际凭据值时，退回掩码 `Bearer` 本身或忽略
+        val_start = cursor;
+        val_end = val_start;
+        while val_end < chars.len() && !is_value_stop(chars[val_end]) {
+            val_end += 1;
+        }
+    }
+    if val_end == val_start || is_already_redacted(&chars[val_start..val_end]) {
+        return None;
+    }
+    let mut replaced: String = chars[index..val_start].iter().collect();
+    replaced.push_str("[REDACTED]");
+    Some((val_end, replaced))
+}
+
+fn try_mask_sk_token(chars: &[char], lower: &[char], index: usize) -> Option<usize> {
+    if index > 0 && chars[index - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    if !starts_with_ascii_slice(lower, index, "sk-") {
+        return None;
+    }
+    let mut cursor = index + 3;
+    if cursor >= chars.len() || is_value_stop(chars[cursor]) {
+        return None;
+    }
+    while cursor < chars.len() && !is_value_stop(chars[cursor]) {
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn try_mask_ipv4(chars: &[char], index: usize) -> Option<usize> {
+    let boundary = index == 0 || !(chars[index - 1].is_ascii_digit() || chars[index - 1] == '.');
+    if !boundary || !chars[index].is_ascii_digit() {
+        return None;
+    }
+    let mut cursor = index;
+    let mut parts = 0;
+    loop {
+        let start = cursor;
+        while cursor < chars.len() && chars[cursor].is_ascii_digit() && cursor - start < 4 {
+            cursor += 1;
+        }
+        let digits: String = chars[start..cursor].iter().collect();
+        if digits.is_empty() || digits.len() > 3 || digits.parse::<u16>().map_or(true, |v| v > 255)
+        {
+            return None;
+        }
+        parts += 1;
+        if parts == 4 || cursor >= chars.len() || chars[cursor] != '.' {
+            break;
+        }
+        cursor += 1;
+    }
+    let ends_cleanly = cursor >= chars.len()
+        || !(chars[cursor].is_ascii_digit()
+            || chars[cursor] == '.'
+                && cursor + 1 < chars.len()
+                && chars[cursor + 1].is_ascii_digit());
+    (parts == 4 && ends_cleanly).then_some(cursor)
+}
+
+/// `scheme://user:pass@host:port/path?query` → 去掉账号密码与查询串/fragment，主机若是 IP 且 `mask_ips` 为真则替换为 `<ip>`。
+fn mask_url(token: &str, scheme_end: usize, mask_ips: bool) -> String {
     let (scheme, rest) = token.split_at(scheme_end + 3);
-    let (rest, had_query) = match rest.find(['?', '#']) {
-        Some(q) => (&rest[..q], true),
-        None => (rest, false),
+    let (rest, suffix) = match rest.find(['?', '#']) {
+        Some(q) if rest[q..].starts_with('?') => (&rest[..q], "?[REDACTED]"),
+        Some(q) => (&rest[..q], "#[REDACTED]"),
+        None => (rest, ""),
     };
     let (authority, path) = match rest.find('/') {
         Some(p) => (&rest[..p], &rest[p..]),
         None => (rest, ""),
     };
-    let host = match authority.rfind('@') {
-        Some(at) => format!("[REDACTED]@{}", mask_ipv4(&authority[at + 1..])),
-        None => mask_ipv4(authority),
+    let maybe_mask_host = |h: &str| {
+        if mask_ips { mask_ipv4(h) } else { h.to_owned() }
     };
-    format!(
-        "{scheme}{host}{path}{}",
-        if had_query { "?[REDACTED]" } else { "" }
-    )
+    let host = match authority.rfind('@') {
+        Some(at) => format!("[REDACTED]@{}", maybe_mask_host(&authority[at + 1..])),
+        None => maybe_mask_host(authority),
+    };
+    format!("{scheme}{host}{path}{suffix}")
 }
 
 /// 把文字里形如 `a.b.c.d`（每段 0..=255）的 IPv4 地址替换成 `<ip>`。
@@ -226,41 +499,10 @@ fn mask_ipv4(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
     while index < chars.len() {
-        let boundary =
-            index == 0 || !(chars[index - 1].is_ascii_digit() || chars[index - 1] == '.');
-        if boundary && chars[index].is_ascii_digit() {
-            let mut cursor = index;
-            let mut parts = 0;
-            let mut valid = true;
-            loop {
-                let start = cursor;
-                while cursor < chars.len() && chars[cursor].is_ascii_digit() && cursor - start < 4 {
-                    cursor += 1;
-                }
-                let digits: String = chars[start..cursor].iter().collect();
-                if digits.is_empty()
-                    || digits.len() > 3
-                    || digits.parse::<u16>().map_or(true, |v| v > 255)
-                {
-                    valid = false;
-                    break;
-                }
-                parts += 1;
-                if parts == 4 || cursor >= chars.len() || chars[cursor] != '.' {
-                    break;
-                }
-                cursor += 1;
-            }
-            let ends_cleanly = cursor >= chars.len()
-                || !(chars[cursor].is_ascii_digit()
-                    || chars[cursor] == '.'
-                        && cursor + 1 < chars.len()
-                        && chars[cursor + 1].is_ascii_digit());
-            if valid && parts == 4 && ends_cleanly {
-                out.push_str("<ip>");
-                index = cursor;
-                continue;
-            }
+        if let Some(next_idx) = try_mask_ipv4(&chars, index) {
+            out.push_str("<ip>");
+            index = next_idx;
+            continue;
         }
         out.push(chars[index]);
         index += 1;
@@ -453,6 +695,92 @@ mod diag_tests {
             scrub_diagnostic_text(&long).ends_with("…（已截断）"),
             "超长时明确标注截断"
         );
+    }
+
+    #[test]
+    fn scrub_masks_space_separated_auth_kv_json_and_preserves_counter_words() {
+        let cases = [
+            (
+                "Bearer fake_val",
+                vec!["fake_val"],
+                vec!["Bearer [REDACTED]"],
+            ),
+            (
+                "Bearer   fake_val",
+                vec!["fake_val"],
+                vec!["Bearer   [REDACTED]"],
+            ),
+            (
+                "Authorization Bearer fake_val",
+                vec!["fake_val"],
+                vec!["Authorization Bearer [REDACTED]"],
+            ),
+            (
+                "Authorization: Bearer fake_val",
+                vec!["fake_val"],
+                vec!["Authorization: Bearer [REDACTED]"],
+            ),
+            (
+                "api_key: fake_val api_key = fake_v2 api_key fake_v3",
+                vec!["fake_val", "fake_v2", "fake_v3"],
+                vec![
+                    "api_key: [REDACTED]",
+                    "api_key = [REDACTED]",
+                    "api_key [REDACTED]",
+                ],
+            ),
+            (
+                "password fake_pw --token fake_tok",
+                vec!["fake_pw", "fake_tok"],
+                vec!["password [REDACTED]", "--token [REDACTED]"],
+            ),
+            (
+                r#"{"token":"fake_json","material":"椴木"}"#,
+                vec!["fake_json"],
+                vec![r#"{"token":"[REDACTED]","material":"椴木"}"#],
+            ),
+            (
+                "wss://fakeuser:fakepass@example.invalid/ws?k=fake1&token=fake2",
+                vec!["fakeuser", "fakepass", "fake1", "fake2"],
+                vec!["wss://[REDACTED]@example.invalid/ws?[REDACTED]"],
+            ),
+            (
+                r#"{\"api_key\":\"abc123\",\"password\":\"x-secret\"}"#,
+                vec!["abc123", "x-secret"],
+                vec![r#"{\"api_key\":\"[REDACTED]\",\"password\":\"[REDACTED]\"}"#],
+            ),
+            (
+                "dbPassword=hunter2 accessToken=abc authToken=ghi nestedSecret=jkl",
+                vec!["hunter2", "abc", "ghi", "jkl"],
+                vec![
+                    "dbPassword=[REDACTED]",
+                    "accessToken=[REDACTED]",
+                    "authToken=[REDACTED]",
+                    "nestedSecret=[REDACTED]",
+                ],
+            ),
+            (
+                "Basic already-basic https://test.invalid/?a=hidden",
+                vec!["already-basic", "hidden"],
+                vec!["Basic [REDACTED]", "https://test.invalid/?[REDACTED]"],
+            ),
+            (
+                "authToken 测试凭据",
+                vec!["测试凭据"],
+                vec!["authToken [REDACTED]"],
+            ),
+            ("tokens_used: 120", vec![], vec!["tokens_used: 120"]),
+        ];
+        for (input, forbidden, expected) in cases {
+            let out = scrub_text_with_options(input, false, 2000, false).0;
+            for secret in &forbidden {
+                assert!(!out.contains(secret), "{secret} leaked in {out}");
+            }
+            for needle in &expected {
+                assert!(out.contains(needle), "expected {needle} in {out}");
+            }
+            assert_eq!(scrub_diagnostic_text(&out), out, "二次脱敏必须保持原样");
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -88,6 +88,8 @@ pub const FLUIDNC_LINE_QUEUE_LIMIT: usize = 4 * 255;
 pub const MAX_RX_WINDOW: usize = FLUIDNC_LINE_QUEUE_LIMIT - 4;
 /// 半行续接缓冲上限：设备持续输出不带换行的数据时丢弃，避免无界增长。
 const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
+/// 限制连续拼接半行的时间；单次阻塞读取仍受传输层读超时约束。
+const LINE_READ_BUDGET: Duration = Duration::from_millis(500);
 
 /// 跨读超时保留半行的行读取器（2026-11-05 修订）。
 ///
@@ -97,6 +99,7 @@ const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
 pub struct LineReader<R> {
     inner: BufReader<R>,
     partial: Vec<u8>,
+    dropping_oversized_line: bool,
 }
 
 impl<R: Read> LineReader<R> {
@@ -104,35 +107,86 @@ impl<R: Read> LineReader<R> {
         Self {
             inner: BufReader::new(inner),
             partial: Vec::new(),
+            dropping_oversized_line: false,
         }
     }
 
     /// `Ok(Some(line))`：完整一行（只去行尾 CR/LF，保留行首缩进）；`Ok(None)`：EOF；
-    /// `Err`：读超时等错误，已读到的半行保留到下次调用。
+    /// `Err`：读超时或单行超限丢弃错误，合法半行保留到下次调用。
+    ///
+    /// 2026-11-18：改用 `fill_buf` + `consume` 逐块限长，避免无 `\n` 洪流先写满内存或卡死上层截止计时。
     pub fn read_line(&mut self) -> Result<Option<String>, String> {
+        self.read_line_with_budget(LINE_READ_BUDGET)
+    }
+
+    fn read_line_with_budget(&mut self, budget: Duration) -> Result<Option<String>, String> {
+        let started = Instant::now();
         loop {
-            match self.inner.read_until(b'\n', &mut self.partial) {
-                Ok(0) => {
-                    if self.partial.is_empty() {
-                        return Ok(None);
-                    }
-                    // EOF 前最后一段没有换行：作为最后一行交出，下次调用再报 EOF
-                    return Ok(Some(Self::take_line(&mut self.partial)));
-                }
-                Ok(_) if self.partial.last() == Some(&b'\n') => {
-                    return Ok(Some(Self::take_line(&mut self.partial)));
-                }
-                // 未遇到换行就返回说明已到 EOF，下一轮读到 0 字节时交出
-                Ok(_) => continue,
+            if started.elapsed() >= budget {
+                return Err("读取设备响应超时，已保留半行状态".into());
+            }
+            let chunk = match std::io::BufRead::fill_buf(&mut self.inner) {
+                Ok(buf) => buf,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    if self.partial.len() > MAX_PARTIAL_LINE_BYTES {
-                        self.partial.clear();
+                Err(e) => return Err(e.to_string()),
+            };
+            if chunk.is_empty() {
+                if self.dropping_oversized_line {
+                    self.dropping_oversized_line = false;
+                    return Err(format!(
+                        "设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃"
+                    ));
+                }
+                if self.partial.is_empty() {
+                    return Ok(None);
+                }
+                // EOF 前最后一段没有换行：作为最后一行交出，下次调用再报 EOF
+                return Ok(Some(Self::take_line(&mut self.partial)));
+            }
+            let newline_pos = chunk.iter().position(|&b| b == b'\n');
+            if self.dropping_oversized_line {
+                match newline_pos {
+                    Some(pos) => {
+                        std::io::BufRead::consume(&mut self.inner, pos + 1);
+                        self.dropping_oversized_line = false;
+                        continue;
+                    }
+                    None => {
+                        let len = chunk.len();
+                        std::io::BufRead::consume(&mut self.inner, len);
                         return Err(format!(
-                            "设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃: {e}"
+                            "设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃"
                         ));
                     }
-                    return Err(e.to_string());
+                }
+            }
+            match newline_pos {
+                Some(pos) => {
+                    let take = pos + 1;
+                    if self.partial.len().saturating_add(take) > MAX_PARTIAL_LINE_BYTES {
+                        std::io::BufRead::consume(&mut self.inner, take);
+                        self.partial.clear();
+                        return Err(format!(
+                            "设备输出单行超过 {MAX_PARTIAL_LINE_BYTES} 字节，已丢弃"
+                        ));
+                    }
+                    self.partial.extend_from_slice(&chunk[..take]);
+                    std::io::BufRead::consume(&mut self.inner, take);
+                    return Ok(Some(Self::take_line(&mut self.partial)));
+                }
+                None => {
+                    let len = chunk.len();
+                    if self.partial.len().saturating_add(len) > MAX_PARTIAL_LINE_BYTES {
+                        std::io::BufRead::consume(&mut self.inner, len);
+                        self.partial.clear();
+                        self.dropping_oversized_line = true;
+                        return Err(format!(
+                            "设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃"
+                        ));
+                    }
+                    self.partial.extend_from_slice(chunk);
+                    std::io::BufRead::consume(&mut self.inner, len);
+                    continue;
                 }
             }
         }
@@ -368,10 +422,177 @@ impl ConnectionSpec {
 
     pub fn describe(&self) -> String {
         match self {
+            Self::Tcp { host, port } if host.contains(':') => format!("[{host}]:{port}"),
             Self::Tcp { host, port } => format!("{host}:{port}"),
             Self::Serial { port, baud_rate } => format!("{port}@{baud_rate}"),
         }
     }
+
+    pub fn matches_target(&self, recorded: &str) -> bool {
+        // 旧版将 IPv6 地址与端口直接拼接。只接受当前明确目标的同一旧格式，不猜端口边界。
+        if let Self::Tcp { host, port } = self
+            && host.contains(':')
+            && recorded
+                .trim()
+                .eq_ignore_ascii_case(&format!("{host}:{port}"))
+        {
+            return true;
+        }
+        let Some(parsed) = normalize_connection_target(recorded) else {
+            return false;
+        };
+        match (self, parsed) {
+            (
+                Self::Tcp { host, port },
+                NormalizedTarget::Tcp {
+                    host: rec_host,
+                    port: rec_port,
+                },
+            ) => host.eq_ignore_ascii_case(&rec_host) && *port == rec_port,
+            (
+                Self::Serial { port, baud_rate },
+                NormalizedTarget::Serial {
+                    port: rec_port,
+                    baud_rate: rec_baud,
+                },
+            ) => {
+                normalize_serial_port(port) == rec_port && rec_baud.is_none_or(|b| b == *baud_rate)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// 解析历史或规范设备标识（如 `127.0.0.1:23`、`tcp://127.0.0.1:23`、`COM3@115200`、`serial:COM3:115200`）
+/// 为结构化目标，无法识别或非法格式返回 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NormalizedTarget {
+    Tcp {
+        host: String,
+        port: u16,
+    },
+    Serial {
+        port: String,
+        baud_rate: Option<u32>,
+    },
+}
+
+fn normalize_serial_port(port: &str) -> String {
+    let trimmed = port.trim();
+    if is_windows_com_port(trimmed) {
+        return format!("COM{}", &trimmed[3..]);
+    }
+    trimmed.to_owned()
+}
+
+fn is_windows_com_port(raw: &str) -> bool {
+    raw.len() >= 4
+        && raw
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("com"))
+        && raw[3..].bytes().all(|b| b.is_ascii_digit())
+}
+
+fn parse_tcp_host_port(raw: &str) -> Option<(String, u16)> {
+    let body = raw.trim().trim_end_matches('/');
+    if body.is_empty() || body.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if let Some(rest) = body.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        if after.is_empty() {
+            return Some((host.to_ascii_lowercase(), 23));
+        }
+        let port = after
+            .strip_prefix(':')?
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0)?;
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    if let Some((host, port_str)) = body.rsplit_once(':') {
+        if host.is_empty() || host.contains(':') || host.contains('/') {
+            return None;
+        }
+        let port = port_str.parse::<u16>().ok().filter(|&p| p > 0)?;
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    if body.contains('/') {
+        return None;
+    }
+    Some((body.to_ascii_lowercase(), 23))
+}
+
+pub fn normalize_connection_target(raw: &str) -> Option<NormalizedTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("tcp://") {
+        let (host, port) = parse_tcp_host_port(&trimmed[6..])?;
+        return Some(NormalizedTarget::Tcp { host, port });
+    }
+    if lower.starts_with("serial://") || lower.starts_with("serial:") {
+        let rest = if lower.starts_with("serial://") {
+            trimmed[9..].trim()
+        } else {
+            trimmed[7..].trim()
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some((port_part, baud_part)) =
+            rest.rsplit_once('@').or_else(|| rest.rsplit_once(':'))
+        {
+            let baud = baud_part
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|b| (1200..=4_000_000).contains(b))?;
+            let port = normalize_serial_port(port_part);
+            if port.is_empty() {
+                return None;
+            }
+            return Some(NormalizedTarget::Serial {
+                port,
+                baud_rate: Some(baud),
+            });
+        }
+        return Some(NormalizedTarget::Serial {
+            port: normalize_serial_port(rest),
+            baud_rate: None,
+        });
+    }
+    if lower.contains("://") {
+        return None;
+    }
+    if let Some((port_part, baud_part)) = trimmed.rsplit_once('@') {
+        let baud = baud_part
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|b| (1200..=4_000_000).contains(b))?;
+        let port = normalize_serial_port(port_part);
+        if port.is_empty() {
+            return None;
+        }
+        return Some(NormalizedTarget::Serial {
+            port,
+            baud_rate: Some(baud),
+        });
+    }
+    if is_windows_com_port(trimmed) || trimmed.starts_with('/') {
+        return Some(NormalizedTarget::Serial {
+            port: normalize_serial_port(trimmed),
+            baud_rate: None,
+        });
+    }
+    let (host, port) = parse_tcp_host_port(trimmed)?;
+    Some(NormalizedTarget::Tcp { host, port })
 }
 
 /// 按连接描述打开传输层（TCP 使用带超时的连接；串口按指定波特率打开）。
@@ -569,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn line_reader_bounds_slow_partial_line_and_keeps_it_for_next_read() {
+        struct DelayedChunks(VecDeque<(Duration, &'static [u8])>);
+
+        impl Read for DelayedChunks {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let Some((delay, chunk)) = self.0.pop_front() else {
+                    return Ok(0);
+                };
+                std::thread::sleep(delay);
+                buf[..chunk.len()].copy_from_slice(chunk);
+                Ok(chunk.len())
+            }
+        }
+
+        let mut reader = LineReader::new(DelayedChunks(VecDeque::from([
+            (Duration::from_millis(80), b"o".as_slice()),
+            (Duration::ZERO, b"k\n".as_slice()),
+        ])));
+        assert!(
+            reader
+                .read_line_with_budget(Duration::from_millis(30))
+                .is_err()
+        );
+        assert_eq!(reader.partial, b"o");
+        assert_eq!(reader.read_line().unwrap().as_deref(), Some("ok"));
+    }
+
+    #[test]
     fn line_reader_keeps_partial_line_across_read_timeout() {
         use std::io::ErrorKind::{TimedOut, WouldBlock};
         let script = [
@@ -627,5 +876,109 @@ mod tests {
         }
         assert_eq!(completed.as_deref(), Some("ok"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn line_reader_drops_unbounded_no_newline_flood_and_recovers_on_next_newline() {
+        struct EndlessFloodReader {
+            remaining: usize,
+            tail: &'static [u8],
+            tail_pos: usize,
+        }
+        impl Read for EndlessFloodReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining > 0 {
+                    let n = buf.len().min(self.remaining);
+                    buf[..n].fill(b'A');
+                    self.remaining -= n;
+                    return Ok(n);
+                }
+                if self.tail_pos < self.tail.len() {
+                    let n = buf.len().min(self.tail.len() - self.tail_pos);
+                    buf[..n].copy_from_slice(&self.tail[self.tail_pos..self.tail_pos + n]);
+                    self.tail_pos += n;
+                    return Ok(n);
+                }
+                Ok(0)
+            }
+        }
+
+        // 1. 超过 64 KiB 无换行且无超时：必须立即报错返回而非无限攒内存或阻塞，并在换行后恢复读取下一行
+        let flood = EndlessFloodReader {
+            remaining: MAX_PARTIAL_LINE_BYTES + 20_000,
+            tail: b"\nok\r\n",
+            tail_pos: 0,
+        };
+        let mut reader = LineReader::new(flood);
+        let first_err = reader.read_line().unwrap_err();
+        assert!(
+            first_err.contains("字节"),
+            "超限无换行输入必须立即报错丢弃: {first_err}"
+        );
+        assert!(reader.partial.is_empty(), "超限丢弃后半行缓存必须清空");
+        // 丢弃完残余垃圾直到 '\n' 后，下一行 ok 必须完整读出
+        loop {
+            match reader.read_line() {
+                Ok(line) => {
+                    assert_eq!(line.as_deref(), Some("ok"));
+                    break;
+                }
+                Err(err) => assert!(err.contains("已丢弃"), "{err}"),
+            }
+        }
+        assert_eq!(reader.read_line().unwrap(), None);
+
+        // 2. 上层截止计时测试：无限无换行洪流不能卡死 handshake / 设备读取循环
+        struct InfiniteNoNewline;
+        impl Read for InfiniteNoNewline {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                buf.fill(b'X');
+                Ok(buf.len())
+            }
+        }
+        let mut flood_reader = LineReader::new(InfiniteNoNewline);
+        let err = flood_reader.read_line().unwrap_err();
+        assert!(err.contains("已丢弃"), "{err}");
+    }
+
+    #[test]
+    fn ipv6_target_description_round_trips_for_resume() {
+        let spec = ConnectionSpec::Tcp {
+            host: "2001:db8::1".into(),
+            port: 2301,
+        };
+        assert_eq!(spec.describe(), "[2001:db8::1]:2301");
+        assert!(spec.matches_target(&spec.describe()));
+        assert!(spec.matches_target("2001:db8::1:2301"));
+        assert!(!spec.matches_target("[2001:db8::1]:2302"));
+        assert!(!spec.matches_target("[2001:db8::2]:2301"));
+    }
+
+    #[test]
+    fn normalize_and_match_target_covers_tcp_serial_and_rejects_mismatches() {
+        let tcp = ConnectionSpec::Tcp {
+            host: "127.0.0.1".into(),
+            port: 23,
+        };
+        assert!(tcp.matches_target("127.0.0.1:23"));
+        assert!(tcp.matches_target("tcp://127.0.0.1:23"));
+        assert!(tcp.matches_target("TCP://127.0.0.1"));
+        assert!(!tcp.matches_target("127.0.0.1:24"));
+        assert!(!tcp.matches_target("192.168.1.99:23"));
+        assert!(!tcp.matches_target("COM3@115200"));
+        assert!(!tcp.matches_target("invalid://target"));
+        assert!(!tcp.matches_target(""));
+
+        let serial = ConnectionSpec::Serial {
+            port: "COM3".into(),
+            baud_rate: 115_200,
+        };
+        assert!(serial.matches_target("COM3@115200"));
+        assert!(serial.matches_target("com3@115200"));
+        assert!(serial.matches_target("serial:COM3:115200"));
+        assert!(serial.matches_target("COM3"));
+        assert!(!serial.matches_target("COM3@9600"));
+        assert!(!serial.matches_target("COM4@115200"));
+        assert!(!serial.matches_target("127.0.0.1:23"));
     }
 }

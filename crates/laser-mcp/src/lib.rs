@@ -1040,6 +1040,10 @@ fn dispatch_allowed(
             };
             let mut body = arguments.as_object().cloned().unwrap_or_default();
             body.insert("action".into(), serde_json::Value::String(action.into()));
+            // 重新预览始终生成新编号，模型带回的旧编号不得触发 HTTP 冲突。
+            if action == "preview" {
+                body.remove("workflow_id");
+            }
             // 文字或基础图形（r44：可以只刻图形）走文字任务生成
             let has_design = ["shapes", "border"]
                 .iter()
@@ -1486,14 +1490,7 @@ fn rpc_error(id: &serde_json::Value, code: i64, message: &str) -> serde_json::Va
 
 /// 端点可用性：为空或仍是模板占位符（含 `<your-token>`）视为未配置。
 pub fn endpoint_from_value(value: &str) -> Option<String> {
-    let value = value.trim().to_owned();
-    if value.is_empty()
-        || value.contains('<')
-        || !(value.starts_with("ws://") || value.starts_with("wss://"))
-    {
-        return None;
-    }
-    Some(value)
+    laser_contracts::parse_mcp_endpoint_url(value)
 }
 
 pub fn endpoint_from_env() -> Option<String> {
@@ -1624,30 +1621,21 @@ impl Drop for LinkGuard {
     }
 }
 
-/// 隐去地址中的 token（`token=***`），用于日志、遥测与页面显示。
+/// 按 URL 解析脱敏 userinfo 与全部查询参数（`***`），用于日志、遥测与页面显示。
 pub fn redact_endpoint(endpoint: &str) -> String {
-    match endpoint.split_once("token=") {
-        Some((head, _)) => format!("{head}token=***"),
-        None => endpoint.to_owned(),
-    }
+    laser_contracts::redact_mcp_endpoint(endpoint)
 }
 
-/// 错误文本里如果带出了 token（个别库会回显地址），替换为 `***`。
+/// 错误文本里如果带出了接入点凭据（userinfo 或查询参数），替换为 `***`。
 fn scrub_token(text: &str, endpoint: &str) -> String {
-    match endpoint
-        .split_once("token=")
-        .map(|(_, token)| token.split('&').next().unwrap_or(""))
-    {
-        Some(token) if !token.is_empty() => text.replace(token, "***"),
-        _ => text.to_owned(),
-    }
+    laser_contracts::scrub_endpoint_secrets(text, endpoint)
 }
 
 /// 接入点身份（NV8）：解码地址中 `token=` 的 JWT 载荷，只取标识类字段（键名以 id 结尾，或 purpose / name / sub 等）
 /// 与签发、过期时间。不校验签名，只用于在语音中心显示“这是哪个智能体的接入点、何时过期”；不是 JWT 时返回 `None`。
 pub fn endpoint_identity(endpoint: &str) -> Option<serde_json::Value> {
     use base64::Engine;
-    let token = endpoint.split_once("token=")?.1.split('&').next()?;
+    let token = laser_contracts::mcp_query_param(endpoint, "token")?;
     let mut parts = token.split('.');
     let (_header, payload, _signature) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
@@ -2605,6 +2593,40 @@ mod tests {
     }
 
     #[test]
+    fn workflow_preview_discards_old_id_on_both_backend_routes() {
+        for (input, route) in [
+            (
+                serde_json::json!({"text": "测试"}),
+                "/api/text-task/generate",
+            ),
+            (
+                serde_json::json!({"source_type": "image", "image_file": "demo.png"}),
+                "/api/workflow",
+            ),
+        ] {
+            let backend = FakeBackend::new(vec![(
+                200,
+                serde_json::json!({
+                    "success": true, "result": {"workflow_id": "wf-new"}
+                }),
+            )]);
+            let mut arguments = input.as_object().unwrap().clone();
+            arguments.insert("action".into(), "preview".into());
+            arguments.insert("workflow_id".into(), "wf-old".into());
+            let result = dispatch_tool_call_with(
+                "laser_workflow_tool",
+                &arguments.into(),
+                false,
+                Some(&backend),
+            );
+            assert!(result.success, "{result:?}");
+            let calls = backend.calls();
+            assert_eq!(calls[0].1, route);
+            assert!(calls[0].2.get("workflow_id").is_none(), "{:?}", calls[0].2);
+        }
+    }
+
+    #[test]
     fn workflow_and_calibration_tools_forward_to_host_backend() {
         // confirm_send → POST /api/workflow，携带连接字段
         let backend = FakeBackend::new(vec![(
@@ -3125,8 +3147,20 @@ mod tests {
         assert_eq!(stats.connections.load(Ordering::Relaxed), 0);
         assert_eq!(
             scrub_token("bad url wss://x/?token=abc&k=1", "wss://x/?token=abc&k=1"),
-            "bad url wss://x/?token=***&k=1"
+            "bad url wss://x/?token=***&k=***"
         );
+        let complex = "wss://fakeuser:fakepass@example.invalid/mcp?k=fake1&token=fake2#frag";
+        let scrubbed_complex = scrub_token(
+            &format!("dial {complex} user=fakeuser pass=fakepass k=fake1 t=fake2"),
+            complex,
+        );
+        for secret in ["fakeuser", "fakepass", "fake1", "fake2", "frag"] {
+            assert!(
+                !scrubbed_complex.contains(secret),
+                "{secret} leaked in {scrubbed_complex}"
+            );
+        }
+        assert!(scrubbed_complex.contains("wss://***@example.invalid/mcp?k=***&token=***#***"));
     }
 
     /// NV8：接入点身份只取标识类字段与有效期，不是 JWT 的地址返回 None。

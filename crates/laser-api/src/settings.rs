@@ -3,14 +3,7 @@ pub(crate) const DEFAULT_JEV_ENDPOINT: &str = "https://openrouter.ai/api/alpha/d
 pub(crate) const JEV_MODEL: &str = "typesafe/jev-1.13";
 
 pub(crate) fn normalize_mcp_endpoint(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.contains('<')
-        || !(value.starts_with("ws://") || value.starts_with("wss://"))
-    {
-        return None;
-    }
-    Some(value.to_owned())
+    laser_contracts::parse_mcp_endpoint_url(value)
 }
 
 /// `/api/system/info` 的 `voice` 字段：`{mode, device_sessions}`。设备会话数只在内置链路下有意义
@@ -99,51 +92,112 @@ pub(crate) fn mask_secret(value: &str) -> String {
     format!("{prefix}••••••••{suffix}")
 }
 
+fn scrub_telemetry_str(text: &str, endpoints: &[&str]) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if endpoints.is_empty() {
+        return laser_contracts::scrub_endpoint_secrets(text, "");
+    }
+    endpoints.iter().fold(text.to_owned(), |acc, ep| {
+        laser_contracts::scrub_endpoint_secrets(&acc, ep)
+    })
+}
+
 /// `/api/system/info` 的 `mcp` 段：只反映真实配置与真实遥测（技术书 §9.5.3，验收 A-72）。
 ///
 /// - `configured`：是否配置了接入点地址；
 /// - `connected`：桥当前是否与接入点保持连接；
-/// - `client_info` / `last_request` / `recent_events` / `messages_count`：没有真实数据时为空 / 0；
+/// - `include_details` 为假（非回环未鉴权请求）时隐藏接入点地址、客户端、请求、事件与多接入点错误遥测；
 /// - `tools_count`：当前开关下实际暴露的工具数（安全模式 19，开发者模式 20）。
 pub(crate) fn mcp_status_json(
     endpoint: Option<&str>,
     telemetry: &laser_contracts::McpTelemetrySnapshot,
     tools_count: usize,
+    include_details: bool,
 ) -> serde_json::Value {
-    let endpoint_display = endpoint
-        .map(|ep| match ep.split_once("token=") {
-            Some((head, _)) => format!("{head}token=***"),
-            None => ep.to_owned(),
-        })
-        .unwrap_or_default();
-    let client_info = match (
-        telemetry.client_name.is_empty(),
-        telemetry.client_version.is_empty(),
-    ) {
-        (true, _) => String::new(),
-        (false, true) => telemetry.client_name.clone(),
-        (false, false) => format!("{} v{}", telemetry.client_name, telemetry.client_version),
+    let scrub_endpoints: Vec<&str> = endpoint
+        .into_iter()
+        .chain(
+            telemetry
+                .endpoints
+                .iter()
+                .map(|link| link.endpoint.as_str()),
+        )
+        .collect();
+    let endpoint_display = if include_details {
+        endpoint
+            .map(laser_contracts::redact_mcp_endpoint)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let client_info = if !include_details {
+        String::new()
+    } else {
+        let client_name = scrub_telemetry_str(&telemetry.client_name, &scrub_endpoints);
+        let client_version = scrub_telemetry_str(&telemetry.client_version, &scrub_endpoints);
+        match (client_name.is_empty(), client_version.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => client_name,
+            (false, false) => format!("{client_name} v{client_version}"),
+        }
+    };
+    let last_request = if include_details {
+        scrub_telemetry_str(&telemetry.last_request, &scrub_endpoints)
+    } else {
+        String::new()
+    };
+    let last_request_time = if include_details {
+        scrub_telemetry_str(&telemetry.last_request_time, &scrub_endpoints)
+    } else {
+        String::new()
+    };
+    let protocol_version = if include_details {
+        scrub_telemetry_str(&telemetry.protocol_version, &scrub_endpoints)
+    } else {
+        String::new()
+    };
+    let recent_events: Vec<String> = if include_details {
+        telemetry
+            .recent_events
+            .iter()
+            .map(|event| scrub_telemetry_str(event, &scrub_endpoints))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let endpoints: Vec<serde_json::Value> = if include_details {
+        telemetry
+            .endpoints
+            .iter()
+            .map(|link| {
+                serde_json::json!({
+                    "id": scrub_telemetry_str(&link.id, &scrub_endpoints),
+                    "endpoint": laser_contracts::redact_mcp_endpoint(&link.endpoint),
+                    "connected": link.connected,
+                    "connections": link.connections,
+                    "last_error": link.last_error.as_deref().map(|err| scrub_telemetry_str(err, &scrub_endpoints)),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
     serde_json::json!({
         "configured": endpoint.is_some(),
         "connected": telemetry.connected,
         "endpoint": endpoint_display,
         "client_info": client_info,
-        "last_request": telemetry.last_request,
-        "last_request_time": telemetry.last_request_time,
-        "messages_count": telemetry.messages_count,
+        "last_request": last_request,
+        "last_request_time": last_request_time,
+        "messages_count": if include_details { telemetry.messages_count } else { 0 },
         "tools_count": tools_count,
-        // 最近一次握手实际应答的版本；未握手为空，界面显示“未知”（n68：不再写死）
-        "protocol_version": telemetry.protocol_version,
-        "recent_events": telemetry.recent_events,
-        // 各接入点的连接状态（NV8 多接入点；地址已脱敏）
-        "endpoints": telemetry.endpoints.iter().map(|link| serde_json::json!({
-            "id": link.id,
-            "endpoint": link.endpoint,
-            "connected": link.connected,
-            "connections": link.connections,
-            "last_error": link.last_error,
-        })).collect::<Vec<_>>(),
+        // 最近一次握手实际应答的版本；未握手或非回环未鉴权时为空
+        "protocol_version": protocol_version,
+        "recent_events": recent_events,
+        // 各接入点的连接状态（NV8 多接入点；地址已脱敏，非回环未鉴权时隐藏）
+        "endpoints": endpoints,
         // 以下三项是固定的设计说明，不是检测结果
         "core_tool": "laser_workflow_tool",
         "safety_gate": "发送前重新计算 G-code 文件 SHA-256，与确认时的快照比对",

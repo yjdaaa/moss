@@ -501,20 +501,108 @@ mod tests {
         )
         .unwrap();
         let rebound = db
-            .bind_usb_voice_device("10:20:30:40:50:60", "uuid-usb-1", "esp32s3", 20.0)
+            .bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-1",
+                "esp32s3",
+                Some(1),
+                false,
+                20.0,
+            )
+            .unwrap()
             .unwrap();
         assert_eq!(rebound.client_id, "uuid-usb-1");
         assert_eq!(rebound.status, VOICE_DEVICE_ALLOWED);
         assert_eq!(rebound.model, "bread-compact-wifi-lcd");
         assert_eq!(rebound.firmware_version, "2.2.4");
         assert_eq!(rebound.decided_at, Some(20.0));
+        assert_eq!(rebound.status_revision, 2);
 
         // 同 Client-Id 二次 USB 改 Wi-Fi 不刷新 decided_at（保留 NV19 授权代次）
         let updated = db
-            .bind_usb_voice_device("10:20:30:40:50:60", "uuid-usb-1", "esp32s3", 30.0)
+            .bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-1",
+                "esp32s3",
+                Some(2),
+                false,
+                30.0,
+            )
+            .unwrap()
             .unwrap();
         assert_eq!(updated.decided_at, Some(20.0));
         assert_eq!(updated.model, "bread-compact-wifi-lcd");
+
+        // 已撤销且未勾解除撤销时不得覆盖撤销状态
+        assert!(
+            db.set_voice_device_status("10:20:30:40:50:60", VOICE_DEVICE_REVOKED, 35.0)
+                .unwrap()
+        );
+        assert!(
+            db.bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-2",
+                "esp32s3",
+                Some(3),
+                false,
+                40.0,
+            )
+            .unwrap()
+            .is_none()
+        );
+        let stayed_revoked = db.voice_device("10:20:30:40:50:60").unwrap().unwrap();
+        assert_eq!(stayed_revoked.status, VOICE_DEVICE_REVOKED);
+        assert_eq!(stayed_revoked.client_id, "uuid-usb-1");
+        assert_eq!(stayed_revoked.status_revision, 3);
+
+        // 即使旧界面明确勾了 unrevoke=true，只要修订号过期（期间发生了更新一次的撤销），也绝不覆盖
+        assert!(
+            db.bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-2",
+                "esp32s3",
+                Some(2),
+                true,
+                45.0,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            db.bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-2",
+                "esp32s3",
+                None,
+                true,
+                46.0,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            db.voice_device("10:20:30:40:50:60")
+                .unwrap()
+                .unwrap()
+                .status,
+            VOICE_DEVICE_REVOKED
+        );
+
+        // 显式 unrevoke=true 且修订号匹配起始修订时允许恢复并重绑
+        let unrevoked = db
+            .bind_usb_voice_device(
+                "10:20:30:40:50:60",
+                "uuid-usb-2",
+                "esp32s3",
+                Some(3),
+                true,
+                50.0,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(unrevoked.status, VOICE_DEVICE_ALLOWED);
+        assert_eq!(unrevoked.client_id, "uuid-usb-2");
+        assert_eq!(unrevoked.status_revision, 4);
     }
 
     /// v5：已是 v4 的库升级后 approvals 增加 request 列，旧行的 request 为空、仍能读出。

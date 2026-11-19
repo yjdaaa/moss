@@ -149,6 +149,11 @@ pub trait DeviceRegistry: Send + Sync {
 
     /// n81 记录一轮已脱敏的语音对话（说了什么、调了什么工具、回了什么），由宿主持久化到本机数据库。
     fn record_chat_turn(&self, _trace: &TurnDebugTrace) {}
+
+    /// n81/#19 带代次快照的持久化入口：宿主在写入 SQLite 前校验开关与代次未发生停用/清空。
+    fn record_chat_turn_at(&self, trace: &TurnDebugTrace, _epoch: u64) {
+        self.record_chat_turn(trace);
+    }
 }
 /// A live permission that cannot become valid again after revoke, disconnect or shutdown.
 pub(crate) struct SessionLease {
@@ -222,6 +227,8 @@ pub struct ServerConfig {
     pub mqtt: Option<MqttConfig>,
     /// n83 小智官方服务端全量动态补字分片目录（`models/noto_v1_full`）；`None` 或尚未下载完成时对 `basic` 设备回退内置 `common` 字库，下载就位后热生效。
     pub full_font_dir: Option<std::path::PathBuf>,
+    /// #19 与宿主共享的对话记录代次计数器：关闭/清空会递增它，使在途记录被宿主识别为过期。
+    pub debug_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -265,6 +272,7 @@ impl Default for ServerConfig {
             preview_hold_duration: Duration::from_secs(24),
             mqtt: None,
             full_font_dir: None,
+            debug_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -527,7 +535,10 @@ impl VoiceServer {
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
             registry,
-            state: state::LiveState::with_log(config.diagnostics.clone()),
+            state: state::LiveState::with_log_and_epoch(
+                config.diagnostics.clone(),
+                config.debug_epoch.clone(),
+            ),
             shutdown: shutdown_rx,
             job_announcements: jobs::AnnounceLog::default(),
             device_requests: Default::default(),

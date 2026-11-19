@@ -351,6 +351,7 @@ struct ActiveTurn {
     >,
     /// 后台查询结果的主动播报轮次（没有用户原话；思考中用户开口照样能接管，n100）
     report: bool,
+    debug_capture_epoch: Option<u64>,
     debug_raw_asr: Option<String>,
     debug_corrected_asr: Option<String>,
     debug_tools: Vec<crate::DebugToolTrace>,

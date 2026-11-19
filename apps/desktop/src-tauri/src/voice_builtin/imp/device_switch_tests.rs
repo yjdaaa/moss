@@ -762,6 +762,8 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
         db: host.db.clone(),
         host: host.clone(),
         settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
     };
     registry.record_chat_turn(&moss_voice_server::TurnDebugTrace {
         id: 0,
@@ -806,6 +808,79 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
     let bundle = restarted.diagnostics_bundle();
     assert_eq!(bundle["debug_traces"].as_array().unwrap().len(), 0);
 
+    let restarted_registry = DbRegistry {
+        db: restarted.host.db.clone(),
+        host: restarted.host.clone(),
+        settings_file: restarted.settings_file(),
+        chat_log_enabled: restarted.debug_trace_enabled.clone(),
+        chat_log_epoch: restarted.chat_log_epoch.clone(),
+    };
+    let secret_turn = || moss_voice_server::TurnDebugTrace {
+        id: 0,
+        at_ms: 1_790_000_200,
+        device_id: "dev-chat".into(),
+        session_id: "s-chat".into(),
+        turn: 2,
+        at: 1_790_000,
+        raw_asr: "Authorization Bearer fake_val api_key fake_api_val".into(),
+        corrected_asr: "password fake_pw_val".into(),
+        tools: vec![moss_voice_server::DebugToolTrace {
+            name: "fetch".into(),
+            arguments: r#"{"token":"fake_json_tok"}"#.into(),
+            result: "https://fakeuser:fakepass@example.invalid/x?token=fake2".into(),
+        }],
+        reply: "Bearer fake_reply_tok".into(),
+        spoken: "done".into(),
+        outcome: "done".into(),
+        truncated: false,
+        tools_dropped: 0,
+    };
+    restarted_registry.record_chat_turn(&secret_turn());
+    assert_eq!(
+        restarted
+            .host
+            .db
+            .lock()
+            .unwrap()
+            .list_voice_chat_logs(20)
+            .unwrap()
+            .len(),
+        1,
+        "关闭对话记录期间新轮次不得写入数据库"
+    );
+
+    // #11：重新开启后，含空格分隔和键值写法的合成凭据经 record_chat_turn -> DB -> 诊断导出整条链路都不得留存原文
+    let reenabled = restarted
+        .local_save(&serde_json::json!({"chat_log_enabled": true}))
+        .unwrap();
+    restarted_registry.record_chat_turn(&secret_turn());
+    let reenabled_status = restarted.status();
+    let exported = restarted.diagnostics_bundle();
+    let db_rows = restarted
+        .host
+        .db
+        .lock()
+        .unwrap()
+        .list_voice_chat_logs(20)
+        .unwrap();
+    assert_eq!(db_rows.len(), 2, "重新开启后应持久化第 2 轮脱敏记录");
+    let combined = format!("{}{}{}{:?}", reenabled, reenabled_status, exported, db_rows);
+    for leak in [
+        "fake_val",
+        "fake_api_val",
+        "fake_pw_val",
+        "fake_json_tok",
+        "fakeuser",
+        "fakepass",
+        "fake2",
+        "fake_reply_tok",
+    ] {
+        assert!(
+            !combined.contains(leak),
+            "{leak} leaked across DB/export: {combined}"
+        );
+    }
+
     // 显式清空：本机记录清零
     let cleared = restarted
         .local_save(&serde_json::json!({"clear_debug_traces": true}))
@@ -825,6 +900,8 @@ fn screen_pack_counts_as_installed_only_after_the_device_downloads_it() {
         db: host.db.clone(),
         host: host.clone(),
         settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
     };
     // 推送后先“等下载”：握手读到的偏好里还没有画风标记，不会按全屏发画面
     moss_voice::settings::update_voice(&builtin.settings_file(), |s| {

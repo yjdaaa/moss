@@ -32,6 +32,40 @@ fn cancel_orders_hold_status_and_reset() {
 }
 
 #[test]
+fn stream_cancel_preserves_hold_write_failure_and_blocks_sequential_send() {
+    struct FailedHold(FakeGrbl);
+
+    impl DeviceTransport for FailedHold {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            self.0.write_line(line)
+        }
+
+        fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+            self.0.write_realtime(command)?;
+            if command == RealtimeCommand::FeedHold {
+                return Err("进给保持写入失败".into());
+            }
+            Ok(())
+        }
+
+        fn read_line(&self) -> Result<Option<String>, String> {
+            self.0.read_line()
+        }
+    }
+
+    let fake = FakeGrbl::new(std::iter::empty());
+    let mut device = DeviceConnection::new(FailedHold(fake.clone()));
+    device.state = DeviceState::Ready;
+    device.auto_report_ms = 100;
+    assert_eq!(device.cancel().unwrap_err(), "进给保持写入失败");
+    assert_eq!(device.state(), DeviceState::Lost);
+    assert_eq!(device.auto_report_ms, 0);
+    assert!(device.send_line("M5").is_err());
+    assert!(fake.lines().is_empty());
+    assert_eq!(fake.realtime(), [b'!', 0x18]);
+}
+
+#[test]
 fn unlock_and_home_recover_alarm_state() {
     // 解锁：ok 之后仍要等到 Idle（FluidNC 可能跑 after_unlock 宏），中间的 [MSG:INFO: Caution: Unlocked] 被忽略
     let fake = FakeGrbl::new(
@@ -300,6 +334,91 @@ fn sd_file_hash_is_reassembled_from_100_char_json_chunks() {
         device.verify_sd_file_hash("/sd/x.gcode", &"0".repeat(64), Duration::from_secs(1)),
         Ok(false)
     );
+}
+
+#[test]
+fn unknown_status_never_triggers_unlock_in_resume_preflight() {
+    let fake =
+        FakeGrbl::new(["$30=1000", "$32=1", "ok", "<Mystery|MPos:0,0,0>"].map(str::to_owned));
+    let mut device = DeviceConnection::new(fake.clone());
+    device.handshake().unwrap();
+    let err = device
+        .verify_job_ready_for_resume(Duration::from_secs(1))
+        .unwrap_err();
+    assert!(err.contains("未知状态"), "{err}");
+    assert_eq!(
+        fake.lines(),
+        vec!["$$".to_owned()],
+        "Unknown 状态绝不能触发自动 $X 解锁"
+    );
+}
+
+#[test]
+fn partial_cd_fails_and_single_axis_cd_preserves_existing_limits() {
+    // 1. 仅配置 x 轴的 $CD 不得擦除 $$ 返回的 $131（y 行程）与加速度
+    let fake = FakeGrbl::new(
+        [
+            "$30=1000",
+            "$32=1",
+            "$130=200",
+            "$131=180",
+            "$120=900",
+            "ok",
+            "axes:",
+            "  x:",
+            "    max_travel_mm: 250",
+            "ok",
+        ]
+        .map(str::to_owned),
+    );
+    let mut device = DeviceConnection::new(fake);
+    device.handshake().unwrap();
+    assert!(device.load_features(Duration::from_secs(1)));
+    assert_eq!(device.travel_limits.x_travel_mm, Some(250.0));
+    assert_eq!(device.travel_limits.y_travel_mm, Some(180.0));
+    assert_eq!(device.travel_limits.x_accel_mm_s2, Some(900.0));
+
+    // 2. 半截 $CD（缺少 ok）必须拒收且不得加载或擦除既有行程
+    struct StallingCdTransport {
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl DeviceTransport for StallingCdTransport {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, _command: RealtimeCommand) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            match self.reads.fetch_add(1, Ordering::Relaxed) {
+                0 => Ok(Some("$30=1000".into())),
+                1 => Ok(Some("$32=1".into())),
+                2 => Ok(Some("$130=300".into())),
+                3 => Ok(Some("$131=220".into())),
+                4 => Ok(Some("ok".into())),
+                5 => Ok(Some("axes:".into())),
+                6 => Ok(Some("  x:".into())),
+                7 => Ok(Some("    max_travel_mm: 50".into())),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(15));
+                    Err("timed out".into())
+                }
+            }
+        }
+    }
+    let mut dev2 = DeviceConnection::new(StallingCdTransport {
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    dev2.handshake().unwrap();
+    assert!(
+        !dev2.load_features(Duration::from_millis(60)),
+        "未收到终止 ok 的半截 $CD 必须失败"
+    );
+    assert!(dev2.features.is_none());
+    assert_eq!(dev2.travel_limits.x_travel_mm, Some(300.0));
+    assert_eq!(dev2.travel_limits.y_travel_mm, Some(220.0));
+    let dirty_err = dev2.send_line("G1 X1").unwrap_err();
+    assert!(dirty_err.contains("未排空"), "{dirty_err}");
 }
 
 /// 2026-11-09：FluidNC 的 `$SD/Run` 回推迟应答（文件跑完才回 ok）。发出后直接监控：
@@ -604,4 +723,104 @@ fn wait_until_idle_keeps_waiting_through_a_long_hold() {
         !progress.paused.load(std::sync::atomic::Ordering::Acquire),
         "恢复后不再显示暂停"
     );
+}
+
+#[test]
+fn sd_monitor_distinguishes_normal_cancellation_from_firmware_failure() {
+    let cancel = CancellationToken::default();
+    cancel.cancel();
+    let fake = FakeGrbl::new(["<Hold:0|MPos:0,0,0>".to_owned()]);
+    let mut device = DeviceConnection::new(fake.clone());
+    assert!(
+        !device
+            .wait_sd_job_or_cancel(Duration::from_secs(2), None, Some(&cancel), true)
+            .unwrap()
+    );
+    assert_eq!(fake.realtime(), [b'?', b'!', b'?', 0x18]);
+
+    for (reply, state) in [
+        ("ALARM:1", DeviceState::Alarm),
+        ("Grbl 1.1h ['$' for help]", DeviceState::Lost),
+    ] {
+        assert_sd_cancel_reports_firmware_error(reply, state);
+    }
+    let fake = FakeGrbl::new(Vec::<String>::new());
+    let mut device = DeviceConnection::new(fake.clone());
+    let error = device
+        .wait_sd_job_or_cancel(Duration::from_secs(2), None, Some(&cancel), true)
+        .unwrap_err();
+    assert!(error.contains("连接断开"), "{error}");
+    assert_eq!(fake.realtime(), [b'?', b'!', b'?', 0x18]);
+}
+
+fn assert_sd_cancel_reports_firmware_error(reply: &str, state: DeviceState) {
+    let cancel = CancellationToken::default();
+    cancel.cancel();
+    let fake = FakeGrbl::new([reply, "<Hold:0|MPos:0,0,0>"].map(str::to_owned));
+    let mut device = DeviceConnection::new(fake.clone());
+    device.state = DeviceState::Ready;
+    device.auto_report_ms = 100;
+    let error = device
+        .wait_sd_job_or_cancel(Duration::from_secs(2), None, Some(&cancel), true)
+        .unwrap_err();
+    assert!(error.contains(reply), "{error}");
+    assert_eq!(device.state(), state);
+    assert_eq!(device.auto_report_ms, 0);
+    assert!(device.send_line("M5").is_err());
+    assert!(fake.lines().is_empty());
+    assert_eq!(fake.realtime(), [b'?', b'!', b'?', 0x18]);
+}
+
+#[test]
+fn sd_cancel_reports_alarm_status_as_failure() {
+    assert_sd_cancel_reports_firmware_error("<Alarm|MPos:0,0,0>", DeviceState::Alarm);
+}
+
+#[test]
+fn sd_cancel_preserves_deferred_error() {
+    assert_sd_cancel_reports_firmware_error("error:60", DeviceState::Lost);
+}
+
+#[test]
+fn sd_cancel_reports_disconnect_after_status_loses_sd_field() {
+    struct CancelOnStatus {
+        fake: FakeGrbl,
+        cancel: CancellationToken,
+    }
+
+    impl DeviceTransport for CancelOnStatus {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            self.fake.write_line(line)
+        }
+
+        fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+            self.fake.write_realtime(command)
+        }
+
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let line = self.fake.read_line()?;
+            if line.as_deref() == Some("<Run|MPos:1,0,0>") {
+                // 监控仍在等停稳，但最后一份运行报告已去掉 SD 字段。
+                self.cancel.cancel();
+            }
+            Ok(line)
+        }
+    }
+
+    let fake =
+        FakeGrbl::new(["<Run|SD:10.00,/sd/job.gcode>", "<Run|MPos:1,0,0>"].map(str::to_owned));
+    let cancel = CancellationToken::default();
+    let mut device = DeviceConnection::new(CancelOnStatus {
+        fake: fake.clone(),
+        cancel: cancel.clone(),
+    });
+    device.state = DeviceState::Ready;
+
+    let error = device
+        .run_sd_file_or_cancel("/sd/job.gcode", Duration::from_secs(2), None, Some(&cancel))
+        .unwrap_err();
+    assert!(error.contains("连接断开"), "{error}");
+    assert_eq!(device.state(), DeviceState::Disconnected);
+    assert_eq!(fake.lines(), ["$SD/Run=/sd/job.gcode"]);
+    assert_eq!(fake.realtime(), [b'?', b'!', b'?', 0x18]);
 }
