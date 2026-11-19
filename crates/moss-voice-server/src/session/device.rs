@@ -40,15 +40,20 @@ impl<'a> Session<'a> {
         device.init_sent = true;
         // Only an already-authorized session gets a currently configured vision capability.
         // Host comes from the validated websocket Host header; port is the ACTUAL bound HTTP port.
-        let capability = match (
-            &self.vision_host,
-            &self.vision_token,
-            &self.shared.config.vision,
-        ) {
-            (Some(host), Some(token), Some(factory))
-                if self.permission.load(std::sync::atomic::Ordering::Acquire)
-                    && factory.ready() =>
-            {
+        let vision_ready = match &self.shared.config.vision {
+            Some(factory) if self.permission.load(std::sync::atomic::Ordering::Acquire) => {
+                let factory = factory.clone();
+                tokio::task::spawn_blocking(move || factory.ready())
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        let Some(device) = self.device_mcp.as_mut() else {
+            return Ok(());
+        };
+        let capability = match (&self.vision_host, &self.vision_token) {
+            (Some(host), Some(token)) if vision_ready => {
                 device.vision_url_sent = true;
                 device.vision_token_issued_at = Some(Instant::now());
                 json!({"vision":{"url":format!("http://{host}:{}/mcp/vision/explain",self.shared.http_port),"token":token}})
@@ -141,9 +146,15 @@ impl<'a> Session<'a> {
                             );
                             self.send_mcp(socket, req).await?;
                         }
-                        if let Some(prefs) =
-                            self.shared.registry.device_hardware_prefs(self.device_id)
-                        {
+                        let prefs_registry = self.shared.registry.clone();
+                        let prefs_device = self.device_id.to_owned();
+                        let prefs = tokio::task::spawn_blocking(move || {
+                            prefs_registry.device_hardware_prefs(&prefs_device)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(prefs) = prefs {
                             self.screen_pack = prefs
                                 .screen_pack
                                 .as_deref()
@@ -249,8 +260,7 @@ impl<'a> Session<'a> {
             Some(McpPending::Snapshot(kind)) => {
                 let text = device_result_text(&payload);
                 self.shared
-                    .registry
-                    .device_snapshot(self.device_id, kind, &text);
+                    .schedule_device_snapshot(self.device_id, kind, text);
                 Ok(())
             }
             Some(McpPending::Quiet(tool)) => {
@@ -364,8 +374,7 @@ impl<'a> Session<'a> {
         };
         let snapshot = json!({ "mode": mode }).to_string();
         self.shared
-            .registry
-            .device_snapshot(self.device_id, crate::SNAPSHOT_LISTEN, &snapshot);
+            .schedule_device_snapshot(self.device_id, crate::SNAPSHOT_LISTEN, snapshot);
     }
 
     /// 桌面端请求（2026-11-02）：刷新设备信息 / 重启设备。设备自带 MCP 未就绪时只记事件。

@@ -19,7 +19,7 @@
 - 设备层：`laser-device` 的握手、预检、`JobWorker` 流控、实时字节、S 值换算、SD 脱机上传与监控。
 - 安全动作：`laser_tools::execute_laser_safe_action` 与 `/api/safe-action`，包括 `unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset`、进给/功率倍率，以及只对走边框作业的 `pause` / `resume` / `stop_framing`（2026-11-18）。
 - 退出路径：`laser_host::ShutdownCoordinator`、panic 钩子、控制台关闭钩子、Tauri 关闭事件（含 macOS `RunEvent::Exit`）与托盘/菜单栏退出。
-- 本地命令与桌面自动化：`command_execution_tool`、`open_app_tool`（Windows 路径/URI，macOS `/Applications/*.app` + `open -a`）、`shortcut_key_execution_tool`（Windows 上通过 PowerShell `SendKeys`，macOS 上媒体/音量白名单走 `osascript`）。
+- 本地命令与桌面自动化：`command_execution_tool`（30 秒超时）、`open_app_tool`（Windows 经 `ShellExecuteW` 直调系统关联而不经过 `cmd /C start`，禁止向 `.cmd`/`.bat` 传参并对非 `.exe` 目标拦截 `cmd.exe` 元字符；macOS `/Applications/*.app` + `open -a <app> -- <payload>` 10 秒超时，拒绝 NUL/控制字符）、`shortcut_key_execution_tool`（Windows 上通过 PowerShell `SendKeys`、macOS 上媒体/音量白名单走 `osascript`，均 10 秒超时）；`generate_text_image_tool` 单边像素上限 8192。
 - 局域网访问：`AuthManager`、`/v1/auth/*` 与公开路由白名单。
 - 浏览器来源校验（CORS）：`laser-api` 的 `is_allowed_origin`、`handle_http_from`、`MOSS_ALLOWED_ORIGINS` 解析（`laser_runtime::config::parse_allowed_origins`）。不得恢复 `Access-Control-Allow-Origin: *`，不得把来源校验改成前缀匹配；回环连接的 `Host` 白名单（`is_allowed_loopback_host`，防 DNS 重绑定）不得放宽成任意主机名；回环请求免鉴权，所以跨站网页的 POST 必须在路由前以 403 `origin_not_allowed` 拦下（见 [api-contracts.md](api-contracts.md) §1.6）。
 

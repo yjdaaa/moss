@@ -269,7 +269,9 @@ fn wait_status_report<T: DeviceTransport>(
             Ok(Some(line)) if line.starts_with('<') => return Some(line),
             Ok(Some(_)) => continue,
             Ok(None) => return None,
-            Err(_) => continue,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
     None
@@ -319,6 +321,9 @@ pub fn execute_laser_safe_action_with_gate_and_cancel(
         .unwrap_or(1200.0);
     let x = args.x.unwrap_or(0.0);
     let y = args.y.unwrap_or(0.0);
+    if !x.is_finite() || !y.is_finite() {
+        return ToolCallResult::err("坐标 x / y 必须是有限数字");
+    }
 
     // 规划要写的顺序 G-code / 实时字节，先做门禁再碰设备
     enum Plan {
@@ -692,6 +697,7 @@ pub fn execute_select_calibration_cell(args: &SelectCalibrationCellArgs) -> Tool
 // 桌面/系统工具：真实执行（原 Python 行为的 Rust 移植）
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct CommandOutput {
     success: bool,
     code: i32,
@@ -750,39 +756,267 @@ fn hide_console_window(cmd: &mut std::process::Command) -> &mut std::process::Co
     cmd
 }
 
-pub fn execute_command(args: &CommandExecutionArgs, developer_mode: bool) -> ToolCallResult {
-    execute_command_with_runner(args, developer_mode, |cmd| {
-        let output = if cfg!(windows) {
-            hide_console_window(std::process::Command::new("cmd").args(["/C", cmd])).output()
-        } else {
-            std::process::Command::new("sh").args(["-c", cmd]).output()
+const COMMAND_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+const SYSTEM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+const SHORTCUT_EXEC_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_COMMAND_CAPTURE_BYTES: usize = 64 * 1024;
+
+fn wait_child_until(
+    child: &mut std::process::Child,
+    deadline: Instant,
+    timeout_secs: u64,
+) -> Result<std::process::ExitStatus, String> {
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => return Ok(status),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("外部命令执行超过 {timeout_secs} 秒已中止"));
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
         }
-        .map_err(|error| error.to_string())?;
-        Ok(CommandOutput {
-            success: output.status.success(),
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+    }
+}
+
+fn run_status_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    wait_child_until(&mut child, Instant::now() + timeout, timeout.as_secs())
+}
+
+fn spawn_bounded_pipe_reader<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    use std::sync::atomic::Ordering;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        if let Some(mut reader) = pipe {
+            let mut scratch = [0u8; 4096];
+            while !stop.load(Ordering::Acquire) {
+                match reader.read(&mut scratch) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let remain = MAX_COMMAND_CAPTURE_BYTES.saturating_sub(captured.len());
+                        if remain > 0 {
+                            captured.extend_from_slice(&scratch[..n.min(remain)]);
+                        }
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            drop(reader);
+        }
+        let _ = tx.send(captured);
+    });
+    rx
+}
+
+fn run_output_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+) -> Result<CommandOutput, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct StopOnDrop(Arc<AtomicBool>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let deadline = Instant::now() + timeout;
+    let stop = Arc::new(AtomicBool::new(false));
+    let _stop_guard = StopOnDrop(stop.clone());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let out_rx = spawn_bounded_pipe_reader(child.stdout.take(), stop.clone());
+    let err_rx = spawn_bounded_pipe_reader(child.stderr.take(), stop);
+    let status = wait_child_until(&mut child, deadline, timeout.as_secs())?;
+    let recv_bounded = |rx: std::sync::mpsc::Receiver<Vec<u8>>| -> Result<Vec<u8>, String> {
+        let remain = deadline.saturating_duration_since(Instant::now());
+        rx.recv_timeout(remain)
+            .map_err(|_| format!("外部命令输出管道超过 {} 秒未关闭已中止", timeout.as_secs()))
+    };
+    let stdout = recv_bounded(out_rx)?;
+    let stderr = recv_bounded(err_rx)?;
+    Ok(CommandOutput {
+        success: status.success(),
+        code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
 }
 
-fn open_with_system(target: &str) -> Result<(), String> {
-    let status = if cfg!(target_os = "windows") {
-        hide_console_window(std::process::Command::new("cmd").args(["/C", "start", "", target]))
-            .status()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(target).status()
-    } else {
-        std::process::Command::new("xdg-open").arg(target).status()
+pub fn execute_command(args: &CommandExecutionArgs, developer_mode: bool) -> ToolCallResult {
+    execute_command_with_runner(args, developer_mode, |cmd| {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", cmd]);
+            hide_console_window(&mut command);
+            run_output_with_timeout(&mut command, COMMAND_EXEC_TIMEOUT)
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", cmd]);
+            run_output_with_timeout(&mut command, COMMAND_EXEC_TIMEOUT)
+        }
+    })
+}
+
+fn validate_launch_text(value: &str, label: &str) -> Result<(), String> {
+    if value
+        .chars()
+        .any(|c| c == '\0' || c == '\r' || c == '\n' || c.is_control())
+    {
+        return Err(format!("{label} 包含非法控制字符"));
+    }
+    Ok(())
+}
+
+/// Windows 侧针对批处理脚本与未显式指定 `.exe` 目标的参数注入防线：
+/// `ShellExecuteW` 启动 `.cmd`/`.bat` 或经 `PATHEXT` 解析到脚本时仍由 `cmd.exe` 解析命令行，
+/// 因此禁止向 `.cmd`/`.bat` 传参，并对非 `.exe` 目标拒绝 `cmd.exe` 元字符。
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_shell_launch(target: &str, payload: Option<&str>) -> Result<(), String> {
+    let lower_target = target.trim().to_ascii_lowercase();
+    let is_batch = lower_target.ends_with(".cmd") || lower_target.ends_with(".bat");
+    if let Some(arg) = payload {
+        if is_batch {
+            return Err("安全策略禁止在 Windows 上向批处理脚本传递参数".into());
+        }
+        let is_explicit_exe = lower_target.ends_with(".exe");
+        if !is_explicit_exe
+            && arg
+                .chars()
+                .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%' | '!' | '"'))
+        {
+            return Err("非 .exe 目标的参数包含 cmd.exe 元字符，已拒绝执行".into());
+        }
+    }
+    Ok(())
+}
+
+/// 按 Windows `CommandLineToArgvW` 规则将单个参数安全包裹，避免参数分裂。
+#[cfg(any(target_os = "windows", test))]
+fn quote_windows_shell_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.chars().any(|c| matches!(c, ' ' | '\t' | '"')) {
+        return arg.to_owned();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+        } else if ch == '"' {
+            for _ in 0..backslashes * 2 + 1 {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push('"');
+        } else {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            backslashes = 0;
+            out.push(ch);
+        }
+    }
+    for _ in 0..backslashes * 2 {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shell_execute(target: &str, payload: Option<&str>) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    validate_windows_shell_launch(target, payload)?;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lp_operation: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show_cmd: i32,
+        ) -> isize;
+    }
+
+    const SW_SHOWNORMAL: i32 = 1;
+    let to_wide = |s: &str| -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     };
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "系统打开命令退出码 {}",
-            status.code().unwrap_or(-1)
-        )),
-        Err(error) => Err(error.to_string()),
+    let verb = to_wide("open");
+    let file = to_wide(target);
+    let params = payload.map(|p| to_wide(&quote_windows_shell_arg(p)));
+    let params_ptr = params.as_ref().map_or(std::ptr::null(), |buf| buf.as_ptr());
+    // SAFETY: verb/file/params 均为有效的 NUL 结尾 UTF-16 缓冲区，调用期间保持存活；
+    // ShellExecuteW 已在入口拦截 .cmd/.bat 与元字符，直接调用系统关联打开目标。
+    let rc = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            params_ptr,
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if rc > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecuteW 返回错误码 {rc}"))
+    }
+}
+
+fn open_with_system(target: &str) -> Result<(), String> {
+    validate_launch_text(target, "目标")?;
+    #[cfg(target_os = "windows")]
+    {
+        windows_shell_execute(target, None)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = if cfg!(target_os = "macos") {
+            let mut cmd = std::process::Command::new("open");
+            cmd.args(["--", target]);
+            run_status_with_timeout(&mut cmd, SYSTEM_OPEN_TIMEOUT)
+        } else {
+            if target.starts_with('-') {
+                return Err("目标不能以 '-' 开头".into());
+            }
+            let mut cmd = std::process::Command::new("xdg-open");
+            cmd.arg(target);
+            run_status_with_timeout(&mut cmd, SYSTEM_OPEN_TIMEOUT)
+        };
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!(
+                "系统打开命令退出码 {}",
+                status.code().unwrap_or(-1)
+            )),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -821,8 +1055,8 @@ fn resolve_app_alias_for(os: &str, argument: &str) -> String {
         "企业微信" => r"C:\Program Files (x86)\WXWork\WXWork.exe",
         "浏览器" | "chrome" => r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         "edge" => r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        "vscode" => "code",
-        "lasergrbl" => "LaserGRBL",
+        "vscode" => "Code.exe",
+        "lasergrbl" => "LaserGRBL.exe",
         _ => argument,
     }
     .to_owned()
@@ -848,25 +1082,40 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
         .filter(|v| !v.is_empty());
     let result = match payload {
         Some(payload) => {
-            let status = if cfg!(target_os = "windows") {
-                hide_console_window(
-                    std::process::Command::new("cmd").args(["/C", "start", "", &target, payload]),
-                )
-                .status()
-            } else if cfg!(target_os = "macos") {
-                std::process::Command::new("open")
-                    .args(["-a", &target, payload])
-                    .status()
+            if let Err(err) = validate_launch_text(&target, "应用目标")
+                .and_then(|()| validate_launch_text(payload, "应用参数"))
+            {
+                Err(err)
             } else {
-                std::process::Command::new(&target).arg(payload).status()
-            };
-            status.map_err(|e| e.to_string()).and_then(|s| {
-                if s.success() {
-                    Ok(())
-                } else {
-                    Err(format!("退出码 {}", s.code().unwrap_or(-1)))
+                #[cfg(target_os = "windows")]
+                {
+                    windows_shell_execute(&target, Some(payload))
                 }
-            })
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if cfg!(target_os = "macos") {
+                        let mut cmd = std::process::Command::new("open");
+                        cmd.args(["-a", &target, "--", payload]);
+                        run_status_with_timeout(&mut cmd, SYSTEM_OPEN_TIMEOUT).and_then(|s| {
+                            if s.success() {
+                                Ok(())
+                            } else {
+                                Err(format!("退出码 {}", s.code().unwrap_or(-1)))
+                            }
+                        })
+                    } else {
+                        // Linux GUI 应用启动后直接返回，避免 `.status()` 无限阻塞直到目标窗口关闭
+                        std::process::Command::new(&target)
+                            .arg(payload)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    }
+                }
+            }
         }
         None => open_with_system(&target),
     };
@@ -928,13 +1177,10 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
     };
     if cfg!(target_os = "windows") {
         let script = format!("(New-Object -COM WScript.Shell).SendKeys(\"{keys}\")");
-        return match hide_console_window(std::process::Command::new("powershell").args([
-            "-NoProfile",
-            "-Command",
-            &script,
-        ]))
-        .status()
-        {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", &script]);
+        hide_console_window(&mut cmd);
+        return match run_status_with_timeout(&mut cmd, SHORTCUT_EXEC_TIMEOUT) {
             Ok(status) if status.success() => {
                 ToolCallResult::ok(format!("快捷键动作已执行: {action}"))
             }
@@ -943,7 +1189,7 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
                 status.code().unwrap_or(-1)
             )),
             Err(error) => {
-                ToolCallResult::err(format!("快捷键 {action} 启动 PowerShell 失败: {error}"))
+                ToolCallResult::err(format!("快捷键 {action} 执行 PowerShell 失败: {error}"))
             }
         };
     }
@@ -951,10 +1197,9 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
         let Some(script) = macos_shortcut_script(action) else {
             return ToolCallResult::err(format!("不支持的快捷键操作: {action}"));
         };
-        return match std::process::Command::new("osascript")
-            .args(["-e", script])
-            .status()
-        {
+        let mut cmd = std::process::Command::new("osascript");
+        cmd.args(["-e", script]);
+        return match run_status_with_timeout(&mut cmd, SHORTCUT_EXEC_TIMEOUT) {
             Ok(status) if status.success() => {
                 ToolCallResult::ok(format!("快捷键动作已执行: {action}"))
             }
@@ -963,7 +1208,7 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
                 status.code().unwrap_or(-1)
             )),
             Err(error) => {
-                ToolCallResult::err(format!("快捷键 {action} 启动 osascript 失败: {error}"))
+                ToolCallResult::err(format!("快捷键 {action} 执行 osascript 失败: {error}"))
             }
         };
     }
@@ -979,8 +1224,21 @@ pub fn execute_generate_text_image(args: &GenerateTextImageArgs) -> ToolCallResu
     if text.is_empty() {
         return ToolCallResult::err("text 不能为空");
     }
-    let width = args.width.filter(|v| *v > 0).unwrap_or(1024) as u32;
-    let height = args.height.filter(|v| *v > 0).unwrap_or(1024) as u32;
+    const MAX_IMAGE_SIDE_PX: i32 = 8192;
+    let width = match args.width {
+        Some(v) if v > MAX_IMAGE_SIDE_PX => {
+            return ToolCallResult::err(format!("width 不能超过 {MAX_IMAGE_SIDE_PX} 像素"));
+        }
+        Some(v) if v > 0 => v as u32,
+        _ => 1024,
+    };
+    let height = match args.height {
+        Some(v) if v > MAX_IMAGE_SIDE_PX => {
+            return ToolCallResult::err(format!("height 不能超过 {MAX_IMAGE_SIDE_PX} 像素"));
+        }
+        Some(v) if v > 0 => v as u32,
+        _ => 1024,
+    };
     let font_size = args.font_size.filter(|v| *v > 0).unwrap_or(320) as f64;
     let font_path = args
         .font_path
@@ -1411,5 +1669,84 @@ mod tests {
         assert!(result.success, "{result:?}");
         let bytes = std::fs::read(&output).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+
+        let oversized = execute_generate_text_image(&GenerateTextImageArgs {
+            text: "MOSS".into(),
+            width: Some(100_000),
+            height: Some(128),
+            ..Default::default()
+        });
+        assert!(!oversized.success);
+    }
+
+    #[test]
+    fn safe_action_rejects_non_finite_coords_and_launch_guards_control_chars() {
+        let (opener, targets, _) = fake_opener(vec![]);
+        let bad = execute_laser_safe_action_with(
+            &LaserSafeActionArgs {
+                action: "absolute_move".into(),
+                confirmed: Some(true),
+                x: Some(f64::NAN),
+                y: Some(10.0),
+                host: Some("127.0.0.1".into()),
+                ..Default::default()
+            },
+            &opener,
+        );
+        assert!(!bad.success);
+        assert!(bad.result.contains("有限数字"), "{bad:?}");
+        assert!(targets.lock().unwrap().is_empty());
+
+        assert!(validate_launch_text("hello\nwhoami", "target").is_err());
+        assert!(validate_launch_text("hello\0world", "target").is_err());
+        assert_eq!(
+            quote_windows_shell_arg(r#"a "b" & calc.exe"#),
+            r#""a \"b\" & calc.exe""#
+        );
+        assert_eq!(quote_windows_shell_arg("plain.txt"), "plain.txt");
+        assert!(validate_windows_shell_launch("code.cmd", Some("foo&calc")).is_err());
+        assert!(validate_windows_shell_launch("tool.BAT", Some("a")).is_err());
+        assert!(validate_windows_shell_launch("code", Some("foo&calc.exe")).is_err());
+        assert!(validate_windows_shell_launch("Code.exe", Some("foo&bar")).is_ok());
+        assert_eq!(resolve_app_alias_for("windows", "vscode"), "Code.exe");
+
+        #[cfg(not(windows))]
+        {
+            let mut sleeper = std::process::Command::new("sh");
+            sleeper.args(["-c", "sleep 5"]);
+            let err = run_status_with_timeout(&mut sleeper, Duration::from_millis(80)).unwrap_err();
+            assert!(err.contains("已中止"), "{err}");
+
+            // 后台孙进程继承 stdout/stderr 管道时，父 sh 立即退出也不得绕过总超时
+            let mut bg = std::process::Command::new("sh");
+            bg.args(["-c", "sleep 2 &"]);
+            let started = Instant::now();
+            let err = run_output_with_timeout(&mut bg, Duration::from_millis(120)).unwrap_err();
+            assert!(err.contains("已中止"), "{err}");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "继承管道的孙进程不应拖住 run_output_with_timeout: {:?}",
+                started.elapsed()
+            );
+
+            // 超 64 KiB 正常输出按上限截断但不因管道写满死锁
+            let mut big = std::process::Command::new("sh");
+            big.args([
+                "-c",
+                "dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'A'",
+            ]);
+            let out = run_output_with_timeout(&mut big, Duration::from_secs(5)).unwrap();
+            assert!(out.success);
+            assert_eq!(out.stdout.len(), MAX_COMMAND_CAPTURE_BYTES);
+
+            // 持续输出的孤儿孙进程在超时返回后因读端关闭而收到 SIGPIPE 退出，不无限空转
+            let mut spam = std::process::Command::new("sh");
+            spam.args(["-c", "yes >/dev/stdout &"]);
+            let spam_started = Instant::now();
+            let spam_err =
+                run_output_with_timeout(&mut spam, Duration::from_millis(120)).unwrap_err();
+            assert!(spam_err.contains("已中止"), "{spam_err}");
+            assert!(spam_started.elapsed() < Duration::from_secs(1));
+        }
     }
 }

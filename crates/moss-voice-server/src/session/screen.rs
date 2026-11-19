@@ -230,13 +230,21 @@ impl<'a> Session<'a> {
         };
         let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
         let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
-        if let Ok(png) = crate::preview_push::make_music_card_png(
-            &crate::preview_push::MusicCardSpec { title_ascii },
-            self.shared.card_style(),
-            frame,
-            cw,
-            ch,
-        ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+        let card_style = self.shared.card_style();
+        let png = tokio::task::spawn_blocking(move || {
+            crate::preview_push::make_music_card_png(
+                &crate::preview_push::MusicCardSpec { title_ascii },
+                card_style,
+                frame,
+                cw,
+                ch,
+            )
+        })
+        .await
+        .ok()
+        .and_then(Result::ok);
+        if let Some(png) = png
+            && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
         {
             let host = self.preview_http_host();
             let url = format!(

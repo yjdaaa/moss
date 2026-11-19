@@ -213,6 +213,7 @@ impl TcpGrbl {
         let stream = TcpStream::connect(address).map_err(|e| e.to_string())?;
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         Self::from_stream(stream)
     }
 
@@ -255,11 +256,24 @@ impl DeviceTransport for TcpGrbl {
     }
 
     fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+        if command == RealtimeCommand::EmergencyStop
+            && let Some(raw) = self.raw_abort_stream.as_ref()
+        {
+            let mut s = raw.as_ref();
+            if s.write_all(&[0x18]).is_ok() {
+                return Ok(());
+            }
+        }
         // Direct non-queuing send via dedicated realtime writer stream
-        let mut writer = self
-            .realtime_writer
-            .lock()
-            .map_err(|_| "TCP realtime writer lock poisoned".to_string())?;
+        let mut writer = if command == RealtimeCommand::EmergencyStop {
+            self.realtime_writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        } else {
+            self.realtime_writer
+                .lock()
+                .map_err(|_| "TCP realtime writer lock poisoned".to_string())?
+        };
         writer
             .write_all(&[command.byte()])
             .map_err(|e| e.to_string())?;
@@ -372,10 +386,23 @@ impl DeviceTransport for SerialGrbl {
     }
 
     fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
-        let mut writer = self
-            .realtime_writer
-            .lock()
-            .map_err(|_| "串口 realtime writer lock poisoned".to_string())?;
+        if command == RealtimeCommand::EmergencyStop
+            && let Some(raw) = self.raw_abort_port.as_ref()
+        {
+            let mut guard = raw.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.write_all(&[0x18]).is_ok() && guard.flush().is_ok() {
+                return Ok(());
+            }
+        }
+        let mut writer = if command == RealtimeCommand::EmergencyStop {
+            self.realtime_writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        } else {
+            self.realtime_writer
+                .lock()
+                .map_err(|_| "串口 realtime writer lock poisoned".to_string())?
+        };
         writer
             .write_all(&[command.byte()])
             .map_err(|e| e.to_string())?;
@@ -392,9 +419,13 @@ impl DeviceTransport for SerialGrbl {
     fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
         let port = self.raw_abort_port.clone()?;
         Some(Box::new(move || {
-            let mut guard = port
-                .lock()
-                .map_err(|_| "串口急停句柄 lock poisoned".to_string())?;
+            let mut guard = match port.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err("串口急停句柄忙".to_string());
+                }
+            };
             guard.write_all(&[0x18]).map_err(|e| e.to_string())?;
             guard.flush().map_err(|e| e.to_string())
         }))

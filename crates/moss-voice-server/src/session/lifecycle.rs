@@ -62,7 +62,13 @@ impl<'a> Session<'a> {
                     },
                     captured_epoch,
                 ) {
-                    self.shared.registry.record_chat_turn_at(&scrubbed, epoch);
+                    let registry = self.shared.registry.clone();
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle
+                            .spawn_blocking(move || registry.record_chat_turn_at(&scrubbed, epoch));
+                    } else {
+                        registry.record_chat_turn_at(&scrubbed, epoch);
+                    }
                 }
             }
         }
@@ -236,11 +242,8 @@ impl<'a> Session<'a> {
     }
 
     /// 字幕里有设备显示不出、MOSS 也补不上的字时记一条诊断（只记字数，不把原话/回复字符写入公共诊断事件，防泄露用户文本）。
-    fn report_glyph_gaps(&mut self, text: &str) {
-        let fresh: Vec<char> = self
-            .shared
-            .glyph_fonts
-            .undisplayable_chars(self.text_font_cap.as_ref(), text)
+    fn emit_glyph_gap_event(&mut self, undisplayable: Vec<char>, full_pack_ready: bool) {
+        let fresh: Vec<char> = undisplayable
             .into_iter()
             .filter(|ch| self.glyph_gaps_reported.insert(*ch))
             .collect();
@@ -248,11 +251,7 @@ impl<'a> Session<'a> {
             return;
         }
         let count = fresh.len();
-        let record = if self
-            .shared
-            .glyph_fonts
-            .full_pack_ready(self.text_font_cap.as_ref())
-        {
+        let record = if full_pack_ready {
             EventRecord::warn(
                 DiagCategory::Device,
                 format!("小智屏幕字幕缺字：有 {count} 个生僻字符不在设备字库与全量补字库里，这些字不会显示"),
@@ -268,12 +267,28 @@ impl<'a> Session<'a> {
         self.event(record);
     }
 
+    /// 在阻塞线程池准备字幕缺字诊断与动态字模（纯基础字走内存快路径，不占 2-worker Tokio 音频线程）。
+    async fn prepare_glyphs_async(
+        &mut self,
+        text: &str,
+    ) -> Option<moss_xiaozhi_proto::GlyphPushPayload> {
+        if !crate::glyph_font::GlyphFontService::needs_lookup(self.text_font_cap.as_ref(), text) {
+            return None;
+        }
+        let glyph_fonts = self.shared.glyph_fonts.clone();
+        let cap = self.text_font_cap.clone();
+        let text_owned = text.to_owned();
+        let (undisplayable, full_ready, glyph_push) = tokio::task::spawn_blocking(move || {
+            glyph_fonts.prepare_text_glyphs(cap.as_ref(), &text_owned)
+        })
+        .await
+        .unwrap_or_default();
+        self.emit_glyph_gap_event(undisplayable, full_ready);
+        glyph_push
+    }
+
     pub(super) async fn send_stt(&mut self, socket: &mut crate::link::Link, text: String) -> bool {
-        self.report_glyph_gaps(&text);
-        let glyph_push = self
-            .shared
-            .glyph_fonts
-            .glyph_push_for_text(self.text_font_cap.as_ref(), &text);
+        let glyph_push = self.prepare_glyphs_async(&text).await;
         let sent = send_json(
             socket,
             &ServerMessage::Stt {
@@ -296,15 +311,11 @@ impl<'a> Session<'a> {
         text: Option<String>,
     ) -> Result<(), String> {
         let starting = matches!(state, TtsState::Start);
-        if let (TtsState::SentenceStart, Some(s)) = (&state, text.as_deref()) {
-            self.last_screen_stt = None;
-            self.report_glyph_gaps(s);
-        }
         let glyph_push = match (&state, text.as_deref()) {
-            (TtsState::SentenceStart, Some(s)) => self
-                .shared
-                .glyph_fonts
-                .glyph_push_for_text(self.text_font_cap.as_ref(), s),
+            (TtsState::SentenceStart, Some(s)) => {
+                self.last_screen_stt = None;
+                self.prepare_glyphs_async(s).await
+            }
             _ => None,
         };
         let message = ServerMessage::Tts {

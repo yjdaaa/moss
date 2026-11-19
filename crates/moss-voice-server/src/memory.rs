@@ -163,7 +163,7 @@ impl MemoryService {
         {
             return Err("记忆内容不合法或超过1500字".into());
         }
-        let _state = self.gate.lock().map_err(|_| "记忆管理锁不可用")?;
+        let mut state = self.gate.lock().map_err(|_| "记忆管理锁不可用")?;
         if !self.store.allowed(device)? {
             return Err("设备未授权".into());
         }
@@ -171,7 +171,11 @@ impl MemoryService {
         if record.revision != revision {
             return Ok(None);
         }
-        self.store.update(device, revision, text)
+        let updated = self.store.update(device, revision, text)?;
+        if updated.is_some() {
+            *state.epochs.entry(device.to_owned()).or_default() += 1;
+        }
+        Ok(updated)
     }
 
     /// Load independently of audio: SQLite access runs on the blocking pool.
@@ -209,24 +213,18 @@ impl MemoryService {
         let Ok(pending) = self.pending.clone().try_acquire_owned() else {
             return false;
         };
-        let (generation, epoch, current) = {
+        let (generation, epoch) = {
             let mut guard = match self.gate.lock() {
                 Ok(g) => g,
                 Err(_) => return false,
             };
-            if !guard.enabled
-                || guard.in_flight.contains(device)
-                || self.store.allowed(device).ok() != Some(true)
-            {
+            if !guard.enabled || guard.in_flight.contains(device) {
                 return false;
             }
-            let Ok(record) = self.store.ensure(device) else {
-                return false;
-            };
             let generation = guard.generation;
             let epoch = *guard.epochs.get(device).unwrap_or(&0);
             guard.in_flight.insert(device.to_owned());
-            (generation, epoch, record)
+            (generation, epoch)
         };
         let service = self.clone();
         let device = device.to_owned();
@@ -248,6 +246,25 @@ impl MemoryService {
             };
             let _pending = pending;
             let Ok(_worker) = service.workers.clone().acquire_owned().await else {
+                return;
+            };
+            let prep_service = service.clone();
+            let prep_device = device.clone();
+            let Ok(Some(current)) = tokio::task::spawn_blocking(move || {
+                let guard = prep_service.gate.lock().ok()?;
+                if !guard.enabled
+                    || guard.generation != generation
+                    || *guard.epochs.get(&prep_device).unwrap_or(&0) != epoch
+                {
+                    return None;
+                }
+                if prep_service.store.allowed(&prep_device).ok() != Some(true) {
+                    return None;
+                }
+                prep_service.store.ensure(&prep_device).ok()
+            })
+            .await
+            else {
                 return;
             };
             let (sender, _receiver) = mpsc::unbounded_channel();

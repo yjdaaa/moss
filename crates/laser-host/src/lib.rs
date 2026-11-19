@@ -36,10 +36,16 @@ fn enter_raw_abort() -> Option<RawAbortReentrancyGuard> {
     }
 }
 
+#[derive(Clone)]
+struct RegisteredAbort {
+    on_shutdown: RawAbortCallback,
+    on_panic: RawAbortCallback,
+}
+
 #[derive(Default)]
 pub struct ShutdownCoordinator {
     requested: Arc<AtomicBool>,
-    raw_handles: Arc<Mutex<Vec<RawAbortCallback>>>,
+    raw_handles: Arc<Mutex<Vec<RegisteredAbort>>>,
     db: Arc<Mutex<Option<Arc<Mutex<RuntimeDb>>>>>,
 }
 
@@ -52,11 +58,24 @@ impl ShutdownCoordinator {
     where
         F: Fn() -> Result<(), String> + Send + Sync + 'static,
     {
+        let cb: RawAbortCallback = Arc::new(handle);
+        self.register_shutdown_and_panic_abort(cb.clone(), cb);
+    }
+
+    /// 分别登记正常停机与 Panic Hook 非阻塞急停回调，避免持锁线程 panic 时在 hook 内自死锁。
+    pub fn register_shutdown_and_panic_abort(
+        &self,
+        on_shutdown: RawAbortCallback,
+        on_panic: RawAbortCallback,
+    ) {
         let mut handles = self
             .raw_handles
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        handles.push(Arc::new(handle));
+        handles.push(RegisteredAbort {
+            on_shutdown,
+            on_panic,
+        });
     }
 
     pub fn register_db(&self, db: Arc<Mutex<RuntimeDb>>) {
@@ -75,11 +94,25 @@ impl ShutdownCoordinator {
         self.requested.clone()
     }
 
-    fn snapshot_raw_handles(&self) -> Vec<RawAbortCallback> {
+    fn snapshot_shutdown_handles(&self) -> Vec<RawAbortCallback> {
         self.raw_handles
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .iter()
+            .map(|entry| entry.on_shutdown.clone())
+            .collect()
+    }
+
+    fn try_snapshot_panic_handles(&self) -> Vec<RawAbortCallback> {
+        match self.raw_handles.try_lock() {
+            Ok(guard) => guard.iter().map(|entry| entry.on_panic.clone()).collect(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
+                .into_inner()
+                .iter()
+                .map(|entry| entry.on_panic.clone())
+                .collect(),
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        }
     }
 
     fn invoke_handles(handles: &[RawAbortCallback]) {
@@ -88,13 +121,13 @@ impl ShutdownCoordinator {
         }
     }
 
-    /// Panic Hook 专用紧急停机：先克隆并释放 `raw_handles` 锁，再遍历裸句柄刷出 `0x18`，
-    /// 且**不置位** `self.requested`，既杜绝持锁回调 panic 重入自锁，又保证后续正常退出仍有效。
+    /// Panic Hook 专用紧急停机：先 `try_lock` 快照并释放 `raw_handles` 锁，再遍历非阻塞裸句柄刷出 `0x18`，
+    /// 且**不置位** `self.requested`，既杜绝持锁线程 panic 自死锁，又保证后续正常退出仍有效。
     pub fn trigger_panic_abort(&self) {
         let Some(_guard) = enter_raw_abort() else {
             return;
         };
-        let handles = self.snapshot_raw_handles();
+        let handles = self.try_snapshot_panic_handles();
         Self::invoke_handles(&handles);
     }
 
@@ -106,11 +139,7 @@ impl ShutdownCoordinator {
         let Some(_guard) = enter_raw_abort() else {
             return true;
         };
-        let handles = match self.raw_handles.try_lock() {
-            Ok(guard) => guard.clone(),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
-            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
-        };
+        let handles = self.try_snapshot_panic_handles();
         Self::invoke_handles(&handles);
         true
     }
@@ -128,7 +157,7 @@ impl ShutdownCoordinator {
 
         // 步骤 1: 快照后释放注册表锁，在锁外执行 0x18 回调（即使回调触发全局 panic hook 也不自锁）
         if let Some(_guard) = enter_raw_abort() {
-            let handles = self.snapshot_raw_handles();
+            let handles = self.snapshot_shutdown_handles();
             Self::invoke_handles(&handles);
         }
 
@@ -208,6 +237,37 @@ pub fn install_console_ctrl_handler() {
             fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
             fn signal(signum: i32, handler: usize) -> usize;
             fn raise(signum: i32) -> i32;
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            fn __error() -> *mut i32;
+            #[cfg(target_os = "android")]
+            fn __errno() -> *mut i32;
+            #[cfg(target_os = "linux")]
+            fn __errno_location() -> *mut i32;
+        }
+        #[inline]
+        unsafe fn errno_ptr() -> *mut i32 {
+            // SAFETY: 平台 C 运行库保证线程局部 errno 地址在信号处理器内可安全读取与恢复。
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                unsafe { __error() }
+            }
+            #[cfg(target_os = "android")]
+            {
+                unsafe { __errno() }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                unsafe { __errno_location() }
+            }
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "android",
+                target_os = "linux"
+            )))]
+            {
+                std::ptr::null_mut()
+            }
         }
         const SIGHUP: i32 = 1;
         const SIGINT: i32 = 2;
@@ -223,22 +283,39 @@ pub fn install_console_ctrl_handler() {
         const O_NONBLOCK: i32 = 0x0800;
 
         // 信号处理器内仅调用异步信号安全的 write() 写入 1 字节信号编号，
+        // 同时保存并恢复 errno，避免破坏被中断线程的错误码；
         // 由预先启动的普通后台线程完成完整停机（刷出 0x18 + 落库 + 重新传递信号）。
         unsafe extern "C" fn signal_handler(signum: i32) {
+            let err_p = unsafe { errno_ptr() };
+            let saved_errno = if err_p.is_null() {
+                0
+            } else {
+                // SAFETY: 非空 errno 指针指向当前线程的 errno 槽位。
+                unsafe { *err_p }
+            };
             let fd = SIGNAL_PIPE_WR.load(Ordering::Relaxed);
             if fd >= 0 {
                 let byte = signum as u8;
+                // SAFETY: write 为 POSIX async-signal-safe，fd 已设 O_NONBLOCK，缓冲区有效 1 字节。
                 unsafe {
                     let _ = write(fd, (&byte as *const u8).cast(), 1);
+                }
+            }
+            if !err_p.is_null() {
+                // SAFETY: 恢复进入信号处理器前的 errno 值。
+                unsafe {
+                    *err_p = saved_errno;
                 }
             }
         }
 
         let mut fds = [-1i32; 2];
+        // SAFETY: fds 为长度为 2 的可写栈数组。
         if unsafe { pipe(fds.as_mut_ptr()) } != 0 {
             return;
         }
         let (rd, wr) = (fds[0], fds[1]);
+        // SAFETY: rd/wr 为刚创建的有效文件描述符。
         let nonblock_ok = unsafe {
             let _ = fcntl(rd, F_SETFD, FD_CLOEXEC);
             let _ = fcntl(wr, F_SETFD, FD_CLOEXEC);
@@ -246,6 +323,7 @@ pub fn install_console_ctrl_handler() {
             flags >= 0 && fcntl(wr, F_SETFL, flags | O_NONBLOCK) == 0
         };
         if !nonblock_ok {
+            // SAFETY: 关闭初始化失败的管道两端。
             unsafe {
                 let _ = close(rd);
                 let _ = close(wr);
@@ -258,10 +336,12 @@ pub fn install_console_ctrl_handler() {
             .spawn(move || {
                 let mut byte = 0u8;
                 loop {
+                    // SAFETY: rd 由本线程独占，byte 为有效 1 字节可写缓冲区。
                     let n = unsafe { read(rd, (&mut byte as *mut u8).cast(), 1) };
                     if n == 1 {
                         let signum = i32::from(byte);
                         global_shutdown_coordinator().trigger_shutdown();
+                        // SAFETY: 恢复默认信号处理并重新向本进程投递原信号。
                         unsafe {
                             signal(signum, SIG_DFL);
                             raise(signum);
@@ -271,19 +351,26 @@ pub fn install_console_ctrl_handler() {
                     if n == 0 {
                         break;
                     }
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
                 }
+                // SAFETY: 线程退出前关闭独占读端。
                 unsafe {
                     let _ = close(rd);
                 }
             });
         if spawned.is_err() {
             SIGNAL_PIPE_WR.store(-1, Ordering::Release);
+            // SAFETY: 后台线程未启动，关闭管道两端。
             unsafe {
                 let _ = close(rd);
                 let _ = close(wr);
             }
             return;
         }
+        // SAFETY: signal_handler 为 extern "C" 异步信号安全函数，且自管道与后台线程已就绪。
         unsafe {
             for signum in [SIGHUP, SIGINT, SIGTERM] {
                 signal(signum, signal_handler as unsafe extern "C" fn(i32) as usize);
@@ -937,9 +1024,13 @@ impl HostApplication {
             eprintln!("严格模式已开启：运动或出光动作需要桌面会话或桌面审批");
         }
 
-        // 五条退出路径统一兜底：对所有正在下发的作业置取消并直接写 0x18（实时信道 + 裸句柄）
+        // 五条退出路径统一兜底：正常退出走完整急停，Panic Hook 走 try_lock 非阻塞裸句柄急停
         let abort_service = api_service.clone();
-        coordinator.register_raw_abort(move || abort_service.abort_all_active_jobs());
+        let panic_service = api_service.clone();
+        coordinator.register_shutdown_and_panic_abort(
+            Arc::new(move || abort_service.abort_all_active_jobs()),
+            Arc::new(move || panic_service.abort_all_active_jobs_nonblocking()),
+        );
 
         Ok(Self {
             settings,

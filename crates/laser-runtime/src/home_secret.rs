@@ -29,6 +29,14 @@ mod envelope {
     const TAG_LEN: usize = 32;
     const MAX_PLAINTEXT_LEN: usize = 64 * 1024;
 
+    fn wipe_bytes(buf: &mut [u8]) {
+        for b in buf.iter_mut() {
+            // SAFETY: b 为有效可写引用；write_volatile + compiler_fence 防止编译器删掉清零操作。
+            unsafe { std::ptr::write_volatile(b, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(super) fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         let mut key_block = [0u8; 64];
         if key.len() > 64 {
@@ -55,9 +63,9 @@ mod envelope {
         let final_digest = outer.finalize();
         let mut out = [0u8; 32];
         out.copy_from_slice(&final_digest);
-        for b in &mut key_block {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
+        wipe_bytes(&mut key_block);
+        wipe_bytes(&mut ipad);
+        wipe_bytes(&mut opad);
         out
     }
 
@@ -67,13 +75,14 @@ mod envelope {
             out.chunks_mut(32).zip(input.chunks(32)).enumerate()
         {
             let counter = (block_idx as u64).to_le_bytes();
-            let stream = hmac_sha256(enc_key, &[&counter]);
+            let mut stream = hmac_sha256(enc_key, &[&counter]);
             for (d, (s, k)) in dst_chunk
                 .iter_mut()
                 .zip(src_chunk.iter().zip(stream.iter()))
             {
                 *d = *s ^ *k;
             }
+            wipe_bytes(&mut stream);
         }
         out
     }
@@ -84,9 +93,9 @@ mod envelope {
         }
         let mut diff = 0u8;
         for (x, y) in a.iter().zip(b.iter()) {
-            diff |= x ^ y;
+            diff |= std::hint::black_box(*x ^ *y);
         }
-        diff == 0
+        std::hint::black_box(diff) == 0
     }
 
     pub(super) fn seal_with_key(
@@ -102,9 +111,8 @@ mod envelope {
         let ciphertext = xor_keystream(&enc_key, plaintext);
         let len_le = (ciphertext.len() as u64).to_le_bytes();
         let tag = hmac_sha256(&mac_key, &[ENTROPY, nonce, &len_le, &ciphertext]);
-        for b in enc_key.iter_mut().chain(mac_key.iter_mut()) {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
+        wipe_bytes(&mut enc_key);
+        wipe_bytes(&mut mac_key);
         let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len() + TAG_LEN);
         sealed.extend_from_slice(nonce);
         sealed.extend_from_slice(&ciphertext);
@@ -130,17 +138,13 @@ mod envelope {
         let mut mac_key = hmac_sha256(master, &[b"moss.ha.mac.v1", ENTROPY, nonce]);
         let len_le = (ciphertext.len() as u64).to_le_bytes();
         let expected_tag = hmac_sha256(&mac_key, &[ENTROPY, nonce, &len_le, ciphertext]);
-        for b in &mut mac_key {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
+        wipe_bytes(&mut mac_key);
         if !constant_time_eq(&expected_tag, tag) {
             return Err(HomeSecretError::CryptoFailure);
         }
         let mut enc_key = hmac_sha256(master, &[b"moss.ha.enc.v1", ENTROPY, nonce]);
         let plaintext = xor_keystream(&enc_key, ciphertext);
-        for b in &mut enc_key {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
+        wipe_bytes(&mut enc_key);
         Ok(plaintext)
     }
 }

@@ -25,14 +25,27 @@ impl ApiService {
                 .then(|| value.trim().strip_prefix("Bearer ").map(str::to_string))
                 .flatten()
         });
-        let content_length = lines
-            .find_map(|line| {
-                let (key, value) = line.split_once(':')?;
-                key.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse().ok())
-                    .flatten()
-            })
-            .unwrap_or(0usize);
+        let content_length = match parse_content_length(&head) {
+            Ok(len) => len,
+            Err(BodyFramingError::TransferEncodingUnsupported) => {
+                return http_json(
+                    501,
+                    failure(
+                        "不支持 Transfer-Encoding 分块传输，请使用 Content-Length",
+                        Some(serde_json::json!({"error_code": "transfer_encoding_unsupported"})),
+                    ),
+                );
+            }
+            Err(BodyFramingError::InvalidContentLength) => {
+                return http_json(
+                    400,
+                    failure(
+                        "Content-Length 请求头无效或存在冲突",
+                        Some(serde_json::json!({"error_code": "invalid_content_length"})),
+                    ),
+                );
+            }
+        };
         let body = &request[separator + 4..];
         if body.len() < content_length {
             return http_json(400, failure("请求体不完整", None));
@@ -732,10 +745,19 @@ impl ApiService {
             let is_download =
                 query_param(query, "download").is_some_and(|v| v == "1" || v == "true");
             let disposition = if is_download {
-                let fname = requested
+                let raw_name = requested
                     .file_name()
                     .and_then(|v| v.to_str())
                     .unwrap_or("download");
+                let safe_name: String = raw_name
+                    .chars()
+                    .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n') && !c.is_control())
+                    .collect();
+                let fname = if safe_name.trim().is_empty() {
+                    "download"
+                } else {
+                    safe_name.trim()
+                };
                 Some(format!("attachment; filename=\"{fname}\""))
             } else {
                 None

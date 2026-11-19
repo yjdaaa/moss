@@ -324,15 +324,18 @@ pub(crate) fn environment_block(
 }
 
 /// Attribute list owns only native metadata; the separate Handle wrappers own
-/// all pipe/process handles. This prevents use-after-free during CreateProcessW.
-struct Attributes {
+/// all pipe/process handles. Lifetime `'a` pins `handles` for the full life of
+/// the attribute list so the borrow checker prevents use-after-free.
+struct Attributes<'a> {
     storage: Vec<usize>,
     initialized: bool,
+    _handles: std::marker::PhantomData<&'a [HANDLE]>,
 }
-impl Attributes {
-    fn new(handles: &mut [HANDLE; 3]) -> Result<Self, ProcessFailure> {
+impl<'a> Attributes<'a> {
+    fn new(handles: &'a mut [HANDLE; 3]) -> Result<Self, ProcessFailure> {
         // SAFETY: Windows first provides the required byte length; usize Vec
-        // provides >= pointer alignment. Handles outlive CreateProcessW.
+        // provides >= pointer alignment. Lifetime `'a` guarantees `handles`
+        // outlives `Attributes` and therefore `CreateProcessW`.
         unsafe {
             let mut count = 0usize;
             InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut count);
@@ -343,6 +346,7 @@ impl Attributes {
             let mut result = Self {
                 storage: vec![0; items],
                 initialized: false,
+                _handles: std::marker::PhantomData,
             };
             if InitializeProcThreadAttributeList(result.pointer(), 1, 0, &mut count) == 0 {
                 return Err(ProcessFailure::StartFailed);
@@ -367,7 +371,7 @@ impl Attributes {
         self.storage.as_mut_ptr() as *mut c_void
     }
 }
-impl Drop for Attributes {
+impl Drop for Attributes<'_> {
     fn drop(&mut self) {
         if self.initialized {
             // SAFETY: initialized on this allocation and never moved within Vec.

@@ -14,7 +14,6 @@ impl ApiService {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
             // 认证要等读完请求才能做，因此在接入时就按来源分配名额：回环（桌面界面 / Tauri 内嵌页）
             // 始终保有预留名额，局域网慢连接占满也不会让本机急停拿到 503（2026-11-05）。
             let Ok(peer) = stream.peer_addr() else {
@@ -22,11 +21,14 @@ impl ApiService {
             };
             let loopback = peer.ip().is_loopback();
             if !try_admit_http_connection(&active_conns, loopback) {
+                // 主 accept 循环只用极短写超时回 503，防止恶意零窗口客户端拖住后续回环急停建连
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(200)));
                 let busy = http_json(503, failure("并发连接过多，请稍后重试", None));
                 let _ = stream.write_all(&busy);
                 let _ = stream.flush();
                 continue;
             }
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
             let permit = ConnPermit(active_conns.clone());
             let service = service.clone();
             let _ = std::thread::Builder::new()
@@ -129,7 +131,7 @@ fn request_allows_keep_alive(request: &[u8], loopback: bool, served_count: usize
     if !first_line.contains("HTTP/1.1") {
         return false;
     }
-    if header_value(&head, "transfer-encoding").is_some() {
+    if parse_content_length(&head).is_err() {
         return false;
     }
     if let Some(conn) = header_value(&head, "connection")
@@ -177,7 +179,7 @@ fn read_http_request_buffered(
     let mut started: Option<std::time::Instant> =
         (!buffer.is_empty()).then(std::time::Instant::now);
     let mut chunk = [0u8; 4096];
-    let mut content_length: Option<usize> = None;
+    let mut content_length: Option<Result<usize, BodyFramingError>> = None;
     let mut header_end: Option<usize> = None;
 
     loop {
@@ -185,13 +187,7 @@ fn read_http_request_buffered(
             if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
                 header_end = Some(pos + 4);
                 let head = String::from_utf8_lossy(&buffer[..pos]);
-                for line in head.lines() {
-                    if let Some((k, v)) = line.split_once(':')
-                        && k.trim().eq_ignore_ascii_case("content-length")
-                    {
-                        content_length = v.trim().parse::<usize>().ok();
-                    }
-                }
+                content_length = Some(parse_content_length(&head));
             } else if buffer.len() > MAX_HEADER_SIZE {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -201,7 +197,16 @@ fn read_http_request_buffered(
         }
 
         if let Some(end) = header_end {
-            let body_len = content_length.unwrap_or(0);
+            let body_len = match content_length {
+                Some(Ok(len)) => len,
+                Some(Err(_)) => {
+                    // 头已完整但 framing 非法/不支持：交给 route_http 返回 400/501 并由连接循环断开
+                    let request = buffer[..end].to_vec();
+                    buffer.clear();
+                    return Ok(request);
+                }
+                None => 0,
+            };
             if body_len > MAX_BODY_SIZE {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

@@ -192,7 +192,12 @@ impl DecisionClient for OpenRouterDecisionClient {
         timeout: Duration,
     ) -> BoxFuture<'a, Result<Value, DecisionError>> {
         Box::pin(async move {
-            let Some(api_key) = (self.secret)().filter(|k| !k.trim().is_empty()) else {
+            let secret_reader = self.secret.clone();
+            let secret = tokio::task::spawn_blocking(move || (secret_reader)())
+                .await
+                .ok()
+                .flatten();
+            let Some(api_key) = secret.filter(|k| !k.trim().is_empty()) else {
                 return Err(DecisionError::Failed);
             };
             let client = shared_http_client()?;

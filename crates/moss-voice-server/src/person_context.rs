@@ -270,6 +270,7 @@ struct State {
     generation: u64,
     deleted: HashSet<String>,
     device_epochs: HashMap<String, u64>,
+    person_epochs: HashMap<String, u64>,
     histories: HashMap<HistoryKey, Vec<ChatMessage>>,
     in_flight: HashSet<String>,
     identifying: HashSet<String>,
@@ -600,11 +601,15 @@ impl PersonContext {
         if revision < 0 || text.chars().count() > 1500 || crate::memory::private_content(text) {
             return Err("个人摘要无效或含敏感内容".into());
         }
-        let state = self.state.lock().map_err(|_| "个人上下文锁不可用")?;
+        let mut state = self.state.lock().map_err(|_| "个人上下文锁不可用")?;
         if !self.valid(&state, scope) {
             return Err("声纹记录已失效".into());
         }
-        self.store.update(scope, revision, text)
+        let updated = self.store.update(scope, revision, text)?;
+        if updated {
+            *state.person_epochs.entry(scope.id.clone()).or_default() += 1;
+        }
+        Ok(updated)
     }
     pub fn session_closed(
         self: &Arc<Self>,
@@ -644,28 +649,24 @@ impl PersonContext {
         let Ok(pending) = self.pending.clone().try_acquire_owned() else {
             return false;
         };
-        let (record, epoch, grant) = {
+        let (epoch, person_epoch) = {
             let Ok(mut state) = self.state.lock() else {
                 return false;
             };
-            if !self.bound_current(&state, context, scope) || state.in_flight.contains(&scope.id) {
-                return false;
-            }
-            let Ok(Some(record)) = self.store.load(scope) else {
-                return false;
-            };
-            let Some(grant) = self.resolver.device_generation(&context.device_id) else {
-                return false;
-            };
-            if record.text.chars().count() > 1500 || crate::memory::private_content(&record.text) {
+            let epoch = *state.device_epochs.get(&context.device_id).unwrap_or(&0);
+            let scope_matches_memory = scope.generation == state.generation
+                && !state.deleted.contains(&scope.id)
+                && !state.in_flight.contains(&scope.id)
+                && scope.binding.as_ref().is_some_and(|binding| {
+                    binding.device == context.device_id
+                        && binding.session == context.session_id
+                        && binding.epoch == epoch
+                });
+            if !scope_matches_memory {
                 return false;
             }
             state.in_flight.insert(scope.id.clone());
-            (
-                record,
-                *state.device_epochs.get(&context.device_id).unwrap_or(&0),
-                grant,
-            )
+            (epoch, *state.person_epochs.get(&scope.id).unwrap_or(&0))
         };
         let this = self.clone();
         let scope = scope.clone();
@@ -691,15 +692,33 @@ impl PersonContext {
             let Ok(_worker) = this.workers.clone().acquire_owned().await else {
                 return;
             };
-            // Queued work must not send a revoked person's text to the model.
-            {
-                let Ok(state) = this.state.lock() else {
-                    return;
-                };
-                if !this.bound_current(&state, &context, &scope) {
-                    return;
+            // Queued work must not send a revoked person's text to the model;
+            // SQLite load & device_generation lookup run on the blocking pool.
+            let prep_this = this.clone();
+            let prep_context = context.clone();
+            let prep_scope = scope.clone();
+            let Ok(Some((record, grant))) = tokio::task::spawn_blocking(move || {
+                let state = prep_this.state.lock().ok()?;
+                if !prep_this.bound_current(&state, &prep_context, &prep_scope)
+                    || *state.person_epochs.get(&prep_scope.id).unwrap_or(&0) != person_epoch
+                {
+                    return None;
                 }
-            }
+                let record = prep_this.store.load(&prep_scope).ok()??;
+                let grant = prep_this
+                    .resolver
+                    .device_generation(&prep_context.device_id)?;
+                if record.text.chars().count() > 1500
+                    || crate::memory::private_content(&record.text)
+                {
+                    return None;
+                }
+                Some((record, grant))
+            })
+            .await
+            else {
+                return;
+            };
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let messages = [
                 ChatMessage::system(
@@ -730,6 +749,7 @@ impl PersonContext {
                 if !this.valid(&state, &scope)
                     || this.resolver.device_generation(&context.device_id) != Some(grant)
                     || *state.device_epochs.get(&context.device_id).unwrap_or(&0) != epoch
+                    || *state.person_epochs.get(&scope.id).unwrap_or(&0) != person_epoch
                 {
                     return;
                 }

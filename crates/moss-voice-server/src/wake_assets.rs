@@ -742,7 +742,12 @@ impl Drop for DownloadChunks {
             )
             .hint("设备写入资源分区后会自动重启，之后开机就按新资源包显示"),
         );
-        shared.registry.assets_downloaded(&device);
+        let registry = shared.registry.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || registry.assets_downloaded(&device));
+        } else {
+            registry.assets_downloaded(&device);
+        }
     }
 }
 

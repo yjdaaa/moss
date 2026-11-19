@@ -134,7 +134,50 @@ impl DeviceRegistry for DbRegistry {
     }
 
     fn record_chat_turn_at(&self, trace: &moss_voice_server::TurnDebugTrace, captured_epoch: u64) {
+        if !self
+            .chat_log_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+            || captured_epoch
+                != self
+                    .chat_log_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        // 在拿数据库锁之前读盘，避免持 db.lock() 期间阻塞在文件系统 I/O 上
+        if !moss_voice::settings::load(&self.settings_file)
+            .builtin_local
+            .chat_log_enabled
+        {
+            return;
+        }
+        let scrubbed_tools: Vec<moss_voice_server::DebugToolTrace> = trace
+            .tools
+            .iter()
+            .map(|t| moss_voice_server::DebugToolTrace {
+                name: t.name.clone(),
+                arguments: moss_voice_server::scrub_debug_text(&t.arguments),
+                result: moss_voice_server::scrub_debug_text(&t.result),
+            })
+            .collect();
+        let tools_json = serde_json::to_string(&scrubbed_tools).unwrap_or_else(|_| "[]".to_owned());
+        let record = laser_runtime::VoiceChatLogRecord {
+            id: 0,
+            at_ms: i64::try_from(trace.at_ms).unwrap_or(i64::MAX),
+            device_id: trace.device_id.clone(),
+            session_id: trace.session_id.clone(),
+            turn: i64::try_from(trace.turn).unwrap_or(i64::MAX),
+            raw_asr: moss_voice_server::scrub_debug_text(&trace.raw_asr),
+            corrected_asr: moss_voice_server::scrub_debug_text(&trace.corrected_asr),
+            reply: moss_voice_server::scrub_debug_text(&trace.reply),
+            spoken: moss_voice_server::scrub_debug_text(&trace.spoken),
+            tools_json,
+            outcome: trace.outcome.clone(),
+            truncated: trace.truncated,
+            tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
+        };
         if let Ok(db) = self.db.lock() {
+            // 拿锁后二次核验开关与代次，保证与清空/关闭时的 db.lock() 屏障严格串行
             if !self
                 .chat_log_enabled
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -142,38 +185,9 @@ impl DeviceRegistry for DbRegistry {
                     != self
                         .chat_log_epoch
                         .load(std::sync::atomic::Ordering::Acquire)
-                || !moss_voice::settings::load(&self.settings_file)
-                    .builtin_local
-                    .chat_log_enabled
             {
                 return;
             }
-            let scrubbed_tools: Vec<moss_voice_server::DebugToolTrace> = trace
-                .tools
-                .iter()
-                .map(|t| moss_voice_server::DebugToolTrace {
-                    name: t.name.clone(),
-                    arguments: moss_voice_server::scrub_debug_text(&t.arguments),
-                    result: moss_voice_server::scrub_debug_text(&t.result),
-                })
-                .collect();
-            let tools_json =
-                serde_json::to_string(&scrubbed_tools).unwrap_or_else(|_| "[]".to_owned());
-            let record = laser_runtime::VoiceChatLogRecord {
-                id: 0,
-                at_ms: i64::try_from(trace.at_ms).unwrap_or(i64::MAX),
-                device_id: trace.device_id.clone(),
-                session_id: trace.session_id.clone(),
-                turn: i64::try_from(trace.turn).unwrap_or(i64::MAX),
-                raw_asr: moss_voice_server::scrub_debug_text(&trace.raw_asr),
-                corrected_asr: moss_voice_server::scrub_debug_text(&trace.corrected_asr),
-                reply: moss_voice_server::scrub_debug_text(&trace.reply),
-                spoken: moss_voice_server::scrub_debug_text(&trace.spoken),
-                tools_json,
-                outcome: trace.outcome.clone(),
-                truncated: trace.truncated,
-                tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
-            };
             let _ = db.append_voice_chat_log(&record);
         }
     }

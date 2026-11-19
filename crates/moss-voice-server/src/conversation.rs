@@ -1853,7 +1853,10 @@ impl Turn {
             } else {
                 (history, Vec::new())
             };
-        let mut tools = self.conversation.tools.tools();
+        let tool_executor = self.conversation.tools.clone();
+        let mut tools = tokio::task::spawn_blocking(move || tool_executor.tools())
+            .await
+            .unwrap_or_default();
         if let Some(device) = &self.device {
             // Reserved play_music is always owned by the trusted desktop index,
             // never by an untrusted device MCP advertisement.

@@ -256,7 +256,10 @@ impl<'a> Session<'a> {
                     let prewarm_text = corrected.clone();
                     listening.prewarm_task = Some(tokio::spawn(async move {
                         tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE).await;
-                        let mut tools = conversation.tools.tools();
+                        let tool_executor = conversation.tools.clone();
+                        let mut tools = tokio::task::spawn_blocking(move || tool_executor.tools())
+                            .await
+                            .unwrap_or_default();
                         tools.extend(device_specs);
                         let _ = jev
                             .should_hold_unfinished(&prewarm_text, &history, &tools)
@@ -322,16 +325,19 @@ impl<'a> Session<'a> {
                 .clone()
                 .filter(|f| f.options().enabled && f.options().unfinished_hold)
         {
-            let mut tools = conversation.tools.tools();
-            if let Some(device) = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set) {
-                tools.extend(
+            let device_specs: Vec<_> = self
+                .device_mcp
+                .as_ref()
+                .and_then(DeviceMcp::tool_set)
+                .map(|device| {
                     device
                         .specs()
                         .iter()
                         .filter(|spec| spec.name != "play_music")
-                        .cloned(),
-                );
-            }
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
             if let Phase::Listening(listening) = &mut self.phase
                 && !listening.manual
                 && !listening.hold_used
@@ -361,13 +367,20 @@ impl<'a> Session<'a> {
                         &self.history,
                         &conversation,
                     );
-                    // 暂存前半句录音、保持 Phase::Listening 不中断，交由 select! 异步接收结果
+                    let tool_executor = conversation.tools.clone();
+                    // 暂存前半句录音、保持 Phase::Listening 不中断，交由 select! 异步接收结果；
+                    // `tools()` 放到后台任务内的 spawn_blocking，既不阻塞会话循环也不占 2-worker Tokio 线程。
                     listening.utterance = pcm;
                     listening.speaking = false;
                     self.hold_check = Some(PendingHoldCheck {
                         paused_at,
                         task: tokio::spawn(async move {
                             tokio::task::yield_now().await;
+                            let mut tools =
+                                tokio::task::spawn_blocking(move || tool_executor.tools())
+                                    .await
+                                    .unwrap_or_default();
+                            tools.extend(device_specs);
                             jev.should_hold_unfinished(&latest, &history, &tools).await
                         }),
                     });

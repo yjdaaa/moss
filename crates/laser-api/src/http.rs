@@ -20,6 +20,43 @@ pub(crate) fn request_head(request: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(&request[..end])
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyFramingError {
+    TransferEncodingUnsupported,
+    InvalidContentLength,
+}
+
+/// 统一校验 HTTP/1.1 请求体长度头，供 `server.rs` 读取阶段与 `routes.rs` 路由阶段共用，
+/// 杜绝重复 `Content-Length` 取首/取尾分歧与非法值静默按 0 处理。
+pub(crate) fn parse_content_length(head: &str) -> Result<usize, BodyFramingError> {
+    let mut parsed: Option<usize> = None;
+    for line in head.lines().skip(1) {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = key.trim();
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(BodyFramingError::TransferEncodingUnsupported);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(BodyFramingError::InvalidContentLength);
+            }
+            let len = trimmed
+                .parse::<usize>()
+                .map_err(|_| BodyFramingError::InvalidContentLength)?;
+            if let Some(prev) = parsed
+                && prev != len
+            {
+                return Err(BodyFramingError::InvalidContentLength);
+            }
+            parsed = Some(len);
+        }
+    }
+    Ok(parsed.unwrap_or(0))
+}
+
 pub(crate) fn header_value(head: &str, name: &str) -> Option<String> {
     head.lines().skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
@@ -81,6 +118,7 @@ pub(crate) fn http_json_with_headers(
         410 => "Gone",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         503 => "Service Unavailable",
         _ => "HTTP",
     };
@@ -136,6 +174,15 @@ pub(crate) fn query_param(query: &str, wanted: &str) -> Option<String> {
     })
 }
 
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -143,9 +190,10 @@ pub(crate) fn percent_decode(value: &str) -> String {
     while index < bytes.len() {
         if bytes[index] == b'%'
             && index + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16)
+            && let (Some(hi), Some(lo)) =
+                (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
         {
-            output.push(byte);
+            output.push((hi << 4) | lo);
             index += 3;
             continue;
         }

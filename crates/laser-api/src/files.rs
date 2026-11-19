@@ -157,19 +157,25 @@ pub fn save_upload(
 
 pub(crate) fn safe_asset_path(path: &str) -> Option<String> {
     let decoded = percent_decode(path);
-    let candidate = std::path::Path::new(&decoded);
-    if decoded.is_empty()
-        || candidate.is_absolute()
+    if decoded.is_empty() || decoded.chars().any(|c| c == '\0' || c.is_control()) {
+        return None;
+    }
+    // 先把反斜杠统一成正斜杠，再按路径组件检查，防止 Unix 上 `..\..\` 绕过 ParentDir 拦截
+    let normalized = decoded.replace('\\', "/");
+    let candidate = std::path::Path::new(&normalized);
+    if candidate.is_absolute()
         || candidate.components().any(|component| {
             matches!(
                 component,
-                std::path::Component::ParentDir | std::path::Component::RootDir
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
             )
         })
     {
         return None;
     }
-    Some(decoded.replace('\\', "/"))
+    Some(normalized)
 }
 
 pub(crate) fn embedded_content_type(path: &str) -> &'static str {

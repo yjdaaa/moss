@@ -314,7 +314,16 @@ impl TextTaskEngine {
         if !(spec.margin_mm.is_finite() && spec.margin_mm >= 0.0) {
             return Err("留边必须是不小于 0 的数字".into());
         }
+        if !(spec.letter_spacing_mm.is_finite()) {
+            return Err("字距必须是有限数字".into());
+        }
+        if !(spec.scan.overscan_mm.is_finite() && spec.scan.overscan_mm >= 0.0) {
+            return Err("过扫描距离必须是不小于 0 的有限数字".into());
+        }
         let has_text = !spec.text.trim().is_empty();
+        if has_text && !(spec.font_size_mm.is_finite() && spec.font_size_mm > 0.0) {
+            return Err("字号必须是大于 0 的有限数字".into());
+        }
         if !has_text && spec.shapes.is_empty() && spec.border.is_none() {
             return Err("要刻的文字和图形不能都为空".into());
         }
@@ -423,7 +432,7 @@ impl TextTaskEngine {
                 for _ in 0..5 {
                     let ratio = region.ratio(ink_w, ink_h);
                     let fits = region.fits(ink_w, ink_h);
-                    if fits && ratio < 1.001 {
+                    if !ratio.is_finite() || ratio <= 0.0 || (fits && ratio < 1.001) {
                         break;
                     }
                     let step = if !fits && ratio >= 0.998 {
@@ -431,7 +440,11 @@ impl TextTaskEngine {
                     } else {
                         ratio * 0.999
                     };
-                    size *= step;
+                    let next_size = size * step;
+                    if !next_size.is_finite() {
+                        break;
+                    }
+                    size = next_size;
                     if size < MIN_FONT_SIZE_MM {
                         return Err(format!(
                             "文字太长，放进{}后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行",
@@ -1687,5 +1700,46 @@ mod tests {
         };
         assert_ne!(first_burn(&plain.gcode), first_burn(&shifted.gcode));
         assert!(with_offset(3.0).is_err(), "偏移的一半超过过扫描要拒绝");
+    }
+
+    #[test]
+    fn non_finite_inputs_and_zero_width_ratio_do_not_produce_nan_or_inf() {
+        let rect = shapes::TextRegion::Rect {
+            cx: 0.0,
+            cy: 0.0,
+            width: Some(50.0),
+            height: None,
+        };
+        assert_eq!(rect.ratio(0.0, 10.0), f64::INFINITY);
+        assert_eq!(rect.ratio(f64::NAN, 10.0), 0.0);
+        assert_eq!(rect.ratio(-1.0, 10.0), 0.0);
+        let bad_rect = shapes::TextRegion::Rect {
+            cx: 0.0,
+            cy: 0.0,
+            width: Some(f64::NAN),
+            height: Some(20.0),
+        };
+        assert_eq!(bad_rect.ratio(10.0, 10.0), 0.0);
+        let neg_rect = shapes::TextRegion::Rect {
+            cx: 0.0,
+            cy: 0.0,
+            width: Some(-5.0),
+            height: Some(20.0),
+        };
+        assert_eq!(neg_rect.ratio(10.0, 10.0), 0.0);
+
+        let err_font = TextTaskEngine::generate(&TextTaskSpec {
+            font_size_mm: f64::NAN,
+            ..spec("A")
+        });
+        assert!(err_font.is_err());
+        let err_overscan = TextTaskEngine::generate(&TextTaskSpec {
+            scan: vector_plan::FillOptions {
+                overscan_mm: f64::NAN,
+                ..spec("A").scan
+            },
+            ..spec("A")
+        });
+        assert!(err_overscan.is_err());
     }
 }

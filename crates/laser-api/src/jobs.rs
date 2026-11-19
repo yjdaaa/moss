@@ -84,6 +84,24 @@ pub struct UncertainJob {
     pub transport: std::sync::Mutex<Option<std::sync::Arc<dyn laser_device::DeviceTransport>>>,
 }
 
+/// 优先通过无锁/独立裸句柄发送 0x18（不被 `realtime_writer` 上的 `?` 心跳阻塞），
+/// 无裸句柄或裸句柄失败时再回退到 `write_realtime(EmergencyStop)`。
+pub(crate) fn send_emergency_stop_transport(
+    transport: &dyn laser_device::DeviceTransport,
+) -> Result<(), String> {
+    if let Some(raw) = transport.raw_abort_handle() {
+        match raw() {
+            Ok(()) => return Ok(()),
+            Err(raw_err) => {
+                return transport
+                    .write_realtime(laser_device::RealtimeCommand::EmergencyStop)
+                    .map_err(|rt_err| format!("{raw_err}; {rt_err}"));
+            }
+        }
+    }
+    transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop)
+}
+
 impl UncertainJob {
     pub fn from_active(
         job: &ActiveJob,
@@ -106,19 +124,28 @@ impl UncertainJob {
             .take()
     }
 
+    fn current_handle(&self) -> Option<std::sync::Arc<dyn laser_device::DeviceTransport>> {
+        self.transport
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn try_current_handle(&self) -> Option<std::sync::Arc<dyn laser_device::DeviceTransport>> {
+        match self.transport.try_lock() {
+            Ok(guard) => guard.clone(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     pub fn write_emergency_stop(
         &self,
         factory: &TransportFactory,
         open_locks: &TargetOpenLocks,
     ) -> Result<(), String> {
-        {
-            let guard = self
-                .transport
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(transport) = guard.as_ref() {
-                return transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
-            }
+        if let Some(transport) = self.current_handle() {
+            return send_emergency_stop_transport(transport.as_ref());
         }
         let Some(spec) = self.spec.clone() else {
             return Err("原设备句柄已释放且无重连参数，请使用实体急停".into());
@@ -127,18 +154,17 @@ impl UncertainJob {
         let _open_guard = open_mutex
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut guard = self
-            .transport
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(transport) = guard.as_ref() {
-            return transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+        if let Some(transport) = self.current_handle() {
+            return send_emergency_stop_transport(transport.as_ref());
         }
         let reopened: std::sync::Arc<dyn laser_device::DeviceTransport> =
             std::sync::Arc::from((factory)(&spec)?);
-        let res = reopened.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+        let res = send_emergency_stop_transport(reopened.as_ref());
         if res.is_ok() {
-            *guard = Some(reopened);
+            *self
+                .transport
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reopened);
         }
         res
     }
@@ -149,18 +175,8 @@ impl UncertainJob {
         open_locks: &TargetOpenLocks,
     ) -> Result<(), String> {
         self.cancel.cancel();
-        {
-            let guard = self
-                .transport
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(transport) = guard.as_ref() {
-                let res = transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
-                if let Some(raw) = transport.raw_abort_handle() {
-                    let _ = raw();
-                }
-                return res;
-            }
+        if let Some(transport) = self.current_handle() {
+            return send_emergency_stop_transport(transport.as_ref());
         }
         let Some(spec) = self.spec.clone() else {
             return Err("原设备句柄已释放且无重连参数，无法向未知状态设备发送退出急停".into());
@@ -169,25 +185,17 @@ impl UncertainJob {
         let _open_guard = open_mutex
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut guard = self
-            .transport
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(transport) = guard.as_ref() {
-            let res = transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
-            if let Some(raw) = transport.raw_abort_handle() {
-                let _ = raw();
-            }
-            return res;
+        if let Some(transport) = self.current_handle() {
+            return send_emergency_stop_transport(transport.as_ref());
         }
         let reopened: std::sync::Arc<dyn laser_device::DeviceTransport> =
             std::sync::Arc::from((factory)(&spec)?);
-        let res = reopened.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
-        if let Some(raw) = reopened.raw_abort_handle() {
-            let _ = raw();
-        }
+        let res = send_emergency_stop_transport(reopened.as_ref());
         if res.is_ok() {
-            *guard = Some(reopened);
+            *self
+                .transport
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reopened);
         }
         res
     }
@@ -312,21 +320,23 @@ impl ApiService {
             )
     }
 
-    /// 退出/崩溃兜底：对所有活动作业置取消并直接写 0x18（实时信道 + 裸句柄双路）。
+    /// 退出/崩溃兜底：对所有活动作业置取消并优先通过裸句柄直接写 0x18（锁中毒时恢复读取，绝不因锁中毒跳过急停）。
     pub fn abort_all_active_jobs(&self) -> Result<(), String> {
         let (jobs, uncertain) = {
             let jobs_guard = self
                 .active_jobs
                 .lock()
-                .map_err(|_| "active_jobs lock poisoned".to_owned())?;
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let uncertain_guard = self
                 .uncertain_jobs
                 .lock()
-                .map_err(|_| "uncertain_jobs lock poisoned".to_owned())?;
-            if let Ok(launching) = self.launching_workflows.lock() {
-                for token in launching.active.values() {
-                    token.cancel();
-                }
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let launching = self
+                .launching_workflows
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for token in launching.active.values() {
+                token.cancel();
             }
             (
                 jobs_guard.values().cloned().collect::<Vec<_>>(),
@@ -336,18 +346,67 @@ impl ApiService {
         let mut first_error = None;
         for job in jobs {
             job.cancel.cancel();
-            if let Err(e) = job
-                .transport
-                .write_realtime(laser_device::RealtimeCommand::EmergencyStop)
-            {
+            if let Err(e) = send_emergency_stop_transport(job.transport.as_ref()) {
                 first_error.get_or_insert(e);
-            }
-            if let Some(raw) = job.transport.raw_abort_handle() {
-                let _ = raw();
             }
         }
         for job in uncertain {
             if let Err(e) = job.abort_with_factory(&self.transport_factory, &self.target_open_locks)
+            {
+                first_error.get_or_insert(e);
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Panic Hook 专用非阻塞急停：使用 `try_lock` 避免持锁线程 panic 时自死锁，
+    /// 锁中毒时恢复读取并优先走无锁裸句柄写 0x18，不在崩溃现场阻塞重连。
+    pub fn abort_all_active_jobs_nonblocking(&self) -> Result<(), String> {
+        let jobs = match self.active_jobs.try_lock() {
+            Ok(guard) => guard.values().cloned().collect::<Vec<_>>(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().values().cloned().collect::<Vec<_>>()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        };
+        let uncertain = match self.uncertain_jobs.try_lock() {
+            Ok(guard) => guard.values().cloned().collect::<Vec<_>>(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().values().cloned().collect::<Vec<_>>()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        };
+        match self.launching_workflows.try_lock() {
+            Ok(launching) => {
+                for token in launching.active.values() {
+                    token.cancel();
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                for token in poisoned.into_inner().active.values() {
+                    token.cancel();
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let mut first_error = None;
+        for job in jobs {
+            job.cancel.cancel();
+            // Panic 现场绝不回退阻塞的 write_realtime，只走非阻塞裸句柄
+            if let Some(raw) = job.transport.raw_abort_handle()
+                && let Err(e) = raw()
+            {
+                first_error.get_or_insert(e);
+            }
+        }
+        for job in uncertain {
+            job.cancel.cancel();
+            if let Some(transport) = job.try_current_handle()
+                && let Some(raw) = transport.raw_abort_handle()
+                && let Err(e) = raw()
             {
                 first_error.get_or_insert(e);
             }

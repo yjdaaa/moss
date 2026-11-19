@@ -361,7 +361,7 @@ pub(crate) struct Shared {
     /// n61：待设备下载的唤醒词资源包（只在内存里，30 分钟过期）
     pub assets_store: wake_assets::AssetsStore,
     /// n83：小智三层字库服务端 `glyph_push` 协调器（支持 `noto-v1-full` 热加载与内置 `common` 离线兜底）
-    pub glyph_fonts: glyph_font::GlyphFontService,
+    pub glyph_fonts: Arc<glyph_font::GlyphFontService>,
     pub screen_card_style: std::sync::Mutex<ScreenCardStyle>,
     pub ws_port: u16,
     /// n71 常连模式实际监听的 MQTT / UDP 端口；没开或端口开不了为 `None`（OTA 不下发 MQTT）
@@ -375,6 +375,10 @@ pub(crate) struct Shared {
     /// 桌面端 → 已连接设备的即时请求：按设备 MAC 绑定当前活跃会话（带 session_id 与 MCP 能力标志）
     pub device_requests:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, DeviceRequestHandle>>>,
+    /// 设备快照后台落库序号门禁：保证按会话提交顺序落库，避免并发 `spawn_blocking` 旧快照覆盖新快照。
+    snapshot_seq: std::sync::atomic::AtomicU64,
+    snapshot_write_gate:
+        Arc<std::sync::Mutex<std::collections::HashMap<(String, &'static str), u64>>>,
 }
 
 impl Shared {
@@ -383,6 +387,36 @@ impl Shared {
             .lock()
             .map(|g| *g)
             .unwrap_or(ScreenCardStyle::MossHud)
+    }
+
+    /// 异步落库设备快照并按 `(device_id, kind)` 单调序号串行防乱序覆盖，绝不阻塞 2-worker Tokio 音频线程。
+    pub(crate) fn schedule_device_snapshot(
+        &self,
+        device_id: &str,
+        kind: &'static str,
+        payload: String,
+    ) {
+        let seq = self
+            .snapshot_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let registry = self.registry.clone();
+        let gate = self.snapshot_write_gate.clone();
+        let device = device_id.to_owned();
+        let run = move || {
+            let mut latest = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let key = (device.clone(), kind);
+            if latest.get(&key).copied().is_some_and(|prev| seq < prev) {
+                return;
+            }
+            latest.insert(key, seq);
+            registry.device_snapshot(&device, kind, &payload);
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(run);
+        } else {
+            run();
+        }
     }
 
     /// 取指定设备当前活跃会话（严格匹配 `device_requests` 当前登记的 `session_id`），
@@ -531,7 +565,9 @@ impl VoiceServer {
             camera_preview: Arc::new(vision::CameraPreviewStore::default()),
             preview_store: Arc::new(preview_push::PreviewStore::default()),
             assets_store: wake_assets::AssetsStore::default(),
-            glyph_fonts: glyph_font::GlyphFontService::new(config.full_font_dir.clone()),
+            glyph_fonts: Arc::new(glyph_font::GlyphFontService::new(
+                config.full_font_dir.clone(),
+            )),
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
             registry,
@@ -542,6 +578,8 @@ impl VoiceServer {
             shutdown: shutdown_rx,
             job_announcements: jobs::AnnounceLog::default(),
             device_requests: Default::default(),
+            snapshot_seq: std::sync::atomic::AtomicU64::new(0),
+            snapshot_write_gate: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
         shared.state.event(
             EventRecord::from(format!(

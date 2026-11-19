@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 加固急停通道、公开路由解码、命令启动、语音 Tokio 卸载与配置/FFI 防护（2026-11-19）
+
+- **现象**：持锁 panic 时全局急停钩子可能自死锁或因锁中毒跳过 `0x18`，且急停排在可能被 Wi-Fi `?` 心跳堵住的 `realtime_writer` 之后；公开静态路由 `/assets/*` 收到 `%中` 会因非 UTF-8 字符边界切片触发 panic 并误发急停；Windows `open_app_tool` 经 `cmd /C start` 存在命令注入且外部命令无超时；2 线程语音 Tokio 运行时多处同步读盘/锁库/PNG 渲染未走 `spawn_blocking`；`voice` 配置子分区损坏时写盘会拿默认值静默覆盖；`safe_asset_path`、重复 `Content-Length`、激光非有限坐标/除零以及 `smart_turn` ORT vtable / Unix 信号处理 / Windows 进程属性存在安全边界缺陷。
+- **根因与修复**：`TcpGrbl`/`SerialGrbl` 与 `laser-api` 全部急停路径统一优先无锁/独立裸句柄并恢复中毒锁，Panic Hook 走 `try_lock` 非阻塞急停；`percent_decode` 改为字节级十六进制解码；`laser-api` 合并统一 `parse_content_length`（冲突/非法 400，`Transfer-Encoding` 501）、`safe_asset_path` 先归一化反斜杠再查组件、503 拒连缩短至 200 ms 写超时并清洗 `Content-Disposition`；`laser-tools` Windows 改直调 `ShellExecuteW`（禁 `.cmd`/`.bat` 传参与非 `.exe` 元字符）、macOS 补 `--`、外部命令增加统一总预算超时与有界管道读取、拦截非有限 `x`/`y` 及超 8192 px 图像尺寸；`moss-voice-server` 与桌面 `devices.rs` 将热路径 `tools()`、字库加载、PNG 渲染、记忆/设备快照全部卸载到 `spawn_blocking` 并为设备快照加单调序号防乱序覆盖；`moss-voice` 全部写入入口增加 `parse_voice_section_checked` 拒覆损坏 `voice` 分区；补齐 `laser-core` 除零/非有限校验、`smart_turn` ORT 槽位判空与 RAII 守卫、`laser-host` Unix `errno` 保护、`home_secret` 中间密钥清零与 `moss-agent` `Attributes<'a>` 生命周期绑定。
+- **验证**：`node scripts/verify.mjs` 全绿（Rust 根工作区 + `moss-voice-local` 共 1,432 项通过、0 失败；脚本单测 46 项、前端单测 356 项、FakeGrbl 回环 API+Chrome UI E2E 40 项全通过，clippy/rustfmt/eslint/分层/卫生门禁零警告）；三轮独立增量审查收敛。Windows `ShellExecuteW`/批处理路径与真实硬件未实机验收（`unverified`）。
+- **关联**：`crates/laser-{api,core,device,host,runtime,tools}`、`crates/moss-{agent,voice,voice-server}`、`apps/desktop/src-tauri/src/voice_builtin/imp/devices.rs`、`apps/moss-voice-local/src/smart_turn.rs`、`docs/developer/{api-contracts,safety}.md`。
+
 ### 修正 2026-11-18 审查遗留问题
 
 - **现象**。关停或取消竞态会漏发急停、误报作业状态，固件中断后下载失效。画板恢复、工作台调参与原生许可门禁也有边界问题，包括 SD 取消期间的故障误报和改名复制 ORT 源码归档绕过去重。

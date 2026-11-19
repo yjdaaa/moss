@@ -426,15 +426,32 @@ impl TextRegion {
 
     /// 文字框最多还能放大的倍数（< 1 表示放不下）。
     pub fn ratio(&self, w: f64, h: f64) -> f64 {
+        if !w.is_finite() || !h.is_finite() || w < 0.0 || h < 0.0 {
+            return 0.0;
+        }
         match *self {
             Self::Rect { width, height, .. } => {
-                let rw = width.map_or(f64::INFINITY, |a| a / w);
-                let rh = height.map_or(f64::INFINITY, |a| a / h);
+                if width.is_some_and(|a| !a.is_finite() || a <= 0.0)
+                    || height.is_some_and(|a| !a.is_finite() || a <= 0.0)
+                {
+                    return 0.0;
+                }
+                let rw = match width {
+                    Some(a) if w > 1e-9 => a / w,
+                    _ => f64::INFINITY,
+                };
+                let rh = match height {
+                    Some(a) if h > 1e-9 => a / h,
+                    _ => f64::INFINITY,
+                };
                 rw.min(rh)
             }
             Self::Ellipse { a, b, .. } => {
+                if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
+                    return 0.0;
+                }
                 let s = ((w / 2.0 / a).powi(2) + (h / 2.0 / b).powi(2)).sqrt();
-                if s <= 0.0 { f64::INFINITY } else { 1.0 / s }
+                if s <= 1e-9 { f64::INFINITY } else { 1.0 / s }
             }
         }
     }

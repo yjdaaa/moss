@@ -229,7 +229,9 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 执行顺序：Host 校验 → 来源校验 → §5 鉴权 → 路由。
 
-**并发连接名额与回环预留（2026-11-05）**：真实 TCP 入口同时最多 64 条连接。鉴权要等读完请求才能做，所以名额在接入时按对端地址分配：非回环连接最多占 56 条，最后 8 条只留给回环连接（桌面界面、Tauri 内嵌页走 127.0.0.1）。局域网慢连接或未鉴权连接占满后，本机界面的 `/api/safe-action` 急停等请求仍能接入；名额不足时直接回 503 `{"success":false,"result":"并发连接过多，请稍后重试"}`，不读请求、不进路由。实现：`try_admit_http_connection`（`MAX_CONCURRENT_HTTP`、`LOOPBACK_RESERVED_HTTP`）。
+**并发连接名额与回环预留（2026-11-05）**：真实 TCP 入口同时最多 64 条连接。鉴权要等读完请求才能做，所以名额在接入时按对端地址分配：非回环连接最多占 56 条，最后 8 条只留给回环连接（桌面界面、Tauri 内嵌页走 127.0.0.1）。局域网慢连接或未鉴权连接占满后，本机界面的 `/api/safe-action` 急停等请求仍能接入；名额不足时在 200 ms 极短写超时内回 503 `{"success":false,"result":"并发连接过多，请稍后重试"}`，不读请求、不进路由、不拖住主 `accept` 循环。实现：`try_admit_http_connection`（`MAX_CONCURRENT_HTTP`、`LOOPBACK_RESERVED_HTTP`）。
+
+**请求体长度头校验（2026-11-19）**：TCP 读取阶段与路由阶段共用 `parse_content_length` 校验；`Content-Length` 非纯数字、溢出或存在多个不同值时统一返回 400 `{"success":false,"result":"Content-Length 请求头无效或存在冲突","detail":{"error_code":"invalid_content_length"}}` 并关闭连接；携带 `Transfer-Encoding` 时统一返回 501 `{"success":false,"result":"不支持 Transfer-Encoding 分块传输，请使用 Content-Length","detail":{"error_code":"transfer_encoding_unsupported"}}` 并关闭连接。
 
 ## 2. GET 路由
 

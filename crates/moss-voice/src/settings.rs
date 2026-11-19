@@ -1366,6 +1366,18 @@ pub struct RootVoiceUpdate {
     pub jev_feedback: Option<bool>,
 }
 
+/// 写回前严格解析已有 `voice` 子分区：缺省或 null 按默认值初始化；
+/// 若已存在但反序列化失败则明确拒写，禁止拿空默认值静默覆盖整份语音配置。
+fn parse_voice_section_checked(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Result<VoiceSettings, String> {
+    match root.get("voice") {
+        None | Some(serde_json::Value::Null) => Ok(VoiceSettings::default()),
+        Some(value) => serde_json::from_value::<VoiceSettings>(value.clone())
+            .map_err(|error| format!("语音配置 voice 分区格式已损坏，已拒绝覆盖写盘: {error}")),
+    }
+}
+
 /// 在全局 `SETTINGS_WRITE` 锁保护下读取最新 `settings.json` 与 `voice` 子分区，
 /// 仅在锁内修改本次涉及的字段并写回，避免锁外读取的旧整份快照覆盖并发隐私/功能开关。
 pub fn update_voice_with_root<R, E>(
@@ -1378,11 +1390,7 @@ pub fn update_voice_with_root<R, E>(
 ) -> Result<R, E> {
     laser_contracts::with_settings_file_lock(|| {
         let mut root = read_root_checked(settings_file).map_err(&map_io_err)?;
-        let mut voice: VoiceSettings = root
-            .get("voice")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
+        let mut voice = parse_voice_section_checked(&root).map_err(&map_io_err)?;
         // n75：写回前先迁移旧角色编号，避免把旧值原样写回
         migrate_personas(&mut voice.builtin_local);
         let (out, update) = mutate(&root, &mut voice)?;
@@ -1407,11 +1415,7 @@ pub fn update_voice_with_jev_feedback<R>(
 ) -> Result<R, String> {
     laser_contracts::with_settings_file_lock(|| {
         let mut root = read_root_checked(settings_file)?;
-        let mut voice: VoiceSettings = root
-            .get("voice")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
+        let mut voice = parse_voice_section_checked(&root)?;
         // n75：写回前先迁移旧角色编号，避免把旧值原样写回
         migrate_personas(&mut voice.builtin_local);
         let (out, jev_feedback) = mutate(&mut voice)?;
@@ -1656,6 +1660,7 @@ fn save_all_inner(
 ) -> Result<(), String> {
     laser_contracts::with_settings_file_lock(|| {
         let mut root = read_root_checked(settings_file)?;
+        parse_voice_section_checked(&root)?;
         apply_voice_to_root(
             &mut root,
             voice,
@@ -2815,6 +2820,31 @@ mod tests {
             "settings.json 格式损坏，拒绝覆盖"
         );
         assert_eq!(std::fs::read(&corrupt).unwrap(), b"{broken-json");
+
+        // 顶层 JSON 合法但 voice 子分区已损坏：update_voice / update_voice_with_root / save 均必须拒绝覆盖写盘
+        let bad_voice = dir.path().join("bad_voice.json");
+        let original =
+            br#"{"web_port":9666,"voice":{"mode":12345,"builtin_memory_enabled":"oops"}}"#;
+        std::fs::write(&bad_voice, original).unwrap();
+        let err = update_voice(&bad_voice, |v| {
+            v.builtin_memory_enabled = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.contains("voice 分区格式已损坏"), "{err}");
+        let err_root = update_voice_with_root(
+            &bad_voice,
+            |_, v| {
+                v.builtin_memory_enabled = true;
+                Ok::<_, String>(((), RootVoiceUpdate::default()))
+            },
+            |e| e,
+        )
+        .unwrap_err();
+        assert!(err_root.contains("voice 分区格式已损坏"), "{err_root}");
+        let err_save = save(&bad_voice, &VoiceSettings::default()).unwrap_err();
+        assert!(err_save.contains("voice 分区格式已损坏"), "{err_save}");
+        assert_eq!(std::fs::read(&bad_voice).unwrap(), original);
     }
 
     #[test]

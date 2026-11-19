@@ -3,7 +3,7 @@
 use super::*;
 
 impl<'a> Session<'a> {
-    fn stage_terminal_badge_url(&self, job: &crate::jobs::FinishedJob) -> Option<String> {
+    async fn stage_terminal_badge_url(&mut self, job: &crate::jobs::FinishedJob) -> Option<String> {
         let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
         let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
         let completed = job.status == "completed";
@@ -12,12 +12,17 @@ impl<'a> Session<'a> {
         } else {
             job.lines_sent
         };
-        let png = crate::preview_push::make_terminal_badge_png(
-            &crate::preview_push::TerminalBadgeSpec { completed, lines },
-            self.shared.card_style(),
-            cw,
-            ch,
-        )
+        let card_style = self.shared.card_style();
+        let png = tokio::task::spawn_blocking(move || {
+            crate::preview_push::make_terminal_badge_png(
+                &crate::preview_push::TerminalBadgeSpec { completed, lines },
+                card_style,
+                cw,
+                ch,
+            )
+        })
+        .await
+        .ok()?
         .ok()?;
         let tok = self.shared.preview_store.stage_prebuilt_png(png).ok()?;
         let host = self.preview_http_host();
@@ -103,7 +108,7 @@ impl<'a> Session<'a> {
                     self.show_finished_scene(socket, &job).await?;
                 } else if want_hud
                     && can_color_hud
-                    && let Some(badge_url) = self.stage_terminal_badge_url(&job)
+                    && let Some(badge_url) = self.stage_terminal_badge_url(&job).await
                 {
                     self.one_shot_badge_url = Some(badge_url.clone());
                     self.send_quiet_device_call(
@@ -164,7 +169,7 @@ impl<'a> Session<'a> {
             } else if want_hud && can_color_hud {
                 self.preview_hold = None;
                 self.last_hud_workflow = None;
-                if let Some(badge_url) = self.stage_terminal_badge_url(&job) {
+                if let Some(badge_url) = self.stage_terminal_badge_url(&job).await {
                     self.send_quiet_device_call(
                         socket,
                         "self.screen.preview_image",
@@ -249,32 +254,26 @@ impl<'a> Session<'a> {
             if can_color_hud && (toolpath.is_some() || !self.pack_active()) {
                 let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
                 let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
-                let png = match toolpath.as_deref() {
-                    Some(source) => crate::preview_push::make_engrave_progress_png(
-                        source,
-                        &progress.to_hud_spec(),
-                        self.shared.card_style(),
-                        frame,
-                        cw,
-                        ch,
-                    )
-                    .or_else(|_| {
-                        crate::preview_push::make_job_hud_png_for_style(
-                            &progress.to_hud_spec(),
-                            self.shared.card_style(),
-                            frame,
-                            cw,
-                            ch,
+                let hud_spec = progress.to_hud_spec();
+                let card_style = self.shared.card_style();
+                let toolpath_for_render = toolpath.clone();
+                let png =
+                    tokio::task::spawn_blocking(move || match toolpath_for_render.as_deref() {
+                        Some(source) => crate::preview_push::make_engrave_progress_png(
+                            source, &hud_spec, card_style, frame, cw, ch,
                         )
-                    }),
-                    None => crate::preview_push::make_job_hud_png_for_style(
-                        &progress.to_hud_spec(),
-                        self.shared.card_style(),
-                        frame,
-                        cw,
-                        ch,
-                    ),
-                };
+                        .or_else(|_| {
+                            crate::preview_push::make_job_hud_png_for_style(
+                                &hud_spec, card_style, frame, cw, ch,
+                            )
+                        }),
+                        None => crate::preview_push::make_job_hud_png_for_style(
+                            &hud_spec, card_style, frame, cw, ch,
+                        ),
+                    })
+                    .await
+                    .map_err(|_| "渲染任务取消".to_owned())
+                    .and_then(|r| r);
                 if let Ok(png) = png
                     && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
                 {
@@ -350,13 +349,18 @@ impl<'a> Session<'a> {
             } else if can_color_hud {
                 let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
                 let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
-                if let Ok(png) = crate::preview_push::make_approval_card_png(
-                    &pending.to_card_spec(),
-                    self.shared.card_style(),
-                    frame,
-                    cw,
-                    ch,
-                ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+                let card_spec = pending.to_card_spec();
+                let card_style = self.shared.card_style();
+                let png = tokio::task::spawn_blocking(move || {
+                    crate::preview_push::make_approval_card_png(
+                        &card_spec, card_style, frame, cw, ch,
+                    )
+                })
+                .await
+                .ok()
+                .and_then(Result::ok);
+                if let Some(png) = png
+                    && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
                 {
                     let host = self.preview_http_host();
                     let url = format!(

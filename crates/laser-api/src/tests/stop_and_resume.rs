@@ -2451,3 +2451,146 @@ fn shutdown_during_open_drops_unwritten_transport_for_send_framing_and_home() {
         assert_eq!(service.active_job_count(), 0);
     }
 }
+
+#[test]
+fn emergency_stop_prefers_raw_abort_recovers_poisoned_lock_and_nonblocking_skips_held_lock() {
+    struct RawFirstTransport {
+        raw_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        rt_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl laser_device::DeviceTransport for RawFirstTransport {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, _command: laser_device::RealtimeCommand) -> Result<(), String> {
+            self.rt_hits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
+            let hits = self.raw_hits.clone();
+            Some(Box::new(move || {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }))
+        }
+    }
+
+    let raw_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rt_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+    let transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
+        std::sync::Arc::new(RawFirstTransport {
+            raw_hits: raw_hits.clone(),
+            rt_hits: rt_hits.clone(),
+        });
+    service.active_jobs.lock().unwrap().insert(
+        "wf-estop-raw".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-estop-raw".into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            cancel: laser_device::CancellationToken::default(),
+            progress: Default::default(),
+            transport,
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+
+    // 1. UI/API 急停必须优先走无锁 raw_abort_handle，不等待 write_realtime
+    let res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "emergency_stop", "confirmed": true}),
+    );
+    assert_eq!(res["success"], true, "{res}");
+    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(rt_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 2. 持锁线程触发 panic hook 非阻塞急停时不得自死锁
+    {
+        let _held = service.active_jobs.lock().unwrap();
+        assert!(service.abort_all_active_jobs_nonblocking().is_ok());
+    }
+
+    // 3. 即使 active_jobs 锁中毒，abort_all_active_jobs 与非阻塞版仍必须恢复锁并刷出 0x18
+    let jobs_arc = service.active_jobs.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = jobs_arc.lock().unwrap();
+        panic!("simulate mutex poison");
+    })
+    .join();
+    assert!(service.active_jobs.is_poisoned());
+    assert!(service.abort_all_active_jobs().is_ok());
+    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(service.abort_all_active_jobs_nonblocking().is_ok());
+    assert_eq!(raw_hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn http_framing_and_safe_asset_path_reject_smuggling_chunked_and_backslash_traversal() {
+    assert_eq!(safe_asset_path("app.js").as_deref(), Some("app.js"));
+    assert_eq!(
+        safe_asset_path("..\\..\\etc\\passwd"),
+        None,
+        "Unix 上也必须先归一化反斜杠再拦截 ParentDir"
+    );
+    assert_eq!(safe_asset_path("%5c..%5csecret.txt"), None);
+    assert_eq!(safe_asset_path("a\0b.js"), None);
+    // 非法百分比编码与多字节 UTF-8 不得触发 panic（防止经公开 /assets 路由触发全局 Panic Hook 急停）
+    assert_eq!(percent_decode("%中"), "%中");
+    assert_eq!(percent_decode("%\u{FFFD}x"), "%\u{FFFD}x");
+    assert_eq!(percent_decode("%2e%2e/a"), "../a");
+
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+    let utf8_percent =
+        service.handle_http("GET /assets/%中 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".as_bytes());
+    let utf8_text = String::from_utf8_lossy(&utf8_percent);
+    assert!(
+        utf8_text.starts_with("HTTP/1.1 404"),
+        "公开 /assets 收到 %中 应安全返 404 而非 panic：{utf8_text}"
+    );
+
+    // 冲突的重复 Content-Length → 400 invalid_content_length
+    let conflict = service.handle_http(
+        b"POST /api/workflow HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\n{}",
+    );
+    let conflict_text = String::from_utf8_lossy(&conflict);
+    assert!(conflict_text.starts_with("HTTP/1.1 400"), "{conflict_text}");
+    assert!(
+        conflict_text.contains("invalid_content_length"),
+        "{conflict_text}"
+    );
+
+    // 非数字 Content-Length → 400 invalid_content_length
+    let invalid_cl = service.handle_http(
+        b"POST /api/workflow HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: abc\r\n\r\n{}",
+    );
+    let invalid_text = String::from_utf8_lossy(&invalid_cl);
+    assert!(invalid_text.starts_with("HTTP/1.1 400"), "{invalid_text}");
+    assert!(
+        invalid_text.contains("invalid_content_length"),
+        "{invalid_text}"
+    );
+
+    // Transfer-Encoding: chunked → 501 transfer_encoding_unsupported
+    let chunked = service.handle_http(
+        b"POST /api/workflow HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    );
+    let chunked_text = String::from_utf8_lossy(&chunked);
+    assert!(chunked_text.starts_with("HTTP/1.1 501"), "{chunked_text}");
+    assert!(
+        chunked_text.contains("transfer_encoding_unsupported"),
+        "{chunked_text}"
+    );
+}

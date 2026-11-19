@@ -738,6 +738,38 @@ impl GlyphFontService {
         Some(provider)
     }
 
+    /// 快路径判定：纯 ASCII 或基础字表已有字不需要进 `spawn_blocking` 触碰磁盘/分片。
+    pub(crate) fn needs_lookup(capability: Option<&TextFontCapability>, text: &str) -> bool {
+        let Some(cap) = capability else {
+            return false;
+        };
+        if cap.bundle != FONT_BUNDLE_ID
+            || text.is_empty()
+            || !matches!(cap.charset.as_str(), "basic" | "common")
+        {
+            return false;
+        }
+        !text
+            .chars()
+            .all(|ch| (ch as u32) < 0x20 || basic_charset().contains(&(ch as u32)))
+    }
+
+    /// 供异步会话在单次 `spawn_blocking` 内合并查询缺字与补字载荷，避免阻塞 Tokio 工作线程。
+    pub(crate) fn prepare_text_glyphs(
+        &self,
+        capability: Option<&TextFontCapability>,
+        text: &str,
+    ) -> (Vec<char>, bool, Option<GlyphPushPayload>) {
+        let undisplayable = self.undisplayable_chars(capability, text);
+        let full_ready = if undisplayable.is_empty() {
+            false
+        } else {
+            self.full_pack_ready(capability)
+        };
+        let push = self.glyph_push_for_text(capability, text);
+        (undisplayable, full_ready, push)
+    }
+
     pub fn glyph_push_for_text(
         &self,
         capability: Option<&TextFontCapability>,

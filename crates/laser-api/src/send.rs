@@ -490,10 +490,7 @@ impl ApiService {
                     return;
                 }
                 if self.job.cancel.is_cancelled() {
-                    let _ = self
-                        .job
-                        .transport
-                        .write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                    let _ = send_emergency_stop_transport(self.job.transport.as_ref());
                     let uncertain_entry =
                         UncertainJob::from_active(&self.job, Some(self.spec.clone()));
                     let mut jobs = self
@@ -863,9 +860,8 @@ impl ApiService {
                         }),
                     ),
                     Err(error) => {
-                        let fallback_estop = job
-                            .transport
-                            .write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                        let fallback_estop =
+                            send_emergency_stop_transport(job.transport.as_ref());
                         let diagnostic = laser_device::diagnose_device_message(&error)
                             .map(|d| format!(" ({d})"))
                             .unwrap_or_default();

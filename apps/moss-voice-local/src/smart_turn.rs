@@ -158,32 +158,163 @@ type FnReleaseValue = unsafe extern "system" fn(*mut OrtValue);
 type FnReleaseTensorShapeInfo = unsafe extern "system" fn(*mut OrtTensorTypeAndShapeInfo);
 type FnReleaseSessionOptions = unsafe extern "system" fn(*mut OrtSessionOptions);
 
-macro_rules! ort_fn {
-    ($api:expr, $slot:expr, $ty:ty) => {
-        std::mem::transmute::<*const c_void, $ty>(*$api.add($slot))
-    };
+macro_rules! try_ort_fn {
+    ($api:expr, $slot:expr, $ty:ty) => {{
+        let raw = *$api.add($slot);
+        if raw.is_null() {
+            return Err(format!("ONNX Runtime API 槽位 {} 为空指针", $slot));
+        }
+        std::mem::transmute::<*const c_void, $ty>(raw)
+    }};
+}
+
+macro_rules! opt_ort_fn {
+    ($api:expr, $slot:expr, $ty:ty) => {{
+        let raw = *$api.add($slot);
+        if raw.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute::<*const c_void, $ty>(raw))
+        }
+    }};
+}
+
+const REQUIRED_ORT_SLOTS: &[usize] = &[
+    SLOT_GET_ERROR_CODE,
+    SLOT_GET_ERROR_MESSAGE,
+    SLOT_CREATE_ENV,
+    SLOT_CREATE_SESSION_FROM_ARRAY,
+    SLOT_RUN,
+    SLOT_CREATE_SESSION_OPTIONS,
+    SLOT_SET_SESSION_GRAPH_OPT_LEVEL,
+    SLOT_SET_INTRA_OP_THREADS,
+    SLOT_SET_INTER_OP_THREADS,
+    SLOT_SESSION_GET_INPUT_NAME,
+    SLOT_SESSION_GET_OUTPUT_NAME,
+    SLOT_CREATE_TENSOR_WITH_DATA,
+    SLOT_GET_TENSOR_MUTABLE_DATA,
+    SLOT_GET_TENSOR_ELEMENT_TYPE,
+    SLOT_GET_TENSOR_SHAPE_ELEMENT_COUNT,
+    SLOT_GET_TENSOR_TYPE_AND_SHAPE,
+    SLOT_CREATE_CPU_MEMORY_INFO,
+    SLOT_ALLOCATOR_FREE,
+    SLOT_GET_ALLOCATOR_DEFAULT,
+    SLOT_RELEASE_ENV,
+    SLOT_RELEASE_STATUS,
+    SLOT_RELEASE_MEMORY_INFO,
+    SLOT_RELEASE_SESSION,
+    SLOT_RELEASE_VALUE,
+    SLOT_RELEASE_TENSOR_SHAPE_INFO,
+    SLOT_RELEASE_SESSION_OPTIONS,
+];
+
+unsafe fn validate_ort_vtable(api: *const *const c_void) -> Result<(), String> {
+    if api.is_null() {
+        return Err("ONNX Runtime API 指针为空".into());
+    }
+    for &slot in REQUIRED_ORT_SLOTS {
+        // SAFETY: `api` 由 `OrtApiBase::get_api(ORT_API_VERSION)` 返回，包含上述全部槽位。
+        if unsafe { (*api.add(slot)).is_null() } {
+            return Err(format!("ONNX Runtime API 槽位 {slot} 缺失"));
+        }
+    }
+    Ok(())
 }
 
 unsafe fn check_status(api: *const *const c_void, status: *mut OrtStatus) -> Result<(), String> {
     if status.is_null() {
         return Ok(());
     }
-    let (code, message) = unsafe {
-        let get_code = ort_fn!(api, SLOT_GET_ERROR_CODE, FnGetErrorCode);
-        let get_msg = ort_fn!(api, SLOT_GET_ERROR_MESSAGE, FnGetErrorMessage);
-        let release = ort_fn!(api, SLOT_RELEASE_STATUS, FnReleaseStatus);
-        let code = get_code(status);
-        let msg_ptr = get_msg(status);
+    let message = unsafe {
+        let code = opt_ort_fn!(api, SLOT_GET_ERROR_CODE, FnGetErrorCode)
+            .map(|f| f(status))
+            .unwrap_or(-1);
+        let msg_ptr = opt_ort_fn!(api, SLOT_GET_ERROR_MESSAGE, FnGetErrorMessage)
+            .map(|f| f(status))
+            .unwrap_or(std::ptr::null());
         let message = if msg_ptr.is_null() {
             format!("ONNX Runtime 错误（code={code}）")
         } else {
             CStr::from_ptr(msg_ptr).to_string_lossy().into_owned()
         };
-        release(status);
-        (code, message)
+        if let Some(release) = opt_ort_fn!(api, SLOT_RELEASE_STATUS, FnReleaseStatus) {
+            release(status);
+        }
+        message
     };
-    let _ = code;
     Err(message)
+}
+
+struct OrtEnvGuard {
+    api: *const *const c_void,
+    ptr: *mut OrtEnv,
+}
+
+impl OrtEnvGuard {
+    fn into_raw(mut self) -> *mut OrtEnv {
+        std::mem::replace(&mut self.ptr, std::ptr::null_mut())
+    }
+}
+
+impl Drop for OrtEnvGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                if let Some(release) = opt_ort_fn!(self.api, SLOT_RELEASE_ENV, FnReleaseEnv) {
+                    release(self.ptr);
+                }
+            }
+        }
+    }
+}
+
+struct OrtMemoryInfoGuard {
+    api: *const *const c_void,
+    ptr: *mut OrtMemoryInfo,
+}
+
+impl OrtMemoryInfoGuard {
+    fn into_raw(mut self) -> *mut OrtMemoryInfo {
+        std::mem::replace(&mut self.ptr, std::ptr::null_mut())
+    }
+}
+
+impl Drop for OrtMemoryInfoGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                if let Some(release) =
+                    opt_ort_fn!(self.api, SLOT_RELEASE_MEMORY_INFO, FnReleaseMemoryInfo)
+                {
+                    release(self.ptr);
+                }
+            }
+        }
+    }
+}
+
+struct OrtSessionGuard {
+    api: *const *const c_void,
+    ptr: *mut OrtSession,
+}
+
+impl OrtSessionGuard {
+    fn into_raw(mut self) -> *mut OrtSession {
+        std::mem::replace(&mut self.ptr, std::ptr::null_mut())
+    }
+}
+
+impl Drop for OrtSessionGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                if let Some(release) = opt_ort_fn!(self.api, SLOT_RELEASE_SESSION, FnReleaseSession)
+                {
+                    release(self.ptr);
+                }
+            }
+        }
+    }
 }
 
 struct OrtSessionOptionsGuard {
@@ -195,12 +326,13 @@ impl Drop for OrtSessionOptionsGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                let release = ort_fn!(
+                if let Some(release) = opt_ort_fn!(
                     self.api,
                     SLOT_RELEASE_SESSION_OPTIONS,
                     FnReleaseSessionOptions
-                );
-                release(self.ptr);
+                ) {
+                    release(self.ptr);
+                }
             }
         }
     }
@@ -215,8 +347,9 @@ impl Drop for OrtValueGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                let release = ort_fn!(self.api, SLOT_RELEASE_VALUE, FnReleaseValue);
-                release(self.ptr);
+                if let Some(release) = opt_ort_fn!(self.api, SLOT_RELEASE_VALUE, FnReleaseValue) {
+                    release(self.ptr);
+                }
             }
         }
     }
@@ -231,12 +364,13 @@ impl Drop for OrtShapeInfoGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                let release = ort_fn!(
+                if let Some(release) = opt_ort_fn!(
                     self.api,
                     SLOT_RELEASE_TENSOR_SHAPE_INFO,
                     FnReleaseTensorShapeInfo
-                );
-                release(self.ptr);
+                ) {
+                    release(self.ptr);
+                }
             }
         }
     }
@@ -257,14 +391,21 @@ unsafe impl Send for SmartTurnModel {}
 impl Drop for SmartTurnModel {
     fn drop(&mut self) {
         unsafe {
-            if !self.session.is_null() {
-                ort_fn!(self.api, SLOT_RELEASE_SESSION, FnReleaseSession)(self.session);
+            if !self.session.is_null()
+                && let Some(release) = opt_ort_fn!(self.api, SLOT_RELEASE_SESSION, FnReleaseSession)
+            {
+                release(self.session);
             }
-            if !self.mem_info.is_null() {
-                ort_fn!(self.api, SLOT_RELEASE_MEMORY_INFO, FnReleaseMemoryInfo)(self.mem_info);
+            if !self.mem_info.is_null()
+                && let Some(release) =
+                    opt_ort_fn!(self.api, SLOT_RELEASE_MEMORY_INFO, FnReleaseMemoryInfo)
+            {
+                release(self.mem_info);
             }
-            if !self.env.is_null() {
-                ort_fn!(self.api, SLOT_RELEASE_ENV, FnReleaseEnv)(self.env);
+            if !self.env.is_null()
+                && let Some(release) = opt_ort_fn!(self.api, SLOT_RELEASE_ENV, FnReleaseEnv)
+            {
+                release(self.env);
             }
         }
     }
@@ -289,7 +430,7 @@ unsafe fn query_io_name(
     session: *const OrtSession,
     allocator: *mut OrtAllocator,
     is_input: bool,
-    fallback: &str,
+    fallback: &CStr,
 ) -> Result<CString, String> {
     let slot = if is_input {
         SLOT_SESSION_GET_INPUT_NAME
@@ -298,14 +439,15 @@ unsafe fn query_io_name(
     };
     let mut name_ptr: *mut c_char = std::ptr::null_mut();
     unsafe {
-        let getter = ort_fn!(api, slot, FnSessionGetName);
-        let free = ort_fn!(api, SLOT_ALLOCATOR_FREE, FnAllocatorFree);
+        let getter = try_ort_fn!(api, slot, FnSessionGetName);
+        let free = try_ort_fn!(api, SLOT_ALLOCATOR_FREE, FnAllocatorFree);
         let status = getter(session, 0, allocator, &mut name_ptr);
         if check_status(api, status).is_err() || name_ptr.is_null() {
-            return CString::new(fallback).map_err(|e| format!("无效张量名称：{e}"));
+            return Ok(fallback.to_owned());
         }
         let name = CStr::from_ptr(name_ptr).to_owned();
-        let _ = free(allocator, name_ptr as *mut c_void);
+        let free_status = free(allocator, name_ptr as *mut c_void);
+        let _ = check_status(api, free_status);
         Ok(name)
     }
 }
@@ -325,55 +467,55 @@ impl SmartTurnModel {
         if api.is_null() {
             return Err("ONNX Runtime 版本不兼容".into());
         }
+        unsafe { validate_ort_vtable(api)? };
 
-        let log_id = CString::new("moss-smart-turn").unwrap();
-        let mut env: *mut OrtEnv = std::ptr::null_mut();
+        let mut env_ptr: *mut OrtEnv = std::ptr::null_mut();
         unsafe {
             check_status(
                 api,
-                ort_fn!(api, SLOT_CREATE_ENV, FnCreateEnv)(
+                try_ort_fn!(api, SLOT_CREATE_ENV, FnCreateEnv)(
                     ORT_LOGGING_LEVEL_ERROR,
-                    log_id.as_ptr(),
-                    &mut env,
+                    c"moss-smart-turn".as_ptr(),
+                    &mut env_ptr,
                 ),
             )?;
         }
+        let env = OrtEnvGuard { api, ptr: env_ptr };
 
-        let mut mem_info: *mut OrtMemoryInfo = std::ptr::null_mut();
-        if let Err(err) = unsafe {
+        let mut mem_info_ptr: *mut OrtMemoryInfo = std::ptr::null_mut();
+        unsafe {
             check_status(
                 api,
-                ort_fn!(api, SLOT_CREATE_CPU_MEMORY_INFO, FnCreateCpuMemoryInfo)(
+                try_ort_fn!(api, SLOT_CREATE_CPU_MEMORY_INFO, FnCreateCpuMemoryInfo)(
                     ORT_ARENA_ALLOCATOR,
                     ORT_MEM_TYPE_DEFAULT,
-                    &mut mem_info,
+                    &mut mem_info_ptr,
                 ),
             )
-        } {
-            unsafe { ort_fn!(api, SLOT_RELEASE_ENV, FnReleaseEnv)(env) };
-            return Err(format!("创建 ORT 内存描述失败：{err}"));
+            .map_err(|err| format!("创建 ORT 内存描述失败：{err}"))?;
         }
+        let mem_info = OrtMemoryInfoGuard {
+            api,
+            ptr: mem_info_ptr,
+        };
 
         let mut opts_ptr: *mut OrtSessionOptions = std::ptr::null_mut();
-        if let Err(err) = unsafe {
+        unsafe {
             check_status(
                 api,
-                ort_fn!(api, SLOT_CREATE_SESSION_OPTIONS, FnCreateSessionOptions)(&mut opts_ptr),
+                try_ort_fn!(api, SLOT_CREATE_SESSION_OPTIONS, FnCreateSessionOptions)(
+                    &mut opts_ptr,
+                ),
             )
-        } {
-            unsafe {
-                ort_fn!(api, SLOT_RELEASE_MEMORY_INFO, FnReleaseMemoryInfo)(mem_info);
-                ort_fn!(api, SLOT_RELEASE_ENV, FnReleaseEnv)(env);
-            }
-            return Err(format!("创建 ORT 会话选项失败：{err}"));
+            .map_err(|err| format!("创建 ORT 会话选项失败：{err}"))?;
         }
         let opts = OrtSessionOptionsGuard { api, ptr: opts_ptr };
 
-        let setup_res = (|| -> Result<(*mut OrtSession, CString, CString), String> {
+        let setup_res = (|| -> Result<(OrtSessionGuard, CString, CString), String> {
             unsafe {
                 check_status(
                     api,
-                    ort_fn!(
+                    try_ort_fn!(
                         api,
                         SLOT_SET_SESSION_GRAPH_OPT_LEVEL,
                         FnSetSessionGraphOptLevel
@@ -381,48 +523,51 @@ impl SmartTurnModel {
                 )?;
                 check_status(
                     api,
-                    ort_fn!(api, SLOT_SET_INTRA_OP_THREADS, FnSetThreads)(opts.ptr, 2),
+                    try_ort_fn!(api, SLOT_SET_INTRA_OP_THREADS, FnSetThreads)(opts.ptr, 2),
                 )?;
                 check_status(
                     api,
-                    ort_fn!(api, SLOT_SET_INTER_OP_THREADS, FnSetThreads)(opts.ptr, 1),
+                    try_ort_fn!(api, SLOT_SET_INTER_OP_THREADS, FnSetThreads)(opts.ptr, 1),
                 )?;
             }
-            let mut session: *mut OrtSession = std::ptr::null_mut();
+            let mut session_ptr: *mut OrtSession = std::ptr::null_mut();
             unsafe {
                 check_status(
                     api,
-                    ort_fn!(
+                    try_ort_fn!(
                         api,
                         SLOT_CREATE_SESSION_FROM_ARRAY,
                         FnCreateSessionFromArray
                     )(
-                        env,
+                        env.ptr,
                         bytes.as_ptr() as *const c_void,
                         bytes.len(),
                         opts.ptr,
-                        &mut session,
+                        &mut session_ptr,
                     ),
                 )?;
             }
+            let session = OrtSessionGuard {
+                api,
+                ptr: session_ptr,
+            };
             let mut allocator: *mut OrtAllocator = std::ptr::null_mut();
             let allocator_ok = unsafe {
                 check_status(
                     api,
-                    ort_fn!(api, SLOT_GET_ALLOCATOR_DEFAULT, FnGetAllocatorDefault)(&mut allocator),
+                    try_ort_fn!(api, SLOT_GET_ALLOCATOR_DEFAULT, FnGetAllocatorDefault)(
+                        &mut allocator,
+                    ),
                 )
             }
             .is_ok();
             let (input_name, output_name) = if allocator_ok && !allocator.is_null() {
                 (
-                    unsafe { query_io_name(api, session, allocator, true, "input_features") }?,
-                    unsafe { query_io_name(api, session, allocator, false, "logits") }?,
+                    unsafe { query_io_name(api, session.ptr, allocator, true, c"input_features") }?,
+                    unsafe { query_io_name(api, session.ptr, allocator, false, c"logits") }?,
                 )
             } else {
-                (
-                    CString::new("input_features").unwrap(),
-                    CString::new("logits").unwrap(),
-                )
+                (c"input_features".to_owned(), c"logits".to_owned())
             };
             Ok((session, input_name, output_name))
         })();
@@ -430,19 +575,13 @@ impl SmartTurnModel {
         match setup_res {
             Ok((session, input_name, output_name)) => Ok(Self {
                 api,
-                env,
-                mem_info,
-                session,
+                env: env.into_raw(),
+                mem_info: mem_info.into_raw(),
+                session: session.into_raw(),
                 input_name,
                 output_name,
             }),
-            Err(err) => {
-                unsafe {
-                    ort_fn!(api, SLOT_RELEASE_MEMORY_INFO, FnReleaseMemoryInfo)(mem_info);
-                    ort_fn!(api, SLOT_RELEASE_ENV, FnReleaseEnv)(env);
-                }
-                Err(format!("加载尾音判停模型失败：{err}"))
-            }
+            Err(err) => Err(format!("加载尾音判停模型失败：{err}")),
         }
     }
 
@@ -457,7 +596,7 @@ impl SmartTurnModel {
         unsafe {
             check_status(
                 self.api,
-                ort_fn!(
+                try_ort_fn!(
                     self.api,
                     SLOT_CREATE_TENSOR_WITH_DATA,
                     FnCreateTensorWithData
@@ -484,7 +623,7 @@ impl SmartTurnModel {
         unsafe {
             check_status(
                 self.api,
-                ort_fn!(self.api, SLOT_RUN, FnRun)(
+                try_ort_fn!(self.api, SLOT_RUN, FnRun)(
                     self.session,
                     std::ptr::null(),
                     input_names.as_ptr(),
@@ -508,7 +647,7 @@ impl SmartTurnModel {
         unsafe {
             check_status(
                 self.api,
-                ort_fn!(
+                try_ort_fn!(
                     self.api,
                     SLOT_GET_TENSOR_TYPE_AND_SHAPE,
                     FnGetTensorTypeAndShape
@@ -524,7 +663,7 @@ impl SmartTurnModel {
         unsafe {
             check_status(
                 self.api,
-                ort_fn!(
+                try_ort_fn!(
                     self.api,
                     SLOT_GET_TENSOR_ELEMENT_TYPE,
                     FnGetTensorElementType
@@ -532,7 +671,7 @@ impl SmartTurnModel {
             )?;
             check_status(
                 self.api,
-                ort_fn!(
+                try_ort_fn!(
                     self.api,
                     SLOT_GET_TENSOR_SHAPE_ELEMENT_COUNT,
                     FnGetTensorShapeCount
@@ -549,7 +688,7 @@ impl SmartTurnModel {
         unsafe {
             check_status(
                 self.api,
-                ort_fn!(
+                try_ort_fn!(
                     self.api,
                     SLOT_GET_TENSOR_MUTABLE_DATA,
                     FnGetTensorMutableData
@@ -559,7 +698,8 @@ impl SmartTurnModel {
         if data_ptr.is_null() {
             return Err("尾音判停输出数据指针为空".into());
         }
-        let raw = unsafe { *(data_ptr as *const f32) };
+        // SAFETY: ORT 保证输出为至少 1 个 float 元素且指针非空，使用 read_unaligned 避免对齐假设。
+        let raw = unsafe { std::ptr::read_unaligned(data_ptr as *const f32) };
         if !raw.is_finite() {
             return Err("尾音判停输出为非有限数值".into());
         }
@@ -933,5 +1073,14 @@ mod tests {
                 .sum();
             assert!(row_sum > 0.0, "mel filter {m} must have positive support");
         }
+    }
+
+    #[test]
+    fn validate_ort_vtable_rejects_null_api_and_null_slot() {
+        assert!(unsafe { validate_ort_vtable(std::ptr::null()) }.is_err());
+        let mut fake_table = vec![std::ptr::dangling::<c_void>(); SLOT_RELEASE_SESSION_OPTIONS + 1];
+        assert!(unsafe { validate_ort_vtable(fake_table.as_ptr()) }.is_ok());
+        fake_table[SLOT_RUN] = std::ptr::null();
+        assert!(unsafe { validate_ort_vtable(fake_table.as_ptr()) }.is_err());
     }
 }

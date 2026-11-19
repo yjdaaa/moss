@@ -144,13 +144,29 @@ impl ApiService {
             Uncertain(std::sync::Arc<UncertainJob>),
         }
         let matched_target = {
-            let Ok(jobs) = self.active_jobs.lock() else {
-                return laser_contracts::ToolCallResult::err("无法读取设备任务，请使用实体急停");
+            let jobs = if alters_alarm {
+                self.active_jobs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            } else {
+                let Ok(jobs) = self.active_jobs.lock() else {
+                    return laser_contracts::ToolCallResult::err(
+                        "无法读取设备任务，请使用实体急停",
+                    );
+                };
+                jobs
             };
-            let Ok(uncertain) = self.uncertain_jobs.lock() else {
-                return laser_contracts::ToolCallResult::err(
-                    "无法读取待确认停止的设备任务，请使用实体急停",
-                );
+            let uncertain = if alters_alarm {
+                self.uncertain_jobs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            } else {
+                let Ok(uncertain) = self.uncertain_jobs.lock() else {
+                    return laser_contracts::ToolCallResult::err(
+                        "无法读取待确认停止的设备任务，请使用实体急停",
+                    );
+                };
+                uncertain
             };
             if let Some(id) = job_id {
                 if let Some(job) = jobs.values().find(|j| j.workflow_id == id).cloned() {
@@ -228,10 +244,7 @@ impl ApiService {
                     }
                     if alters_alarm {
                         job.cancel.cancel();
-                        if let Err(error) = job
-                            .transport
-                            .write_realtime(laser_device::RealtimeCommand::EmergencyStop)
-                        {
+                        if let Err(error) = send_emergency_stop_transport(job.transport.as_ref()) {
                             return laser_contracts::ToolCallResult::err(format!(
                                 "作业取消已请求，但急停 0x18 发送失败：{error}"
                             ));
@@ -1322,7 +1335,7 @@ impl ApiService {
                 );
             }
             if cancel.is_cancelled() {
-                let _ = transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                let _ = send_emergency_stop_transport(transport.as_ref());
                 return failed(
                     409,
                     format!("{label}在预检前已取消，急停 0x18 已发送"),
@@ -1344,10 +1357,7 @@ impl ApiService {
                     return;
                 }
                 if self.job.cancel.is_cancelled() {
-                    let _ = self
-                        .job
-                        .transport
-                        .write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                    let _ = send_emergency_stop_transport(self.job.transport.as_ref());
                     let uncertain_entry =
                         UncertainJob::from_active(&self.job, Some(self.spec.clone()));
                     let mut jobs = self
@@ -1498,7 +1508,7 @@ impl ApiService {
                 // 取消或失败都不能证明机器已停：在同锁对内原子完成 active -> uncertain 交接；
                 // 失败分支（即便同时置有 cancel）都必须保留真实错误并兜底补发 0x18，绝不能伪报安全停机。
                 let fallback_res = if result.is_err() || !cancel.is_cancelled() {
-                    transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop)
+                    send_emergency_stop_transport(transport.as_ref())
                 } else {
                     Ok(())
                 };
