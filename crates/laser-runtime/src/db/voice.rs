@@ -437,8 +437,9 @@ impl RuntimeDb {
             .map_err(Into::into)
     }
 
-    /// 记录一次设备来访（OTA 或 WebSocket）。新设备登记为待允许；
-    /// **`client_id` 与已登记的不同**时，已允许的设备退回待允许（防止他人冒用 MAC 取得 token），已撤销的保持撤销。
+    /// 记录一次设备来访（OTA 或 WebSocket）。新设备登记为待允许（未认证待允许最多 64 条，超限淘汰最旧）；
+    /// **`client_id` 与已登记的不同**时原样返回已有记录、不做任何修改：不替换绑定、不把已允许设备降级
+    /// （防止伪造 MAC 把在线合法设备踢下线），由 OTA 按 `bound` 拒绝签发 token / MQTT。
     pub fn voice_device_seen(
         &self,
         device_id: &str,

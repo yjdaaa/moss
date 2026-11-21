@@ -130,7 +130,7 @@ foreach($item in @(@{key='desktop';path=$desktopExe},@{key='helper';path=$bin},@
   $files[$item.key]=@{name=$f.Name;bytes=$f.Length;sha256=(Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 }
 $protocolSource=Get-Content -LiteralPath (Join-Path $repo 'crates/moss-voice-local-proto/src/lib.rs') -Raw
-$dbSource=Get-Content -LiteralPath (Join-Path $repo 'crates/laser-runtime/src/db.rs') -Raw
+$dbSource=Get-Content -LiteralPath (Join-Path $repo 'crates/laser-runtime/src/db/mod.rs') -Raw
 $proto=[regex]::Match($protocolSource,'pub const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+)')
 $schema=[regex]::Match($dbSource,'pub const SCHEMA_VERSION:\s*i64\s*=\s*(\d+)')
 if(-not $proto.Success -or -not $schema.Success){throw 'Cannot verify protocol or schema'}

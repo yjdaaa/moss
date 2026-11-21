@@ -2887,6 +2887,113 @@ fn discover_controllers_is_single_flight() {
     let _ = first.join().unwrap();
 }
 
+fn discovery_busy_tables(service: &ApiService) -> crate::connection::DiscoveryBusyTables {
+    crate::connection::DiscoveryBusyTables {
+        open_locks: service.target_open_locks.clone(),
+        active_jobs: service.active_jobs.clone(),
+        uncertain_jobs: service.uncertain_jobs.clone(),
+        short_io_targets: service.short_io_targets.clone(),
+    }
+}
+
+fn discovery_candidate(ip: &str, telnet_port: u16) -> crate::connection::ControllerCandidate {
+    crate::connection::ControllerCandidate {
+        ip: ip.to_owned(),
+        telnet_port,
+        hostname: String::new(),
+        http_port: None,
+        source: "scan",
+    }
+}
+
+/// 2026-11-21 审查：扫描确认线程开连接前须在打开锁内复查短连接占用（不能与并发探测双开同一 Telnet 端口），
+/// IPv6 目标按 `describe()` 的方括号格式匹配。
+#[test]
+fn discovery_probe_skips_target_held_by_short_io_including_ipv6() {
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+    let busy = discovery_busy_tables(&service);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let held: std::sync::Arc<dyn laser_device::DeviceTransport> =
+        std::sync::Arc::new(laser_device::FakeGrbl::new(Vec::<String>::new()));
+
+    let target = format!("127.0.0.1:{port}");
+    let guard = register_short_io_target(&service.short_io_targets, &target, held.clone());
+    let outcome = crate::connection::probe_discovery_candidate(
+        &busy,
+        &discovery_candidate("127.0.0.1", port),
+        std::time::Duration::from_millis(100),
+    );
+    assert_eq!(outcome.unwrap_err(), "probing");
+    assert!(listener.accept().is_err(), "被占用的目标不得再开连接");
+    drop(guard);
+
+    let _v6 = register_short_io_target(&service.short_io_targets, "[::1]:23", held);
+    let outcome = crate::connection::probe_discovery_candidate(
+        &busy,
+        &discovery_candidate("::1", 23),
+        std::time::Duration::from_millis(100),
+    );
+    assert_eq!(
+        outcome.unwrap_err(),
+        "probing",
+        "IPv6 目标须按 [addr]:port 命中占用"
+    );
+}
+
+#[test]
+fn discovery_probe_registers_and_releases_short_io_for_idle_target() {
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+    let busy = discovery_busy_tables(&service);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target = format!("127.0.0.1:{port}");
+    let seen_held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let short_io = service.short_io_targets.clone();
+    let seen_cb = seen_held.clone();
+    let target_cb = target.clone();
+    // 对端接受连接但不回应：确认期间占用表里应有这个目标
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        // accept 在握手完成即返回，探测方登记占用稍晚；在问询等待窗口内轮询
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        while std::time::Instant::now() < deadline {
+            if short_io.lock().unwrap().contains_key(&target_cb) {
+                seen_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    });
+    let outcome = crate::connection::probe_discovery_candidate(
+        &busy,
+        &discovery_candidate("127.0.0.1", port),
+        std::time::Duration::from_millis(200),
+    );
+    assert!(outcome.unwrap().is_err(), "不回应的对端不算控制器");
+    peer.join().unwrap();
+    assert!(
+        seen_held.load(std::sync::atomic::Ordering::SeqCst),
+        "问询期间须登记 ShortIoGuard"
+    );
+    assert!(
+        !service
+            .short_io_targets
+            .lock()
+            .unwrap()
+            .contains_key(&target),
+        "确认结束须释放占用"
+    );
+}
+
 #[test]
 fn resume_rejects_non_cancelled_status_and_estop_bumps_cancel_epoch() {
     use sha2::{Digest, Sha256};

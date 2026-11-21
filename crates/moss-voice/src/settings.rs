@@ -1303,17 +1303,6 @@ fn read_root(settings_file: &Path) -> serde_json::Map<String, serde_json::Value>
     laser_runtime::settings_store::read(settings_file)
 }
 
-/// 持 `settings_store` 写锁更新 `settings.json` 顶层键值；非空损坏文件拒绝覆盖。
-pub fn update_root(
-    settings_file: &Path,
-    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-) -> Result<(), String> {
-    let lock = laser_runtime::settings_store::lock(settings_file);
-    let mut root = lock.read_checked()?;
-    mutate(&mut root);
-    lock.write(&root)
-}
-
 /// 持 `settings_store` 写锁执行 `load -> mutate -> save`，避免并发子分区写入互相覆盖。
 pub fn update_voice<R>(
     settings_file: &Path,
@@ -2662,7 +2651,7 @@ mod tests {
     }
 
     #[test]
-    fn update_voice_and_update_root_serialize_concurrent_subsection_writes_and_reject_corrupt_json()
+    fn update_voice_and_root_writes_serialize_concurrent_subsection_writes_and_reject_corrupt_json()
     {
         use std::sync::{Arc, Barrier};
         let dir = tempfile::tempdir().unwrap();
@@ -2723,11 +2712,13 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 for i in 0..20 {
-                    update_root(&file, |root| {
+                    // 桌面壳导出设置等顶层写入方直接走 settings_store，须与语音分区写入共用同一把锁
+                    laser_runtime::settings_store::update(&file, |root| {
                         root.insert(
                             "export".into(),
                             serde_json::json!({"dir": format!("exp-{i}"), "ask_each_time": true}),
                         );
+                        Ok(())
                     })
                     .unwrap();
                 }
@@ -2753,8 +2744,9 @@ mod tests {
         let corrupt = dir.path().join("corrupt.json");
         std::fs::write(&corrupt, b"{broken-json").unwrap();
         assert_eq!(
-            update_root(&corrupt, |r| {
+            laser_runtime::settings_store::update(&corrupt, |r| {
                 r.insert("x".into(), serde_json::json!(1));
+                Ok(())
             })
             .unwrap_err(),
             "settings.json 格式损坏，拒绝覆盖"

@@ -319,7 +319,7 @@ def file_meta(path: pathlib.Path) -> dict:
     }
 
 proto_src = (repo / "crates/moss-voice-local-proto/src/lib.rs").read_text(encoding="utf-8")
-db_src = (repo / "crates/laser-runtime/src/db.rs").read_text(encoding="utf-8")
+db_src = (repo / "crates/laser-runtime/src/db/mod.rs").read_text(encoding="utf-8")
 proto_match = re.search(r"pub const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+)", proto_src)
 schema_match = re.search(r"pub const SCHEMA_VERSION:\s*i64\s*=\s*(\d+)", db_src)
 if not proto_match or not schema_match:

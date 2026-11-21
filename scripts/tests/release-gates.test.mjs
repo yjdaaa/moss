@@ -657,3 +657,23 @@ test("release.yml 的发布说明生成器对超长 CHANGELOG 自动按行截断
     "重跑覆盖已有 Release 资产后须同步更新发布说明正文",
   );
 });
+
+test("打包与发版脚本里写死的 Rust 源码路径都存在（模块拆分后不留旧路径）", async () => {
+  const { readdirSync, existsSync } = await import("node:fs");
+  const roots = ["scripts", ".github/workflows"];
+  const files = roots.flatMap((root) =>
+    readdirSync(join(REPO_ROOT, root), { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.(sh|ps1|mjs|py|yml)$/.test(entry.name))
+      .map((entry) => join(entry.parentPath ?? entry.path, entry.name))
+      .filter((path) => !path.includes(`${join("scripts", "tests")}`)),
+  );
+  const missing = [];
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    for (const [path] of text.matchAll(/\b(?:crates|apps)\/[A-Za-z0-9_./-]+\.rs\b/g)) {
+      if (!existsSync(join(REPO_ROOT, path))) missing.push(`${file.slice(REPO_ROOT.length + 1)} -> ${path}`);
+    }
+  }
+  assert.ok(files.length > 10, "应扫描到打包与发版脚本");
+  assert.deepEqual(missing, []);
+});

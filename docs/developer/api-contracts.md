@@ -243,7 +243,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | `/api/ui/runtime-config` | 无 | `{connection:{default_mode, preferred_modes:[默认, 另一], serial:{default_port:"", baudrate:115200}, network:{default_host:"", transport:"telnet", http_port:80, telnet_port:23, timeout:5.0}}, upload:{gcode_suffixes:[".gcode",".nc"]}}` | 无 |
 | `/api/ui/serial-ports` | 无 | `{ports:[…], default_port, baudrate}`；只列系统真实识别到的串口 | 无 |
 | `/api/ui/discover-controllers`（**POST**，body `{}`；用 POST 防止跨站页面用无 Origin 的 GET 触发扫描） | 无 | `{controllers:[{ip, telnet_port, hostname, http_port, source: mdns/scan/mdns+scan, firmware, state, machine}], busy:[{ip, telnet_port, workflow_id}], checked, not_controllers, hint}`。2026-11-09 起：mDNS（`_telnet._tcp` / `_http._tcp`，约 1.5 秒）与本机局域网网卡所在 /24 的 23 端口扫描（枚举网卡、跳过回环与代理 / VPN 点对点虚拟网卡）只产生候选，逐台连接后发实时状态查询 `?` 与 `$I`（均只读，不发运动、出光或改设置的命令），回了状态报告、`[VER:…]` 或 GRBL 启动横幅的才列入 `controllers`（`machine` 为 FluidNC `$I` 的 `[MSG:Machine: …]`）；候选一出现就开始确认（mDNS 1 秒窗口内边找边验，回了别的协议立即判定、0.7 秒无回应即放弃），通常约 1 秒返回；正在加工或待确认停机的目标不另开连接，列入 `busy`；连不上或不是 GRBL 的只计入 `not_controllers`；并发调用由单飞锁防重入（已有扫描进行中时直接返回空列表与提示），扫描与验证线程均设有上限。没有结果时 `hint` 写明扫了哪个网段。候选来源可由 `ApiService::with_controller_candidates` 替换（测试不扫真实网络）。 |
-| `/api/ui/material-options` | 无 | `{materials:[{name, thicknesses:[数字升序]}]}` 按 name 排序 | 500 `读取材料选项失败` |
+| `/api/ui/material-options` | 无 | `{materials:[{name, thicknesses:[数字升序], surface?}]}` 按 name 排序；有表面通用条目的材料带 `surface:true`（表面条目不进厚度列表，只有表面条目的材料 `thicknesses` 为空） | 500 `读取材料选项失败` |
 | `/api/ui/material-recommendation` | `material` 必填、`laser_mode` 必填、`thickness_mm`、`engraving_mode` 可选、`power_scale` 可选 | 白名单投影：`material, thickness_mm, matched_thickness_mm, match, laser_mode, laser_max_power, feed_rate, passes`；engrave 且有值时加 `engraving_mode`；r40 起条目随材料保存了图层设置时另带 `fill_options` / `cut_options`（没有就不带这两个键） | 400 `material 和 laser_mode 不能为空` / `读取材料推荐失败` |
 | `/api/material-lab/export` | 无 | `{params_file, library:{version:1, power_scale, materials}}` | 500 |
 
@@ -492,7 +492,7 @@ Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickne
 | LightBurn | MOSS | 说明 |
 |---|---|---|
 | 材料 → 厚度条目（带 Description） | 材料 → 厚度键 → `engrave.raster` / `engrave.outline` / `cut` 参数格，每格可带 `title`（条目标题，存于参数格 `extra.title`）与 `notes` | 旧库 JSON 与 SQLite 无需迁移，`title` 走现有 `extra` 列 |
-| No thickness 条目（表面雕刻） | 厚度键 `surface`（`laser_contracts::SURFACE_THICKNESS_KEY`），只存雕刻参数 | 雕刻推荐：同厚度有该模式参数 > 表面条目 > 最近厚度；切割仍要求真实厚度。`/api/ui/material-recommendation` 命中时 `match="surface"`、带 `title`；`/api/ui/material-options` 对有表面条目的材料加 `surface:true`（厚度列表不变，只有表面条目的材料在工作台下拉里不出现，需至少保存一个真实厚度） |
+| No thickness 条目（表面雕刻） | 厚度键 `surface`（`laser_contracts::SURFACE_THICKNESS_KEY`），只存雕刻参数 | 雕刻推荐：同厚度有该模式参数 > 表面条目 > 最近厚度；切割仍要求真实厚度。`/api/ui/material-recommendation` 命中时 `match="surface"`、带 `title`；`/api/ui/material-options` 对有表面条目的材料加 `surface:true`（厚度列表不变；2026-11-20 起只有表面条目的材料也出现在工作台、画板与材料弹窗的下拉里，按表面通用参数雕刻，切割仍要求真实厚度） |
 | 材料测试结果写回 | `select-cell` 写回功率、速度、遍数与线距（`pixel_size_mm`） | 线距即 LightBurn Interval |
 | 库条目保存整套图层设置（r40） | 雕刻参数格可带 `fill_options`（`grouping`、`angle_deg`、`cross_hatch`、`bidirectional`、`overscan_mm`），切割参数格可带 `cut_options`（`kerf_mm`、`tab_count` / `tab_spacing_mm`、`tab_width_mm`、`tabs_skip_inner`、`lead_in_mm`、`lead_out_mm`、`lead_angle_deg`、`overcut_mm`），存于参数格 `extra`，值域与生成请求相同 | **双向扫描偏移（含速度表）与机器加速度跟机器走，不进材料库**（放进来 400）。生成请求没写的键回落到推荐条目的值，结果 `fill_options.from_material` / `cut_options.from_material` 列出取自材料库的键；导入的库同样校验 |
 | Load / Save / Merge `.clb` | JSON 导出、导入（`replace` / `merge`） | **不支持 `.clb`**：LightBurn 私有 XML，单位与字段（mm/s、百分比功率、图层模式）需人工换算，未做导入器 |

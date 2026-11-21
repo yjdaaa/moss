@@ -1,7 +1,7 @@
 # 数据库表结构与旧 JSON 字段映射
 
 状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表；2026-11-18 升级至 schema v20（`voice_devices.status_revision`）；2026-11-21 `db.rs` 按域拆成 `db/` 目录（`mod.rs` 连接与共享类型，`migrate`、`materials`、`approvals`、`voice`、`secrets`、`maintenance` 各一文件），对外接口与 schema 不变
-代码：`crates/laser-runtime/src/{db,store,root,migration}.rs`
+代码：`crates/laser-runtime/src/db/`（按域分文件）与 `crates/laser-runtime/src/{store,root,migration}.rs`
 历史依据：旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
 
 ---
@@ -244,12 +244,12 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 
 ### 3.13 `voice_devices`（schema v6，内置语音技术书 NV1）
 
-内置语音服务登记的小智设备。新设备第一次请求 OTA 或连接时登记为待允许，桌面端允许后才签发 token。
+内置语音服务登记的小智设备。新设备第一次请求 OTA 或连接时登记为待允许，桌面端允许后才签发 token。未认证的待允许记录最多保留 64 条，新登记超限时淘汰最近来访最早的待允许记录（2026-11-20，防止局域网刷量拖慢主库）。
 
 | 列 | 类型 | 说明 |
 | --- | --- | --- |
 | device_id | TEXT PK | 设备 MAC（固件请求头 `Device-Id`） |
-| client_id | TEXT | 设备 UUID（`Client-Id`）。与已登记值不同时，已允许的设备退回待允许（防止他人冒用 MAC 取得 token），已撤销的保持撤销 |
+| client_id | TEXT | 设备 UUID（`Client-Id`）。与已登记值不同的来访不改记录：不替换已绑定的 `Client-Id`，也不把已允许设备降级（2026-11-20 起，防止伪造 MAC 把在线的合法设备踢下线）；OTA 只在已允许且 `Client-Id` 与绑定一致（`bound`）时签发 token 与 MQTT 配置 |
 | status | TEXT | `pending` 待允许 / `allowed` 已允许 / `revoked` 已撤销 |
 | name | TEXT | 用户起的名字（最长 32 字），默认空 |
 | model / firmware_version | TEXT | OTA 上报的型号（`board.type`）与固件版本；空值不覆盖已有记录 |

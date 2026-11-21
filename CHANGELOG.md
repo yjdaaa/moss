@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复第三批重构遗留：打包脚本旧 db.rs 路径、局域网扫描绕过开连接锁与残留命令表（2026-11-21）
+
+- **现象**：拆分 `db.rs` 后，`scripts/build-macos-installer.sh`（`--with-voice-sidecar`）与 `scripts/voice-helper/build-sidecar-installer.ps1` 校验 schema 版本时仍读已删除的 `crates/laser-runtime/src/db.rs`，打包直接报错中断；局域网设备扫描的确认线程开 Telnet 连接前没拿 `target_open_mutex`、没查也没登记短连接占用，可能与并发启动的发送或连接探测双开同一端口，且候选键按 `ip:port` 拼接，IPv6 目标匹配不到正在加工的任务；`safe_action` 里还留着一份 38 项实时命令名单；`moss_voice::settings::update_root` 已无生产调用方；文档里材料下拉、审批卡层级与 `voice_devices` 换 `Client-Id` 的说明落后于 2026-11-20 的改动。
+- **根因与修复**：两个打包脚本改读 `db/mod.rs`；局域网扫描的工作线程与降级串行分支统一走 `probe_discovery_candidate`：持 `target_open_mutex` 依次复查活动任务、待确认任务与短连接占用，空闲才开连接并登记 `ShortIoGuard`，随即释放打开锁再问询，结束时先放本地句柄再释放占用；候选键改用 `ConnectionSpec::describe()`（IPv6 带方括号）。`safe_action` 的互斥判定改为直接用 `laser_tools::realtime_action` 的解析结果；删除 `update_root`，其并发测试改调 `settings_store::update`。同步 `api-contracts.md`（`material-options` 的 `surface` 字段与纯表面材料可选）、`frontend-behavior.md`（`.approval-center-modal` 128）、`db-schema.md`（代码路径、待允许 64 条上限、换 `Client-Id` 不降级）、`moss-native-voice-spec.md` 允许流程与 `db/voice.rs` 注释。
+- **验证**：新增 `discovery_probe_skips_target_held_by_short_io_including_ipv6`（被占用目标返回 `probing` 且不开连接，IPv6 按方括号命中）与 `discovery_probe_registers_and_releases_short_io_for_idle_target`（问询期间登记、结束释放），新增脚本护栏“打包与发版脚本里写死的 Rust 源码路径都存在”（还原旧路径时失败）；`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1,455 项、58 项脚本单测、分层与卫生门禁、回环 E2E 全部通过；已执行 `bash scripts/quick-update-desktop.sh --with-host`。两个打包脚本未实跑完整打包，局域网扫描未连真实雕刻机（`unverified`）。
+- **关联**：`scripts/build-macos-installer.sh`、`scripts/voice-helper/build-sidecar-installer.ps1`、`scripts/tests/release-gates.test.mjs`、`crates/laser-api/src/{connection,safe_action}.rs`（`probe_discovery_candidate`、`DiscoveryBusyTables`）、`crates/laser-api/src/tests/stop_and_resume.rs`、`crates/moss-voice/src/settings.rs`、`crates/laser-runtime/src/db/voice.rs`、`docs/developer/{api-contracts,frontend-behavior,db-schema}.md`、`docs/integration/moss-native-voice-spec.md`。
+
 ### 第三批重构 3B：前端设备连接存储收口与发送“结果未知”状态转移抽成纯函数（2026-11-21）
 
 - **现象**：同一组设备连接存储键在工作台、材料实验室、数字孪生、画板默认表单、AI 预览与连接栏 6 个文件里各自手写读写；工作台开刻 / 续雕“结果未知”的处理复制了 4 份，材料实验室的发送与轮询状态转移写在页面里，没有单测。

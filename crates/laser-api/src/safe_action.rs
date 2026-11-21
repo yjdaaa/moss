@@ -285,47 +285,9 @@ impl ApiService {
                 return laser_contracts::ToolCallResult::err("语音设备授权已失效，请重新连接");
             }
         };
-        let is_mutating_sequential = !matches!(
-            action,
-            "status"
-                | "emergency_stop"
-                | "soft_reset"
-                | "feed_override_reset"
-                | "feed_reset"
-                | "feed_100"
-                | "feed_override_plus_10"
-                | "feed_plus_10"
-                | "feed_+10%"
-                | "feed_override_minus_10"
-                | "feed_minus_10"
-                | "feed_-10%"
-                | "feed_override_plus_1"
-                | "feed_plus_1"
-                | "feed_+1%"
-                | "feed_override_minus_1"
-                | "feed_minus_1"
-                | "feed_-1%"
-                | "spindle_override_reset"
-                | "power_override_reset"
-                | "power_reset"
-                | "power_100"
-                | "spindle_override_plus_10"
-                | "power_override_plus_10"
-                | "power_plus_10"
-                | "power_+10%"
-                | "spindle_override_minus_10"
-                | "power_override_minus_10"
-                | "power_minus_10"
-                | "power_-10%"
-                | "spindle_override_plus_1"
-                | "power_override_plus_1"
-                | "power_plus_1"
-                | "power_+1%"
-                | "spindle_override_minus_1"
-                | "power_override_minus_1"
-                | "power_minus_1"
-                | "power_-1%"
-        ) && args.dry_run != Some(true);
+        // 实时字节命令（急停、软复位、倍率）与查询不占互斥任务位；分类只看 `laser_tools::realtime_action` 一张表
+        let is_mutating_sequential =
+            action != "status" && realtime_cmd_info.is_none() && args.dry_run != Some(true);
         let cancel = laser_device::CancellationToken::default();
         let safe_job_id = job_id
             .map(str::to_owned)
