@@ -7,6 +7,7 @@ mod home_secret;
 pub mod knowledge_store;
 pub mod migration;
 pub mod root;
+pub mod settings_store;
 pub mod store;
 
 pub use agent_store::AgentRunRecord;

@@ -772,10 +772,7 @@ pub fn mcp_bridge_connected(api: &ApiService) -> bool {
 fn read_runtime_settings(
     runtime_dir: &std::path::Path,
 ) -> serde_json::Map<String, serde_json::Value> {
-    std::fs::read(runtime_dir.join("settings.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    laser_runtime::settings_store::read(&laser_runtime::settings_store::settings_path(runtime_dir))
 }
 
 /// 运行目录 `settings.json` 中配置的接入点（NV8）：`(编号, 地址)`。

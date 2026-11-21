@@ -1300,56 +1300,21 @@ impl VoiceSettings {
 }
 
 fn read_root(settings_file: &Path) -> serde_json::Map<String, serde_json::Value> {
-    std::fs::read(settings_file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
+    laser_runtime::settings_store::read(settings_file)
 }
 
-fn read_root_checked(
-    settings_file: &Path,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    match std::fs::read(settings_file) {
-        Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(serde_json::Map::new()),
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .ok_or_else(|| "settings.json 格式损坏，拒绝覆盖".to_owned()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::Map::new()),
-        Err(error) => Err(format!("无法读取设置文件: {error}")),
-    }
-}
-
-fn write_root(
-    settings_file: &Path,
-    root: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    if let Some(parent) = settings_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
-    }
-    let text = serde_json::to_string_pretty(root).map_err(|error| error.to_string())?;
-    let temp = settings_file.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&temp, text).map_err(|error| format!("写入设置失败: {error}"))?;
-    std::fs::rename(&temp, settings_file).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        format!("保存设置失败: {error}")
-    })
-}
-
-/// 在全局 `SETTINGS_WRITE` 锁保护下更新 `settings.json` 顶层键值；非空损坏文件拒绝覆盖。
+/// 持 `settings_store` 写锁更新 `settings.json` 顶层键值；非空损坏文件拒绝覆盖。
 pub fn update_root(
     settings_file: &Path,
     mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
 ) -> Result<(), String> {
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = read_root_checked(settings_file)?;
-        mutate(&mut root);
-        write_root(settings_file, &root)
-    })
+    let lock = laser_runtime::settings_store::lock(settings_file);
+    let mut root = lock.read_checked()?;
+    mutate(&mut root);
+    lock.write(&root)
 }
 
-/// 在全局 `SETTINGS_WRITE` 锁保护下执行 `load -> mutate -> save`，避免并发子分区写入互相覆盖。
+/// 持 `settings_store` 写锁执行 `load -> mutate -> save`，避免并发子分区写入互相覆盖。
 pub fn update_voice<R>(
     settings_file: &Path,
     mutate: impl FnOnce(&mut VoiceSettings) -> Result<R, String>,
@@ -1357,7 +1322,7 @@ pub fn update_voice<R>(
     update_voice_with_jev_feedback(settings_file, |voice| mutate(voice).map(|out| (out, None)))
 }
 
-/// 在全局 `SETTINGS_WRITE` 锁保护下更新顶层与 `voice` 字段时可选同步的顶层键。
+/// 持 `settings_store` 写锁更新顶层与 `voice` 字段时可选同步的顶层键。
 #[derive(Debug, Default)]
 pub struct RootVoiceUpdate {
     pub endpoint: Option<Option<String>>,
@@ -1378,7 +1343,7 @@ fn parse_voice_section_checked(
     }
 }
 
-/// 在全局 `SETTINGS_WRITE` 锁保护下读取最新 `settings.json` 与 `voice` 子分区，
+/// 持 `settings_store` 写锁读取最新 `settings.json` 与 `voice` 子分区，
 /// 仅在锁内修改本次涉及的字段并写回，避免锁外读取的旧整份快照覆盖并发隐私/功能开关。
 pub fn update_voice_with_root<R, E>(
     settings_file: &Path,
@@ -1388,41 +1353,39 @@ pub fn update_voice_with_root<R, E>(
     ) -> Result<(R, RootVoiceUpdate), E>,
     map_io_err: impl Fn(String) -> E,
 ) -> Result<R, E> {
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = read_root_checked(settings_file).map_err(&map_io_err)?;
-        let mut voice = parse_voice_section_checked(&root).map_err(&map_io_err)?;
-        // n75：写回前先迁移旧角色编号，避免把旧值原样写回
-        migrate_personas(&mut voice.builtin_local);
-        let (out, update) = mutate(&root, &mut voice)?;
-        apply_voice_to_root(
-            &mut root,
-            &voice,
-            update.endpoint.as_ref().map(|v| v.as_deref()),
-            update.extra_endpoints.as_deref(),
-            update.disabled_tools.as_deref(),
-            update.jev_feedback,
-        )
-        .map_err(&map_io_err)?;
-        write_root(settings_file, &root).map_err(map_io_err)?;
-        Ok(out)
-    })
+    let lock = laser_runtime::settings_store::lock(settings_file);
+    let mut root = lock.read_checked().map_err(&map_io_err)?;
+    let mut voice = parse_voice_section_checked(&root).map_err(&map_io_err)?;
+    // n75：写回前先迁移旧角色编号，避免把旧值原样写回
+    migrate_personas(&mut voice.builtin_local);
+    let (out, update) = mutate(&root, &mut voice)?;
+    apply_voice_to_root(
+        &mut root,
+        &voice,
+        update.endpoint.as_ref().map(|v| v.as_deref()),
+        update.extra_endpoints.as_deref(),
+        update.disabled_tools.as_deref(),
+        update.jev_feedback,
+    )
+    .map_err(&map_io_err)?;
+    lock.write(&root).map_err(map_io_err)?;
+    Ok(out)
 }
 
-/// 在全局 `SETTINGS_WRITE` 锁保护下原子更新 `voice` 子分区与可选顶层 `jev_enabled`。
+/// 持 `settings_store` 写锁原子更新 `voice` 子分区与可选顶层 `jev_enabled`。
 pub fn update_voice_with_jev_feedback<R>(
     settings_file: &Path,
     mutate: impl FnOnce(&mut VoiceSettings) -> Result<(R, Option<bool>), String>,
 ) -> Result<R, String> {
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = read_root_checked(settings_file)?;
-        let mut voice = parse_voice_section_checked(&root)?;
-        // n75：写回前先迁移旧角色编号，避免把旧值原样写回
-        migrate_personas(&mut voice.builtin_local);
-        let (out, jev_feedback) = mutate(&mut voice)?;
-        apply_voice_to_root(&mut root, &voice, None, None, None, jev_feedback)?;
-        write_root(settings_file, &root)?;
-        Ok(out)
-    })
+    let lock = laser_runtime::settings_store::lock(settings_file);
+    let mut root = lock.read_checked()?;
+    let mut voice = parse_voice_section_checked(&root)?;
+    // n75：写回前先迁移旧角色编号，避免把旧值原样写回
+    migrate_personas(&mut voice.builtin_local);
+    let (out, jev_feedback) = mutate(&mut voice)?;
+    apply_voice_to_root(&mut root, &voice, None, None, None, jev_feedback)?;
+    lock.write(&root)?;
+    Ok(out)
 }
 
 /// 读取语音设置；文件缺失、损坏或旧版本没有 `voice` 时返回默认值。
@@ -1485,50 +1448,49 @@ const LEGACY_SELF_HOSTED_KEYS: [&str; 7] = [
 /// 相同；没有备份时 `mcp_endpoint` 原样不动；再删掉自建链路专用的旧键。其他键全部保留。
 /// 返回是否改写了文件；文件缺失或不需要迁移时返回 `Ok(false)`，文件损坏时返回错误且不覆盖。
 pub fn migrate_legacy_self_hosted(settings_file: &Path) -> Result<bool, String> {
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = read_root_checked(settings_file)?;
-        let Some(voice) = root
-            .get_mut("voice")
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            return Ok(false);
-        };
-        if voice.get("mode").and_then(serde_json::Value::as_str) != Some("self_hosted") {
-            return Ok(false);
+    let lock = laser_runtime::settings_store::lock(settings_file);
+    let mut root = lock.read_checked()?;
+    let Some(voice) = root
+        .get_mut("voice")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    if voice.get("mode").and_then(serde_json::Value::as_str) != Some("self_hosted") {
+        return Ok(false);
+    }
+    voice.insert("mode".into(), serde_json::Value::String("builtin".into()));
+    let text = |voice: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        voice
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let official = text(voice, "official_mcp_endpoint");
+    let self_hosted = text(voice, "self_hosted_mcp_endpoint");
+    for key in LEGACY_SELF_HOSTED_KEYS {
+        voice.remove(key);
+    }
+    match official {
+        Some(official) => {
+            root.insert("mcp_endpoint".into(), serde_json::Value::String(official));
         }
-        voice.insert("mode".into(), serde_json::Value::String("builtin".into()));
-        let text = |voice: &serde_json::Map<String, serde_json::Value>, key: &str| {
-            voice
-                .get(key)
+        // 没有官方备份：顶层接入点若还是原来的自建接入点（那个服务端 MOSS 已不再启动），清掉，
+        // 免得连接桥一直对着不存在的地址重试；用户另设的地址不动
+        None => {
+            let current = root
+                .get("mcp_endpoint")
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        };
-        let official = text(voice, "official_mcp_endpoint");
-        let self_hosted = text(voice, "self_hosted_mcp_endpoint");
-        for key in LEGACY_SELF_HOSTED_KEYS {
-            voice.remove(key);
-        }
-        match official {
-            Some(official) => {
-                root.insert("mcp_endpoint".into(), serde_json::Value::String(official));
-            }
-            // 没有官方备份：顶层接入点若还是原来的自建接入点（那个服务端 MOSS 已不再启动），清掉，
-            // 免得连接桥一直对着不存在的地址重试；用户另设的地址不动
-            None => {
-                let current = root
-                    .get("mcp_endpoint")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim);
-                if self_hosted.is_some() && current == self_hosted.as_deref() {
-                    root.remove("mcp_endpoint");
-                }
+                .map(str::trim);
+            if self_hosted.is_some() && current == self_hosted.as_deref() {
+                root.remove("mcp_endpoint");
             }
         }
-        write_root(settings_file, &root)?;
-        Ok(true)
-    })
+    }
+    lock.write(&root)?;
+    Ok(true)
 }
 
 /// 附加接入点（顶层 `mcp_extra_endpoints`，NV8）。
@@ -1658,19 +1620,18 @@ fn save_all_inner(
     disabled_tools: Option<&[String]>,
     jev_feedback: Option<bool>,
 ) -> Result<(), String> {
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = read_root_checked(settings_file)?;
-        parse_voice_section_checked(&root)?;
-        apply_voice_to_root(
-            &mut root,
-            voice,
-            endpoint,
-            extra_endpoints,
-            disabled_tools,
-            jev_feedback,
-        )?;
-        write_root(settings_file, &root)
-    })
+    let lock = laser_runtime::settings_store::lock(settings_file);
+    let mut root = lock.read_checked()?;
+    parse_voice_section_checked(&root)?;
+    apply_voice_to_root(
+        &mut root,
+        voice,
+        endpoint,
+        extra_endpoints,
+        disabled_tools,
+        jev_feedback,
+    )?;
+    lock.write(&root)
 }
 
 /// Strict MCP read: a damaged settings file must not silently become an empty server list.
@@ -1688,14 +1649,7 @@ pub fn read_mcp_servers(file: &Path) -> Result<Vec<moss_mcp_client::ServerConfig
 }
 
 fn strict_root(file: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    match std::fs::read(file) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .ok_or_else(|| "设置文件损坏，未覆盖原文件".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
-        Err(_) => Err("无法读取设置文件".into()),
-    }
+    laser_runtime::settings_store::read_checked(file)
 }
 
 /// NV15: isolated, versioned offline Home Assistant settings. Nothing here
@@ -1753,35 +1707,34 @@ pub fn save_home_offline(
     expected_revision: u64,
 ) -> Result<u64, HomeOfflineError> {
     next.validate_offline().map_err(HomeOfflineError::Invalid)?;
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = strict_root(file).map_err(HomeOfflineError::Storage)?;
-        let (current, revision) = home_snapshot(&root)?;
-        if revision != expected_revision {
-            return Err(HomeOfflineError::Conflict);
-        }
-        if &current == next {
-            return Ok(revision);
-        }
-        let updated_revision = revision
-            .checked_add(1)
-            .filter(|v| *v <= HOME_REVISION_MAX)
-            .ok_or(HomeOfflineError::Invalid("Home Assistant 配置版本已达上限"))?;
-        let voice = root.entry("voice").or_insert_with(|| serde_json::json!({}));
-        let voice = voice
-            .as_object_mut()
-            .ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
-        voice.insert(
-            "builtin_home".into(),
-            serde_json::to_value(next)
-                .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置序列化失败"))?,
-        );
-        voice.insert(
-            "builtin_home_revision".into(),
-            serde_json::json!(updated_revision),
-        );
-        write_root(file, &root).map_err(HomeOfflineError::Storage)?;
-        Ok(updated_revision)
-    })
+    let lock = laser_runtime::settings_store::lock(file);
+    let mut root = lock.read_checked().map_err(HomeOfflineError::Storage)?;
+    let (current, revision) = home_snapshot(&root)?;
+    if revision != expected_revision {
+        return Err(HomeOfflineError::Conflict);
+    }
+    if &current == next {
+        return Ok(revision);
+    }
+    let updated_revision = revision
+        .checked_add(1)
+        .filter(|v| *v <= HOME_REVISION_MAX)
+        .ok_or(HomeOfflineError::Invalid("Home Assistant 配置版本已达上限"))?;
+    let voice = root.entry("voice").or_insert_with(|| serde_json::json!({}));
+    let voice = voice
+        .as_object_mut()
+        .ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
+    voice.insert(
+        "builtin_home".into(),
+        serde_json::to_value(next)
+            .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置序列化失败"))?,
+    );
+    voice.insert(
+        "builtin_home_revision".into(),
+        serde_json::json!(updated_revision),
+    );
+    lock.write(&root).map_err(HomeOfflineError::Storage)?;
+    Ok(updated_revision)
 }
 
 /// NV15 portable Home profile format; never contains app_secrets, DPAPI
@@ -1848,19 +1801,18 @@ pub fn save_mcp_servers(
     servers: &[moss_mcp_client::ServerConfig],
 ) -> Result<(), String> {
     moss_mcp_client::validate_servers(servers).map_err(|error| error.to_string())?;
-    laser_contracts::with_settings_file_lock(|| {
-        let mut root = strict_root(file)?;
-        let voice = root
-            .entry("voice")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-            .ok_or("语音设置格式不正确")?;
-        voice.insert(
-            "mcp_servers".into(),
-            serde_json::to_value(servers).map_err(|_| "第三方 MCP 配置格式不正确")?,
-        );
-        write_root(file, &root)
-    })
+    let lock = laser_runtime::settings_store::lock(file);
+    let mut root = lock.read_checked()?;
+    let voice = root
+        .entry("voice")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("语音设置格式不正确")?;
+    voice.insert(
+        "mcp_servers".into(),
+        serde_json::to_value(servers).map_err(|_| "第三方 MCP 配置格式不正确")?,
+    );
+    lock.write(&root)
 }
 
 #[cfg(test)]

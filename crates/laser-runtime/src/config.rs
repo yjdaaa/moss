@@ -18,9 +18,7 @@ impl LaserSettings {
     pub fn from_env_with_runtime_dir(runtime_dir: Option<&Path>) -> Result<Self, String> {
         load_env_files(runtime_dir);
         let settings_file = runtime_dir
-            .map(|d| d.join("settings.json"))
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            .map(|dir| crate::settings_store::read(&crate::settings_store::settings_path(dir)));
         let port_from_file = settings_file
             .as_ref()
             .and_then(|v| v.get("web_port").and_then(|p| p.as_u64()))

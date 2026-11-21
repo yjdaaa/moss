@@ -8,6 +8,7 @@ description = "语音中心（技术书 §9.4，P4）：语音链路（官方小
 
 [dependencies]
 laser-contracts = { path = "../laser-contracts" }
+laser-runtime = { path = "../laser-runtime" }
 moss-mcp-client = { path = "../moss-mcp-client" }
 moss-process = { path = "../moss-process" }
 serde.workspace = true

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 第三批重构 3A：settings.json 统一读写入口，修复 Android 导出设置绕过写锁（2026-11-21）
+
+- **现象**：`settings.json` 在 `laser-api`、`moss-voice`、`laser-host`、`laser-runtime` 与桌面壳各有一套读写；Android 的导出设置直接裸写、绕过进程内写锁，可能与 `/api/settings` 并发保存时互相覆盖；全局设置锁放在第 0 层 `laser-contracts`；Jev 决策接口默认地址在三个包里各写一份。
+- **根因与修复**：新增 `laser_runtime::settings_store`（`update` / `lock` / `read` / `read_checked`）：进程内唯一写锁 + 同目录临时文件原子替换，非空但不是 JSON 对象的文件拒绝覆盖，修改闭包出错不写盘；`laser-api`、`moss-voice::settings`（7 处）、`laser-host`、`LaserSettings` 与桌面壳 `export.rs`（含 Android 分支）全部改用它，删除 `laser_contracts::with_settings_file_lock`。`moss-voice` 与桌面壳新增对第 1 层 `laser-runtime` 的依赖；`moss-voice` 写设置失败的提示与 `laser-api` 统一为“读取 / 写入 settings.json 失败：…”。Jev 地址收口为 `laser_contracts::OPENROUTER_DECISIONS_URL`，独立的 `moss-voice-server` 保留自有常量并加测试与 `moss-voice` 比对。评估后不拆 `moss-voice-config`（`settings.rs` 依赖 `colab`、`local_models`、`models`，调用方本就同链进桌面程序，编译收益小）。
+- **验证**：新增 `settings_store` 5 项（保留其他键无残留临时文件、损坏 / 非对象文件不覆盖、缺失文件与父目录创建、闭包失败不写、16 线程并发写不同键全部保留）与 `defaults_match_voice_center` 1 项；`moss-voice` 96 项通过；全工作区 clippy 零警告、1,453 项测试通过，分层门禁通过；Android 实机导出设置未验（`unverified`）。
+- **关联**：`crates/laser-runtime/src/{settings_store.rs,config.rs,lib.rs}`、`crates/laser-api/src/settings.rs`、`crates/moss-voice/{Cargo.toml,src/settings.rs,src/models.rs}`、`crates/laser-host/src/lib.rs`、`crates/laser-contracts/src/lib.rs`、`crates/moss-voice-server/src/jev.rs`、`apps/desktop/src-tauri/{Cargo.toml,src/export.rs}`、`docs/developer/architecture.md`。
+
 ### 加固缓存清理脚本安全边界、修复发版重跑正文哈希失配并同步开发文档（2026-11-21）
 
 - **现象**：`scripts/clean-build-cache.sh` 漏扫 `.dylib` OSO 调试引用、macOS 缺 `nm` 时 fail-open 删文件、非 UTF-8 符号名可能触发 `UnicodeDecodeError`、`--dry-run` 对超期增量会话重复计费、未阻断中间段软链穿透，且与 `clean-build-cache.ps1` 一并将独立工作区 `apps/moss-voice-local/target` 当成误生子目录整删；`release.yml` 重跑已有 Release 覆盖上传资产后未更新正文 SHA-256 表；部分开发文档滞后于近期重构（缺少 3 个新 crate、局域网配对 token 持久化与协议 7 / `CATALOG` 27 项 / `kws` / `dispatch_json` / 可注入遥测 / schema v20 `status_revision`）。

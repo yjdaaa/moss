@@ -1,5 +1,5 @@
 pub(crate) const JEV_API_KEY_SECRET: &str = "jev_api_key";
-pub(crate) const DEFAULT_JEV_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+pub(crate) const DEFAULT_JEV_ENDPOINT: &str = laser_contracts::OPENROUTER_DECISIONS_URL;
 pub(crate) const JEV_MODEL: &str = "typesafe/jev-1.13";
 
 pub(crate) fn normalize_mcp_endpoint(value: &str) -> Option<String> {
@@ -47,40 +47,26 @@ pub(crate) fn read_runtime_settings(
     runtime_path: Option<&std::path::Path>,
 ) -> serde_json::Map<String, serde_json::Value> {
     runtime_path
-        .map(|path| path.join("settings.json"))
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .map(|path| {
+            laser_runtime::settings_store::read(&laser_runtime::settings_store::settings_path(path))
+        })
         .unwrap_or_default()
 }
 
-/// 读-改-写运行目录的 settings.json（先写临时文件再改名，保留其他键）。
+/// 读-改-写运行目录的 settings.json（经 `laser_runtime::settings_store` 持锁原子替换，保留其他键）。
 /// 没有运行目录或写入失败时返回错误，调用方不能报告“已保存”。
 pub(crate) fn update_runtime_settings(
     runtime_path: Option<&std::path::Path>,
     change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
 ) -> Result<(), String> {
-    laser_contracts::with_settings_file_lock(|| {
-        let runtime_path = runtime_path.ok_or("没有配置运行目录")?;
-        let target = runtime_path.join("settings.json");
-        let mut current = match std::fs::read(&target) {
-            Ok(bytes) if bytes.iter().all(|b| b.is_ascii_whitespace()) => serde_json::Map::new(),
-            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-                .ok_or_else(|| "settings.json 格式损坏，拒绝覆盖".to_owned())?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
-            Err(err) => return Err(format!("读取 settings.json 失败：{err}")),
-        };
-        change(&mut current);
-        let data = serde_json::to_vec_pretty(&current).map_err(|error| error.to_string())?;
-        let temp = runtime_path.join(format!("settings.json.api-tmp-{}", std::process::id()));
-        std::fs::write(&temp, data)
-            .and_then(|()| std::fs::rename(&temp, &target))
-            .map_err(|error| {
-                let _ = std::fs::remove_file(&temp);
-                format!("写入 settings.json 失败：{error}")
-            })
-    })
+    let runtime_path = runtime_path.ok_or("没有配置运行目录")?;
+    laser_runtime::settings_store::update(
+        &laser_runtime::settings_store::settings_path(runtime_path),
+        |root| {
+            change(root);
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn mask_secret(value: &str) -> String {
@@ -208,16 +194,10 @@ pub(crate) fn mcp_status_json(
 }
 
 pub(crate) fn configured_mcp_endpoint(runtime_path: Option<&std::path::Path>) -> Option<String> {
-    let saved = runtime_path
-        .map(|path| path.join("settings.json"))
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| {
-            value
-                .get("mcp_endpoint")
-                .and_then(|item| item.as_str())
-                .map(str::to_owned)
-        });
+    let saved = read_runtime_settings(runtime_path)
+        .get("mcp_endpoint")
+        .and_then(|item| item.as_str())
+        .map(str::to_owned);
     saved
         .as_deref()
         .and_then(normalize_mcp_endpoint)

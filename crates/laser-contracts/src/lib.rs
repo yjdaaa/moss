@@ -52,16 +52,6 @@ pub const MATERIAL_CUT_OPTION_KEYS: &[&str] = &[
     "overcut_mm",
 ];
 
-/// 进程内共享的 `settings.json` 读-改-写互斥锁（`laser-api` 与 `moss-voice` 共用），
-/// 避免 `/api/settings` 与语音中心并发保存时互相覆盖对方刚写入的字段。
-pub fn with_settings_file_lock<R>(f: impl FnOnce() -> R) -> R {
-    static SETTINGS_FILE_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = SETTINGS_FILE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f()
-}
-
 /// 调用方上下文（技术书 §6.4）：由 HTTP 入口或进程内调用方**构造**，绝不从请求体读取。
 /// P1-00 只做传递，不参与任何判定；严格模式（P1-04）将据此决定 R3 动作是否放行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1333,6 +1323,10 @@ mod caller_context_tests {
 }
 
 /// 校验并规范化小智 MCP 接入点 URL：只接受无占位符且带主机的 `ws://` 或 `wss://` 地址。
+/// OpenRouter Jev 决策接口的默认地址：加工反馈（`laser-api`）与语音中心（`moss-voice`）共用这一份；
+/// 独立的 `moss-voice-server` 不依赖本包，自带同值常量，由其测试与 `moss-voice` 比对防漂移。
+pub const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
+
 pub fn parse_mcp_endpoint_url(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.contains('<') {

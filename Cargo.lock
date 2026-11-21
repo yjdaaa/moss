@@ -3239,6 +3239,7 @@ dependencies = [
  "bzip2",
  "flate2",
  "laser-contracts",
+ "laser-runtime",
  "moss-mcp-client",
  "moss-process",
  "reqwest",

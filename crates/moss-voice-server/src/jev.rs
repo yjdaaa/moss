@@ -1471,6 +1471,23 @@ mod tests {
 
     use super::*;
 
+    /// 本服务不依赖 `moss-voice`，默认地址与模型各自声明；这里比对，防止两边改了一边忘了另一边。
+    #[test]
+    fn defaults_match_voice_center() {
+        assert_eq!(
+            DEFAULT_DECISIONS_ENDPOINT,
+            moss_voice::models::DEFAULT_JEV_DECISIONS_URL
+        );
+        assert_eq!(
+            DEFAULT_LOCAL_LAYA_ENDPOINT,
+            moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL
+        );
+        assert_eq!(
+            DEFAULT_JEV_VOICE_MODEL,
+            moss_voice::settings::DEFAULT_JEV_MODEL
+        );
+    }
+
     struct FakeDecisionClient {
         calls: AtomicUsize,
         seen_payloads: Mutex<Vec<Value>>,

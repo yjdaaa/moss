@@ -93,12 +93,7 @@ pub(crate) fn write_new_export(dir: &Path, name: &str, bytes: &[u8]) -> Result<P
 
 /// 读取 settings.json 中的 `export` 设置；文件缺失或格式不对时返回默认值。
 pub(crate) fn read_export_settings(settings_file: &Path) -> ExportSettings {
-    let Some(value) = std::fs::read(settings_file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    else {
-        return ExportSettings::default();
-    };
+    let value = serde_json::Value::Object(laser_runtime::settings_store::read(settings_file));
     let export = &value["export"];
     ExportSettings {
         dir: export["dir"]
@@ -126,33 +121,11 @@ pub(crate) fn write_export_settings(
         );
         root.insert("export".into(), serde_json::Value::Object(export));
     };
-    #[cfg(desktop)]
-    {
-        moss_voice::settings::update_root(settings_file, apply)
-    }
-    #[cfg(not(desktop))]
-    {
-        let mut root = match std::fs::read(settings_file) {
-            Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => serde_json::Map::new(),
-            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-                .ok_or_else(|| "settings.json 格式损坏，拒绝覆盖".to_owned())?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
-            Err(e) => return Err(format!("读取设置失败: {e}")),
-        };
-        apply(&mut root);
-        let data = serde_json::to_vec_pretty(&root).map_err(|e| format!("序列化设置失败: {e}"))?;
-        if let Some(parent) = settings_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建设置目录失败: {e}"))?;
-        }
-        let tmp = settings_file.with_extension(format!("json.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, data).map_err(|e| format!("写入设置失败: {e}"))?;
-        std::fs::rename(&tmp, settings_file).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("保存设置失败: {e}")
-        })
-    }
+    // 与后端 `/api/settings`、语音中心共用同一把进程内写锁；Android 也不例外（2026-11-21 前移动端绕过了锁）
+    laser_runtime::settings_store::update(settings_file, |root| {
+        apply(root);
+        Ok(())
+    })
 }
 
 /// 导出目录校验：绝对路径、目录存在、可写（创建并删除一个探测文件）。

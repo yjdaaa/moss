@@ -25,7 +25,7 @@ const MAX_MODELS_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MODELS_COUNT: usize = 2000;
 
 /// OpenRouter Decisions 固定端点与常用 Jev 模型预设。
-pub const DEFAULT_JEV_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
+pub const DEFAULT_JEV_DECISIONS_URL: &str = laser_contracts::OPENROUTER_DECISIONS_URL;
 pub const DEFAULT_LOCAL_LAYA_DECISIONS_URL: &str = "http://127.0.0.1:18090/v1/systemone";
 pub const DEFAULT_OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 pub const BUILTIN_JEV_MODELS: [&str; 2] = ["typesafe/jev-1.14", "typesafe/jev-1.13"];
