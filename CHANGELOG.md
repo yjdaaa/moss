@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 第三批重构 3B：前端设备连接存储收口与发送“结果未知”状态转移抽成纯函数（2026-11-21）
+
+- **现象**：同一组设备连接存储键在工作台、材料实验室、数字孪生、画板默认表单、AI 预览与连接栏 6 个文件里各自手写读写；工作台开刻 / 续雕“结果未知”的处理复制了 4 份，材料实验室的发送与轮询状态转移写在页面里，没有单测。
+- **根因与修复**：新增 `deviceConnection.js`（工作台 `laser-forge-*` 与画板 `laserLab.*` 连接键唯一登记处）与 `useDeviceConnection`（工作台、材料实验室共用，只写回变化的字段），6 处改用它；行为变更：材料实验室自动选中的串口现在也会记住。抽出 `matrixSendOutcome` / `matrixPollOutcome`（材料实验室）与 `workbenchConnectionFields` / `workbenchCanonicalTarget` / `sendProgressForUnknownResult`（工作台），“结果未知继续轮询、保留规范急停目标、不报失败”的语义不变。`DrawPage` 持久化逻辑与十余个页面状态交织、纯逻辑已在 `drawScenePersist.js`，评估后不再抽 Hook。
+- **验证**：前端 ESLint 零告警，369 项单测（新增 `deviceConnection.test.mjs` 4 项、矩阵发送 / 轮询与工作台连接 3 项；`targetedFixes` 源码护栏改指向新的纯函数位置，未放宽）与生产构建通过；回环 E2E 40/40 通过（含画板继承工作台设备、材料实验室矩阵下发与双设备切页急停）；浏览器交互测试 16/17，`twin-render.browser.mjs` 在本机无头软件 WebGL 下 0.5 秒出帧 8 次低于阈值，恢复改动前的 `TwinPage.jsx` 后同样失败，与本次无关；已执行 `bash scripts/quick-update-desktop.sh --with-host`。
+- **关联**：`frontend/src/{deviceConnection.js,useDeviceConnection.js,materialLabState.js,workbenchParams.js,aiPreviewState.js,drawConnection.js,pages/{HomePage,MaterialLabPage,TwinPage}.jsx,components/material-lab/LabConnectionBar.jsx}`、`docs/developer/frontend-behavior.md`。
+
 ### 第三批重构 3C：按域拆分 RuntimeDb 与 laser-mcp、合并 GRBL 实时命令表（2026-11-21）
 
 - **现象**：`laser-runtime/src/db.rs`（3,042 行）与 `laser-mcp/src/lib.rs`（3,444 行）单文件过大；GRBL 实时字节命令表（急停 / 软复位、进给与功率倍率）在 `laser-api` 与 `laser-tools` 各抄一份。

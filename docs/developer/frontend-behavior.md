@@ -79,7 +79,7 @@
 
 | 键 | 页面 | 内容 |
 | --- | --- | --- |
-| `laser-forge-conn-mode`、`laser-forge-serial-port`、`laser-forge-baud`、`laser-forge-host`、`laser-forge-telnet-port` | 主页 | 连接方式与参数 |
+| `laser-forge-conn-mode`、`laser-forge-serial-port`、`laser-forge-baud`、`laser-forge-host`、`laser-forge-telnet-port` | 主页、材料实验室（数字孪生、创作画板与 AI 预览只读回退） | 连接方式与参数；键名与读写只在 `deviceConnection.js`（画板的 `laserLab.*` 连接键同在此登记），两页状态由 `useDeviceConnection` 持有，只写回变化的字段 |
 | `laser-forge-mat`、`laser-forge-thick`、`laser-forge-text`、`laser-forge-font-size`、`laser-forge-text-style`、`laser-forge-last-sent-sha256` | 主页 | 文字任务表单、文字刻法（兼容旧值 `raster` 归一为 `fill`）与最近一次已下发刀路的物理 SHA-256（防原位重复烧穿提醒） |
 | `laserLab.material`、`laserLab.thickness_mm`、`laserLab.width_mm`、`laserLab.height_mm`、`laserLab.mode`（2026-11-16 起默认 `vector`；另记 `laserLab.mode_version=2`，此前版本存下的 `raster` 读取时迁移一次为 `vector`）、`laserLab.connection_mode`、`laserLab.network_host`、`laserLab.network_telnet_port`、`laserLab.port`、`laserLab.baudrate`、`laserLab.vector_simplify_factor` | 画板 | 画板表单（`mode` 旧值 `auto` 读入时按 `raster`；`drawConnection.js::readDrawDefaultForm` 读取，存储被禁用时逐项用默认值，保存失败只提示“不会被记住”，2026-11-05） |
 | `laserLab.authToken` | 全局 | 局域网配对 token |

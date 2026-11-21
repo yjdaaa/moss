@@ -6,6 +6,7 @@
  * - 严格模式开启：AI 口头“确认”只会生成审批，必须在预览窗（或审批卡）点同意才开刻；
  * - 严格模式关闭：用户也可以对小智说“确认”，AI 调 confirm_send 后预览窗切到发送进度。
  */
+import { DRAW_CONNECTION_KEYS, WORKBENCH_CONNECTION_KEYS, readConnectionForm } from "./deviceConnection.js";
 import { drawConnectionPayload, drawTargetLabel, drawTargetMissingText, drawTargetReady, safeBrowserStorage } from "./drawConnection.js";
 import { normalizeWorkflowStatus } from "./state/statusNormalize.js";
 
@@ -49,28 +50,9 @@ export function pendingAiPreviews(workflows, { since = 0, dismissed = new Set(),
 
 /** 雕刻工作台保存的设备目标（`laser-forge-*`），没填时退回创作画板保存的目标（`laserLab.*`）。 */
 export function savedConnectionForm(storage = safeBrowserStorage()) {
-  const read = (key) => {
-    try {
-      return storage?.getItem?.(key) ?? null;
-    } catch (_error) {
-      return null;
-    }
-  };
-  const forge = {
-    connection_mode: read("laser-forge-conn-mode") === "serial" ? "serial" : "network",
-    network_host: read("laser-forge-host") || "",
-    network_telnet_port: read("laser-forge-telnet-port") || "23",
-    port: read("laser-forge-serial-port") || "",
-    baudrate: read("laser-forge-baud") || "115200",
-  };
+  const forge = readConnectionForm(WORKBENCH_CONNECTION_KEYS, storage);
   if (drawTargetReady(forge)) return forge;
-  const lab = {
-    connection_mode: read("laserLab.connection_mode") === "serial" ? "serial" : "network",
-    network_host: read("laserLab.network_host") || "",
-    network_telnet_port: read("laserLab.network_telnet_port") || "23",
-    port: read("laserLab.port") || "",
-    baudrate: read("laserLab.baudrate") || "115200",
-  };
+  const lab = readConnectionForm(DRAW_CONNECTION_KEYS, storage);
   return drawTargetReady(lab) ? lab : forge;
 }
 

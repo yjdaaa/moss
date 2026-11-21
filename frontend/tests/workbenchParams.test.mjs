@@ -326,3 +326,30 @@ test("旧调参预览的低功率如实回填，后续生成走手动范围校�
   assert.match(manualParamsPayload({ enabled: true, powerPercent: adopted.customPower,
     feedRate: adopted.customFeed, passes: adopted.customPasses }).error, /功率/);
 });
+
+test("工作台连接字段、规范目标与结果未知时的进度保留", async () => {
+  const { sendProgressForUnknownResult, workbenchCanonicalTarget, workbenchConnectionFields } = await import(
+    "../src/workbenchParams.js"
+  );
+  const serial = { connectionMode: "serial", serialPort: "COM3", baudrate: "250000", networkHost: "", telnetPort: 23 };
+  const network = { connectionMode: "network", serialPort: "", baudrate: 115200, networkHost: "<device-ip>", telnetPort: "" };
+  assert.deepEqual(workbenchConnectionFields(serial), {
+    connection_mode: "serial",
+    port: "COM3",
+    baudrate: 250000,
+    network_host: "",
+    network_telnet_port: 23,
+  });
+  assert.equal(workbenchCanonicalTarget(serial), "COM3@250000");
+  assert.equal(workbenchCanonicalTarget(network), "<device-ip>:23");
+
+  // 已绑定目标的进度原样保留（急停仍按原通道），没有目标时补上规范目标
+  const bound = { sent: 12, total: 40, target: "COM9@115200" };
+  assert.equal(sendProgressForUnknownResult(bound, 99, "COM3@250000"), bound);
+  assert.deepEqual(sendProgressForUnknownResult({ sent: 5, total: 40, target: "" }, 99, "COM3@250000"), {
+    sent: 5,
+    total: 40,
+    target: "COM3@250000",
+  });
+  assert.deepEqual(sendProgressForUnknownResult(null, 99, "x"), { sent: 0, total: 99, target: "x" });
+});

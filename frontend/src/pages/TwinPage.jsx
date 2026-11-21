@@ -39,6 +39,7 @@ import {
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
+import { readWorkbenchConnection } from "../deviceConnection.js";
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
 const DEMO_GCODE = [
@@ -206,19 +207,14 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
   // 读取工作台保存的连接参数
   // 存储被禁用时读取会抛错；急停路径也会调用这里，必须退回空目标而不是中断（2026-11-05）
   const getConnectionPayload = useCallback(() => {
-    const read = (key) => {
-      try {
-        return globalThis.localStorage?.getItem(key) || "";
-      } catch (_error) {
-        return "";
-      }
-    };
-    const mode = read("laser-forge-conn-mode") || "network";
-    const port = read("laser-forge-serial-port");
-    const baudrate = Number(read("laser-forge-baud") || 115200);
-    const networkHost = read("laser-forge-host");
-    const telnetPort = Number(read("laser-forge-telnet-port") || 23);
-    return buildTwinConnectionPayload({ mode, port, baudrate, networkHost, telnetPort });
+    const saved = readWorkbenchConnection();
+    return buildTwinConnectionPayload({
+      mode: saved.connection_mode,
+      port: saved.port,
+      baudrate: Number(saved.baudrate) || 115200,
+      networkHost: saved.network_host,
+      telnetPort: Number(saved.network_telnet_port) || 23,
+    });
   }, []);
 
   // 解析三维刀路

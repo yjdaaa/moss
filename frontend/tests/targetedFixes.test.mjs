@@ -388,8 +388,11 @@ test("前端安全与状态止血回归护栏（发送未知结果、拖拽不�
   assert.equal((homeSrc.match(/res\.status === 0/g) || []).length >= 2, true, "工作台发送与续雕均须处理 status === 0");
   assert.match(homeSrc, /sendInFlightRef\.current/, "工作台确认开刻后自动握手期间须防重入双发");
 
+  // 2026-11-21：结果未知的转移抽到 materialLabState.matrixSendOutcome（行为见 materialLabState.test.mjs），页面按 poll 轮询
   const matLabSrc = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
-  assert.match(matLabSrc, /res\.status === 0[\s\S]{0,600}startMatrixPolling\(matrixId\)/, "材料矩阵发送断连须继续轮询原任务");
+  const matLabStateSrc = readFileSync(path.join(srcRoot, "materialLabState.js"), "utf8");
+  assert.match(matLabStateSrc, /res\?\.status === 0[\s\S]{0,600}poll: true/, "材料矩阵发送断连须继续轮询原任务");
+  assert.match(matLabSrc, /matrixSendOutcome\(res, built\)[\s\S]{0,300}if \(outcome\.poll\) startMatrixPolling\(matrixId\)/, "材料矩阵页须按发送结果的 poll 继续轮询原任务");
 
   const aiPreviewSrc = readFileSync(path.join(srcRoot, "components/AiPreviewCenter.jsx"), "utf8");
   assert.match(aiPreviewSrc, /res\.status === 0[\s\S]{0,600}connectionLost:\s*true/, "AI 预览窗开刻断连须转入跟踪态");
@@ -424,8 +427,11 @@ test("前端安全与状态止血回归护栏（发送未知结果、拖拽不�
   assert.match(tracesSrc, /tone:\s*"warning",\s*danger:\s*true/);
 
   // Round-1 复核补齐：串口未知结果急停目标格式、DrawMaterialCard 表面材料、TwinPage 轮询防死锁、5 个语音卡单调序守卫
-  assert.match(homeSrc, /const canonicalTarget =[\s\S]{0,160}\$\{serialPort\}@\$\{Number\(baudrate\) \|\| 115200\}/);
-  assert.match(matLabSrc, /const canonicalTarget =[\s\S]{0,160}\$\{built\.payload\.port\}@\$\{Number\(built\.payload\.baudrate\) \|\| 115200\}/);
+  // 2026-11-21：格式拼装抽到纯函数（workbenchParams.workbenchCanonicalTarget / materialLabState.matrixSendOutcome，均有行为单测）
+  const workbenchParamsSrc = readFileSync(path.join(srcRoot, "workbenchParams.js"), "utf8");
+  assert.equal((homeSrc.match(/const canonicalTarget = workbenchCanonicalTarget\(deviceConnection\)/g) || []).length, 4, "工作台开刻与续雕的断连、异常四处都须补规范目标");
+  assert.match(workbenchParamsSrc, /\$\{serialPort\}@\$\{Number\(baudrate\) \|\| 115200\}/);
+  assert.match(matLabStateSrc, /\$\{payload\.port\}@\$\{Number\(payload\.baudrate\) \|\| 115200\}/);
   assert.match(aiPreviewSrc, /const canonicalTarget =[\s\S]{0,160}\$\{liveConn\.payload\.port\}@\$\{Number\(liveConn\.payload\.baudrate\) \|\| 115200\}/);
 
   const drawMatSrc = readFileSync(path.join(srcRoot, "components/draw/DrawMaterialCard.jsx"), "utf8");

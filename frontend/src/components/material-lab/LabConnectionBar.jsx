@@ -2,7 +2,6 @@ import React from "react";
 import { RefreshCw } from "lucide-react";
 import { showPrompt } from "../../appDialog.js";
 import { defaultSerialPortHint } from "../../platform.js";
-import { writeLocalSafe } from "./labStorage.js";
 
 /** 材料实验室 ③ 校准矩阵 · 设备连接行（网络与 USB 串口，与工作台共享连接配置）。原样搬自 pages/MaterialLabPage.jsx（2026-11-16 按职责拆分） */
 export function LabConnectionBar({
@@ -27,7 +26,6 @@ export function LabConnectionBar({
         onChange={(e) => {
           const next = e.target.value;
           setConnectionMode(next);
-          writeLocalSafe("laser-forge-conn-mode", next);
         }}
         className="select-input lab-conn-mode"
         aria-label="设备连接方式"
@@ -57,11 +55,9 @@ export function LabConnectionBar({
                     setSerialPorts((prev) => [...prev, p]);
                   }
                   setSerialPort(p);
-                  writeLocalSafe("laser-forge-serial-port", p);
                 }
               } else {
                 setSerialPort(chosen);
-                writeLocalSafe("laser-forge-serial-port", chosen);
               }
             }}
             className="select-input lab-field-5"
@@ -82,7 +78,6 @@ export function LabConnectionBar({
             value={baudrate}
             onChange={(e) => {
               setBaudrate(e.target.value);
-              writeLocalSafe("laser-forge-baud", e.target.value);
             }}
             title="串口波特率"
             className="select-input lab-baud-select"
@@ -110,7 +105,6 @@ export function LabConnectionBar({
             onChange={(e) => {
               const val = e.target.value;
               setMatrixHost(val);
-              writeLocalSafe("laser-forge-host", val);
             }}
             className="text-input lab-field-5"
           />
@@ -121,7 +115,6 @@ export function LabConnectionBar({
             value={telnetPort}
             onChange={(e) => {
               setTelnetPort(e.target.value);
-              writeLocalSafe("laser-forge-telnet-port", e.target.value);
             }}
             title="Telnet 端口（默认 23）"
             className="text-input lab-port-input"

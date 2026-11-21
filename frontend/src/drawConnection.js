@@ -4,6 +4,13 @@
 // 同一个值）决定；转图片时再选“转图片方式”：光栅扫描（默认，与工作台图片同一套引擎）或轮廓描边。
 
 import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
+import {
+  DEFAULT_BAUDRATE,
+  DEFAULT_TELNET_PORT,
+  DRAW_CONNECTION_KEYS,
+  WORKBENCH_CONNECTION_KEYS,
+  readRawConnection,
+} from "./deviceConnection.js";
 import { normalizeEngraveRoute } from "./engraveRoute.js";
 import { intervalScaleValue } from "./qualityPresets.js";
 import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
@@ -166,19 +173,20 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
       return null;
     }
   };
-  const labModeRaw = read("laserLab.connection_mode");
-  const labHost = read("laserLab.network_host") || "";
-  const labPort = read("laserLab.port") || "";
-  const hasLabTarget = Boolean(labModeRaw || labHost.trim() || labPort.trim());
+  const lab = readRawConnection(DRAW_CONNECTION_KEYS, storage);
+  const labHost = lab.network_host || "";
+  const labPort = lab.port || "";
+  const hasLabTarget = Boolean(lab.connection_mode || labHost.trim() || labPort.trim());
 
-  const forgeConnMode = read("laser-forge-conn-mode") === "serial" ? "serial" : "network";
+  const forge = readRawConnection(WORKBENCH_CONNECTION_KEYS, storage);
+  const forgeConnMode = forge.connection_mode === "serial" ? "serial" : "network";
   const connection_mode = hasLabTarget
-    ? (labModeRaw === "serial" ? "serial" : "network")
+    ? (lab.connection_mode === "serial" ? "serial" : "network")
     : forgeConnMode;
-  const network_host = labHost || read("laser-forge-host") || "";
-  const network_telnet_port = read("laserLab.network_telnet_port") || read("laser-forge-telnet-port") || "23";
-  const port = labPort || read("laser-forge-serial-port") || "";
-  const baudrate = read("laserLab.baudrate") || read("laser-forge-baud") || "115200";
+  const network_host = labHost || forge.network_host || "";
+  const network_telnet_port = lab.network_telnet_port || forge.network_telnet_port || DEFAULT_TELNET_PORT;
+  const port = labPort || forge.port || "";
+  const baudrate = lab.baudrate || forge.baudrate || DEFAULT_BAUDRATE;
 
   return {
     material: read("laserLab.material") || "椴木",

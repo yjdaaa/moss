@@ -3,6 +3,7 @@
  * 不依赖 React，供页面与单元测试共用。
  */
 
+import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
 import { thicknessesEqual } from "./materialSelectState.js";
 
 export const MATRIX_MODE_OPTIONS = [
@@ -417,6 +418,85 @@ export function buildMatrixSendRequest({
       network_host: host,
       network_telnet_port: portNum,
     },
+  };
+}
+
+/**
+ * 标定矩阵发送请求返回后的状态转移（2026-11-21 从页面抽出）：
+ * - `approval`：严格模式下进了桌面审批，只提示，不轮询；
+ * - `sending`：后端已开始逐行下发，开始轮询；
+ * - `unknown`：网络中断或超时（status 0），后端可能已开始加工——保留规范目标供顶栏急停并立即轮询，
+ *   严禁报“失败”诱导用户重发；
+ * - `failed`：门禁或后端明确拒绝。
+ * `sendState` 为 null 表示不改动当前发送状态。
+ */
+export function matrixSendOutcome(res, built) {
+  if (isApprovalRequiredResponse(res)) {
+    return { kind: "approval", sendState: null, status: approvalPendingMessage(res, "发送标定矩阵"), poll: false };
+  }
+  const sendResult = res?.data?.result?.send_result;
+  if (res?.ok && res?.data?.success && sendResult?.running) {
+    const total = sendResult.total_lines || 0;
+    return {
+      kind: "sending",
+      sendState: { status: "sending", lines_sent: 0, total_lines: total, target: sendResult.target },
+      status: `握手通过，正在逐行下发 (0/${total} 行)…`,
+      poll: true,
+    };
+  }
+  if (res?.status === 0) {
+    const payload = built?.payload;
+    const target =
+      payload?.connection_mode === "serial"
+        ? `${payload.port}@${Number(payload.baudrate) || 115200}`
+        : built?.targetLabel;
+    return {
+      kind: "unknown",
+      sendState: { status: "sending", lines_sent: 0, total_lines: 0, target, connectionLost: true },
+      status: "发送结果未知（连接中断或超时），正在查询原标定任务，请勿重复发送；必要时使用顶栏急停。",
+      poll: true,
+    };
+  }
+  return { kind: "failed", sendState: null, status: `发送失败: ${res?.data?.result || "门禁拦截"}`, poll: false };
+}
+
+const MATRIX_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * 一次标定任务轮询后的状态转移：`job` 为 `applyJobPoll` 合并后的任务状态，`res` 为本次原始响应。
+ * 查询失败（`connectionLost`）时不改发送状态、不当作结束，只提示状态未知；`terminal` 为真时调用方停止轮询。
+ */
+export function matrixPollOutcome(previous, job, res) {
+  if (job?.connectionLost) {
+    return {
+      sendState: previous ?? null,
+      status: "状态未知：暂时无法查询设备，正在重试；机器可能仍在运行，请到现场确认。",
+      terminal: false,
+    };
+  }
+  const sr = res?.data?.result?.send_result || {};
+  const sendState = {
+    ...previous,
+    status: job.status,
+    target: sr.target || previous?.target,
+    lines_sent: job.progress?.sent ?? previous?.lines_sent ?? 0,
+    total_lines: job.progress?.total ?? previous?.total_lines ?? 0,
+    error: sr.error,
+  };
+  if (MATRIX_TERMINAL_STATUSES.has(job.status)) {
+    return {
+      sendState,
+      status:
+        job.status === "completed"
+          ? `标定矩阵加工完成 (${sr.lines_sent || 0}/${sr.total_lines || 0} 行已确认)，请观察样板并点选最佳单元格`
+          : `标定矩阵记录为${job.status === "cancelled" ? "已取消" : "发送失败"}，请确认设备状态${sr.error ? `: ${sr.error}` : ""}`,
+      terminal: true,
+    };
+  }
+  return {
+    sendState,
+    status: `正在逐行下发 (${job.progress?.sent || 0}/${job.progress?.total || 0} 行)…`,
+    terminal: false,
   };
 }
 

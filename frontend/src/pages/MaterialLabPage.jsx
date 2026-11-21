@@ -1,5 +1,4 @@
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
-import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Bookmark,
@@ -30,6 +29,8 @@ import {
   buildMatrixSendRequest,
   buildMatrixConfirmPrompt,
   buildMatrixPreviewPayload,
+  matrixPollOutcome,
+  matrixSendOutcome,
   unwrapImportedMaterialLibrary,
   isSurfaceKey,
   thicknessChipLabel,
@@ -39,6 +40,7 @@ import { LabLibraryPanel } from "../components/material-lab/LabLibraryPanel.jsx"
 import { LabParamsPanel } from "../components/material-lab/LabParamsPanel.jsx";
 import { LabMatrixSettings } from "../components/material-lab/LabMatrixSettings.jsx";
 import { LabConnectionBar } from "../components/material-lab/LabConnectionBar.jsx";
+import { useDeviceConnection } from "../useDeviceConnection.js";
 import { LabMatrixGrid } from "../components/material-lab/LabMatrixGrid.jsx";
 
 export function MaterialLabPage({ onNavigate }) {
@@ -94,11 +96,18 @@ export function MaterialLabPage({ onNavigate }) {
   const [matrixPassesMin, setMatrixPassesMin] = useState(1);
   const [matrixPassesMax, setMatrixPassesMax] = useState(3);
   const [matrixLabels, setMatrixLabels] = useState(true);
-  const [connectionMode, setConnectionMode] = useState(() => readLocalSafe("laser-forge-conn-mode", "network") || "network");
-  const [matrixHost, setMatrixHost] = useState(() => readLocalSafe("laser-forge-host", ""));
-  const [telnetPort, setTelnetPort] = useState(() => readLocalSafe("laser-forge-telnet-port", "23") || "23");
-  const [serialPort, setSerialPort] = useState(() => readLocalSafe("laser-forge-serial-port", ""));
-  const [baudrate, setBaudrate] = useState(() => readLocalSafe("laser-forge-baud", "115200") || "115200");
+  const {
+    connectionMode,
+    setConnectionMode,
+    networkHost: matrixHost,
+    setNetworkHost: setMatrixHost,
+    telnetPort,
+    setTelnetPort,
+    serialPort,
+    setSerialPort,
+    baudrate,
+    setBaudrate,
+  } = useDeviceConnection();
   const [serialPorts, setSerialPorts] = useState([]);
   const [matrixPreview, setMatrixPreview] = useState(null);
   const [matrixSignature, setMatrixSignature] = useState("");
@@ -182,7 +191,7 @@ export function MaterialLabPage({ onNavigate }) {
     } catch {
       // 忽略串口列表读取异常
     }
-  }, []);
+  }, [setSerialPort]);
 
   useEffect(() => {
     void loadBootstrap();
@@ -613,27 +622,10 @@ export function MaterialLabPage({ onNavigate }) {
     try {
       const res = await postJson("/api/material-lab/send", built.payload);
       setMatrixBusy(false);
-      if (isApprovalRequiredResponse(res)) {
-        setMatrixStatus(approvalPendingMessage(res, "发送标定矩阵"));
-        return;
-      }
-      const sendResult = res.data?.result?.send_result;
-      if (res.ok && res.data?.success && sendResult?.running) {
-        setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: sendResult.total_lines || 0, target: sendResult.target });
-        setMatrixStatus(`握手通过，正在逐行下发 (0/${sendResult.total_lines || 0} 行)…`);
-        startMatrixPolling(matrixId);
-      } else if (res.status === 0) {
-        // 网络中断或超时：后端可能已启动激光加工，保留任务编号与规范目标供顶栏急停并立即拉起状态轮询，严禁误报失败诱导重发
-        const canonicalTarget =
-          built.payload?.connection_mode === "serial"
-            ? `${built.payload.port}@${Number(built.payload.baudrate) || 115200}`
-            : built.targetLabel;
-        setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: 0, target: canonicalTarget, connectionLost: true });
-        setMatrixStatus("发送结果未知（连接中断或超时），正在查询原标定任务，请勿重复发送；必要时使用顶栏急停。");
-        startMatrixPolling(matrixId);
-      } else {
-        setMatrixStatus(`发送失败: ${res.data?.result || "门禁拦截"}`);
-      }
+      const outcome = matrixSendOutcome(res, built);
+      if (outcome.sendState) setMatrixSendState(outcome.sendState);
+      setMatrixStatus(outcome.status);
+      if (outcome.poll) startMatrixPolling(matrixId);
     } catch (e) {
       setMatrixBusy(false);
       setMatrixStatus(`发送网络异常: ${e.message}`);
@@ -648,29 +640,14 @@ export function MaterialLabPage({ onNavigate }) {
       (signal) => postJson("/api/material-lab/status", { calibration_id: calibrationId }, { signal }),
       (res) => {
         state = applyJobPoll(state, calibrationId, "calibration", res);
-        if (state.connectionLost) {
-          setMatrixStatus("状态未知：暂时无法查询设备，正在重试；机器可能仍在运行，请到现场确认。");
-          return;
-        }
-        const sr = res.data.result?.send_result || {};
-        setMatrixSendState((previous) => ({
-          ...previous,
-          status: state.status,
-          target: sr.target || previous?.target,
-          lines_sent: state.progress?.sent ?? previous?.lines_sent ?? 0,
-          total_lines: state.progress?.total ?? previous?.total_lines ?? 0,
-          error: sr.error,
-        }));
-        if (["completed", "failed", "cancelled"].includes(state.status)) {
+        // 状态转移在 matrixPollOutcome 里（纯函数、有单测）；提示与是否结束不依赖上一次发送状态，
+        // 发送状态在更新函数里基于最新值合并，查询失败时原样保留
+        const outcome = matrixPollOutcome(null, state, res);
+        setMatrixSendState((previous) => matrixPollOutcome(previous, state, res).sendState);
+        setMatrixStatus(outcome.status);
+        if (outcome.terminal) {
           stop();
           matrixPollRef.current = null;
-          setMatrixStatus(
-            state.status === "completed"
-              ? `标定矩阵加工完成 (${sr.lines_sent || 0}/${sr.total_lines || 0} 行已确认)，请观察样板并点选最佳单元格`
-              : `标定矩阵记录为${state.status === "cancelled" ? "已取消" : "发送失败"}，请确认设备状态${sr.error ? `: ${sr.error}` : ""}`,
-          );
-        } else {
-          setMatrixStatus(`正在逐行下发 (${state.progress?.sent || 0}/${state.progress?.total || 0} 行)…`);
         }
       },
     );

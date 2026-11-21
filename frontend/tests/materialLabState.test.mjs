@@ -15,6 +15,8 @@ import {
   cellAxisText,
   isSurfaceKey,
   thicknessChipLabel,
+  matrixPollOutcome,
+  matrixSendOutcome,
 } from "../src/materialLabState.js";
 import {
   MATERIAL_LIBRARY_CHANNEL,
@@ -256,4 +258,71 @@ test("导入 JSON 解包与 BroadcastChannel 跨页同步通知", () => {
   assert.equal(posted[0].channel, MATERIAL_LIBRARY_CHANNEL);
   assert.equal(posted[0].msg.type, "materials-updated");
   assert.equal(closed, true);
+});
+
+test("标定矩阵发送结果：审批、开始下发、结果未知、拒绝四种转移", () => {
+  const built = buildMatrixSendRequest({ calibrationId: "cal-1", connectionMode: "serial", serialPort: "COM3", baudrate: "115200" });
+
+  const approval = matrixSendOutcome({ ok: true, status: 202, data: { success: true, result: { status: "approval_required" } } }, built);
+  assert.equal(approval.kind, "approval");
+  assert.equal(approval.sendState, null);
+  assert.equal(approval.poll, false);
+
+  const sending = matrixSendOutcome(
+    { ok: true, status: 200, data: { success: true, result: { send_result: { running: true, total_lines: 40, target: "COM3@115200" } } } },
+    built,
+  );
+  assert.equal(sending.kind, "sending");
+  assert.deepEqual(sending.sendState, { status: "sending", lines_sent: 0, total_lines: 40, target: "COM3@115200" });
+  assert.equal(sending.poll, true);
+
+  // 网络中断：后端可能已开始加工，必须继续按“发送中”轮询并保留规范目标给急停，不能报失败
+  const unknown = matrixSendOutcome({ ok: false, status: 0, data: null }, built);
+  assert.equal(unknown.kind, "unknown");
+  assert.equal(unknown.sendState.status, "sending");
+  assert.equal(unknown.sendState.connectionLost, true);
+  assert.equal(unknown.sendState.target, "COM3@115200");
+  assert.equal(unknown.poll, true);
+  assert.match(unknown.status, /请勿重复发送/);
+
+  const failed = matrixSendOutcome({ ok: false, status: 409, data: { success: false, result: "SHA 不匹配" } }, built);
+  assert.equal(failed.kind, "failed");
+  assert.equal(failed.sendState, null);
+  assert.equal(failed.poll, false);
+  assert.equal(failed.status, "发送失败: SHA 不匹配");
+});
+
+test("标定矩阵轮询：进度合并、查询失败不算结束、终态停止轮询", () => {
+  const previous = { status: "sending", lines_sent: 0, total_lines: 40, target: "COM3@115200", connectionLost: true };
+  const lost = matrixPollOutcome(previous, { status: "sending", connectionLost: true }, { ok: false });
+  assert.equal(lost.sendState, previous);
+  assert.equal(lost.terminal, false);
+  assert.match(lost.status, /状态未知/);
+
+  const progress = matrixPollOutcome(
+    previous,
+    { status: "sending", connectionLost: false, progress: { sent: 10, total: 40 } },
+    { ok: true, data: { success: true, result: { send_result: {} } } },
+  );
+  assert.equal(progress.terminal, false);
+  assert.equal(progress.sendState.lines_sent, 10);
+  assert.equal(progress.sendState.target, "COM3@115200");
+  assert.equal(progress.status, "正在逐行下发 (10/40 行)…");
+
+  const done = matrixPollOutcome(
+    progress.sendState,
+    { status: "completed", connectionLost: false, progress: { sent: 40, total: 40 } },
+    { ok: true, data: { success: true, result: { send_result: { lines_sent: 40, total_lines: 40 } } } },
+  );
+  assert.equal(done.terminal, true);
+  assert.equal(done.sendState.status, "completed");
+  assert.match(done.status, /加工完成 \(40\/40 行已确认\)/);
+
+  const cancelled = matrixPollOutcome(
+    progress.sendState,
+    { status: "cancelled", connectionLost: false },
+    { ok: true, data: { success: true, result: { send_result: { error: "用户急停" } } } },
+  );
+  assert.equal(cancelled.terminal, true);
+  assert.equal(cancelled.status, "标定矩阵记录为已取消，请确认设备状态: 用户急停");
 });

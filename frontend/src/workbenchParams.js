@@ -404,6 +404,33 @@ export function workbenchConfirmSendPrompt({
   };
 }
 
+/** 工作台连接参数 → 请求里的连接字段（波特率、Telnet 端口按数字）。握手、开刻、续雕共用。 */
+export function workbenchConnectionFields({ connectionMode, serialPort, baudrate, networkHost, telnetPort }) {
+  return {
+    connection_mode: connectionMode,
+    port: serialPort,
+    baudrate: Number(baudrate),
+    network_host: networkHost,
+    network_telnet_port: Number(telnetPort),
+  };
+}
+
+/** 与后端 `send_result.target` 同格式的规范目标：串口 `端口@波特率`，网口 `主机:端口`。 */
+export function workbenchCanonicalTarget({ connectionMode, serialPort, baudrate, networkHost, telnetPort }) {
+  return connectionMode === "serial"
+    ? `${serialPort}@${Number(baudrate) || 115200}`
+    : `${networkHost}:${Number(telnetPort) || 23}`;
+}
+
+/**
+ * 开刻 / 续雕请求断连、超时或抛错（结果未知）时的发送进度：后端可能已开始加工，已有目标的进度原样保留
+ * （急停仍按原通道），否则补上规范目标，保证顶栏急停有处可发。
+ */
+export function sendProgressForUnknownResult(previous, fallbackTotal, target) {
+  if (previous?.target) return previous;
+  return { sent: previous?.sent ?? 0, total: previous?.total ?? fallbackTotal, target };
+}
+
 /** 构造点击「断点续雕」时的二次确认弹窗内容，防止误触直接出光或丢步错位。 */
 export function workbenchResumeSendPrompt({
   workflow,

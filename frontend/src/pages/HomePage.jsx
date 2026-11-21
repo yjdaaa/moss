@@ -24,6 +24,9 @@ import {
   workbenchConfirmSendPrompt,
   workbenchFeedbackInputs,
   workbenchInputSignature,
+  sendProgressForUnknownResult,
+  workbenchCanonicalTarget,
+  workbenchConnectionFields,
   workbenchResumeSendPrompt,
 } from "../workbenchParams.js";
 import { framingRequest, framingShapeText, readFramingShape } from "../aiPreviewState.js";
@@ -65,6 +68,7 @@ import { WorkbenchMaterialCard } from "../components/workbench/WorkbenchMaterial
 import { WorkbenchMonitorCard } from "../components/workbench/WorkbenchMonitorCard.jsx";
 import { notifyMaterialsUpdated, pickThicknessForMaterial, subscribeMaterialsUpdated } from "../materialSelectState.js";
 import { discoveryOutcome } from "../controllerDiscovery.js";
+import { useDeviceConnection } from "../useDeviceConnection.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
   if (!imageFile) return "";
@@ -92,23 +96,21 @@ function writeLocal(key, value) {
 }
 
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mcpStatus: externalMcpStatus = null }) {
-  // Connection state
-  const [connectionMode, setConnectionMode] = useState(
-    () => readLocal("laser-forge-conn-mode", "network") || "network"
-  );
-  const [serialPort, setSerialPort] = useState(
-    () => readLocal("laser-forge-serial-port", "")
-  );
-  const [baudrate, setBaudrate] = useState(
-    () => Number(readLocal("laser-forge-baud", "115200") || 115200)
-  );
+  // Connection state（连接参数读写收口在 useDeviceConnection，与材料实验室共用存储键）
+  const {
+    connectionMode,
+    setConnectionMode,
+    serialPort,
+    setSerialPort,
+    baudrate,
+    setBaudrate,
+    networkHost,
+    setNetworkHost,
+    telnetPort,
+    setTelnetPort,
+  } = useDeviceConnection({ numeric: true });
+  const deviceConnection = { connectionMode, serialPort, baudrate, networkHost, telnetPort };
   const [serialPorts, setSerialPorts] = useState([]);
-  const [networkHost, setNetworkHost] = useState(
-    () => readLocal("laser-forge-host", "")
-  );
-  const [telnetPort, setTelnetPort] = useState(
-    () => Number(readLocal("laser-forge-telnet-port", "23") || 23)
-  );
 
   // Active Tool Mode
   const [activeTool, setActiveTool] = useState("text"); // text, image, gcode
@@ -371,11 +373,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const persistedRef = useRef({});
   useEffect(() => {
     const entries = [
-      ["laser-forge-conn-mode", connectionMode],
-      ["laser-forge-serial-port", serialPort],
-      ["laser-forge-baud", String(baudrate)],
-      ["laser-forge-host", networkHost],
-      ["laser-forge-telnet-port", String(telnetPort)],
       ["laser-forge-mat", selectedMaterial],
       ["laser-forge-thick", selectedThickness],
       ["laser-forge-text", textContent],
@@ -389,11 +386,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       }
     }
   }, [
-    connectionMode,
-    serialPort,
-    baudrate,
-    networkHost,
-    telnetPort,
     selectedMaterial,
     selectedThickness,
     textContent,
@@ -560,13 +552,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     if (!silent) {
       addLog("DEVICE", `正在探测 ${connectionMode === "serial" ? "串口" : "网络"} 模式连接...`, "info");
     }
-    const payload = {
-      connection_mode: connectionMode,
-      port: serialPort,
-      baudrate: Number(baudrate),
-      network_host: networkHost,
-      network_telnet_port: Number(telnetPort),
-    };
+    const payload = workbenchConnectionFields(deviceConnection);
     try {
       const res = await postJson("/api/connection/check", payload);
       if (probeEpochRef.current !== epoch) return false;
@@ -1076,11 +1062,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         action: "confirm_send",
         workflow_id: currentWorkflow.workflow_id,
         confirmed: true,
-        connection_mode: connectionMode,
-        port: serialPort,
-        baudrate: Number(baudrate),
-        network_host: networkHost,
-        network_telnet_port: Number(telnetPort),
+        ...workbenchConnectionFields(deviceConnection),
       };
 
       const res = await postJson("/api/workflow", payload);
@@ -1102,15 +1084,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         startStatusPolling(currentWorkflow.workflow_id);
       } else if (res.status === 0) {
         // 网络中断或超时：后端可能已启动激光任务，严禁报失败或放开重发，立刻补全目标并拉起原任务轮询以保留急停绑定
-        const canonicalTarget =
-          connectionMode === "serial"
-            ? `${serialPort}@${Number(baudrate) || 115200}`
-            : `${networkHost}:${Number(telnetPort) || 23}`;
-        setSendProgress((prev) =>
-          prev?.target
-            ? prev
-            : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
-        );
+        const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
+        setSendProgress((prev) => sendProgressForUnknownResult(prev, gcodeLineCount, canonicalTarget));
         const warn = "发送请求断连或超时，后端可能已开始加工，正在持续查询原任务状态，请勿重复发送；必要时请按急停。";
         setOverlayStatus("running");
         setPollSafetyNotice(warn);
@@ -1124,15 +1099,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         showAlert(reason, { title: "发送失败", tone: "error" });
       }
     } catch (e) {
-      const canonicalTarget =
-        connectionMode === "serial"
-          ? `${serialPort}@${Number(baudrate) || 115200}`
-          : `${networkHost}:${Number(telnetPort) || 23}`;
-      setSendProgress((prev) =>
-        prev?.target
-          ? prev
-          : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
-      );
+      const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
+      setSendProgress((prev) => sendProgressForUnknownResult(prev, gcodeLineCount, canonicalTarget));
       const warn = `发送网络异常（${e.message}），后端可能已启动任务，正在查询原任务状态，请勿重复发送。`;
       setOverlayStatus("running");
       setPollSafetyNotice(warn);
@@ -1204,11 +1172,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         action: "resume",
         workflow_id: currentWorkflow.workflow_id,
         confirmed: true,
-        connection_mode: connectionMode,
-        port: serialPort,
-        baudrate: Number(baudrate),
-        network_host: networkHost,
-        network_telnet_port: Number(telnetPort),
+        ...workbenchConnectionFields(deviceConnection),
       };
 
       const res = await postJson("/api/workflow", payload);
@@ -1226,15 +1190,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         setOverlayStatus("running");
         startStatusPolling(currentWorkflow.workflow_id);
       } else if (res.status === 0) {
-        const canonicalTarget =
-          connectionMode === "serial"
-            ? `${serialPort}@${Number(baudrate) || 115200}`
-            : `${networkHost}:${Number(telnetPort) || 23}`;
-        setSendProgress((prev) =>
-          prev?.target
-            ? prev
-            : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
-        );
+        const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
+        setSendProgress((prev) => sendProgressForUnknownResult(prev, gcodeLineCount, canonicalTarget));
         const warn = "断点续雕请求断连或超时，后端可能已恢复加工，正在持续查询原任务状态，请勿重复续雕；必要时请按急停。";
         setOverlayStatus("running");
         setPollSafetyNotice(warn);
@@ -1248,15 +1205,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         showAlert(reason, { title: "断点恢复失败", tone: "error" });
       }
     } catch (e) {
-      const canonicalTarget =
-        connectionMode === "serial"
-          ? `${serialPort}@${Number(baudrate) || 115200}`
-          : `${networkHost}:${Number(telnetPort) || 23}`;
-      setSendProgress((prev) =>
-        prev?.target
-          ? prev
-          : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
-      );
+      const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
+      setSendProgress((prev) => sendProgressForUnknownResult(prev, gcodeLineCount, canonicalTarget));
       const warn = `恢复发送网络异常（${e.message}），后端可能已启动续雕，正在查询原任务状态，请勿重复续雕。`;
       setOverlayStatus("running");
       setPollSafetyNotice(warn);
