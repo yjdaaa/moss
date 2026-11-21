@@ -16,11 +16,14 @@
 | `crates/laser-host` | 启动组装、退出协调、语音工具分发与第三方 MCP 接线 |
 | `crates/moss-agent` | 本机 Agent（NV13）CLI 识别、受限进程运行器与桌面审批桥（仅桌面） |
 | `crates/moss-home` | Home Assistant 家居控制（NV15）策略、审批与 HTTPS 传输（仅桌面） |
+| `crates/moss-process` | 第 0 层跨平台子进程生命周期守卫：Windows Job Object（`KILL_ON_JOB_CLOSE`）进程树托管句柄 |
 | `crates/moss-usb-provision` | 小智 USB 一键配网：读写 NVS、回读校验与失败恢复、预签设备令牌（仅桌面） |
 | `crates/moss-xiaozhi-proto` | 小智设备协议：消息、音频帧、设备 token、OTA |
+| `crates/moss-xiaozhi-display` | 小智彩屏渲染、护目镜小机器人动图、中文字库与全屏画风/唤醒词 `assets.bin` 纯构造（零网络与异步依赖） |
 | `crates/moss-voice-server` | 内置语音服务：OTA / WebSocket、设备允许、会话、插件（仅桌面） |
 | `crates/moss-voice-providers` | ASR / LLM / TTS 提供方（OpenAI 兼容、本地模型、豆包流式） |
 | `crates/moss-voice` | 语音中心设置与链路切换（官方 / 内置）、内置服务的模型配置与本地模型管理（仅桌面） |
+| `crates/moss-voice-host` | 内置语音与长期记忆宿主总装配（零 Tauri/UI 依赖，`BuiltinVoice` / `ContextHost` 编排，仅桌面） |
 | `crates/moss-voice-local-proto` | 与本地模型 helper 的帧协议 |
 | `crates/moss-mcp-client` | 第三方 MCP 客户端（stdio / Streamable HTTP），默认拒绝 Ask |
 | `apps/moss-host` | 命令行宿主 `serve` / `migrate` |

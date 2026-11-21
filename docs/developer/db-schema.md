@@ -1,6 +1,6 @@
 # 数据库表结构与旧 JSON 字段映射
 
-状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表
+状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表；2026-11-18 升级至 schema v20（`voice_devices.status_revision`）
 代码：`crates/laser-runtime/src/{db,store,root,migration}.rs`
 历史依据：旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
 
@@ -259,6 +259,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | hello_json / hello_at | TEXT / REAL | v14。WebSocket 连接握手 `hello` 快照（协议版本、传输方式、音频参数、`features.aec`）及记录时间，可空 |
 | status_json / status_at | TEXT / REAL | v14。设备自带 MCP `self.get_device_status` 最近一次返回（音量、屏幕、电池、网络）及记录时间，可空 |
 | listen_json / listen_at | TEXT / REAL | v15。最近一次实际拾音模式快照（如 `{"mode":"auto\|manual\|realtime"}`）及记录时间，可空 |
+| status_revision | INTEGER NOT NULL DEFAULT 0 | v20。状态递增修订号，用于 USB 配网自动放行与并发撤销 CAS 校验 |
 
 ### 3.14 `voice_memory`（schema v7，NV10-1）
 

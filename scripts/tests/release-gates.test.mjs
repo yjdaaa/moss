@@ -649,4 +649,11 @@ test("release.yml 的发布说明生成器对超长 CHANGELOG 自动按行截断
   assert.equal(shortRes.status, 0, shortRes.stderr);
   assert.match(shortRes.stdout, /- 精简改动/);
   assert.doesNotMatch(shortRes.stdout, /完整更新记录见/);
+
+  // 已存在 Release 重跑覆盖上传资产时，必须同步更新正文 release-notes.md（含最新 SHA-256 校验表）
+  assert.match(
+    releaseYml,
+    /if gh release view "\$TAG" >\/dev\/null 2>&1; then\s+gh release upload "\$TAG" "\$\{ASSETS\[@\]\}" --clobber\s+gh release edit "\$TAG" --notes-file release-notes\.md/,
+    "重跑覆盖已有 Release 资产后须同步更新发布说明正文",
+  );
 });

@@ -9,7 +9,7 @@
 MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版），面向 FluidNC/GRBL 与 ESP32 下位机。
 
 - 激光主链路：`crates/laser-*`（contracts、core、device、runtime、tools、mcp、api、host）。
-- 内置语音：`crates/moss-voice*`、`moss-xiaozhi-proto`、`moss-mcp-client`、`moss-usb-provision`（USB 配网）；跨域扩展 `moss-agent`（本机 Agent）、`moss-home`（家居）由桌面壳组装；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
+- 内置语音：`crates/moss-voice*`（含 `moss-voice-host`、`moss-voice-server`、`moss-voice-providers`、`moss-voice-local-proto`）、`moss-xiaozhi-proto`、`moss-xiaozhi-display`、`moss-process`、`moss-mcp-client`、`moss-usb-provision`（USB 配网）；跨域扩展 `moss-agent`（本机 Agent）、`moss-home`（家居）由桌面壳组装；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
 - 宿主：`apps/desktop`（Tauri 2 桌面/Android）、`apps/moss-host`（HTTP/WS）；前端 `frontend/`（React + Vite）。
 - 文档入口 [`docs/README.md`](docs/README.md)；实施进度只看 [实施 TODO](docs/integration/moss-fusion-implementation-todo.md)。结构以代码为准。
 

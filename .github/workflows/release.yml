@@ -619,6 +619,7 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
           else
             gh release create "$TAG" "${ASSETS[@]}" \
               --verify-tag \

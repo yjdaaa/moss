@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 加固缓存清理脚本安全边界、修复发版重跑正文哈希失配并同步开发文档（2026-11-21）
+
+- **现象**：`scripts/clean-build-cache.sh` 漏扫 `.dylib` OSO 调试引用、macOS 缺 `nm` 时 fail-open 删文件、非 UTF-8 符号名可能触发 `UnicodeDecodeError`、`--dry-run` 对超期增量会话重复计费、未阻断中间段软链穿透，且与 `clean-build-cache.ps1` 一并将独立工作区 `apps/moss-voice-local/target` 当成误生子目录整删；`release.yml` 重跑已有 Release 覆盖上传资产后未更新正文 SHA-256 表；部分开发文档滞后于近期重构（缺少 3 个新 crate、局域网配对 token 持久化与协议 7 / `CATALOG` 27 项 / `kws` / `dispatch_json` / 可注入遥测 / schema v20 `status_revision`）。
+- **根因与修复**：`clean-build-cache.sh` 补齐 `profile_dir`/`deps_dir` `.dylib` OSO 扫描、macOS 缺 `nm` fail-closed、`errors="replace"`、已标删父目录去重、`has_symlink_component` 全链路软链拦截（含第 0 步 `cargo-sweep`），并与 `clean-build-cache.ps1` 同步豁免 `apps/moss-voice-local/target` 整删（改由 `cargo-sweep` 按 3 天清理）；`clean-build-cache.ps1` 同步修复 `Get-Item` 目录匹配、不跟随重解析点的目录遍历与 `Remove-TreeSafe`（清只读并容错占用锁文件）；`release.yml` 在 `gh release upload --clobber` 后追加 `gh release edit "$TAG" --notes-file release-notes.md`；同步 `AGENTS.md` 与 `docs/developer/{standards,architecture,api-contracts,db-schema}.md`。
+- **验证**：`scripts/tests/clean-build-cache.test.mjs` 新增 2 项回归测试（覆盖 `--dry-run` 不重复计费、叶子/中间段软链防穿透、豁免 `apps/moss-voice-local/target`、macOS `.dylib` OSO 与缺 `nm` fail-closed），`scripts/tests/release-gates.test.mjs` 补齐重跑正文同步断言；57/57 项脚本单测、`bash scripts/clean-build-cache.sh --dry-run`、`check-crate-layers.mjs` 与 `check-repo-hygiene.mjs`（含 `.ps1` 纯 ASCII）全通过。未改动桌面/后端源码，跳过桌面主程序重编；`clean-build-cache.ps1` 与 `release.yml` 实跑待 Windows 与发版流水线验证（`unverified`）。
+- **关联**：`scripts/clean-build-cache.sh`、`scripts/clean-build-cache.ps1`、`scripts/tests/clean-build-cache.test.mjs`、`.github/workflows/release.yml`、`scripts/tests/release-gates.test.mjs`、`AGENTS.md`、`docs/developer/{standards,architecture,api-contracts,db-schema}.md`。
+
 ### 修复激光安全与并发、语音权限边界及前端急停状态高危隐患（2026-11-20）
 
 - **现象**：激光发送收尾阶段报警/断线与取消并发时故障会被吞并，并发 `resume` 存在绕过非取消态的竞态，连接探测与非变更安全动作未隔离并发双开且探测会剥离 `UncertainJob` 句柄，图片预览与 `S 500`/`S+500` 功率缩放、`$CD` 异常、SD 哈希校验、局域网扫描线程和停机终态存在漏洞；正式版默认放行开发端口 CORS，`/v1/auth/challenge` 漏校桌面会话，内置语音服务缺少连接/待审设备/固件下载并发上限、OTA 错绑 `Client-Id` 仍签发令牌、`voice_persona_tool` 撤销后仍可写回，`moss-mcp-client` 未约束子进程树与 HTTP 代理；前端发送/续雕断连（`status === 0`）误报失败或急停串口目标失配、`WorkbenchCanvas` 拖拽可能残留全局点击捕获器吞掉顶栏急停，以及局域网预览 401、审批窗被预览窗遮挡、纯表面材料选项缺失、弹窗关闭未清敏感状态和多处轮询/吞错问题。
@@ -13,6 +20,13 @@
   - 前端安全与契约：`HomePage`/`MaterialLabPage`/`AiPreviewCenter` 断连未知结果统一保留规范目标并持续轮询，`WorkbenchCanvas` 自动撤除点击捕获器并清理 `pointercancel`/卸载监听，统一局域网鉴权预览与 `ApprovalCenter` 层级，补全 `DrawMaterialCard`/`WorkbenchMaterialCard`/`MaterialModal` 纯表面材料支持、`HomePage` 握手期防重入、`SettingsModal`/`CloseConfirmModal` 关闭重置、`TwinPage` 与 5 个语音卡片单调序号/单飞守卫，以及 4 处吞错与乐观更新回滚。同步更新 `docs/developer/api-contracts.md` 与 `docs/developer/safety.md`。
 - **验证**：`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1,447 项全通过（51 组，含新增并发/安全/进程树回归用例），`frontend` ESLint 零告警、362 项前端单测与 Vite 生产构建通过，55 项脚本单测与分层/卫生门禁通过，40/40 项回环 E2E（API + Chrome UI）通过，16/17 项浏览器交互测试通过（仅 `tests/twin-render.browser.mjs` 在无头软件 WebGL 下 0.5 秒出帧 10 次略低于既有阈值 11），已执行 `bash scripts/quick-update-desktop.sh --with-host` 原地更新并验签本机 `/Applications/MOSS.app` 与 `moss-host` 并清理 3 天超期缓存。独立工作区 `apps/moss-voice-local` 未改动未重测；真实激光硬件、真机小智固件与 Windows/Android 实机打包未验（`unverified`）。
 - **关联**：`crates/laser-device/src/{connection,connection/job,probe,discovery}.rs`、`crates/laser-tools/src/lib.rs`、`crates/laser-api/src/{access,connection,jobs,routes,safe_action,send,workflow,generation/image_upload}.rs`、`crates/laser-runtime/src/db.rs`、`crates/moss-voice-server/src/{lib,firmware,mqtt,ota,persona,session/connect}.rs`、`crates/moss-voice-host/src/builtin/{conversation,devices,plugins}.rs`、`crates/moss-mcp-client/{Cargo.toml,src/client.rs}`、`frontend/src/{pages,components,styles/10-component-inline.css,authSession.js,materialSelectState.js}`、`docs/developer/{api-contracts,safety}.md`。
+
+### `clean-build-cache.sh` 补齐 macOS 孤儿与失效 `.rcgu.o` 自动清理（2026-11-20）
+
+- **现象**：macOS 默认使用 `split-debuginfo=unpacked`，在 `target/*/deps/` 下留下大量 `<crate>-<hash>.<cgu>.rcgu.o` 及无哈希静态库 `.rcgu.o`；`cargo-sweep` 与原 `clean-build-cache.sh` 按完整后缀分桶均无法识别，长期堆积可达十余 GB。
+- **根因与修复**：在 `scripts/clean-build-cache.sh` 追踪本趟待删/已删路径并新增第 6 步，按 `(stem, hash)` 存活产物、Mach-O 顶层二进制 `nm -pa` OSO 调试表以及 `ar -t` 静态库归档成员交叉核验，在同趟清理及 `--dry-run` 预览中统一剔除孤儿与失效 `.rcgu.o`，并按 `deps/` 汇总输出避免刷屏。
+- **验证**：新增 `scripts/tests/clean-build-cache.test.mjs` 2 项真实临时目录回归测试（覆盖 `--dry-run` 同趟联动、存活第三方与带连字符二进制保留、真实 `ar` 归档成员校验及 3 天超期孤儿清理），`bash scripts/clean-build-cache.sh --dry-run` 与 `node scripts/verify.mjs` 全部通过；未改动桌面程序源码，跳过桌面主程序重编。
+- **关联**：`scripts/clean-build-cache.sh`、`scripts/tests/clean-build-cache.test.mjs`。
 
 ### 固定 Android 验签工具版本，修复正式证书被误判不匹配（2026-11-19）
 
