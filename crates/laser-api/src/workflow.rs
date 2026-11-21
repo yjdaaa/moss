@@ -349,6 +349,17 @@ pub(crate) fn finalize_workflow_record(
     };
     match effective_store.get(kind, workflow_id) {
         Ok(Some(mut stored)) => {
+            // 关停协调器写入的 failed / result_unknown 是不可逆终态，后台发送线程收尾绝不得覆写为 cancelled 或 completed
+            let already_result_unknown = stored.status.as_deref() == Some("failed")
+                && stored
+                    .payload
+                    .get("send_result")
+                    .and_then(|sr| sr.get("phase"))
+                    .and_then(|v| v.as_str())
+                    == Some("result_unknown");
+            if already_result_unknown {
+                return;
+            }
             // 取消请求可能已由 HTTP 层写入 cancelled；不要用 completed 覆盖用户取消
             let already_cancelled = stored.status.as_deref() == Some("cancelled")
                 || stored.payload.get("status").and_then(|v| v.as_str()) == Some("cancelled");
@@ -809,134 +820,142 @@ pub(crate) fn handle_workflow_store_request(
             else {
                 return http_json(404, failure("未找到 workflow", None));
             };
-            if let Err(error) = validate_material_safety_in_payload(&stored.payload) {
-                return http_json(
-                    400,
-                    failure(
-                        error,
-                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
-                    ),
-                );
+            let validate_resume_record =
+                |rec: &laser_runtime::StoredRecord| -> Result<usize, (u16, serde_json::Value)> {
+                    if let Err(error) = validate_material_safety_in_payload(&rec.payload) {
+                        return Err((
+                            400,
+                            failure(
+                                error,
+                                Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                            ),
+                        ));
+                    }
+                    let status = rec
+                        .status
+                        .as_deref()
+                        .or_else(|| rec.payload.get("status").and_then(|v| v.as_str()));
+                    if status == Some("sending") {
+                        return Err((
+                            409,
+                            failure(
+                                "该 workflow 正在发送中，禁止重复操作",
+                                Some(serde_json::json!({"error_code": "device_busy"})),
+                            ),
+                        ));
+                    }
+                    if status == Some("completed") {
+                        return Err((
+                            400,
+                            failure(
+                                "该 workflow 已全量完成，无法断点继续",
+                                Some(serde_json::json!({"error_code": "workflow_completed"})),
+                            ),
+                        ));
+                    }
+                    if status != Some("cancelled") {
+                        return Err((
+                            400,
+                            failure(
+                                "仅已取消且保留可恢复断点的 workflow 支持断点续雕，请重新发起确认发送",
+                                Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                            ),
+                        ));
+                    }
+                    let send_result = rec.payload.get("send_result").cloned().unwrap_or_default();
+                    if send_result.get("mode").and_then(|v| v.as_str()) == Some("sd_offline")
+                        || send_result.get("can_resume").and_then(|v| v.as_bool()) != Some(true)
+                        || object.get("offline_sd").and_then(|v| v.as_bool()) == Some(true)
+                    {
+                        return Err((
+                            400,
+                            failure(
+                                "该任务不支持按行断点续雕（如 SD 脱机整文件作业或未产生可恢复断点），请重新发起确认发送",
+                                Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                            ),
+                        ));
+                    }
+                    let original_target = send_result
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let Some(orig_target) = original_target else {
+                        return Err((
+                            400,
+                            failure(
+                                "原任务记录缺少连接目标锁定信息（target），禁止跨设备或盲目续雕，请重新发起确认发送",
+                                Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                            ),
+                        ));
+                    };
+                    let req_spec = match &requested_spec {
+                        Ok(spec) => spec,
+                        Err(e) => {
+                            return Err((
+                                400,
+                                failure(
+                                    format!("连接参数无效: {e}"),
+                                    Some(
+                                        serde_json::json!({"error_code": "connection_params_invalid"}),
+                                    ),
+                                ),
+                            ));
+                        }
+                    };
+                    if !req_spec.matches_target(orig_target) {
+                        return Err((
+                            400,
+                            failure(
+                                format!(
+                                    "续雕连接目标（{}）与原任务锁定设备（{orig_target}）不一致，禁止用旧断点/坐标对新目标续雕",
+                                    req_spec.describe()
+                                ),
+                                Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                            ),
+                        ));
+                    }
+                    let total_lines = send_result
+                        .get("total_lines")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let boundary_source = send_result
+                        .get("resume_boundary_source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let resumable_from_line = send_result
+                        .get("resumable_from_line")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize);
+                    let lines_completed = send_result
+                        .get("lines_completed")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize);
+                    let lines_acked = send_result
+                        .get("lines_sent")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize);
+                    match (boundary_source, resumable_from_line, lines_completed) {
+                        ("device_hold_ln", Some(resumable), Some(completed))
+                            if resumable > 0
+                                && resumable == completed
+                                && (total_lines == 0 || resumable < total_lines)
+                                && lines_acked.is_none_or(|acked| resumable <= acked) =>
+                        {
+                            Ok(resumable)
+                        }
+                        _ => Err((
+                            400,
+                            failure(
+                                "该任务断点缺少设备直接证实来源（resume_boundary_source=device_hold_ln），拒绝按未知或入队 ACK 续雕，请重新发起确认发送",
+                                Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                            ),
+                        )),
+                    }
+                };
+            if let Err((status, body)) = validate_resume_record(&stored) {
+                return http_json(status, body);
             }
-
-            let status = stored
-                .status
-                .as_deref()
-                .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()));
-            if status == Some("sending") {
-                return http_json(
-                    409,
-                    failure(
-                        "该 workflow 正在发送中，禁止重复操作",
-                        Some(serde_json::json!({"error_code": "device_busy"})),
-                    ),
-                );
-            }
-            if status == Some("completed") {
-                return http_json(
-                    400,
-                    failure(
-                        "该 workflow 已全量完成，无法断点继续",
-                        Some(serde_json::json!({"error_code": "workflow_completed"})),
-                    ),
-                );
-            }
-
-            let send_result = stored
-                .payload
-                .get("send_result")
-                .cloned()
-                .unwrap_or_default();
-            if send_result.get("mode").and_then(|v| v.as_str()) == Some("sd_offline")
-                || send_result.get("can_resume").and_then(|v| v.as_bool()) != Some(true)
-                || object.get("offline_sd").and_then(|v| v.as_bool()) == Some(true)
-            {
-                return http_json(
-                    400,
-                    failure(
-                        "该任务不支持按行断点续雕（如 SD 脱机整文件作业或未产生可恢复断点），请重新发起确认发送",
-                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
-                    ),
-                );
-            }
-            let original_target = send_result
-                .get("target")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let Some(orig_target) = original_target else {
-                return http_json(
-                    400,
-                    failure(
-                        "原任务记录缺少连接目标锁定信息（target），禁止跨设备或盲目续雕，请重新发起确认发送",
-                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
-                    ),
-                );
-            };
-            let req_spec = match requested_spec {
-                Ok(spec) => spec,
-                Err(e) => {
-                    return http_json(
-                        400,
-                        failure(
-                            format!("连接参数无效: {e}"),
-                            Some(serde_json::json!({"error_code": "connection_params_invalid"})),
-                        ),
-                    );
-                }
-            };
-            if !req_spec.matches_target(orig_target) {
-                return http_json(
-                    400,
-                    failure(
-                        format!(
-                            "续雕连接目标（{}）与原任务锁定设备（{orig_target}）不一致，禁止用旧断点/坐标对新目标续雕",
-                            req_spec.describe()
-                        ),
-                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
-                    ),
-                );
-            }
-            let total_lines = send_result
-                .get("total_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let boundary_source = send_result
-                .get("resume_boundary_source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let resumable_from_line = send_result
-                .get("resumable_from_line")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-            let lines_completed = send_result
-                .get("lines_completed")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-            let lines_acked = send_result
-                .get("lines_sent")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-            let proven_boundary = match (boundary_source, resumable_from_line, lines_completed) {
-                ("device_hold_ln", Some(resumable), Some(completed))
-                    if resumable > 0
-                        && resumable == completed
-                        && (total_lines == 0 || resumable < total_lines)
-                        && lines_acked.is_none_or(|acked| resumable <= acked) =>
-                {
-                    Some(resumable)
-                }
-                _ => None,
-            };
-            let Some(resume_line) = proven_boundary else {
-                return http_json(
-                    400,
-                    failure(
-                        "该任务断点缺少设备直接证实来源（resume_boundary_source=device_hold_ln），拒绝按未知或入队 ACK 续雕，请重新发起确认发送",
-                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
-                    ),
-                );
-            };
 
             let _launch_guard = match reserve_workflow_launch(
                 jobs,
@@ -964,26 +983,18 @@ pub(crate) fn handle_workflow_store_request(
                     );
                 }
             };
-            // 二次复核预约建立前未发生并发状态跳变
-            match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
+            // 持预约锁后重新读取记录并完整复核续雕资格与断点行，杜绝并发续雕或失败/急停后的 TOCTOU 复放旧行号
+            let resume_line = match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
                 Ok(Some(fresh)) => {
-                    let fresh_status = fresh
-                        .status
-                        .as_deref()
-                        .or_else(|| fresh.payload.get("status").and_then(|v| v.as_str()));
-                    if fresh_status == Some("sending") || fresh_status == Some("completed") {
-                        return http_json(
-                            409,
-                            failure(
-                                "workflow 状态已变更，请刷新后重试",
-                                Some(serde_json::json!({"error_code": "device_busy"})),
-                            ),
-                        );
-                    }
+                    let fresh_line = match validate_resume_record(&fresh) {
+                        Ok(line) => line,
+                        Err((status, body)) => return http_json(status, body),
+                    };
                     stored = fresh;
+                    fresh_line
                 }
                 _ => return http_json(500, failure("读取 workflow 失败", None)),
-            }
+            };
             let (preflight, gcode_sha, gcode_file) =
                 match build_send_preflight(&stored.payload, send_roots) {
                     Ok(value) => value,

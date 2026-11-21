@@ -228,6 +228,23 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
       setFailure(approvalPendingMessage(res, "开始加工"));
       return;
     }
+    if (res.status === 0) {
+      watchedRef.current.delete(record.workflow_id);
+      forget(record.workflow_id);
+      const canonicalTarget =
+        liveConn.payload?.connection_mode === "serial"
+          ? `${liveConn.payload.port}@${Number(liveConn.payload.baudrate) || 115200}`
+          : liveConn.label;
+      setJob({
+        kind: "workflow",
+        id: record.workflow_id,
+        status: "sending",
+        progress: null,
+        target: canonicalTarget,
+        connectionLost: true,
+      });
+      return;
+    }
     if (!(res.ok && res.data?.success)) {
       setFailure(typeof res.data?.result === "string" && res.data.result ? res.data.result : "没有开始加工，请检查设备连接后重试");
       return;

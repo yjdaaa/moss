@@ -56,9 +56,10 @@ export default function VoiceKnowledgeCard() {
   };
 
   const toggleRoot = async (root, enabled) => {
+    const prevEnabled = root.enabled;
     setBusyId(root.id);
     setResult(null);
-    // 先就地切换勾选，避免受控复选框在后端返回前弹回原状态；失败时下方 catch 会重新读取真实状态。
+    // 先就地切换勾选，避免受控复选框在后端返回前弹回原状态；失败时立即回滚并尽力重载真实状态。
     setRoots((current) => current.map((item) => (item.id === root.id ? { ...item, enabled } : item)));
     try {
       const updated = await voiceApi.contextManage({
@@ -70,6 +71,7 @@ export default function VoiceKnowledgeCard() {
       setRoots((current) => current.map((item) => (item.id === root.id ? { ...item, ...updated } : item)));
       setResult({ ok: true, text: `${enabled ? "已挂载" : "已停用"}「${root.label}」` });
     } catch (e) {
+      setRoots((current) => current.map((item) => (item.id === root.id ? { ...item, enabled: prevEnabled } : item)));
       setResult({ ok: false, text: e?.message || "切换知识库状态失败" });
       await load().catch(() => {});
     } finally {

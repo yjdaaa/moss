@@ -206,6 +206,13 @@ async fn download(
     if !token_ok(&token) {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let Ok(permit) = shared.firmware_downloads.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "固件下载并发已达上限，请稍后重试",
+        )
+            .into_response();
+    };
     let peer_ip = peer.ip().to_string();
     let lookup = token.clone();
     let bytes = tokio::task::spawn_blocking(move || host.fetch(&lookup, &peer_ip))
@@ -214,13 +221,36 @@ async fn download(
         .flatten();
     match bytes {
         Some(bytes) => {
+            let len = bytes.len();
             shared.state.event(crate::EventRecord::info(
                 crate::DiagCategory::Firmware,
-                format!("固件下载：{} 开始下载 {} 字节", peer.ip(), bytes.len()),
+                format!("固件下载：{} 开始下载 {len} 字节", peer.ip()),
             ));
-            ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
+            // 按 64 KiB 分块流式写出，并在流结束时释放并发下载信号量
+            let stream = futures_util::stream::unfold(
+                (bytes, 0usize, permit),
+                |(buf, offset, permit)| async move {
+                    const CHUNK: usize = 64 * 1024;
+                    if offset >= buf.len() {
+                        drop(permit);
+                        return None;
+                    }
+                    let end = (offset + CHUNK).min(buf.len());
+                    let chunk = axum::body::Bytes::copy_from_slice(&buf[offset..end]);
+                    Some((Ok::<_, std::convert::Infallible>(chunk), (buf, end, permit)))
+                },
+            );
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                    (header::CONTENT_LENGTH, len.to_string()),
+                ],
+                axum::body::Body::from_stream(stream),
+            )
+                .into_response()
         }
         None => {
+            drop(permit);
             shared.state.event(
                 crate::EventRecord::warn(
                     crate::DiagCategory::Firmware,

@@ -72,8 +72,18 @@ export function WorkbenchCanvas({
   const canvasRef = useRef(null);
   const metrics = useRef({ colStep: 100, rowStep: ROW_UNIT + ROW_GAP });
   const drag = useRef(null);
+  const dragListenersRef = useRef(null);
+  const cleanupDragRef = useRef(null);
   const expandedRows = useRef({}); // 折叠前记下的行数，展开时还原
   const manualHeightIds = useRef(new Set()); // 用户在本轮显式上下拖拽过高度的卡片
+
+  useEffect(() => () => {
+    dragListenersRef.current?.();
+    dragListenersRef.current = null;
+    cleanupDragRef.current?.();
+    cleanupDragRef.current = null;
+    drag.current = null;
+  }, []);
   const twoColumn = useMediaQuery(TWO_COLUMN_QUERY);
   // 窄窗口只换显示位置；layout 本身（含内容自适应行数）照常更新，拉宽窗口后回到用户的排布
   const shown = useMemo(() => (twoColumn ? stackTwoColumns(layout) : layout), [twoColumn, layout]);
@@ -217,17 +227,29 @@ export function WorkbenchCanvas({
 
   const onDragEnd = () => {
     const state = drag.current;
-    window.removeEventListener("pointermove", onDragMove);
+    dragListenersRef.current?.();
+    dragListenersRef.current = null;
     drag.current = null;
     document.querySelectorAll(".wb-dragging").forEach((item) => item.classList.remove("wb-dragging"));
     if (!state) return;
     clearPreview(state);
     if (!state.armed) return;
-    // 拖完不要顺手把卡片折叠/展开：吞掉这一次 click
-    document.addEventListener("click", (event) => {
+    // 拖完不要顺手把卡片折叠/展开：仅在本次 pointerup 紧随的事件循环内吞掉合成 click，
+    // 下一宏任务自动撤除，绝不残留全局拦截器吞掉后续点击（如顶栏急停按钮 #nav-estop）。
+    cleanupDragRef.current?.();
+    const swallowClick = (event) => {
       event.stopPropagation();
       event.preventDefault();
-    }, { capture: true, once: true });
+    };
+    document.addEventListener("click", swallowClick, { capture: true, once: true });
+    const swallowTimer = window.setTimeout(() => {
+      document.removeEventListener("click", swallowClick, { capture: true });
+      cleanupDragRef.current = null;
+    }, 0);
+    cleanupDragRef.current = () => {
+      window.clearTimeout(swallowTimer);
+      document.removeEventListener("click", swallowClick, { capture: true });
+    };
     const { colStep, rowStep } = metrics.current;
     const cols = Math.round(state.dx / colStep);
     const rows = Math.round(state.dy / rowStep);
@@ -301,8 +323,16 @@ export function WorkbenchCanvas({
       dx: 0, dy: 0,
     };
     cardElement.classList.add("wb-dragging");
-    window.addEventListener("pointermove", onDragMove);
-    window.addEventListener("pointerup", onDragEnd, { once: true });
+    const moveListener = onDragMove;
+    const endListener = onDragEnd;
+    dragListenersRef.current = () => {
+      window.removeEventListener("pointermove", moveListener);
+      window.removeEventListener("pointerup", endListener);
+      window.removeEventListener("pointercancel", endListener);
+    };
+    window.addEventListener("pointermove", moveListener);
+    window.addEventListener("pointerup", endListener, { once: true });
+    window.addEventListener("pointercancel", endListener, { once: true });
   };
 
   const toggleLock = () => {

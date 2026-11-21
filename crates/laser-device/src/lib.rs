@@ -17,7 +17,7 @@ pub use discovery::{
     scan_subnet_port, scan_subnet_port_with, subnet_hosts,
 };
 pub use preflight::{SendPreflight, authorize_send};
-pub use probe::{ProbeReport, available_serial_ports, probe_device};
+pub use probe::{ProbeReport, available_serial_ports, probe_device, probe_opened_device};
 pub use protocol::{
     MAX_GCODE_LINE_BYTES, MachineActivity, MachineFeatures, MachineLimits, PreparedGcode,
     SdProgress, StatusReport, extract_device_explanation, is_reset_banner,

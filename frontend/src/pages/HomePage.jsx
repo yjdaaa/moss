@@ -6,7 +6,7 @@ import {
   PenTool,
 } from "lucide-react";
 import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
-import { isRemoteMode } from "../authSession.js";
+import { isRemoteMode, readAuthToken } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
@@ -131,6 +131,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [materialLayer, setMaterialLayer] = useState(null);
   const [materialApplied, setMaterialApplied] = useState([]);
   const materialLayerKeyRef = useRef("");
+  const sendInFlightRef = useRef(false);
+  const workflowAssetSeqRef = useRef(0);
   const updateFillSettings = (next) => {
     setFillSettings(next);
     writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
@@ -775,20 +777,27 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         const info = extractWorkflowInfo(wf);
         const artifacts = wf.artifacts || {};
 
+        const assetSeq = ++workflowAssetSeqRef.current;
         if (artifacts.image_file) {
-          // 连接电脑时图片需要带配对 token，<img> 直链拿不到，才经鉴权取回 blob；本机/桌面直接用直链，避免泄漏 blob
+          // 远程 App 或局域网配对浏览器下 /preview 需要 Bearer 头，<img> 直链拿不到，需经鉴权取回 blob
           const nextUrl = await loadWorkbenchPreviewUrl(artifacts.image_file, {
-            remote: isRemoteMode(),
+            remote: isRemoteMode() || Boolean(readAuthToken()),
             fetchBlobUrl: fetchPreviewBlobUrl,
             resolveUrl: resolveApiUrl,
           });
-          applyPreviewUrl(nextUrl);
+          if (!mountedRef.current || workflowAssetSeqRef.current !== assetSeq) {
+            if (typeof nextUrl === "string" && nextUrl.startsWith("blob:")) {
+              URL.revokeObjectURL(nextUrl);
+            }
+          } else {
+            applyPreviewUrl(nextUrl);
+          }
         }
         if (artifacts.gcode_file) {
           // 2026-11-05：先核对 HTTP 状态，错误页不得当 G-code 显示；SHA-256 只用后端给出的真实值，
           // 拿不到时如实说明不可用，绝不伪造摘要或声称门禁已通过（发送时后端仍按物理文件重算）。
           void fetchPreviewText(artifacts.gcode_file).then((preview) => {
-            if (!mountedRef.current) return;
+            if (!mountedRef.current || workflowAssetSeqRef.current !== assetSeq) return;
             if (!preview.ok) {
               setGcodeText("");
               addLog("PREVIEW", `加工预览已生成，但 G-code 刀路读取失败：${preview.error}。请重新生成预览后再发送。`, "error");
@@ -859,19 +868,24 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     setOverlayStatus("pending");
     setSendProgress(null);
     setPollSafetyNotice("");
+    const assetSeq = ++workflowAssetSeqRef.current;
     const artifacts = workflow.artifacts || {};
-    applyPreviewUrl(
-      await loadWorkbenchPreviewUrl(artifacts.image_file, {
-        remote: isRemoteMode(),
-        fetchBlobUrl: fetchPreviewBlobUrl,
-        resolveUrl: resolveApiUrl,
-      }),
-    );
-    if (!mountedRef.current) return;
+    const nextUrl = await loadWorkbenchPreviewUrl(artifacts.image_file, {
+      remote: isRemoteMode() || Boolean(readAuthToken()),
+      fetchBlobUrl: fetchPreviewBlobUrl,
+      resolveUrl: resolveApiUrl,
+    });
+    if (!mountedRef.current || workflowAssetSeqRef.current !== assetSeq) {
+      if (typeof nextUrl === "string" && nextUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(nextUrl);
+      }
+      return;
+    }
+    applyPreviewUrl(nextUrl);
     setGcodeText("");
     if (artifacts.gcode_file) {
       const preview = await fetchPreviewText(artifacts.gcode_file);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || workflowAssetSeqRef.current !== assetSeq) return;
       if (preview.ok) {
         setGcodeText(preview.text);
       } else {
@@ -1031,39 +1045,44 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       return;
     }
 
-    // 优化 2: 点击确认开刻后自动兜底校验握手
-    let isConnected = connectionStatus?.connected;
-    if (!isConnected) {
-      addLog("GATE", "检测到硬件尚未握手，正在自动执行快速握手校验...", "info");
-      isConnected = await performConnectionProbe(true);
-    }
-
-    // 强连通性前置硬门禁：如果设备确实未连接，严禁下发伪发送，坚决报错拦截
-    if (!isConnected) {
-      const hint = connectionMode === "serial"
-        ? `未检测到有效串口连接（当前串口: ${serialPort || "未选择"}）。请确保 USB 数据线已插入且驱动正常！`
-        : `未检测到网络控制器连接（当前设备: ${networkHost || "未填写 IP"}:${telnetPort}）。请确保控制器已开机且局域网可达！`;
-      addLog("GATE", `发送被安全门禁拦截：${hint}`, "error");
-      showAlert(hint, { title: "发送失败 · 设备未连接", tone: "error", confirmText: "知道了" });
-      return;
-    }
-
-    lastLoggedPctRef.current = -1;
-    addLog("DISPATCH", "安全门禁校验通过，开始逐行下发加工指令...", "info");
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    const prevOverlayStatus = overlayStatus;
+    // 确认后立刻锁入 preparing，消除自动握手期间按钮仍可重复点击导致的双发窗口
     setOverlayStatus("preparing");
-
-    const payload = {
-      action: "confirm_send",
-      workflow_id: currentWorkflow.workflow_id,
-      confirmed: true,
-      connection_mode: connectionMode,
-      port: serialPort,
-      baudrate: Number(baudrate),
-      network_host: networkHost,
-      network_telnet_port: Number(telnetPort),
-    };
-
     try {
+      // 优化 2: 点击确认开刻后自动兜底校验握手
+      let isConnected = connectionStatus?.connected;
+      if (!isConnected) {
+        addLog("GATE", "检测到硬件尚未握手，正在自动执行快速握手校验...", "info");
+        isConnected = await performConnectionProbe(true);
+      }
+
+      // 强连通性前置硬门禁：如果设备确实未连接，严禁下发伪发送，坚决报错拦截
+      if (!isConnected) {
+        setOverlayStatus(prevOverlayStatus);
+        const hint = connectionMode === "serial"
+          ? `未检测到有效串口连接（当前串口: ${serialPort || "未选择"}）。请确保 USB 数据线已插入且驱动正常！`
+          : `未检测到网络控制器连接（当前设备: ${networkHost || "未填写 IP"}:${telnetPort}）。请确保控制器已开机且局域网可达！`;
+        addLog("GATE", `发送被安全门禁拦截：${hint}`, "error");
+        showAlert(hint, { title: "发送失败 · 设备未连接", tone: "error", confirmText: "知道了" });
+        return;
+      }
+
+      lastLoggedPctRef.current = -1;
+      addLog("DISPATCH", "安全门禁校验通过，开始逐行下发加工指令...", "info");
+
+      const payload = {
+        action: "confirm_send",
+        workflow_id: currentWorkflow.workflow_id,
+        confirmed: true,
+        connection_mode: connectionMode,
+        port: serialPort,
+        baudrate: Number(baudrate),
+        network_host: networkHost,
+        network_telnet_port: Number(telnetPort),
+      };
+
       const res = await postJson("/api/workflow", payload);
       if (isApprovalRequiredResponse(res)) {
         const msg = approvalPendingMessage(res, "开始雕刻");
@@ -1081,6 +1100,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         addLog("STREAM", `进度同步: 0% (0 / ${total} 行)`, "info");
         setOverlayStatus("running");
         startStatusPolling(currentWorkflow.workflow_id);
+      } else if (res.status === 0) {
+        // 网络中断或超时：后端可能已启动激光任务，严禁报失败或放开重发，立刻补全目标并拉起原任务轮询以保留急停绑定
+        const canonicalTarget =
+          connectionMode === "serial"
+            ? `${serialPort}@${Number(baudrate) || 115200}`
+            : `${networkHost}:${Number(telnetPort) || 23}`;
+        setSendProgress((prev) =>
+          prev?.target
+            ? prev
+            : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
+        );
+        const warn = "发送请求断连或超时，后端可能已开始加工，正在持续查询原任务状态，请勿重复发送；必要时请按急停。";
+        setOverlayStatus("running");
+        setPollSafetyNotice(warn);
+        addLog("DISPATCH", warn, "warn");
+        showAlert(warn, { title: "发送结果未知 · 禁止盲目重发", tone: "warning" });
+        startStatusPolling(currentWorkflow.workflow_id);
       } else {
         setOverlayStatus("failed");
         const reason = res.data?.result || "发送门禁拦截或连接失败";
@@ -1088,8 +1124,22 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         showAlert(reason, { title: "发送失败", tone: "error" });
       }
     } catch (e) {
-      setOverlayStatus("failed");
-      addLog("DISPATCH", `发送网络异常: ${e.message}`, "error");
+      const canonicalTarget =
+        connectionMode === "serial"
+          ? `${serialPort}@${Number(baudrate) || 115200}`
+          : `${networkHost}:${Number(telnetPort) || 23}`;
+      setSendProgress((prev) =>
+        prev?.target
+          ? prev
+          : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
+      );
+      const warn = `发送网络异常（${e.message}），后端可能已启动任务，正在查询原任务状态，请勿重复发送。`;
+      setOverlayStatus("running");
+      setPollSafetyNotice(warn);
+      addLog("DISPATCH", warn, "warn");
+      startStatusPolling(currentWorkflow.workflow_id);
+    } finally {
+      sendInFlightRef.current = false;
     }
   };
 
@@ -1132,32 +1182,35 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       return;
     }
 
-    let isConnected = connectionStatus?.connected;
-    if (!isConnected) {
-      addLog("GATE", "正在自动执行快速握手校验...", "info");
-      isConnected = await performConnectionProbe(true);
-    }
-    if (!isConnected) {
-      showAlert("未检测到控制器连接，请确认设备已开机并完成握手！", { title: "断点续雕失败", tone: "error" });
-      return;
-    }
-
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
     const prevOverlayStatus = overlayStatus;
-    addLog("DISPATCH", `正在从第 ${startLine} 行发起断点续雕，剩余代码即将继续流式下发...`, "info");
     setOverlayStatus("preparing");
-
-    const payload = {
-      action: "resume",
-      workflow_id: currentWorkflow.workflow_id,
-      confirmed: true,
-      connection_mode: connectionMode,
-      port: serialPort,
-      baudrate: Number(baudrate),
-      network_host: networkHost,
-      network_telnet_port: Number(telnetPort),
-    };
-
     try {
+      let isConnected = connectionStatus?.connected;
+      if (!isConnected) {
+        addLog("GATE", "正在自动执行快速握手校验...", "info");
+        isConnected = await performConnectionProbe(true);
+      }
+      if (!isConnected) {
+        setOverlayStatus(prevOverlayStatus);
+        showAlert("未检测到控制器连接，请确认设备已开机并完成握手！", { title: "断点续雕失败", tone: "error" });
+        return;
+      }
+
+      addLog("DISPATCH", `正在从第 ${startLine} 行发起断点续雕，剩余代码即将继续流式下发...`, "info");
+
+      const payload = {
+        action: "resume",
+        workflow_id: currentWorkflow.workflow_id,
+        confirmed: true,
+        connection_mode: connectionMode,
+        port: serialPort,
+        baudrate: Number(baudrate),
+        network_host: networkHost,
+        network_telnet_port: Number(telnetPort),
+      };
+
       const res = await postJson("/api/workflow", payload);
       if (isApprovalRequiredResponse(res)) {
         const msg = approvalPendingMessage(res, "断点续雕");
@@ -1172,6 +1225,22 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         addLog("STREAM", `断点续雕已启动：正在从第 ${sent + 1}/${total} 行继续执行`, "ok");
         setOverlayStatus("running");
         startStatusPolling(currentWorkflow.workflow_id);
+      } else if (res.status === 0) {
+        const canonicalTarget =
+          connectionMode === "serial"
+            ? `${serialPort}@${Number(baudrate) || 115200}`
+            : `${networkHost}:${Number(telnetPort) || 23}`;
+        setSendProgress((prev) =>
+          prev?.target
+            ? prev
+            : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
+        );
+        const warn = "断点续雕请求断连或超时，后端可能已恢复加工，正在持续查询原任务状态，请勿重复续雕；必要时请按急停。";
+        setOverlayStatus("running");
+        setPollSafetyNotice(warn);
+        addLog("DISPATCH", warn, "warn");
+        showAlert(warn, { title: "续雕结果未知 · 禁止盲目重发", tone: "warning" });
+        startStatusPolling(currentWorkflow.workflow_id);
       } else {
         setOverlayStatus("failed");
         const reason = res.data?.result || "断点恢复失败";
@@ -1179,8 +1248,22 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         showAlert(reason, { title: "断点恢复失败", tone: "error" });
       }
     } catch (e) {
-      setOverlayStatus("failed");
-      addLog("DISPATCH", `恢复发送网络异常: ${e.message}`, "error");
+      const canonicalTarget =
+        connectionMode === "serial"
+          ? `${serialPort}@${Number(baudrate) || 115200}`
+          : `${networkHost}:${Number(telnetPort) || 23}`;
+      setSendProgress((prev) =>
+        prev?.target
+          ? prev
+          : { sent: prev?.sent ?? 0, total: prev?.total ?? gcodeLineCount, target: canonicalTarget },
+      );
+      const warn = `恢复发送网络异常（${e.message}），后端可能已启动续雕，正在查询原任务状态，请勿重复续雕。`;
+      setOverlayStatus("running");
+      setPollSafetyNotice(warn);
+      addLog("DISPATCH", warn, "warn");
+      startStatusPolling(currentWorkflow.workflow_id);
+    } finally {
+      sendInFlightRef.current = false;
     }
   };
 

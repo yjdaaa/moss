@@ -211,11 +211,8 @@ impl BuiltinVoice {
             .db
             .lock()
             .ok()
-            .and_then(|db| db.voice_devices().ok())
-            .is_some_and(|list| {
-                list.into_iter()
-                    .any(|d| d.device_id == device_id && d.is_allowed())
-            })
+            .and_then(|db| db.voice_device(device_id).ok().flatten())
+            .is_some_and(|d| d.is_allowed())
     }
 
     /// 2026-11-02：桌面端直接向一台已连接设备发请求（`refresh_info` / `reboot`），不经过模型。

@@ -112,6 +112,8 @@ impl ApiService {
     /// 局域网扫描（2026-11-09 用户要求）：收集候选后逐台只读识别（`?` + `$I`），只返回按 GRBL / FluidNC
     /// 回应的设备；正在加工或待确认停机的目标不另开连接打扰，单独列出。
     pub(crate) fn discover_verified_controllers(&self) -> serde_json::Value {
+        use std::sync::atomic::Ordering;
+        const MAX_PROBE_WORKERS: usize = 8;
         if self.is_shutdown_requested() {
             return serde_json::json!({
                 "controllers": [],
@@ -121,83 +123,244 @@ impl ApiService {
                 "hint": "服务正在关闭，已拒绝局域网设备扫描",
             });
         }
-        let busy: std::collections::BTreeMap<String, String> = {
-            let mut busy = std::collections::BTreeMap::new();
-            if let Ok(jobs) = self.active_jobs.lock() {
-                for job in jobs.values() {
-                    busy.insert(job.target.clone(), job.workflow_id.clone());
-                }
+        struct DiscoveryInFlightGuard<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for DiscoveryInFlightGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
             }
-            if let Ok(uncertain) = self.uncertain_jobs.lock() {
-                for job in uncertain.values() {
-                    busy.entry(job.target.clone())
-                        .or_insert_with(|| job.workflow_id.clone());
-                }
+        }
+        if self
+            .discovery_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return serde_json::json!({
+                "controllers": [],
+                "busy": [],
+                "checked": 0,
+                "not_controllers": 0,
+                "hint": "已有局域网设备扫描正在进行，请稍后重试",
+            });
+        }
+        let _discovery_guard = DiscoveryInFlightGuard(&self.discovery_in_flight);
+
+        let busy_workflow_for = |target: &str| -> Option<String> {
+            if let Ok(jobs) = self.active_jobs.lock()
+                && let Some(job) = jobs.values().find(|j| j.target == target)
+            {
+                return Some(job.workflow_id.clone());
             }
-            busy
+            if let Ok(uncertain) = self.uncertain_jobs.lock()
+                && let Some(job) = uncertain.values().find(|j| j.target == target)
+            {
+                return Some(job.workflow_id.clone());
+            }
+            if let Ok(short_io) = self.short_io_targets.lock()
+                && short_io.contains_key(target)
+            {
+                return Some("probing".to_owned());
+            }
+            None
         };
-        // 2026-11-09：边找边验——候选一到就开线程确认，不等 mDNS 与网段扫描都结束
+
+        enum ProbeOutcome {
+            Done(String, Result<laser_device::ControllerIdentity, String>),
+            Skipped {
+                ip: String,
+                telnet_port: u16,
+                workflow_id: String,
+            },
+        }
+
+        // 2026-11-09：边找边验——候选到达后交给固定小线程池（上限 8 线程）确认，防止并发请求打爆 OS 线程数
         let (candidate_tx, candidate_rx) = std::sync::mpsc::channel::<ControllerCandidate>();
         let finder = self.controller_candidates.clone();
-        let finder_thread = std::thread::spawn(move || {
-            finder(&move |candidate| {
-                let _ = candidate_tx.send(candidate);
+        let finder_thread = std::thread::Builder::new()
+            .name("moss-lan-finder".into())
+            .spawn(move || {
+                finder(&move |candidate| {
+                    let _ = candidate_tx.send(candidate);
+                });
             });
-        });
-        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (work_tx, work_rx) = std::sync::mpsc::channel::<(String, ControllerCandidate)>();
+        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<ProbeOutcome>();
         let reply_timeout = self.discovery_reply_timeout;
+        let mut workers = Vec::new();
+        for _ in 0..MAX_PROBE_WORKERS {
+            let work_rx = work_rx.clone();
+            let result_tx = result_tx.clone();
+            let active_jobs = self.active_jobs.clone();
+            let uncertain_jobs = self.uncertain_jobs.clone();
+            let shutdown_flag = self.shutdown_requested.clone();
+            if let Ok(handle) = std::thread::Builder::new()
+                .name("moss-lan-probe".into())
+                .spawn(move || {
+                    loop {
+                        let next = work_rx.lock().ok().and_then(|rx| rx.recv().ok());
+                        let Some((key, candidate)) = next else {
+                            break;
+                        };
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // 开连接前实时复查活动/待确认任务，避免探测刚启动加工的设备
+                        let busy_wf = active_jobs
+                            .lock()
+                            .ok()
+                            .and_then(|jobs| {
+                                jobs.values()
+                                    .find(|j| j.target == key)
+                                    .map(|j| j.workflow_id.clone())
+                            })
+                            .or_else(|| {
+                                uncertain_jobs.lock().ok().and_then(|uncertain| {
+                                    uncertain
+                                        .values()
+                                        .find(|j| j.target == key)
+                                        .map(|j| j.workflow_id.clone())
+                                })
+                            });
+                        if let Some(workflow_id) = busy_wf {
+                            let _ = result_tx.send(ProbeOutcome::Skipped {
+                                ip: candidate.ip,
+                                telnet_port: candidate.telnet_port,
+                                workflow_id,
+                            });
+                            continue;
+                        }
+                        let spec = laser_device::ConnectionSpec::Tcp {
+                            host: candidate.ip.clone(),
+                            port: candidate.telnet_port,
+                        };
+                        let result = laser_device::identify_controller(
+                            &spec,
+                            std::time::Duration::from_millis(800),
+                            reply_timeout,
+                        );
+                        let _ = result_tx.send(ProbeOutcome::Done(key, result));
+                    }
+                })
+            {
+                workers.push(handle);
+            }
+        }
         let mut seen: std::collections::BTreeMap<String, ControllerCandidate> = Default::default();
         let mut skipped = Vec::new();
-        let mut probes = Vec::new();
-        for candidate in candidate_rx {
-            let key = format!("{}:{}", candidate.ip, candidate.telnet_port);
-            if let Some(known) = seen.get_mut(&key) {
-                // 同一地址 mDNS 与网段扫描各来一次：合并主机名、HTTP 端口与来源
-                if known.hostname.is_empty() {
-                    known.hostname = candidate.hostname.clone();
+        let mut inline_work = Vec::new();
+        match finder_thread {
+            Ok(handle) => {
+                for candidate in candidate_rx {
+                    let key = format!("{}:{}", candidate.ip, candidate.telnet_port);
+                    if let Some(known) = seen.get_mut(&key) {
+                        if known.hostname.is_empty() {
+                            known.hostname = candidate.hostname.clone();
+                        }
+                        known.http_port = known.http_port.or(candidate.http_port);
+                        if known.source != candidate.source {
+                            known.source = "mdns+scan";
+                        }
+                        continue;
+                    }
+                    seen.insert(key.clone(), candidate.clone());
+                    if let Some(workflow) = busy_workflow_for(&key) {
+                        skipped.push(serde_json::json!({
+                            "ip": candidate.ip, "telnet_port": candidate.telnet_port, "workflow_id": workflow,
+                        }));
+                        continue;
+                    }
+                    if workers.is_empty() {
+                        inline_work.push((key, candidate));
+                    } else {
+                        let _ = work_tx.send((key, candidate));
+                    }
                 }
-                known.http_port = known.http_port.or(candidate.http_port);
-                if known.source != candidate.source {
-                    known.source = "mdns+scan";
+                let _ = handle.join();
+            }
+            Err(_) => {
+                // 极端线程紧张时回退到当前线程收集候选，不触发 panic
+                let collected = std::sync::Mutex::new(Vec::new());
+                self.controller_candidates.as_ref()(&|candidate| {
+                    if let Ok(mut list) = collected.lock() {
+                        list.push(candidate);
+                    }
+                });
+                for candidate in collected.into_inner().unwrap_or_default() {
+                    let key = format!("{}:{}", candidate.ip, candidate.telnet_port);
+                    if let Some(known) = seen.get_mut(&key) {
+                        if known.hostname.is_empty() {
+                            known.hostname = candidate.hostname.clone();
+                        }
+                        known.http_port = known.http_port.or(candidate.http_port);
+                        if known.source != candidate.source {
+                            known.source = "mdns+scan";
+                        }
+                        continue;
+                    }
+                    seen.insert(key.clone(), candidate.clone());
+                    if let Some(workflow) = busy_workflow_for(&key) {
+                        skipped.push(serde_json::json!({
+                            "ip": candidate.ip, "telnet_port": candidate.telnet_port, "workflow_id": workflow,
+                        }));
+                        continue;
+                    }
+                    if workers.is_empty() {
+                        inline_work.push((key, candidate));
+                    } else {
+                        let _ = work_tx.send((key, candidate));
+                    }
                 }
-                continue;
             }
-            seen.insert(key.clone(), candidate.clone());
-            if let Some(workflow) = busy.get(&key) {
-                skipped.push(serde_json::json!({
-                    "ip": candidate.ip, "telnet_port": candidate.telnet_port, "workflow_id": workflow,
-                }));
-                continue;
-            }
-            let result_tx = result_tx.clone();
-            probes.push(std::thread::spawn(move || {
-                let spec = laser_device::ConnectionSpec::Tcp {
-                    host: candidate.ip.clone(),
-                    port: candidate.telnet_port,
-                };
-                let result = laser_device::identify_controller(
-                    &spec,
-                    std::time::Duration::from_millis(800),
-                    reply_timeout,
-                );
-                let _ = result_tx.send((key, result));
-            }));
         }
-        let _ = finder_thread.join();
+        drop(work_tx);
+        for (key, candidate) in inline_work {
+            if self.is_shutdown_requested() {
+                break;
+            }
+            if let Some(workflow_id) = busy_workflow_for(&key) {
+                let _ = result_tx.send(ProbeOutcome::Skipped {
+                    ip: candidate.ip,
+                    telnet_port: candidate.telnet_port,
+                    workflow_id,
+                });
+                continue;
+            }
+            let spec = laser_device::ConnectionSpec::Tcp {
+                host: candidate.ip.clone(),
+                port: candidate.telnet_port,
+            };
+            let result = laser_device::identify_controller(
+                &spec,
+                std::time::Duration::from_millis(800),
+                reply_timeout,
+            );
+            let _ = result_tx.send(ProbeOutcome::Done(key, result));
+        }
         drop(result_tx);
-        for probe in probes {
-            let _ = probe.join();
+        for worker in workers {
+            let _ = worker.join();
         }
         let candidates: Vec<ControllerCandidate> = seen.values().cloned().collect();
-        let probed: Vec<(
+        let mut probed: Vec<(
             ControllerCandidate,
             Result<laser_device::ControllerIdentity, String>,
-        )> = result_rx
-            .into_iter()
-            .filter_map(|(key, result)| {
-                seen.get(&key).cloned().map(|candidate| (candidate, result))
-            })
-            .collect();
+        )> = Vec::new();
+        for item in result_rx {
+            match item {
+                ProbeOutcome::Done(key, result) => {
+                    if let Some(candidate) = seen.get(&key).cloned() {
+                        probed.push((candidate, result));
+                    }
+                }
+                ProbeOutcome::Skipped {
+                    ip,
+                    telnet_port,
+                    workflow_id,
+                } => skipped.push(serde_json::json!({
+                    "ip": ip, "telnet_port": telnet_port, "workflow_id": workflow_id,
+                })),
+            }
+        }
         let mut controllers = Vec::new();
         let mut not_controllers = 0usize;
         for (candidate, result) in probed {
@@ -410,36 +573,141 @@ impl ApiService {
                 }
             };
             let target = spec.describe();
-            let active_workflow = self.active_jobs.lock().ok().and_then(|jobs| {
-                jobs.values()
-                    .find(|j| j.target == target)
-                    .map(|j| j.workflow_id.clone())
-            });
-            if let Some(wf_id) = active_workflow {
-                let busy_summary = format!("设备正在执行任务 {wf_id}");
-                attempts.push(serde_json::json!({
-                    "mode": mode,
-                    "target": target,
-                    "connected": true,
-                    "laser_mode_ok": true,
-                    "summary": busy_summary,
-                }));
-                if mode == "serial" {
-                    serial_connected = true;
-                } else {
-                    network_connected = true;
-                }
-                selected = Some(mode);
-                summary = busy_summary;
-                break;
+            enum ProbeOpenOutcome {
+                Active(String),
+                Uncertain(String),
+                Busy,
+                Opened(
+                    std::sync::Arc<dyn laser_device::DeviceTransport>,
+                    ShortIoGuard,
+                ),
+                OpenFailed(String),
             }
-            let report = {
+            // 统一锁序：target_open_mutex -> active_jobs -> uncertain_jobs -> short_io_targets；
+            // 只读探测绝不剥离 UncertainJob 活句柄，打开连接后登记 ShortIoGuard 即释放打开锁，
+            // 既防止并发双开串口/Telnet，又不阻断急停复用在途句柄写 0x18。
+            let opened = {
                 let open_mutex = target_open_mutex(&self.target_open_locks, &target);
                 let _open_guard = open_mutex
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                release_uncertain_target_handle(&self.uncertain_jobs, &target);
-                laser_device::probe_device(&spec, timeout)
+                let active_wf = self.active_jobs.lock().ok().and_then(|jobs| {
+                    jobs.values()
+                        .find(|j| j.target == target)
+                        .map(|j| j.workflow_id.clone())
+                });
+                if let Some(wf_id) = active_wf {
+                    ProbeOpenOutcome::Active(wf_id)
+                } else {
+                    let uncertain_wf = self.uncertain_jobs.lock().ok().and_then(|uncertain| {
+                        uncertain
+                            .values()
+                            .find(|j| j.target == target)
+                            .map(|j| j.workflow_id.clone())
+                    });
+                    if let Some(wf_id) = uncertain_wf {
+                        ProbeOpenOutcome::Uncertain(wf_id)
+                    } else if self
+                        .short_io_targets
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains_key(&target)
+                    {
+                        ProbeOpenOutcome::Busy
+                    } else {
+                        match laser_device::open_transport(&spec, timeout) {
+                            Ok(t) => {
+                                let transport_arc: std::sync::Arc<
+                                    dyn laser_device::DeviceTransport,
+                                > = std::sync::Arc::from(t);
+                                let guard = register_short_io_target(
+                                    &self.short_io_targets,
+                                    &target,
+                                    transport_arc.clone(),
+                                );
+                                ProbeOpenOutcome::Opened(transport_arc, guard)
+                            }
+                            Err(e) => ProbeOpenOutcome::OpenFailed(e),
+                        }
+                    }
+                }
+            };
+            let report = match opened {
+                ProbeOpenOutcome::Active(wf_id) => {
+                    let busy_summary = format!("设备正在执行任务 {wf_id}");
+                    attempts.push(serde_json::json!({
+                        "mode": mode,
+                        "target": target,
+                        "connected": true,
+                        "laser_mode_ok": true,
+                        "summary": busy_summary,
+                    }));
+                    if mode == "serial" {
+                        serial_connected = true;
+                    } else {
+                        network_connected = true;
+                    }
+                    selected = Some(mode);
+                    summary = busy_summary;
+                    break;
+                }
+                ProbeOpenOutcome::Uncertain(wf_id) => {
+                    let pending_summary = format!(
+                        "设备存在待确认停止的任务 {wf_id}，请先核实硬件停机或按急停后再探测"
+                    );
+                    attempts.push(serde_json::json!({
+                        "mode": mode,
+                        "target": target,
+                        "connected": false,
+                        "laser_mode_ok": false,
+                        "summary": pending_summary,
+                    }));
+                    if index == 0 || summary.is_empty() {
+                        summary = pending_summary;
+                    }
+                    continue;
+                }
+                ProbeOpenOutcome::Busy => {
+                    let busy_summary =
+                        format!("设备 {target} 正在执行另一次连接探测或状态查询，请稍后重试");
+                    attempts.push(serde_json::json!({
+                        "mode": mode,
+                        "target": target,
+                        "connected": false,
+                        "laser_mode_ok": false,
+                        "summary": busy_summary,
+                    }));
+                    if index == 0 || summary.is_empty() {
+                        summary = busy_summary;
+                    }
+                    continue;
+                }
+                ProbeOpenOutcome::OpenFailed(error) => {
+                    let label = if mode == "network" {
+                        "网络"
+                    } else {
+                        "串口"
+                    };
+                    laser_device::ProbeReport {
+                        mode: spec.mode(),
+                        target: target.clone(),
+                        connected: false,
+                        laser_mode_ok: false,
+                        firmware_settings: Vec::new(),
+                        machine_limits: None,
+                        features: None,
+                        summary: format!("{label} 连接失败: {error}"),
+                    }
+                }
+                ProbeOpenOutcome::Opened(transport_arc, _short_io_guard) => {
+                    // probe_opened_device 持有 Box<Arc<...>> 并在返回前释放，随后 _short_io_guard
+                    // 在锁内释放最后一个 Arc（关闭串口/TCP fd），保证无并发双开窗口。
+                    laser_device::probe_opened_device(
+                        &spec,
+                        Box::new(transport_arc) as Box<dyn laser_device::DeviceTransport>,
+                        timeout,
+                    )
+                }
             };
             attempts.push(serde_json::json!({
                 "mode": mode,

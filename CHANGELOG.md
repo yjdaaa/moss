@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 修复激光安全与并发、语音权限边界及前端急停状态高危隐患（2026-11-20）
+
+- **现象**：激光发送收尾阶段报警/断线与取消并发时故障会被吞并，并发 `resume` 存在绕过非取消态的竞态，连接探测与非变更安全动作未隔离并发双开且探测会剥离 `UncertainJob` 句柄，图片预览与 `S 500`/`S+500` 功率缩放、`$CD` 异常、SD 哈希校验、局域网扫描线程和停机终态存在漏洞；正式版默认放行开发端口 CORS，`/v1/auth/challenge` 漏校桌面会话，内置语音服务缺少连接/待审设备/固件下载并发上限、OTA 错绑 `Client-Id` 仍签发令牌、`voice_persona_tool` 撤销后仍可写回，`moss-mcp-client` 未约束子进程树与 HTTP 代理；前端发送/续雕断连（`status === 0`）误报失败或急停串口目标失配、`WorkbenchCanvas` 拖拽可能残留全局点击捕获器吞掉顶栏急停，以及局域网预览 401、审批窗被预览窗遮挡、纯表面材料选项缺失、弹窗关闭未清敏感状态和多处轮询/吞错问题。
+- **根因与修复**：
+  - 激光链路与接口门禁：`laser-device` 新增 `wait_until_idle_or_cancel`、修复流式写入与收尾取消并存时的故障优先权、`verify_sd_file_hash` 与 `cancel_with_sd_monitoring` 的 EOF/未终止/复位检测、`rescale_gcode_line_s` 空白与 `+` 号处理，以及 `fetch_fluidnc_config`/`load_features`/`probe_opened_device` 仅豁免旧 GRBL `error:3`（`laser_off` 跳过 `$CD`，`unlock` 在非断线/非失联的 Alarm 态仍可解锁）；`laser-api` 统一 `target_open_mutex -> active_jobs -> uncertain_jobs -> short_io_targets` 锁序并引入 `ShortIoGuard` 防双开且允许 `alters_alarm` 急停直接复用在途句柄并递增 `cancel_epoch`，收紧 `validate_resume_record` 在预留锁后仅放行 `cancelled`，移除图片预览路径穿越兜底，补齐 `safe_action` 失败迁移 `uncertain_jobs`、`finalize_workflow_record` 保护 `result_unknown`、设备发现单飞与有界线程池，并将开发端口 CORS 限定为 debug 构建、`/v1/auth/challenge` 在桌面会话启用时强制校验 `X-Moss-Desktop-Session`。
+  - 语音与第三方 MCP 权限边界：`moss-voice-server`/`laser-runtime`/`moss-voice-host` 补齐 HTTP/WS/MQTT 连接与固件分块流式下载并发限额、64 条待审设备上限、O(1) 设备授权查询、OTA 按 `bound` 签发令牌与方括号 IPv6 `Host` 校验，以及 `PersonaStore::save_active_if` 锁内撤销复核；`moss-mcp-client` 接入 `process-wrap`（`KillOnDrop` + Windows `CREATE_NO_WINDOW`/`JobObject` + Unix `ProcessGroup::leader` 与 `waitid(WNOWAIT)` 退前进程组清扫）并启用 `.no_proxy()` 与 `http://localhost` 回环固定解析。
+  - 前端安全与契约：`HomePage`/`MaterialLabPage`/`AiPreviewCenter` 断连未知结果统一保留规范目标并持续轮询，`WorkbenchCanvas` 自动撤除点击捕获器并清理 `pointercancel`/卸载监听，统一局域网鉴权预览与 `ApprovalCenter` 层级，补全 `DrawMaterialCard`/`WorkbenchMaterialCard`/`MaterialModal` 纯表面材料支持、`HomePage` 握手期防重入、`SettingsModal`/`CloseConfirmModal` 关闭重置、`TwinPage` 与 5 个语音卡片单调序号/单飞守卫，以及 4 处吞错与乐观更新回滚。同步更新 `docs/developer/api-contracts.md` 与 `docs/developer/safety.md`。
+- **验证**：`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1,447 项全通过（51 组，含新增并发/安全/进程树回归用例），`frontend` ESLint 零告警、362 项前端单测与 Vite 生产构建通过，55 项脚本单测与分层/卫生门禁通过，40/40 项回环 E2E（API + Chrome UI）通过，16/17 项浏览器交互测试通过（仅 `tests/twin-render.browser.mjs` 在无头软件 WebGL 下 0.5 秒出帧 10 次略低于既有阈值 11），已执行 `bash scripts/quick-update-desktop.sh --with-host` 原地更新并验签本机 `/Applications/MOSS.app` 与 `moss-host` 并清理 3 天超期缓存。独立工作区 `apps/moss-voice-local` 未改动未重测；真实激光硬件、真机小智固件与 Windows/Android 实机打包未验（`unverified`）。
+- **关联**：`crates/laser-device/src/{connection,connection/job,probe,discovery}.rs`、`crates/laser-tools/src/lib.rs`、`crates/laser-api/src/{access,connection,jobs,routes,safe_action,send,workflow,generation/image_upload}.rs`、`crates/laser-runtime/src/db.rs`、`crates/moss-voice-server/src/{lib,firmware,mqtt,ota,persona,session/connect}.rs`、`crates/moss-voice-host/src/builtin/{conversation,devices,plugins}.rs`、`crates/moss-mcp-client/{Cargo.toml,src/client.rs}`、`frontend/src/{pages,components,styles/10-component-inline.css,authSession.js,materialSelectState.js}`、`docs/developer/{api-contracts,safety}.md`。
+
 ### 固定 Android 验签工具版本，修复正式证书被误判不匹配（2026-11-19）
 
 - **现象**：`v0.3.12` 已完成 Android APK 构建，但验签步骤报证书不匹配，发布任务被跳过。

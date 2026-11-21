@@ -77,25 +77,35 @@ pub fn rescale_gcode_line_s(line: &str, scale_factor: f64) -> String {
             .next_back()
             .is_none_or(|prev| prev.is_whitespace() || prev.is_ascii_digit() || prev == '.');
         if (c == 'S' || c == 's') && at_word_start {
-            let mut num_str = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc.is_ascii_digit() || nc == '.' {
-                    num_str.push(chars.next().unwrap());
+            // GRBL / FluidNC 解析前会剥空白并允许前导 `+`（如 `M4 S 500`、`G1 X10 S+500`）
+            let mut lookahead = chars.clone();
+            while let Some(&nc) = lookahead.peek() {
+                if nc == ' ' || nc == '\t' {
+                    lookahead.next();
                 } else {
                     break;
                 }
             }
-            if !num_str.is_empty() {
-                if let Ok(val) = num_str.parse::<f64>() {
-                    let rescaled = (val * scale_factor).round() as i64;
-                    result.push(c);
-                    result.push_str(&rescaled.to_string());
-                    continue;
+            if matches!(lookahead.peek(), Some('+')) {
+                lookahead.next();
+            }
+            let mut num_str = String::new();
+            while let Some(&nc) = lookahead.peek() {
+                if nc.is_ascii_digit() || nc == '.' {
+                    num_str.push(lookahead.next().unwrap());
                 } else {
-                    result.push(c);
-                    result.push_str(&num_str);
-                    continue;
+                    break;
                 }
+            }
+            if !num_str.is_empty()
+                && let Ok(val) = num_str.parse::<f64>()
+                && val.is_finite()
+            {
+                chars = lookahead;
+                let rescaled = (val * scale_factor).round() as i64;
+                result.push(c);
+                result.push_str(&rescaled.to_string());
+                continue;
             }
         }
         result.push(c);
@@ -291,12 +301,8 @@ impl<T: DeviceTransport> JobWorker<T> {
                         return Ok(true);
                     }
                     let _ = lines_iter.next();
-                    if let Err(e) = self.device.send_line(&line) {
-                        if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
-                            return Ok(true);
-                        }
-                        return Err(e);
-                    }
+                    // 传输 I/O 失败不得被并发取消吞并改写为“已取消”；外层错误分支仍会尽力补发 0x18
+                    self.device.send_line(&line)?;
                     chars_in_buffer += line_len;
                     in_flight.push_back(line_len);
                 } else {
@@ -381,18 +387,24 @@ impl<T: DeviceTransport> JobWorker<T> {
         self.progress
             .awaiting_completion
             .store(true, Ordering::Release);
-        // G4 P0 同步 FluidNC/GRBL 规划器缓冲区
-        let completion = self
+        // G4 P0 同步 FluidNC/GRBL 规划器缓冲区；报警/复位/断线/超时优先于并发取消，绝不吞掉真实故障
+        let g4_acked = self
             .device
-            .send_line_wait_ack_cancellable("G4 P0", Some(&self.cancel))
-            .and_then(|()| {
-                self.device
-                    .wait_until_idle(Duration::from_secs(30), Some(&self.cancel))
-            });
+            .send_line_wait_ack_or_cancel("G4 P0", Some(&self.cancel))?;
+        if !g4_acked {
+            self.cancel_with_proven_completion(use_numbered_wire, *acked_count)?;
+            return Ok(true);
+        }
+        let idle_ok = self
+            .device
+            .wait_until_idle_or_cancel(Duration::from_secs(30), Some(&self.cancel))?;
+        if !idle_ok {
+            self.cancel_with_proven_completion(use_numbered_wire, *acked_count)?;
+            return Ok(true);
+        }
         if self.cancel_with_proven_completion(use_numbered_wire, *acked_count)? {
             return Ok(true);
         }
-        completion?;
         self.progress
             .lines_completed
             .store(*acked_count, Ordering::Relaxed);

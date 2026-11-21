@@ -9,12 +9,19 @@ publish = false
 
 [dependencies]
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+process-wrap = { version = "10.0", default-features = false, features = ["tokio1", "kill-on-drop", "process-group", "job-object", "creation-flags"] }
 reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "process", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
 axum.workspace = true

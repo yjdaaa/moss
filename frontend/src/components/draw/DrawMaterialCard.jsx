@@ -100,32 +100,48 @@ export function DrawMaterialCard({
         </label>
       ) : null}
 
-      {materialMode === "library" && findMaterialOption(materialLibrary, form.material) ? (
-        <label>
-          厚度 mm
-          <select
-            value={form.thickness_mm}
-            onChange={(event) => handleThicknessSelectChange(event.target.value)}
-          >
-            {findMaterialOption(materialLibrary, form.material).thicknesses.map((value) => (
-              <option key={String(value)} value={String(value)}>
-                {value}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : (
-        <label>
-          厚度 mm
-          <input
-            type="number"
-            min="0"
-            step="0.1"
-            value={form.thickness_mm}
-            onChange={(event) => updateForm("thickness_mm", event.target.value)}
-          />
-        </label>
-      )}
+      {(() => {
+        const matchedMaterial =
+          materialMode === "library" ? findMaterialOption(materialLibrary, form.material) : null;
+        if (!matchedMaterial) {
+          return (
+            <label>
+              厚度 mm
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={form.thickness_mm}
+                onChange={(event) => updateForm("thickness_mm", event.target.value)}
+              />
+            </label>
+          );
+        }
+        const thicknesses = matchedMaterial.thicknesses || [];
+        return (
+          <label>
+            厚度 mm
+            <select
+              value={form.thickness_mm}
+              onChange={(event) => handleThicknessSelectChange(event.target.value)}
+            >
+              {thicknesses.length > 0 ? (
+                thicknesses.map((value) => (
+                  <option key={String(value)} value={String(value)}>
+                    {value}
+                  </option>
+                ))
+              ) : (
+                <option value={String(form.thickness_mm || 3)}>
+                  {matchedMaterial.surface
+                    ? `表面通用（${form.thickness_mm || 3} mm）`
+                    : `${form.thickness_mm || 3} mm`}
+                </option>
+              )}
+            </select>
+          </label>
+        );
+      })()}
 
       {materialMode === "custom" && materialLibrary.length > 0 ? (
         <button type="button" className="ghost-button" onClick={handleReturnToLibrary}>

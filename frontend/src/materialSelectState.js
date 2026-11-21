@@ -99,11 +99,12 @@ export function normalizeMaterialOptions(rawMaterials) {
         deduped.set(key, Math.abs(number - Math.round(number)) < 1e-9 ? Math.round(number) : number);
       }
     }
-    if (deduped.size === 0) continue;
+    const surfaceOnly = Boolean(item.surface) && deduped.size === 0;
+    if (deduped.size === 0 && !surfaceOnly) continue;
     const thicknesses = [...deduped.entries()]
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map((entry) => entry[1]);
-    projected.push({ name, thicknesses });
+    projected.push(surfaceOnly ? { name, thicknesses, surface: true } : { name, thicknesses });
   }
   projected.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return projected;
@@ -117,6 +118,10 @@ export function findMaterialOption(materials, name) {
 
 export function pickThicknessForMaterial(materialOption, preferredThickness) {
   if (!materialOption || !Array.isArray(materialOption.thicknesses) || materialOption.thicknesses.length === 0) {
+    if (materialOption?.surface) {
+      const n = Number(preferredThickness);
+      return Number.isFinite(n) && n > 0 ? String(preferredThickness) : "3";
+    }
     return preferredThickness == null ? "" : String(preferredThickness);
   }
   const match = materialOption.thicknesses.find((value) => thicknessesEqual(value, preferredThickness));

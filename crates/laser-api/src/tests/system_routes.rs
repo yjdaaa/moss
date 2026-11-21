@@ -243,6 +243,10 @@ fn fake_grbl_handshake(laser_mode: u8) -> u16 {
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() && line.trim() == "$$" {
                 let _ = write!(writer, "$0=10\r\n$32={laser_mode}\r\nok\r\n");
+                line.clear();
+                if reader.read_line(&mut line).is_ok() && line.trim() == "$CD" {
+                    let _ = write!(writer, "error:3\r\n");
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }

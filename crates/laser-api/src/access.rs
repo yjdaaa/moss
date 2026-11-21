@@ -30,7 +30,7 @@ impl ApiService {
 
 /// 浏览器来源白名单（技术书 §6.5）：Tauri 2 内嵌页。
 const TAURI_ORIGINS: [&str; 2] = ["http://tauri.localhost", "tauri://localhost"];
-/// 前端开发 / 预览端口（`frontend/package.json` 的 5177、5178，Vite 默认 5173）；仅回环请求时允许。
+/// 前端开发 / 预览端口（`frontend/package.json` 的 5177、5178，Vite 默认 5173）；仅 debug 构建的回环请求允许。
 const DEV_LOOPBACK_ORIGINS: [&str; 6] = [
     "http://127.0.0.1:5173",
     "http://localhost:5173",
@@ -42,12 +42,22 @@ const DEV_LOOPBACK_ORIGINS: [&str; 6] = [
 /// 判断浏览器 `Origin` 是否允许跨源访问。精确匹配 scheme + host + port，不做前缀或大小写归一。
 ///
 /// 允许：Tauri 内嵌页；与请求 `Host` 同源（MOSS 自己提供的页面，含局域网访问）；
-/// 回环请求下的前端开发端口；`extra`（`MOSS_ALLOWED_ORIGINS`）。
+/// debug 构建下回环请求的前端开发端口；`extra`（`MOSS_ALLOWED_ORIGINS`）。
 pub fn is_allowed_origin(
     origin: &str,
     host_header: Option<&str>,
     loopback: bool,
     extra: &[String],
+) -> bool {
+    is_allowed_origin_with_dev(origin, host_header, loopback, extra, cfg!(debug_assertions))
+}
+
+pub(crate) fn is_allowed_origin_with_dev(
+    origin: &str,
+    host_header: Option<&str>,
+    loopback: bool,
+    extra: &[String],
+    allow_dev_loopback: bool,
 ) -> bool {
     if origin.is_empty() || origin != origin.trim() || origin == "null" {
         return false;
@@ -55,7 +65,7 @@ pub fn is_allowed_origin(
     if TAURI_ORIGINS.contains(&origin) {
         return true;
     }
-    if loopback && DEV_LOOPBACK_ORIGINS.contains(&origin) {
+    if allow_dev_loopback && loopback && DEV_LOOPBACK_ORIGINS.contains(&origin) {
         return true;
     }
     if extra.iter().any(|item| item == origin) {

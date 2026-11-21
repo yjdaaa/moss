@@ -1260,9 +1260,15 @@ impl BuiltinVoice {
             }),
         });
         self.persona.configure(persona_config(experience));
+        let persona_host = self.host.clone();
         let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools {
             original: tools,
             persona: self.persona.clone(),
+            permitted: Some(Arc::new(move |ctx: &ToolContext| {
+                persona_host
+                    .api_service
+                    .voice_session_allowed(&ctx.device_id, &ctx.session_id)
+            })),
         });
         let system_prompt = self.persona.system_prompt();
         let asr_corrections = moss_voice::settings::effective_asr_corrections(

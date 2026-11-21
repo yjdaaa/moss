@@ -448,3 +448,17 @@ test("subscribeMaterialsUpdated filters messages, cleans up, and tolerates missi
   const noop = subscribeMaterialsUpdated(() => {}, null);
   assert.doesNotThrow(() => noop());
 });
+
+test("surface-only material is preserved by normalizeMaterialOptions and keeps positive numeric thickness", () => {
+  const materials = normalizeMaterialOptions([
+    { name: "阳极铝", thicknesses: [], surface: true },
+    { name: "椴木", thicknesses: [3] },
+    { name: "坏材料", thicknesses: [] },
+  ]);
+  assert.deepEqual(materials, [
+    { name: "椴木", thicknesses: [3] },
+    { name: "阳极铝", thicknesses: [], surface: true },
+  ]);
+  assert.equal(pickThicknessForMaterial(materials[1], ""), "3");
+  assert.equal(pickThicknessForMaterial(materials[1], "5"), "5");
+});

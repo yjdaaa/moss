@@ -312,6 +312,18 @@ pub fn execute_laser_safe_action_with_gate_and_cancel(
     allowed: &dyn Fn() -> bool,
     cancel: Option<&laser_device::CancellationToken>,
 ) -> ToolCallResult {
+    execute_laser_safe_action_with_gate_cancel_and_dispatch(args, opener, allowed, cancel, None)
+}
+
+/// 同 [`execute_laser_safe_action_with_gate_and_cancel`]，额外在越过预检正式向控制器发令前置位 `dispatched`，
+/// 供调用方区分“预检未发令即拒绝”与“已发令后失败/停机状态未知”。
+pub fn execute_laser_safe_action_with_gate_cancel_and_dispatch(
+    args: &LaserSafeActionArgs,
+    opener: &TransportOpener,
+    allowed: &dyn Fn() -> bool,
+    cancel: Option<&laser_device::CancellationToken>,
+    dispatched: Option<&std::sync::atomic::AtomicBool>,
+) -> ToolCallResult {
     let action = args.action.trim().to_ascii_lowercase();
     let confirmed = args.confirmed.unwrap_or(false);
     let dry_run = args.dry_run.unwrap_or(false);
@@ -563,8 +575,22 @@ pub fn execute_laser_safe_action_with_gate_and_cancel(
                     "{label} 在预检阶段已取消，已发送急停 0x18 兜底 ({target})"
                 ));
             }
-            // FluidNC：读取 $CD 以感知 after_unlock / after_homing 自动宏；旧 GRBL 静默跳过
-            device.load_features(timeout);
+            // FluidNC：读取 $CD 以感知 after_unlock / after_homing 自动宏；仅旧 GRBL error:3 静默跳过。
+            // R2 关光（laser_off）不依赖 $CD；解锁（unlock）允许在 Alarm 态（如 error:9/ALARM:）继续发 $X，
+            // 但断线/复位/未排空超时仍必须中止。
+            if action != "laser_off"
+                && let Err(error) = device.load_features(timeout)
+            {
+                if needs_laser_mode
+                    || matches!(
+                        device.state(),
+                        laser_device::DeviceState::Disconnected | laser_device::DeviceState::Lost
+                    )
+                {
+                    return ToolCallResult::err(format!("{label} 拒绝执行：{target} {error}"));
+                }
+                device.state = laser_device::DeviceState::Ready;
+            }
             if !allowed() {
                 return ToolCallResult::err("预检期间设备授权已失效，操作未执行");
             }
@@ -575,6 +601,9 @@ pub fn execute_laser_safe_action_with_gate_and_cancel(
                 return ToolCallResult::err(format!(
                     "{label} 已取消，已发送急停 0x18 兜底 ({target})"
                 ));
+            }
+            if let Some(flag) = dispatched {
+                flag.store(true, std::sync::atomic::Ordering::Release);
             }
             let outcome = match action.as_str() {
                 // 解锁 / 回零：等 ok 后继续等到 Idle（FluidNC 会在其后执行自动宏，Home 状态视为忙碌）
@@ -1533,6 +1562,17 @@ mod tests {
         let failed = execute_laser_safe_action_with(&host_args("set_origin", true), &opener);
         assert!(!failed.success);
         assert_eq!(fake.realtime(), vec![0x18]);
+
+        // Alarm 态下：laser_off 不依赖 $CD 直接关光，unlock 容忍 $CD 的 error:9/ALARM 继续发 $X 恢复
+        let (opener, _, fake) = fake_opener(vec!["ALARM:1", "ok", "ok"]);
+        let off = execute_laser_safe_action_with(&host_args("laser_off", true), &opener);
+        assert!(off.success, "{off:?}");
+        assert_eq!(fake.lines(), vec!["$$", "M5", "S0"]);
+
+        let (opener, _, fake) = fake_opener(vec!["ALARM:1", "error:9", "ok", "<Idle|MPos:0,0,0>"]);
+        let unlocked = execute_laser_safe_action_with(&host_args("unlock", true), &opener);
+        assert!(unlocked.success, "{unlocked:?}");
+        assert_eq!(fake.lines(), vec!["$$", "$CD", "$X"]);
 
         // dry_run：描述将发送的内容，不打开设备
         let (opener, targets, _) = fake_opener(vec![]);

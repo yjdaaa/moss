@@ -258,7 +258,7 @@ export default function VoiceContextCard() {
                     disabled={busy}
                     onClick={() => {
                       setAppliedQuery(query);
-                      void loadAll(query);
+                      void loadAll(query).catch((e) => setError(e?.message || "读取记忆失败"));
                     }}
                   >
                     查找
@@ -270,7 +270,7 @@ export default function VoiceContextCard() {
                       onClick={() => {
                         setQuery("");
                         setAppliedQuery("");
-                        void loadAll("");
+                        void loadAll("").catch((e) => setError(e?.message || "读取记忆失败"));
                       }}
                     >
                       重置

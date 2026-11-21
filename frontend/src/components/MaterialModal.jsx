@@ -161,9 +161,15 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   useEffect(() => {
     if (initialData) {
       setName(initialData.name || "");
-      const thicks = Array.isArray(initialData.thicknesses)
-        ? initialData.thicknesses.join(", ")
-        : String(initialData.thickness_mm || "3");
+      // 过滤“表面通用”非数字键（"surface"），避免把字面量塞进数字厚度输入框导致校验失败
+      const numericList = Array.isArray(initialData.thicknesses)
+        ? initialData.thicknesses.filter((t) => Number.isFinite(Number(t)) && Number(t) > 0)
+        : [];
+      const thicks = numericList.length > 0
+        ? numericList.join(", ")
+        : (Number.isFinite(Number(initialData.thickness_mm)) && Number(initialData.thickness_mm) > 0
+          ? String(initialData.thickness_mm)
+          : "3");
       setThicknessStr(thicks);
       setPower(Number(initialData.power_percent || 50));
       setSpeed(Number(initialData.speed_mms || 100));
@@ -242,7 +248,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       existingThicknesses: resolvedExistingThicknesses,
       targetThickness: isEditing ? initialData?.target_thickness : undefined,
       paramsChanged,
-      pruneMissingThicknesses: isEditing && Boolean(initialData?.existing_thicknesses),
+      pruneMissingThicknesses: isEditing && Boolean(resolvedExistingThicknesses),
     });
 
     try {

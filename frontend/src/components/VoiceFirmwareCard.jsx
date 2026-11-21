@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 import { firmwareDeliveryView } from "../voiceState.js";
@@ -11,19 +11,51 @@ export default function VoiceFirmwareCard() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [choice, setChoice] = useState({});
-  const refresh = async () => {
-    try { setData(await voiceApi.firmwareStatus()); setError(""); } catch (e) { setError(e.message); }
-  };
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+  const mountedRef = useRef(true);
+  const pollSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const refresh = useCallback(async (fromPoll = false) => {
+    if (fromPoll && inFlightRef.current) return;
+    const seq = ++pollSeqRef.current;
+    inFlightRef.current = true;
+    try {
+      const next = await voiceApi.firmwareStatus();
+      if (!mountedRef.current || seq !== pollSeqRef.current) return;
+      setData(next);
+      setError("");
+    } catch (e) {
+      if (mountedRef.current && seq === pollSeqRef.current) setError(e.message);
+    } finally {
+      if (seq === pollSeqRef.current) inFlightRef.current = false;
+    }
   }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    void refresh(false);
+    const timer = setInterval(() => { void refresh(true); }, 5000);
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+      clearInterval(timer);
+    };
+  }, [refresh]);
   const run = async (work, done) => {
     setBusy(true); setError(""); setMessage("");
-    try { const next = await work(); if (next) setData(next); if (done) setMessage(done); return true; }
-    catch (e) { setError(e.message); return false; }
-    finally { setBusy(false); }
+    try {
+      const next = await work();
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+      if (!mountedRef.current) return false;
+      if (next) setData(next);
+      if (done) setMessage(done);
+      return true;
+    } catch (e) {
+      if (mountedRef.current) setError(e.message);
+      return false;
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
   };
   const importFirmware = async () => {
     setBusy(true); setError(""); setMessage("");
@@ -59,7 +91,7 @@ export default function VoiceFirmwareCard() {
       {message && <p role="status">{message}</p>}
       <div className="wakeword-actions">
         <button className="btn btn-hud-primary" type="button" disabled={busy} onClick={importFirmware}>导入固件…</button>
-        <button className="btn btn-ghost" type="button" disabled={busy} onClick={refresh}>刷新</button>
+        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void refresh(false)}>刷新</button>
       </div>
 
       <h3>已导入的固件</h3>

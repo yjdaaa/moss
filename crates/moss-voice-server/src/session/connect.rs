@@ -47,8 +47,17 @@ async fn upgrade(
             .and_then(crate::ota::host_without_port),
         ip: peer.ip().to_string(),
     };
+    let Ok(conn_permit) = shared.ws_connections.clone().try_acquire_owned() else {
+        return axum::response::IntoResponse::into_response((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "设备并发连接已达上限",
+        ));
+    };
     ws.max_message_size(64 * 1024)
-        .on_upgrade(move |socket| run(shared, socket, identity))
+        .on_upgrade(move |socket| async move {
+            let _conn_permit = conn_permit;
+            run(shared, socket, identity).await;
+        })
 }
 
 pub(crate) fn random_id() -> Result<String, getrandom::Error> {

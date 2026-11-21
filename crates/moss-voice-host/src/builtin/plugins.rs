@@ -27,8 +27,21 @@ pub(super) struct DesktopPersonaStore {
 }
 impl PersonaStore for DesktopPersonaStore {
     fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String> {
+        self.save_active_if(id, &|| true, apply)
+    }
+
+    fn save_active_if(
+        &self,
+        id: &str,
+        allowed: &dyn Fn() -> bool,
+        apply: &mut dyn FnMut(PersonaConfig),
+    ) -> Result<(), String> {
         let mut touched = false;
         let result = moss_voice::settings::update_voice(&self.settings_file, |settings| {
+            // 持设置写锁后再次复核设备授权，防止撤销后的滞后阻塞任务改写全局角色
+            if !allowed() {
+                return Err("语音设备授权已失效，未修改角色".into());
+            }
             let local = &mut settings.builtin_local;
             touched = true;
             match moss_voice::settings::validate_active_persona(id, &local.custom_personas) {

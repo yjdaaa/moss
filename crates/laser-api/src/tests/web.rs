@@ -1024,3 +1024,63 @@ fn serve_reuses_loopback_keep_alive_connection_across_requests() {
         "带 Connection: close 的末个请求应正常关闭连接"
     );
 }
+
+#[test]
+fn release_origin_check_rejects_dev_ports_and_challenge_requires_desktop_session() {
+    let none: Vec<String> = Vec::new();
+    // release 口径（allow_dev_loopback=false）绝不放行 5173/5177/5178 开发端口
+    for dev in [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:5177",
+        "http://localhost:5177",
+        "http://127.0.0.1:5178",
+        "http://localhost:5178",
+    ] {
+        assert!(
+            !crate::access::is_allowed_origin_with_dev(
+                dev,
+                Some("127.0.0.1:9666"),
+                true,
+                &none,
+                false
+            ),
+            "release 下开发来源 {dev} 必须被拒绝"
+        );
+    }
+    // 同源与 Tauri 仍放行
+    assert!(crate::access::is_allowed_origin_with_dev(
+        "http://127.0.0.1:9666",
+        Some("127.0.0.1:9666"),
+        true,
+        &none,
+        false
+    ));
+    assert!(crate::access::is_allowed_origin_with_dev(
+        "http://tauri.localhost",
+        Some("127.0.0.1:9666"),
+        true,
+        &none,
+        false
+    ));
+
+    // 桌面会话开启后，不带 X-Moss-Desktop-Session 的回环请求不能签发局域网配对挑战码
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_auth(std::sync::Arc::new(AuthManager::new()));
+    let session = service.enable_desktop_session().unwrap();
+    let req_without_session =
+        b"POST /v1/auth/challenge HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: 0\r\n\r\n";
+    let blocked = String::from_utf8(service.handle_http(req_without_session)).unwrap();
+    assert!(blocked.starts_with("HTTP/1.1 403"), "{blocked}");
+    assert!(blocked.contains("desktop_session_required"), "{blocked}");
+
+    let req_with_session = format!(
+        "POST /v1/auth/challenge HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nX-Moss-Desktop-Session: {session}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let allowed = String::from_utf8(service.handle_http(req_with_session.as_bytes())).unwrap();
+    assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+    assert!(allowed.contains("pairing_code"), "{allowed}");
+}

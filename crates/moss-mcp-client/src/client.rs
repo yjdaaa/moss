@@ -87,6 +87,155 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Unix 下挂在 `ProcessGroup::leader()` 之上的进程组收尾包装器：
+/// - 正常等待退出（`wait` / `try_wait`）时先用 `waitid(P_PID, WEXITED | WNOWAIT)` 保持直接子进程僵尸态占位
+///   （POSIX 保证未回收前其 PID/PGID 绝不会被内核复用），随即对整组发送 `SIGKILL` 清扫残留孙进程，
+///   然后再委托内层回收直接子进程；
+/// - 未回收前同步 `Drop` 时直接向 `-pgid` 发 `SIGKILL`，覆盖建连失败、超时与 Tokio 运行时关闭场景。
+#[cfg(unix)]
+#[derive(Debug)]
+struct KillProcessGroupOnExit;
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct KillProcessGroupChild {
+    inner: Option<Box<dyn process_wrap::tokio::ChildWrapper>>,
+    pgid: i32,
+    reaped: bool,
+}
+
+#[cfg(unix)]
+impl KillProcessGroupChild {
+    /// 返回 `Ok(true)` 表示直接子进程已退出且僵尸仍占位（可安全向 `-pgid` 发 SIGKILL），
+    /// `Ok(false)` 表示非阻塞检查下仍在运行，`Err` 表示系统调用失败（如 `ECHILD`）。
+    fn wait_exited_without_reaping(pgid: i32, nohang: bool) -> std::io::Result<bool> {
+        let mut flags = libc::WEXITED | libc::WNOWAIT;
+        if nohang {
+            flags |= libc::WNOHANG;
+        }
+        loop {
+            // SAFETY: siginfo_t is a plain C struct; zero-init is required before waitid with WNOHANG.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::waitid(libc::P_PID, pgid as libc::id_t, &mut info, flags) };
+            if rc == 0 {
+                // SAFETY: waitid returned 0 and info was zero-initialized; si_pid() works across macOS, Linux and Android.
+                return Ok(unsafe { info.si_pid() } == pgid);
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    fn kill_group(&self) {
+        if !self.reaped && self.pgid > 0 {
+            // SAFETY: 直接子进程尚未被 waitpid 回收，POSIX 保证其 PID/PGID 未被复用，
+            // 向 -pgid 发送 SIGKILL 仅作用于 ProcessGroup::leader() 创建的独占进程组。
+            unsafe {
+                libc::kill(-self.pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for KillProcessGroupChild {
+    fn drop(&mut self) {
+        self.kill_group();
+    }
+}
+
+#[cfg(unix)]
+impl process_wrap::tokio::CommandWrapper for KillProcessGroupOnExit {
+    fn wrap_child(
+        &mut self,
+        inner: Box<dyn process_wrap::tokio::ChildWrapper>,
+        _core: &process_wrap::tokio::CommandWrap,
+    ) -> std::io::Result<Box<dyn process_wrap::tokio::ChildWrapper>> {
+        let pgid = inner
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .filter(|&id| id > 0)
+            .ok_or_else(|| std::io::Error::other("missing child pid for process group guard"))?;
+        Ok(Box::new(KillProcessGroupChild {
+            inner: Some(inner),
+            pgid,
+            reaped: false,
+        }))
+    }
+}
+
+#[cfg(unix)]
+impl process_wrap::tokio::ChildWrapper for KillProcessGroupChild {
+    fn inner(&self) -> &dyn process_wrap::tokio::ChildWrapper {
+        self.inner
+            .as_deref()
+            .expect("KillProcessGroupChild inner missing")
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn process_wrap::tokio::ChildWrapper {
+        self.inner
+            .as_deref_mut()
+            .expect("KillProcessGroupChild inner missing")
+    }
+
+    fn into_inner(mut self: Box<Self>) -> Box<dyn process_wrap::tokio::ChildWrapper> {
+        self.reaped = true;
+        self.inner
+            .take()
+            .expect("KillProcessGroupChild inner missing")
+    }
+
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        self.kill_group();
+        self.inner_mut().start_kill()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        if !self.reaped {
+            match Self::wait_exited_without_reaping(self.pgid, true) {
+                Ok(false) => return Ok(None),
+                Ok(true) => self.kill_group(),
+                Err(_) => {}
+            }
+        }
+        let status = self.inner_mut().try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
+    }
+
+    fn wait(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            if !self.reaped {
+                let pgid = self.pgid;
+                let exited = tokio::task::spawn_blocking(move || {
+                    Self::wait_exited_without_reaping(pgid, false)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(false);
+                if exited {
+                    self.kill_group();
+                }
+            }
+            let status = self.inner_mut().wait().await?;
+            self.reaped = true;
+            Ok(status)
+        })
+    }
+}
+
 /// 一条已明确配置的连接。所有调用串行借用；不隐式启动外部服务，不进行工具调用重试。
 /// 宿主须每 HEARTBEAT_INTERVAL 调用 heartbeat，失败后通过 ReconnectBackoff 调度 reconnect。
 pub struct Client {
@@ -138,9 +287,7 @@ impl Client {
             match &config.transport {
                 TransportConfig::Stdio { command, args, .. } => {
                     let mut command = tokio::process::Command::new(command);
-                    command.args(args).env_clear().kill_on_drop(true);
-                    #[cfg(windows)]
-                    command.creation_flags(0x0800_0000);
+                    command.args(args).env_clear();
                     // 不继承模型 API key / token 等任意宿主环境变量。
                     for key in [
                         "PATH",
@@ -157,7 +304,22 @@ impl Client {
                         }
                     }
                     command.envs(&values);
-                    let (transport, _) = TokioChildProcess::builder(command)
+                    // 绑定 OS 进程树（KillOnDrop + Unix 独立进程组及退前清扫 / Windows CREATE_NO_WINDOW + KILL_ON_JOB_CLOSE Job Object）
+                    let mut wrapped = process_wrap::tokio::CommandWrap::from(command);
+                    wrapped.wrap(process_wrap::tokio::KillOnDrop);
+                    #[cfg(unix)]
+                    {
+                        wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+                        wrapped.wrap(KillProcessGroupOnExit);
+                    }
+                    #[cfg(windows)]
+                    {
+                        wrapped.wrap(process_wrap::tokio::CreationFlags(
+                            windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                        ));
+                        wrapped.wrap(process_wrap::tokio::JobObject);
+                    }
+                    let (transport, _) = TokioChildProcess::builder(wrapped)
                         .stderr(Stdio::null())
                         .spawn()
                         .map_err(|_| ClientError::ConnectionFailed)?;
@@ -175,12 +337,23 @@ impl Client {
                         value.set_sensitive(true);
                         headers.insert(name, value);
                     }
-                    let http = reqwest::Client::builder()
+                    // 禁用系统/环境代理与重定向；明文 http://localhost 钉死解析到回环 127.0.0.1，防凭据外泄
+                    let mut builder = reqwest::Client::builder()
+                        .no_proxy()
                         .redirect(reqwest::redirect::Policy::none())
                         .connect_timeout(Duration::from_secs(10))
-                        .default_headers(headers)
-                        .build()
-                        .map_err(|_| ClientError::ConnectionFailed)?;
+                        .default_headers(headers);
+                    if let Ok(parsed) = url::Url::parse(url)
+                        && parsed.scheme() == "http"
+                        && parsed.host_str() == Some("localhost")
+                    {
+                        let port = parsed.port_or_known_default().unwrap_or(80);
+                        builder = builder.resolve(
+                            "localhost",
+                            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                        );
+                    }
+                    let http = builder.build().map_err(|_| ClientError::ConnectionFailed)?;
                     let transport_config =
                         StreamableHttpClientTransportConfig::with_uri(url.clone())
                             .max_sse_event_size(MAX_RESPONSE_BYTES)
@@ -596,5 +769,77 @@ mod tests {
         );
         backoff.reset_after_healthy_connection();
         assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_failed_connect_kills_orphaned_grandchild_process_group() {
+        struct EmptySecrets;
+        impl SecretStore for EmptySecrets {
+            fn get(&self, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let pid_file = std::env::temp_dir().join(format!(
+            "moss-mcp-grandchild-{}-{}.pid",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let script = format!(
+            "sleep 30 >/dev/null 2>&1 </dev/null & echo $! > '{}'; exit 0",
+            pid_file.display()
+        );
+        let config = ServerConfig {
+            name: "grandchild_test".into(),
+            enabled: true,
+            transport: TransportConfig::Stdio {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), script],
+                env_refs: BTreeMap::new(),
+            },
+            policies: BTreeMap::new(),
+        };
+        let err = Client::connect(config, &EmptySecrets, Arc::new(RequireApproval)).await;
+        assert!(err.is_err());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut grandchild_pid: Option<i32> = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse::<i32>()
+                && pid > 0
+            {
+                grandchild_pid = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        let pid = grandchild_pid.expect("script should have written grandchild pid");
+
+        let wait_dead = std::time::Instant::now() + Duration::from_secs(2);
+        let mut dead = false;
+        while std::time::Instant::now() < wait_dead {
+            // SAFETY: kill(pid, 0) only probes process existence without delivering a signal.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !dead {
+            // Clean up defensively if assertion is about to fail.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            dead,
+            "grandchild process {pid} survived MCP stdio process-group cleanup"
+        );
     }
 }

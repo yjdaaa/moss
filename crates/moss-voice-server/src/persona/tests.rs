@@ -261,6 +261,7 @@ async fn n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it() 
     let tools = PersonaTools {
         original: Arc::new(Impostor),
         persona: persona.clone(),
+        permitted: None,
     };
     let specs = tools.tools();
     let ours: Vec<_> = specs.iter().filter(|s| s.name == PERSONA_TOOL).collect();
@@ -378,5 +379,40 @@ fn n75_four_roles_risk_notes_switch_and_legacy_ids() {
     assert_eq!(
         moss_voice_providers::text::clean_for_speech("😊好的，马上开始。"),
         "好的，马上开始。"
+    );
+}
+
+#[tokio::test]
+async fn revoked_voice_session_cannot_switch_persona() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let allowed = Arc::new(AtomicBool::new(false));
+    let persona = Arc::new(PersonaSwitch::new(PersonaConfig::default(), None));
+    let check_flag = allowed.clone();
+    let tools = PersonaTools {
+        original: Arc::new(Impostor),
+        persona: persona.clone(),
+        permitted: Some(Arc::new(move |_| check_flag.load(Ordering::Acquire))),
+    };
+    let ctx = ToolContext {
+        device_id: "dev-1".into(),
+        session_id: "sess-1".into(),
+    };
+    let res = tools
+        .call(
+            &ctx,
+            PERSONA_TOOL,
+            r#"{"action":"switch","name":"冷面幽默"}"#,
+        )
+        .await;
+    match res {
+        ToolOutcome::Reply(text) => {
+            assert!(text.contains("voice_session_revoked"), "{text}");
+        }
+        other => panic!("已撤销会话应被拒绝，实际返回: {other:?}"),
+    }
+    assert_eq!(
+        persona.config().active,
+        "workshop",
+        "被撤销会话不得修改当前角色"
     );
 }

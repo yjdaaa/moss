@@ -47,7 +47,11 @@ export function SideNav({
   useEffect(() => {
     const handleAuthChange = () => setHasToken(Boolean(readAuthToken()));
     window.addEventListener("laser-auth-required", handleAuthChange);
-    return () => window.removeEventListener("laser-auth-required", handleAuthChange);
+    window.addEventListener("laser-auth-changed", handleAuthChange);
+    return () => {
+      window.removeEventListener("laser-auth-required", handleAuthChange);
+      window.removeEventListener("laser-auth-changed", handleAuthChange);
+    };
   }, []);
 
   useEffect(() => {

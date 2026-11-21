@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 import { WAKE_WORD_PRESETS, screenPackDeviceView, wakeWordDraftError } from "../voiceState.js";
@@ -13,24 +13,52 @@ export default function VoiceWakeWordCard() {
   const [busy, setBusy] = useState(false);
   // n70 推送时默认一并刷入 MOSS 全屏画风（只对报了彩屏分辨率的设备生效）
   const [withScreen, setWithScreen] = useState(true);
-  const refresh = async (resetDraft = false) => {
+  const mountedRef = useRef(true);
+  const pollSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const refresh = useCallback(async (resetDraft = false, fromPoll = false) => {
+    if (fromPoll && inFlightRef.current) return;
+    const seq = ++pollSeqRef.current;
+    inFlightRef.current = true;
     try {
       const next = await voiceApi.wakewordStatus();
+      if (!mountedRef.current || seq !== pollSeqRef.current) return;
       setData(next);
       setDraft((old) => (resetDraft || !old ? { ...next.word } : old));
       setError("");
-    } catch (e) { setError(e.message); }
-  };
-  useEffect(() => {
-    void refresh(true);
-    const timer = setInterval(() => refresh(false), 5000);
-    return () => clearInterval(timer);
+    } catch (e) {
+      if (mountedRef.current && seq === pollSeqRef.current) setError(e.message);
+    } finally {
+      if (seq === pollSeqRef.current) inFlightRef.current = false;
+    }
   }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    void refresh(true, false);
+    const timer = setInterval(() => { void refresh(false, true); }, 5000);
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+      clearInterval(timer);
+    };
+  }, [refresh]);
   const run = async (work, done) => {
     setBusy(true); setError(""); setMessage("");
-    try { const next = await work(); if (next) setData(next); if (done) setMessage(typeof done === "function" ? done(next) : done); return next; }
-    catch (e) { setError(e.message); return null; }
-    finally { setBusy(false); }
+    try {
+      const next = await work();
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+      if (!mountedRef.current) return null;
+      if (next) setData(next);
+      if (done) setMessage(typeof done === "function" ? done(next) : done);
+      return next;
+    } catch (e) {
+      if (mountedRef.current) setError(e.message);
+      return null;
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
   };
   const saved = data?.word;
   const dirty = Boolean(draft && saved) && (draft.text !== saved.text || draft.command.trim().toLowerCase().split(/\s+/).join(" ") !== saved.command || Number(draft.threshold) !== saved.threshold);

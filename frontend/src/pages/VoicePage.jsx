@@ -254,22 +254,31 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
   // n68：列表上限与读取失败原因（失败时保留上次列表并明确提示，不悄悄显示旧数据）
   const [approvalsMeta, setApprovalsMeta] = useState({ limit: 0, error: "" });
   const mounted = useRef(true);
+  const statusSeqRef = useRef(0);
+  const statusInFlightRef = useRef(false);
+  const approvalsSeqRef = useRef(0);
+  const approvalsInFlightRef = useRef(false);
   const builtin = useBuiltinStatus();
 
   const reportDirty = useCallback((id, where) => {
     setDirty((current) => ((current[id] || "") === where ? current : { ...current, [id]: where }));
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ fromPoll = false } = {}) => {
+    if (fromPoll && statusInFlightRef.current) return;
+    const seq = ++statusSeqRef.current;
+    statusInFlightRef.current = true;
     try {
       const next = await voiceApi.status();
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== statusSeqRef.current) return;
       setStatus(next);
       setLoadError("");
       setForm((current) => current || settingsForm(next));
       setBaseline((current) => current || settingsForm(next));
     } catch (error) {
-      if (mounted.current) setLoadError(voiceErrorText(error));
+      if (mounted.current && seq === statusSeqRef.current) setLoadError(voiceErrorText(error));
+    } finally {
+      if (seq === statusSeqRef.current) statusInFlightRef.current = false;
     }
   }, []);
 
@@ -303,15 +312,22 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     }
   };
 
-  const refreshApprovals = useCallback(async () => {
+  const refreshApprovals = useCallback(async ({ fromPoll = false } = {}) => {
+    if (fromPoll && approvalsInFlightRef.current) return;
+    const seq = ++approvalsSeqRef.current;
+    approvalsInFlightRef.current = true;
     let res;
     try {
       res = await getJson("/v1/approvals?status=all");
     } catch (error) {
-      if (mounted.current) setApprovalsMeta((meta) => ({ ...meta, error: voiceErrorText(error) }));
+      if (mounted.current && seq === approvalsSeqRef.current) {
+        setApprovalsMeta((meta) => ({ ...meta, error: voiceErrorText(error) }));
+      }
       return;
+    } finally {
+      if (seq === approvalsSeqRef.current) approvalsInFlightRef.current = false;
     }
-    if (!mounted.current) return;
+    if (!mounted.current || seq !== approvalsSeqRef.current) return;
     if (res?.ok && res.data?.success) {
       setApprovals(Array.isArray(res.data.result?.approvals) ? res.data.result.approvals : []);
       setApprovalsMeta({ limit: Number(res.data.result?.limit) || 0, error: "" });
@@ -335,19 +351,23 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     refreshApprovals();
     const timer = setInterval(() => {
       if (!document.hidden) {
-        refresh();
-        refreshApprovals();
+        refresh({ fromPoll: true });
+        refreshApprovals({ fromPoll: true });
       }
     }, VOICE_POLL_MS);
     const onVisibility = () => {
       if (!document.hidden) {
-        refresh();
-        refreshApprovals();
+        refresh({ fromPoll: true });
+        refreshApprovals({ fromPoll: true });
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       mounted.current = false;
+      statusSeqRef.current += 1;
+      statusInFlightRef.current = false;
+      approvalsSeqRef.current += 1;
+      approvalsInFlightRef.current = false;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };

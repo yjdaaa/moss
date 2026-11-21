@@ -300,6 +300,19 @@ pub trait PersonaStore: Send + Sync {
     /// 界面保存也在同一把锁里更新运行中的角色，因此运行中的角色与文件按同一顺序变化，不会对不上。
     /// 文件里已没有这个角色（例如界面刚删掉）时返回错误，不调用 `apply`。
     fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String>;
+
+    /// 在设置写入锁内复核设备会话授权 `allowed()` 后再写入，防止已撤销会话在排队进阻塞线程后改写全局设置。
+    fn save_active_if(
+        &self,
+        id: &str,
+        allowed: &dyn Fn() -> bool,
+        apply: &mut dyn FnMut(PersonaConfig),
+    ) -> Result<(), String> {
+        if !allowed() {
+            return Err("语音设备授权已失效，未修改角色".into());
+        }
+        self.save_active(id, apply)
+    }
 }
 
 /// 运行中的当前角色。宿主创建一份，同时交给对话（读提示词）与 [`PersonaTools`]（切换）。
@@ -338,19 +351,40 @@ impl PersonaSwitch {
 
     /// 语音切换：先保存，保存成功才换（换成的是设置文件里的那份角色设置）。返回新角色名。
     pub fn switch(&self, query: &str) -> Result<String, SwitchError> {
+        self.switch_if(query, &|| true)
+    }
+
+    /// 带实时会话授权门禁的语音切换：在查询与设置写入锁内双重校验 `allowed()`，已撤销会话不改写全局角色。
+    pub fn switch_if(
+        &self,
+        query: &str,
+        allowed: &dyn Fn() -> bool,
+    ) -> Result<String, SwitchError> {
+        if !allowed() {
+            return Err(SwitchError::Revoked);
+        }
         let (id, _) = self.config().find(query).map_err(SwitchError::Find)?;
         let applied = match &self.store {
             Some(store) => {
                 let mut applied = None;
                 store
-                    .save_active(&id, &mut |config| {
+                    .save_active_if(&id, allowed, &mut |config| {
                         self.configure(config.clone());
                         applied = Some(config);
                     })
-                    .map_err(SwitchError::Save)?;
+                    .map_err(|err| {
+                        if !allowed() {
+                            SwitchError::Revoked
+                        } else {
+                            SwitchError::Save(err)
+                        }
+                    })?;
                 applied.ok_or_else(|| SwitchError::Save("设置没有写入".into()))?
             }
             None => {
+                if !allowed() {
+                    return Err(SwitchError::Revoked);
+                }
                 let mut next = self.config();
                 next.active = id.clone();
                 self.configure(next.clone());
@@ -368,6 +402,7 @@ impl PersonaSwitch {
 pub enum SwitchError {
     Find(FindError),
     Save(String),
+    Revoked,
 }
 
 fn tool_spec() -> ToolSpec {
@@ -389,25 +424,35 @@ fn tool_spec() -> ToolSpec {
 }
 
 /// 执行一次 `voice_persona_tool`：成功切换直接朗读固定话术，其余结果交给模型组织回答。
-fn run_tool(persona: &PersonaSwitch, arguments: &str) -> ToolOutcome {
+fn run_tool(persona: &PersonaSwitch, arguments: &str, allowed: &dyn Fn() -> bool) -> ToolOutcome {
+    let reply = |value: Value| ToolOutcome::Reply(value.to_string());
+    if !allowed() {
+        return reply(json!({
+            "success": false,
+            "error": "voice_session_revoked",
+            "result": "设备授权已失效，无法查看或切换角色"
+        }));
+    }
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let config = persona.config();
     let names: Vec<String> = config.roles().into_iter().map(|(_, name)| name).collect();
     let (_, current) = config.active_role();
-    let reply = |value: Value| ToolOutcome::Reply(value.to_string());
     match args.get("action").and_then(Value::as_str) {
         Some("list") => reply(
             json!({"success": true, "result": "可选角色", "current": current, "roles": names}),
         ),
         Some("switch") => {
             let query = args.get("name").and_then(Value::as_str).unwrap_or_default();
-            match persona.switch(query) {
+            match persona.switch_if(query, allowed) {
                 Ok(name) => ToolOutcome::Speak(format!("好的，已切换为{name}。")),
                 Err(SwitchError::Find(FindError::Ambiguous(matches))) => reply(
                     json!({"success": false, "error": "ambiguous", "result": "有几个角色都对得上，请用户说清楚是哪一个", "matches": matches}),
                 ),
                 Err(SwitchError::Find(FindError::NotFound)) => reply(
                     json!({"success": false, "error": "not_found", "result": "没有这个角色", "current": current, "roles": names}),
+                ),
+                Err(SwitchError::Revoked) => reply(
+                    json!({"success": false, "error": "voice_session_revoked", "result": "设备授权已失效，未切换角色", "current": current}),
                 ),
                 Err(SwitchError::Save(_)) => reply(
                     json!({"success": false, "error": "save_failed", "result": "角色没有切换成功，请在电脑上的 MOSS 语音体验里切换", "current": current}),
@@ -420,10 +465,14 @@ fn run_tool(persona: &PersonaSwitch, arguments: &str) -> ToolOutcome {
     }
 }
 
+pub type PersonaPermission = Arc<dyn Fn(&ToolContext) -> bool + Send + Sync>;
+
 /// 在原有工具之外加上 `voice_persona_tool`；同名的外部工具一律去掉，避免冒充。其余调用原样转交。
 pub struct PersonaTools {
     pub original: Arc<dyn ToolExecutor>,
     pub persona: Arc<PersonaSwitch>,
+    /// 宿主提供的实时设备会话授权复查（缺省仅限纯单测，桌面宿主必须接线）。
+    pub permitted: Option<PersonaPermission>,
 }
 
 impl ToolExecutor for PersonaTools {
@@ -449,13 +498,30 @@ impl ToolExecutor for PersonaTools {
         }
         let persona = self.persona.clone();
         let arguments = arguments.to_owned();
+        let permitted = self.permitted.clone();
+        let ctx = context.clone();
         Box::pin(async move {
+            if let Some(check) = &permitted
+                && !check(&ctx)
+            {
+                return ToolOutcome::Reply(
+                    json!({
+                        "success": false,
+                        "error": "voice_session_revoked",
+                        "result": "设备授权已失效，无法查看或切换角色"
+                    })
+                    .to_string(),
+                );
+            }
             // The host store writes the settings file; keep it off the async workers.
-            tokio::task::spawn_blocking(move || run_tool(&persona, &arguments))
-                .await
-                .unwrap_or_else(|_| {
-                    ToolOutcome::Reply(json!({"success": false, "error": "internal"}).to_string())
-                })
+            tokio::task::spawn_blocking(move || {
+                let allowed = || permitted.as_ref().is_none_or(|check| check(&ctx));
+                run_tool(&persona, &arguments, &allowed)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                ToolOutcome::Reply(json!({"success": false, "error": "internal"}).to_string())
+            })
         })
     }
 

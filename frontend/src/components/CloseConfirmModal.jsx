@@ -5,6 +5,12 @@ import { trayActionCopy } from "../platform.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 export function CloseConfirmModal({ visible, onClose, onConfirm }) {
+  // 关闭即卸载内层状态，防止取消后残留“完全退出+记住选择”在下次打开时误杀进程
+  if (!visible) return null;
+  return <CloseConfirmModalBody onClose={onClose} onConfirm={onConfirm} />;
+}
+
+function CloseConfirmModalBody({ onClose, onConfirm }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
   const backdropRef = useRef(null);
@@ -12,7 +18,6 @@ export function CloseConfirmModal({ visible, onClose, onConfirm }) {
   const trayCopy = trayActionCopy();
 
   useEffect(() => {
-    if (!visible) return undefined;
     const onKey = (e) => {
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
@@ -23,9 +28,7 @@ export function CloseConfirmModal({ visible, onClose, onConfirm }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [visible, onClose]);
-
-  if (!visible) return null;
+  }, [onClose]);
 
   const handleConfirm = () => {
     onConfirm(selectedAction, remember);

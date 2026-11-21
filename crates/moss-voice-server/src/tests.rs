@@ -586,6 +586,16 @@ fn ota_from_spoofed_client_does_not_write_device_snapshot() {
         .send()
         .unwrap();
     assert_eq!(response.status().as_u16(), 200);
+    let spoof_body: serde_json::Value = response.json().unwrap();
+    assert_eq!(
+        spoof_body["websocket"]["token"].as_str().unwrap_or(""),
+        "",
+        "Client-Id 不一致的冒用 OTA 请求不得下发签名 token: {spoof_body}"
+    );
+    assert!(
+        spoof_body.get("mqtt").is_none(),
+        "Client-Id 不一致的冒用 OTA 请求不得下发 MQTT 配置: {spoof_body}"
+    );
     assert_eq!(
         registry.status(DEVICE),
         Some(DeviceStatus::Allowed),

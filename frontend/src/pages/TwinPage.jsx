@@ -17,7 +17,7 @@ import {
   ChevronUp,
   ChevronDown,
 } from "lucide-react";
-import { fetchPreviewText, postJson } from "../api/client.js";
+import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewText, postJson } from "../api/client.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { readFoldOpen, writeFoldOpen } from "../foldState.js";
 import { TwinStage3D } from "../components/TwinStage3D.jsx";
@@ -487,6 +487,21 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     };
   }, [driveMode, isJobRunning, selectedWorkflowId]);
 
+  const mountedRef = useRef(true);
+  const telemetrySeqRef = useRef(0);
+  const telemetryAbortRef = useRef(null);
+  const telemetryInFlightRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      telemetrySeqRef.current += 1;
+      telemetryInFlightRef.current = false;
+      telemetryAbortRef.current?.abort();
+      telemetryAbortRef.current = null;
+    };
+  }, []);
+
   // 同步机台物理行程与外设能力 (/api/connection/check)
   const handleSyncMachineCapabilities = async () => {
     if (probingDevice) return;
@@ -494,6 +509,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     try {
       const payload = getConnectionPayload();
       const res = await postJson("/api/connection/check", payload);
+      if (!mountedRef.current) return;
       if (res.ok && res.data?.success) {
         const r = res.data.result || {};
         const isConn = Boolean(r.connected || r.serial_connected || r.network_connected);
@@ -509,22 +525,47 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
           });
         }
         if (r.features) setMachineFeatures(r.features);
+      } else {
+        const msg = (typeof res.data?.result === "string" && res.data.result) || "同步控制器 $CD 能力失败，请检查设备连接";
+        setConnectionStatus?.({
+          connected: false,
+          summary: msg,
+          checkedAt: Date.now(),
+        });
+        setTelemetry(parseGrblStatusReport("", msg));
       }
-    } catch (_e) {
-      // ignore
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const msg = err?.message || "同步控制器 $CD 能力异常";
+      setConnectionStatus?.({
+        connected: false,
+        summary: msg,
+        checkedAt: Date.now(),
+      });
+      setTelemetry(parseGrblStatusReport("", msg));
     } finally {
-      setProbingDevice(false);
+      if (mountedRef.current) setProbingDevice(false);
     }
   };
 
   // 单次采样控制器 GRBL 实时状态 (/api/safe-action { action: "status" })
+  // 带 AbortController、超时上限、单调序号与卸载守卫，防止慢回包卸载后污染全局 connectionStatus
   const sampleControllerStatus = useCallback(async (silent = false) => {
+    const seq = ++telemetrySeqRef.current;
+    telemetryAbortRef.current?.abort();
+    const controller = new AbortController();
+    telemetryAbortRef.current = controller;
+    telemetryInFlightRef.current = true;
     try {
       const payload = {
         ...getConnectionPayload(),
         action: "status",
       };
-      const res = await postJson("/api/safe-action", payload);
+      const res = await postJson("/api/safe-action", payload, {
+        signal: controller.signal,
+        timeoutMs: DEFAULT_READ_TIMEOUT_MS,
+      });
+      if (!mountedRef.current || telemetrySeqRef.current !== seq) return null;
       if (res.ok && res.data?.success) {
         const detail = res.data.detail ?? res.data.result;
         const parsed = parseGrblStatusReport(detail, String(res.data.result || ""));
@@ -544,8 +585,16 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
         setTelemetry(parseGrblStatusReport("", msg));
       }
     } catch (err) {
+      if (!mountedRef.current || telemetrySeqRef.current !== seq) return null;
       if (!silent) {
         setTelemetry(parseGrblStatusReport("", err?.message || "状态查询异常"));
+      }
+    } finally {
+      if (telemetryAbortRef.current === controller) {
+        telemetryAbortRef.current = null;
+      }
+      if (telemetrySeqRef.current === seq) {
+        telemetryInFlightRef.current = false;
       }
     }
     return null;
@@ -559,6 +608,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     let pollGen = 0;
 
     const loop = async () => {
+      if (telemetryInFlightRef.current) {
+        if (!cancelled && !document.hidden) {
+          clearTimeout(timer);
+          timer = setTimeout(loop, 2000);
+        }
+        return;
+      }
       const myGen = ++pollGen;
       clearTimeout(timer);
       await sampleControllerStatus(true);
@@ -577,6 +633,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     return () => {
       cancelled = true;
       pollGen += 1;
+      telemetrySeqRef.current += 1;
+      telemetryInFlightRef.current = false;
+      telemetryAbortRef.current?.abort();
+      telemetryAbortRef.current = null;
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };

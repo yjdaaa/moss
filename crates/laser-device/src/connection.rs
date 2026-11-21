@@ -313,16 +313,17 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         Ok(settings)
     }
 
-    /// 握手后读取 FluidNC `$CD` 配置并缓存到 `features`。非 FluidNC（`error:3`）、超时或空响应时
-    /// 保持 `None` 且不报错；按字段叠加合并行程上限，不擦除 `$$` 已报告的其余轴或运动参数。
-    pub fn load_features(&mut self, timeout: Duration) -> bool {
-        match self.fetch_fluidnc_config(timeout) {
-            Ok((limits, features)) => {
+    /// 握手后读取 FluidNC `$CD` 配置并缓存到 `features`。仅旧 GRBL 返回 `error:3`（不支持 `$CD`）时
+    /// 静默返回 `Ok(false)` 并保持 `features = None`；复位、报警、断线或超时均返回 `Err`，
+    /// 按字段叠加合并行程上限，不擦除 `$$` 已报告的其余轴或运动参数。
+    pub fn load_features(&mut self, timeout: Duration) -> Result<bool, String> {
+        match self.fetch_fluidnc_config(timeout)? {
+            Some((limits, features)) => {
                 self.travel_limits.merge_prefer(&limits);
                 self.features = Some(features);
-                true
+                Ok(true)
             }
-            Err(_) => false,
+            None => Ok(false),
         }
     }
 
@@ -588,10 +589,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     }
 
     /// 发送 $CD 读取 FluidNC 的 YAML 配置文件并解析出机械行程与外设引脚；必须收到终止 `ok`。
+    /// 仅旧 GRBL 返回 `error:3`（不支持 `$CD`）时返回 `Ok(None)`；复位、报警、断线、超时或其他错误均返回 `Err`。
     pub fn fetch_fluidnc_config(
         &mut self,
         timeout: Duration,
-    ) -> Result<(MachineLimits, MachineFeatures), String> {
+    ) -> Result<Option<(MachineLimits, MachineFeatures)>, String> {
         if self.sequential_channel_dirty {
             return Err("控制器顺序信道此前未排空，拒绝读取 $CD，请重连设备".into());
         }
@@ -608,8 +610,14 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         terminated = true;
                         break;
                     }
-                    if line.to_ascii_lowercase().starts_with("error:") {
-                        return Err(format!("设备不支持 $CD 或报错: {line}"));
+                    let lower = line.trim().to_ascii_lowercase();
+                    if let Some(rest) = lower.strip_prefix("error:3")
+                        && !rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    {
+                        return Ok(None);
+                    }
+                    if lower.starts_with("error:") {
+                        return Err(format!("读取 $CD 报错: {line}"));
                     }
                     if is_reset_banner(&line) {
                         self.state = DeviceState::Lost;
@@ -637,10 +645,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         }
         if !terminated {
             if saw_eof {
+                self.state = DeviceState::Disconnected;
                 return Err(if yaml_lines.is_empty() {
-                    "读取 $CD 超时或未响应".into()
+                    "读取 $CD 时连接断开（未收到响应）".into()
                 } else {
-                    self.state = DeviceState::Disconnected;
                     "读取 $CD 响应不完整（连接断开，缺少终止 ok）".into()
                 });
             }
@@ -662,7 +670,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             }
         }
         let raw = yaml_lines.join("\n");
-        Ok(parse_fluidnc_yaml(&raw))
+        Ok(Some(parse_fluidnc_yaml(&raw)))
     }
 
     /// 消费一行状态类响应的公共处理：记录说明行、识别复位横幅、更新 SD 作业标记。
@@ -724,6 +732,15 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         if self.sequential_channel_dirty {
             return Err(IdleCheckError::Fatal(
                 "控制器顺序信道存在未排空残留（$CD/$RI 超时），拒绝执行任务，请重连设备".into(),
+            ));
+        }
+        if matches!(
+            self.state,
+            DeviceState::Lost | DeviceState::Disconnected | DeviceState::Alarm
+        ) {
+            return Err(IdleCheckError::Fatal(
+                "控制器在预检期间发生复位、报警或连接断开（状态异常），拒绝执行任务，请重连设备"
+                    .into(),
             ));
         }
         self.transport
@@ -840,6 +857,19 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<(), String> {
+        match self.wait_until_idle_or_cancel(timeout, cancel)? {
+            true => Ok(()),
+            false => Err("用户取消，停止等待控制器".into()),
+        }
+    }
+
+    /// 等待控制器回到 Idle：已确认空闲返回 `Ok(true)`，主动取消返回 `Ok(false)`；
+    /// 读到的报警、复位、断线或超时一律作为 `Err` 返回，不与取消混淆。
+    pub fn wait_until_idle_or_cancel(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<bool, String> {
         const MAX_ACTIVE_DRAIN: Duration = Duration::from_secs(1800);
         let start = Instant::now();
         let mut last_activity_at = start;
@@ -855,7 +885,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             .write_realtime(RealtimeCommand::StatusQuery)?;
         while last_activity_at.elapsed() < timeout && start.elapsed() < hard_cap {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err("用户取消，停止等待控制器".into());
+                return Ok(false);
             }
             if last_poll.elapsed() >= interval {
                 let _ = self.transport.write_realtime(RealtimeCommand::StatusQuery);
@@ -872,7 +902,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                     match report.activity {
                         MachineActivity::Idle if !report.has_sd_job() => {
                             self.state = DeviceState::Ready;
-                            return Ok(());
+                            return Ok(true);
                         }
                         MachineActivity::Idle | MachineActivity::Busy => {
                             let quantize = |p: (f64, f64, f64)| {
@@ -972,7 +1002,19 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         terminated = true;
                         break;
                     }
-                    if line.starts_with("error:") || line.starts_with("ALARM:") {
+                    if is_reset_banner(&line) {
+                        self.state = DeviceState::Lost;
+                        return Err(format!(
+                            "校验 SD 文件哈希时控制器复位（{}），拒绝执行",
+                            line.trim()
+                        ));
+                    }
+                    if line.starts_with("ALARM:") {
+                        self.state = DeviceState::Alarm;
+                        let msg = self.explain(&line);
+                        return Err(format!("固件计算文件哈希期间触发报警: {msg}"));
+                    }
+                    if line.starts_with("error:") {
                         let msg = self.explain(&line);
                         return Err(format!("固件计算文件哈希失败: {msg}"));
                     }
@@ -991,15 +1033,34 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         }
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    self.state = DeviceState::Disconnected;
+                    return Err("读取固件文件哈希期间设备连接断开，拒绝执行".into());
+                }
                 Err(_) => continue,
             }
         }
         if got_hash.is_none() {
             got_hash = sha256_from_hash_json(&json);
         }
-        if !terminated && got_hash.is_none() {
-            return Err("读取固件文件哈希超时或未响应".into());
+        if !terminated {
+            match self.drain_until_terminator(Duration::from_millis(150)) {
+                DrainResult::Terminated => {
+                    return Err("读取固件文件哈希超时（已排空迟到终止符），拒绝执行".into());
+                }
+                DrainResult::Disconnected => {
+                    self.state = DeviceState::Disconnected;
+                    return Err("读取固件文件哈希超时且设备连接已断开，拒绝执行".into());
+                }
+                DrainResult::TimedOut => {
+                    self.sequential_channel_dirty = true;
+                    self.state = DeviceState::Lost;
+                    return Err(
+                        "读取固件文件哈希未收到终止 ok（顺序信道存在残留/失步风险），拒绝执行"
+                            .into(),
+                    );
+                }
+            }
         }
         match got_hash {
             Some(actual) if actual.eq_ignore_ascii_case(expected_sha256) => Ok(true),
@@ -1339,9 +1400,13 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             break Ok(());
                         }
                     }
-                    Ok(None) if monitoring_sd => {
+                    Ok(None) => {
                         self.state = DeviceState::Disconnected;
-                        break Err("用户取消期间设备连接断开，SD 作业状态未知".to_owned());
+                        break Err(if monitoring_sd {
+                            "用户取消期间设备连接断开，SD 作业状态未知".to_owned()
+                        } else {
+                            "用户取消期间设备连接断开，作业状态未知".to_owned()
+                        });
                     }
                     _ => {}
                 }

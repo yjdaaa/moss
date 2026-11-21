@@ -21,8 +21,13 @@ const FALLBACK_APP_VERSION =
     ? __MOSS_FRONTEND_VERSION__
     : packageVersion;
 
-export function SettingsModal({
-  visible,
+export function SettingsModal(props) {
+  // 关闭即卸载内层状态，确保上次点开的明文 API 密钥与未保存草稿不会在下次打开时残留裸露
+  if (!props.visible) return null;
+  return <SettingsModalBody {...props} />;
+}
+
+function SettingsModalBody({
   onClose,
   onOpenVoice = null,
   hideTopPills: hideTopPillsProp,
@@ -61,7 +66,6 @@ export function SettingsModal({
   const [installProgress, setInstallProgress] = useState(null);
 
   useEffect(() => {
-    if (!visible) return;
     if (
       initialUpdateReport &&
       (!updateReport ||
@@ -74,11 +78,10 @@ export function SettingsModal({
         document.getElementById("settings-update-section")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     }
-  }, [visible, initialUpdateReport, focusUpdateSection, updateReport]);
+  }, [initialUpdateReport, focusUpdateSection, updateReport]);
 
   useEffect(() => {
-    if (!visible) return;
-
+    let alive = true;
     let saved = "ask";
     try {
       saved = globalThis.localStorage?.getItem("moss_close_action") || "ask";
@@ -90,6 +93,7 @@ export function SettingsModal({
 
     // 查询系统实际运行端口、首选端口与更新设置
     getJson("/api/system/info").then((res) => {
+      if (!alive) return;
       if (res.ok && res.data?.success) {
         const info = res.data.result || {};
         setSystemInfo(info);
@@ -104,17 +108,19 @@ export function SettingsModal({
       // 当前语音链路决定 Jev 加工反馈判断在哪配：内置链路在“语音中心 → 模型”，其余在这里
       voiceApi
         .status()
-        .then((status) => setVoiceMode(status?.mode || "official"))
-        .catch(() => setVoiceMode("official"));
+        .then((status) => { if (alive) setVoiceMode(status?.mode || "official"); })
+        .catch(() => { if (alive) setVoiceMode("official"); });
     }
     getJson("/api/jev/status").then((res) => {
+      if (!alive) return;
       if (res.ok && res.data?.success) {
         const jev = res.data.result || {};
         setJevEnabled(Boolean(jev.enabled));
         setJevMaskedKey(jev.masked_key || "");
       }
     });
-  }, [visible, hideTopPillsProp, onOpenVoice]);
+    return () => { alive = false; };
+  }, [hideTopPillsProp, onOpenVoice]);
 
   useEffect(() => {
     if (!updateReport?.has_update || !appUpdateAvailable()) return;
@@ -130,14 +136,24 @@ export function SettingsModal({
     return () => { alive = false; };
   }, [updateReport]);
 
-  // 安装进行中时每 0.5 秒刷新进度；结束（或没在安装）就停
+  // 安装进行中时每 0.5 秒刷新进度；单飞保护 + 卸载停止
   const installBusy = appUpdateBusy(installProgress);
   useEffect(() => {
-    if (!installBusy) return;
+    if (!installBusy) return undefined;
+    let alive = true;
+    let inFlight = false;
     const timer = setInterval(() => {
-      appUpdateStatus().then(setInstallProgress).catch(() => {});
+      if (inFlight) return;
+      inFlight = true;
+      appUpdateStatus()
+        .then((next) => { if (alive) setInstallProgress(next); })
+        .catch(() => {})
+        .finally(() => { inFlight = false; });
     }, 500);
-    return () => clearInterval(timer);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
   }, [installBusy]);
 
   const showJevSettings = preferencesShowJev({ hasVoiceCenter: Boolean(onOpenVoice), voiceMode });
@@ -153,7 +169,6 @@ export function SettingsModal({
   const backdropPressRef = useRef(false);
 
   useEffect(() => {
-    if (!visible) return undefined;
     const onKey = (e) => {
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
@@ -165,9 +180,7 @@ export function SettingsModal({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [visible, modalBusy, onClose]);
-
-  if (!visible) return null;
+  }, [modalBusy, onClose]);
 
   const handleActionChange = (action) => {
     setCloseAction(action);

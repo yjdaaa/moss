@@ -272,17 +272,14 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             return Err("未指定图片素材路径".into());
         }
 
-        let image_path = resolve_preview_file(std::path::Path::new(image_file), preview_roots)
-            .or_else(|_| {
-                if let Some(up) = upload_root {
-                    let candidate = up.join(image_file);
-                    if candidate.exists() {
-                        return Ok(candidate);
-                    }
-                }
-                Err("找不到指定的素材图片文件")
-            })
-            .map_err(|e| e.to_string())?;
+        let mut allowed_roots = preview_roots.to_vec();
+        if let Some(up) = upload_root
+            && !allowed_roots.iter().any(|existing| existing == up)
+        {
+            allowed_roots.push(up.to_path_buf());
+        }
+        let image_path = resolve_preview_file(std::path::Path::new(image_file), &allowed_roots)
+            .map_err(|_| "找不到指定的素材图片文件".to_string())?;
 
         let image_bytes = std::fs::read(&image_path).map_err(|e| format!("读取素材失败: {e}"))?;
 

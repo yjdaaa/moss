@@ -37,6 +37,7 @@ fn job_launcher_rejects_power_or_busy_state_before_writing_gcode() {
             format!("$30={max}"),
             "$32=1".into(),
             "ok".into(),
+            "error:3".into(),
             status.into(),
         ]);
         let observed = fake.clone();

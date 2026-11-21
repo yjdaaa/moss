@@ -373,7 +373,7 @@ fn partial_cd_fails_and_single_axis_cd_preserves_existing_limits() {
     );
     let mut device = DeviceConnection::new(fake);
     device.handshake().unwrap();
-    assert!(device.load_features(Duration::from_secs(1)));
+    assert_eq!(device.load_features(Duration::from_secs(1)), Ok(true));
     assert_eq!(device.travel_limits.x_travel_mm, Some(250.0));
     assert_eq!(device.travel_limits.y_travel_mm, Some(180.0));
     assert_eq!(device.travel_limits.x_accel_mm_s2, Some(900.0));
@@ -411,7 +411,7 @@ fn partial_cd_fails_and_single_axis_cd_preserves_existing_limits() {
     });
     dev2.handshake().unwrap();
     assert!(
-        !dev2.load_features(Duration::from_millis(60)),
+        dev2.load_features(Duration::from_millis(60)).is_err(),
         "未收到终止 ok 的半截 $CD 必须失败"
     );
     assert!(dev2.features.is_none());
@@ -823,4 +823,117 @@ fn sd_cancel_reports_disconnect_after_status_loses_sd_field() {
     assert_eq!(device.state(), DeviceState::Disconnected);
     assert_eq!(fake.lines(), ["$SD/Run=/sd/job.gcode"]);
     assert_eq!(fake.realtime(), [b'?', b'!', b'?', 0x18]);
+}
+
+#[test]
+fn verify_sd_file_hash_rejects_unterminated_reset_and_eof() {
+    let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let hash_line = format!(
+        "{{\"signature\":{{\"algorithm\":\"SHA2-256\",\"value\":\"{sha}\"}},\"path\":\"/sd/test.gcode\"}}"
+    );
+    // 1. 收到匹配哈希但紧接着连接断开（无终止 ok）→ 必须失败并标记 Disconnected
+    let mut eof_dev = DeviceConnection::new(FakeGrbl::new([hash_line.clone()]));
+    let eof_err = eof_dev
+        .verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_millis(80))
+        .unwrap_err();
+    assert!(eof_err.contains("断开"), "{eof_err}");
+    assert_eq!(eof_dev.state(), DeviceState::Disconnected);
+
+    // 2. 收到匹配哈希后遇复位横幅 → 必须失败并标记 Lost
+    let mut reset_dev = DeviceConnection::new(FakeGrbl::new([
+        hash_line.clone(),
+        "Grbl 3.7 ['$' for help]".into(),
+    ]));
+    let reset_err = reset_dev
+        .verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_millis(80))
+        .unwrap_err();
+    assert!(reset_err.contains("复位"), "{reset_err}");
+    assert_eq!(reset_dev.state(), DeviceState::Lost);
+
+    // 3. 收到匹配哈希但尾随 ok 超时未到 → 必须失败并标记顺序信道脏
+    struct HashWithoutOk {
+        line: String,
+        sent: std::sync::atomic::AtomicBool,
+    }
+    impl DeviceTransport for HashWithoutOk {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, _command: RealtimeCommand) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            if !self.sent.swap(true, Ordering::SeqCst) {
+                return Ok(Some(self.line.clone()));
+            }
+            std::thread::sleep(Duration::from_millis(15));
+            Err("timed out".into())
+        }
+    }
+    let mut stalled = DeviceConnection::new(HashWithoutOk {
+        line: hash_line,
+        sent: std::sync::atomic::AtomicBool::new(false),
+    });
+    let timeout_err = stalled
+        .verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_millis(50))
+        .unwrap_err();
+    assert!(timeout_err.contains("未收到终止 ok"), "{timeout_err}");
+    assert_eq!(stalled.state(), DeviceState::Lost);
+    let dirty_err = stalled.send_line("G1 X1").unwrap_err();
+    assert!(dirty_err.contains("未排空"), "{dirty_err}");
+}
+
+#[test]
+fn cd_reset_blocks_subsequent_idle_preflight() {
+    let fake = FakeGrbl::new(
+        [
+            "$30=1000",
+            "$32=1",
+            "ok",
+            "axes:",
+            "[MSG:INFO: Restarting]",
+            "<Idle|MPos:0,0,0>",
+        ]
+        .map(str::to_owned),
+    );
+    let mut device = DeviceConnection::new(fake);
+    device.handshake().unwrap();
+    let cd_err = device.load_features(Duration::from_secs(1)).unwrap_err();
+    assert!(cd_err.contains("复位"), "{cd_err}");
+    assert_eq!(device.state(), DeviceState::Lost);
+    let err = device
+        .verify_job_ready_adaptive(Duration::from_secs(1))
+        .unwrap_err();
+    assert!(err.contains("复位") && err.contains("连接断开"), "{err}");
+}
+
+#[test]
+fn cd_alarm_and_error3_are_distinguished_in_load_features_and_probe() {
+    // 1. 旧 GRBL 返回 error:3 视为不支持 $CD，静默返回 Ok(false)
+    let grbl = FakeGrbl::new(["$30=1000", "$32=1", "ok", "error:3"].map(str::to_owned));
+    let mut dev = DeviceConnection::new(grbl);
+    dev.handshake().unwrap();
+    assert_eq!(dev.load_features(Duration::from_secs(1)), Ok(false));
+    assert_eq!(dev.state(), DeviceState::Ready);
+
+    // 2. $CD 期间触发 ALARM 必须向上报错，且 probe_opened_device 不得伪报激光模式就绪
+    let spec = crate::ConnectionSpec::Tcp {
+        host: "127.0.0.1".into(),
+        port: 23,
+    };
+    let alarming = FakeGrbl::new(["$30=1000", "$32=1", "ok", "ALARM:1"].map(str::to_owned));
+    let report = crate::probe_opened_device(&spec, Box::new(alarming), Duration::from_secs(1));
+    assert!(!report.laser_mode_ok, "{}", report.summary);
+    assert!(report.summary.contains("报警"), "{}", report.summary);
+}
+
+#[test]
+fn stream_cancel_reports_eof_as_disconnect_while_sending_estop() {
+    let fake = FakeGrbl::new(Vec::<String>::new());
+    let mut device = DeviceConnection::new(fake.clone());
+    device.state = DeviceState::Ready;
+    let err = device.cancel().unwrap_err();
+    assert!(err.contains("连接断开"), "{err}");
+    assert_eq!(device.state(), DeviceState::Disconnected);
+    assert_eq!(fake.realtime(), [b'!', b'?', 0x18]);
 }

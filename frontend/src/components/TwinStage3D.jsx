@@ -97,9 +97,15 @@ export function TwinStage3D({
     }
   }, [syncStageViewport]);
 
+  const stageResizeCleanupRef = useRef(null);
+  useEffect(() => () => {
+    stageResizeCleanupRef.current?.();
+  }, []);
+
   const handleStageResizeStart = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
+    stageResizeCleanupRef.current?.();
     const startY = e.clientY;
     const startH = stageHeight;
     setResizingStage(true);
@@ -108,15 +114,19 @@ export function TwinStage3D({
       const dy = moveEvent.clientY - startY;
       updateStageHeight(startH + dy);
     };
-    const onUp = () => {
+    const cleanup = () => {
       setResizingStage(false);
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+      if (stageResizeCleanupRef.current === cleanup) {
+        stageResizeCleanupRef.current = null;
+      }
     };
+    stageResizeCleanupRef.current = cleanup;
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   }, [stageHeight, updateStageHeight]);
 
   const toggleHudCollapsed = useCallback(() => {

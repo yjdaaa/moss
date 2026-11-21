@@ -243,6 +243,12 @@ impl ApiService {
                         ));
                     }
                     if alters_alarm {
+                        // 与 HTTP 取消同口径推进取消世代，阻止并发待启动续雕复用急停前快照
+                        let _ = mark_job_cancelled_in_memory(
+                            &self.active_jobs,
+                            &self.launching_workflows,
+                            &job.workflow_id,
+                        );
                         job.cancel.cancel();
                         if let Err(error) = send_emergency_stop_transport(job.transport.as_ref()) {
                             return laser_contracts::ToolCallResult::err(format!(
@@ -417,11 +423,16 @@ impl ApiService {
         let uncertain_for_opener = self.uncertain_jobs.clone();
         let open_locks_for_opener = self.target_open_locks.clone();
         let active_for_opener = self.active_jobs.clone();
+        let launching_for_opener = self.launching_workflows.clone();
+        let short_io_for_opener = self.short_io_targets.clone();
         let cancel_for_opener = cancel.clone();
         let registered_job: std::sync::Arc<
             std::sync::Mutex<Option<(std::sync::Arc<ActiveJob>, laser_device::ConnectionSpec)>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let registered_for_opener = registered_job.clone();
+        let short_io_guard_slot: std::sync::Arc<std::sync::Mutex<Option<ShortIoGuard>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let short_io_guard_for_opener = short_io_guard_slot.clone();
         let job_id_for_opener = safe_job_id.clone();
 
         let opener: laser_tools::TransportOpener = std::sync::Arc::new(
@@ -439,7 +450,84 @@ impl ApiService {
                 let _open_guard = mutex
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                release_uncertain_target_handle(&uncertain_for_opener, &target_desc);
+                // 统一锁序 target_open_mutex -> active_jobs -> uncertain_jobs -> short_io_targets：
+                // 急停/软复位（alters_alarm）绝不被并发建连中的任务或探测阻塞，直接复用在途句柄并推进取消世代；
+                // 其他动作严禁在已有作业/待确认停止/探测占位期间并发打开第二个物理通道。
+                if alters_alarm {
+                    let active_hit = active_for_opener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .values()
+                        .find(|j| j.target == target_desc)
+                        .cloned();
+                    if let Some(busy) = active_hit {
+                        let _ = mark_job_cancelled_in_memory(
+                            &active_for_opener,
+                            &launching_for_opener,
+                            &busy.workflow_id,
+                        );
+                        busy.cancel.cancel();
+                        return Ok(Box::new(busy.transport.clone())
+                            as Box<dyn laser_device::DeviceTransport>);
+                    }
+                    let uncertain_hit = uncertain_for_opener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .values()
+                        .find(|j| j.target == target_desc)
+                        .cloned();
+                    if let Some(uncertain) = uncertain_hit {
+                        uncertain.cancel.cancel();
+                        if let Some(existing) = uncertain.current_handle() {
+                            return Ok(Box::new(existing) as Box<dyn laser_device::DeviceTransport>);
+                        }
+                    }
+                    let short_io_hit = short_io_for_opener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&target_desc)
+                        .map(|(_, t)| t.clone());
+                    if let Some(existing) = short_io_hit {
+                        return Ok(Box::new(existing) as Box<dyn laser_device::DeviceTransport>);
+                    }
+                } else {
+                    {
+                        let jobs = active_for_opener
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(busy) = jobs.values().find(|j| j.target == target_desc) {
+                            return Err(format!(
+                                "设备 {target_desc} 正在执行 {}，禁止并发打开新通道",
+                                busy.workflow_id
+                            ));
+                        }
+                    }
+                    if !is_mutating_sequential {
+                        let uncertain_wf = uncertain_for_opener.lock().ok().and_then(|uncertain| {
+                            uncertain
+                                .values()
+                                .find(|j| j.target == target_desc)
+                                .map(|j| j.workflow_id.clone())
+                        });
+                        if let Some(wf_id) = uncertain_wf {
+                            return Err(format!(
+                                "设备 {target_desc} 存在待确认停止的任务 {wf_id}，请先核实硬件停机或按急停"
+                            ));
+                        }
+                    }
+                    if short_io_for_opener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains_key(&target_desc)
+                    {
+                        return Err(format!(
+                            "设备 {target_desc} 正在执行连接探测或状态查询，禁止并发打开新通道"
+                        ));
+                    }
+                    if is_mutating_sequential {
+                        release_uncertain_target_handle(&uncertain_for_opener, &target_desc);
+                    }
+                }
                 let opened = (factory)(spec)?;
                 if is_mutating_sequential
                     && shutdown_flag.load(std::sync::atomic::Ordering::Acquire)
@@ -482,6 +570,15 @@ impl ApiService {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                         Some((job, spec.clone()));
+                } else {
+                    let guard = register_short_io_target(
+                        &short_io_for_opener,
+                        &target_desc,
+                        transport_arc.clone(),
+                    );
+                    *short_io_guard_for_opener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(guard);
                 }
                 Ok(Box::new(transport_arc) as Box<dyn laser_device::DeviceTransport>)
             },
@@ -492,11 +589,18 @@ impl ApiService {
             registered: std::sync::Arc<
                 std::sync::Mutex<Option<(std::sync::Arc<ActiveJob>, laser_device::ConnectionSpec)>>,
             >,
+            short_io_guard: std::sync::Arc<std::sync::Mutex<Option<ShortIoGuard>>>,
             cancel: laser_device::CancellationToken,
+            dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
             succeeded: bool,
         }
         impl Drop for SafeActionJobCleanup {
             fn drop(&mut self) {
+                let _ = self
+                    .short_io_guard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
                 let Some((job, spec)) = self
                     .registered
                     .lock()
@@ -505,7 +609,10 @@ impl ApiService {
                 else {
                     return;
                 };
-                if !self.succeeded && self.cancel.is_cancelled() {
+                if !self.succeeded
+                    && (self.cancel.is_cancelled()
+                        || self.dispatched.load(std::sync::atomic::Ordering::Acquire))
+                {
                     let uncertain_entry = UncertainJob::from_active(&job, Some(spec));
                     let mut jobs = self
                         .active_jobs
@@ -527,14 +634,17 @@ impl ApiService {
                 }
             }
         }
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut cleanup = SafeActionJobCleanup {
             active_jobs: self.active_jobs.clone(),
             uncertain_jobs: self.uncertain_jobs.clone(),
             registered: registered_job,
+            short_io_guard: short_io_guard_slot,
             cancel: cancel.clone(),
+            dispatched: dispatched.clone(),
             succeeded: false,
         };
-        let result = laser_tools::execute_laser_safe_action_with_gate_and_cancel(
+        let result = laser_tools::execute_laser_safe_action_with_gate_cancel_and_dispatch(
             args,
             &opener,
             &|| {
@@ -543,6 +653,7 @@ impl ApiService {
                     .is_none_or(|p| p.load(std::sync::atomic::Ordering::Acquire))
             },
             is_mutating_sequential.then_some(&cancel),
+            is_mutating_sequential.then_some(dispatched.as_ref()),
         );
         cleanup.succeeded = result.success;
         result
@@ -1268,7 +1379,7 @@ impl ApiService {
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(lines.len(), Ordering::Relaxed);
         progress.preflighting.store(true, Ordering::Relaxed);
-        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
+        let (transport, job) = {
             let open_mutex = target_open_mutex(&self.target_open_locks, &target);
             let _open_guard = open_mutex
                 .lock()
@@ -1287,67 +1398,97 @@ impl ApiService {
                     job_spec.cancelled_code,
                 );
             }
-            release_uncertain_target_handle(&self.uncertain_jobs, &target);
-            match self.open_device_transport(&spec) {
-                Ok(t) => std::sync::Arc::from(t),
-                Err(e) if self.is_shutdown_requested() => {
+            {
+                let jobs = self
+                    .active_jobs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(busy) = jobs.values().find(|j| j.target == target) {
                     return failed(
-                        503,
-                        format!("服务正在关闭 ({target}): {e}"),
-                        "host_shutting_down",
-                    );
-                }
-                Err(e) => {
-                    return failed(
-                        400,
-                        format!("设备连接失败 ({target}): {e}"),
-                        "device_unreachable",
+                        409,
+                        format!(
+                            "设备 {target} 正在执行 {}，请等待完成或先取消",
+                            busy.workflow_id
+                        ),
+                        "device_busy",
                     );
                 }
             }
-        };
-        let job = std::sync::Arc::new(ActiveJob {
-            workflow_id: job_id.clone(),
-            mode: spec.mode(),
-            target: target.clone(),
-            cancel: cancel.clone(),
-            progress: progress.clone(),
-            transport: transport.clone(),
-            started_at: std::time::Instant::now(),
-            spec: Some(spec.clone()),
-        });
-        {
-            let mut jobs = self
-                .active_jobs
+            release_uncertain_target_handle(&self.uncertain_jobs, &target);
+            if self
+                .short_io_targets
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(busy) = jobs.values().find(|j| j.target == target) {
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&target)
+            {
                 return failed(
                     409,
-                    format!(
-                        "设备 {target} 正在执行 {}，请等待完成或先取消",
-                        busy.workflow_id
-                    ),
+                    format!("设备 {target} 正在执行连接探测或状态查询，请稍后重试"),
                     "device_busy",
                 );
             }
-            if self.is_shutdown_requested() {
-                return failed(
-                    503,
-                    "服务正在关闭，已中止新任务预检".into(),
-                    "host_shutting_down",
-                );
+            let transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
+                match self.open_device_transport(&spec) {
+                    Ok(t) => std::sync::Arc::from(t),
+                    Err(e) if self.is_shutdown_requested() => {
+                        return failed(
+                            503,
+                            format!("服务正在关闭 ({target}): {e}"),
+                            "host_shutting_down",
+                        );
+                    }
+                    Err(e) => {
+                        return failed(
+                            400,
+                            format!("设备连接失败 ({target}): {e}"),
+                            "device_unreachable",
+                        );
+                    }
+                };
+            let job = std::sync::Arc::new(ActiveJob {
+                workflow_id: job_id.clone(),
+                mode: spec.mode(),
+                target: target.clone(),
+                cancel: cancel.clone(),
+                progress: progress.clone(),
+                transport: transport.clone(),
+                started_at: std::time::Instant::now(),
+                spec: Some(spec.clone()),
+            });
+            {
+                let mut jobs = self
+                    .active_jobs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(busy) = jobs.values().find(|j| j.target == target) {
+                    return failed(
+                        409,
+                        format!(
+                            "设备 {target} 正在执行 {}，请等待完成或先取消",
+                            busy.workflow_id
+                        ),
+                        "device_busy",
+                    );
+                }
+                if self.is_shutdown_requested() {
+                    return failed(
+                        503,
+                        "服务正在关闭，已中止新任务预检".into(),
+                        "host_shutting_down",
+                    );
+                }
+                if cancel.is_cancelled() {
+                    let _ = send_emergency_stop_transport(transport.as_ref());
+                    return failed(
+                        409,
+                        format!("{label}在预检前已取消，急停 0x18 已发送"),
+                        job_spec.cancelled_code,
+                    );
+                }
+                jobs.insert(job_id.clone(), job.clone());
             }
-            if cancel.is_cancelled() {
-                let _ = send_emergency_stop_transport(transport.as_ref());
-                return failed(
-                    409,
-                    format!("{label}在预检前已取消，急停 0x18 已发送"),
-                    job_spec.cancelled_code,
-                );
-            }
-            jobs.insert(job_id.clone(), job.clone());
-        }
+            (transport, job)
+        };
         struct ActivePreflightCleanup {
             active_jobs: ActiveJobs,
             uncertain_jobs: UncertainJobs,
@@ -1408,7 +1549,20 @@ impl ApiService {
                 "device_not_ready",
             );
         }
-        device.load_features(std::time::Duration::from_secs(3));
+        if let Err(e) = device.load_features(std::time::Duration::from_secs(3)) {
+            if cancel.is_cancelled() {
+                return failed(
+                    409,
+                    format!("{label}在读取配置期间已取消，急停 0x18 已发送: {e}"),
+                    job_spec.cancelled_code,
+                );
+            }
+            return failed(
+                400,
+                format!("设备 $CD 配置读取异常 ({target}): {e}"),
+                "device_not_ready",
+            );
+        }
         let device_scale = match device
             .verify_job_ready_adaptive_cancellable(std::time::Duration::from_secs(3), Some(&cancel))
         {

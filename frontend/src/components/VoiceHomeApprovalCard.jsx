@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 
@@ -7,25 +7,40 @@ export default function VoiceHomeApprovalCard() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const refresh = async () => {
+  const mountedRef = useRef(true);
+  const pollSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const refresh = useCallback(async (fromPoll = false) => {
+    if (fromPoll && inFlightRef.current) return;
+    const seq = ++pollSeqRef.current;
+    inFlightRef.current = true;
     try {
       const data = await voiceApi.homeApprovals();
-      if (!Array.isArray(data.approvals) || typeof data.can_control !== "boolean") throw new Error("家居审批安全状态不可验证");
+      if (!mountedRef.current || seq !== pollSeqRef.current) return;
+      if (!Array.isArray(data.approvals) || typeof data.can_control !== "boolean") {
+        throw new Error("家居审批安全状态不可验证");
+      }
       setItems(data.approvals);
-    } catch (e) { setError(e?.message || "无法读取家居审批"); }
-  };
-  useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      try {
-        const data = await voiceApi.homeApprovals();
-        if (active && Array.isArray(data.approvals) && typeof data.can_control === "boolean") setItems(data.approvals);
-      } catch (e) { if (active) setError(e?.message || "审批列表不可用"); }
-    };
-    void poll();
-    const timer = setInterval(poll, 5000);
-    return () => { active = false; clearInterval(timer); };
+      setError("");
+    } catch (e) {
+      if (mountedRef.current && seq === pollSeqRef.current) {
+        setError(e?.message || (fromPoll ? "审批列表不可用" : "无法读取家居审批"));
+      }
+    } finally {
+      if (seq === pollSeqRef.current) inFlightRef.current = false;
+    }
   }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    void refresh(false);
+    const timer = setInterval(() => { void refresh(true); }, 5000);
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+      clearInterval(timer);
+    };
+  }, [refresh]);
   const cancel = async (item) => {
     setBusy(item.approval_id);
     setError("");
@@ -55,7 +70,7 @@ export default function VoiceHomeApprovalCard() {
     <section className="voice-card" aria-label="HomeControl 独立审批收件箱">
       <h3>家居控制审批（NV15）</h3>
       <p role="status">语音申请的家居动作在这里逐个批准；批准后会实际控制设备，结果未知时不会自动重发。不确定时请拒绝。</p>
-      <button type="button" disabled={!!busy} onClick={refresh}>刷新家居审批</button>
+      <button type="button" disabled={!!busy} onClick={() => void refresh(false)}>刷新家居审批</button>
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
       {items.length === 0 ? <p>当前没有家居审批记录。</p> : (

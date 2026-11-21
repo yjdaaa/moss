@@ -1263,7 +1263,16 @@ export function DrawPage({ onNavigate, active = true }) {
   async function loadSerialPorts() {
     try {
       const response = await apiFetch("/api/ui/serial-ports");
-      const data = await response.json();
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok || !data?.success) {
+        setStatus(`读取串口列表失败：${(typeof data?.result === "string" && data.result) || `HTTP ${response.status}`}`);
+        return;
+      }
       const ports = Array.isArray(data?.result?.ports) ? data.result.ports : [];
       setSerialPorts(ports);
       if (ports.length && !ports.includes(formRef.current.port)) updateForm("port", ports[0]);

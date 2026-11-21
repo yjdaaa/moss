@@ -131,9 +131,17 @@ export function WorkbenchMaterialCard({
                 onChange={(e) => setSelectedThickness(e.target.value)}
                 className="select-input wb-field-8"
               >
-                {availableThicknesses.map((th) => (
-                  <option key={th} value={String(th)}>{th} mm</option>
-                ))}
+                {availableThicknesses.length > 0 ? (
+                  availableThicknesses.map((th) => (
+                    <option key={th} value={String(th)}>{th} mm</option>
+                  ))
+                ) : (
+                  <option value={String(selectedThickness || 3)}>
+                    {materials.find((m) => m.name === selectedMaterial)?.surface
+                      ? `表面通用（${selectedThickness || 3} mm）`
+                      : `${selectedThickness || 3} mm`}
+                  </option>
+                )}
               </select>
             </div>
           </div>

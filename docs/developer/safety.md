@@ -21,7 +21,7 @@
 - 退出路径：`laser_host::ShutdownCoordinator`、panic 钩子、控制台关闭钩子、Tauri 关闭事件（含 macOS `RunEvent::Exit`）与托盘/菜单栏退出。
 - 本地命令与桌面自动化：`command_execution_tool`（30 秒超时）、`open_app_tool`（Windows 经 `ShellExecuteW` 直调系统关联而不经过 `cmd /C start`，禁止向 `.cmd`/`.bat` 传参并对非 `.exe` 目标拦截 `cmd.exe` 元字符；macOS `/Applications/*.app` + `open -a <app> -- <payload>` 10 秒超时，拒绝 NUL/控制字符）、`shortcut_key_execution_tool`（Windows 上通过 PowerShell `SendKeys`、macOS 上媒体/音量白名单走 `osascript`，均 10 秒超时）；`generate_text_image_tool` 单边像素上限 8192。
 - 局域网访问：`AuthManager`、`/v1/auth/*` 与公开路由白名单。
-- 浏览器来源校验（CORS）：`laser-api` 的 `is_allowed_origin`、`handle_http_from`、`MOSS_ALLOWED_ORIGINS` 解析（`laser_runtime::config::parse_allowed_origins`）。不得恢复 `Access-Control-Allow-Origin: *`，不得把来源校验改成前缀匹配；回环连接的 `Host` 白名单（`is_allowed_loopback_host`，防 DNS 重绑定）不得放宽成任意主机名；回环请求免鉴权，所以跨站网页的 POST 必须在路由前以 403 `origin_not_allowed` 拦下（见 [api-contracts.md](api-contracts.md) §1.6）。
+- 浏览器来源校验（CORS）：`laser-api` 的 `is_allowed_origin`、`handle_http_from`、`MOSS_ALLOWED_ORIGINS` 解析（`laser_runtime::config::parse_allowed_origins`）。不得恢复 `Access-Control-Allow-Origin: *`，不得把来源校验改成前缀匹配；前端开发端口（`5173/5177/5178`）仅在 debug 构建的回环请求中允许，release 构建默认拒绝；回环连接的 `Host` 白名单（`is_allowed_loopback_host`，防 DNS 重绑定）不得放宽成任意主机名；回环请求免鉴权，所以跨站网页的 POST 必须在路由前以 403 `origin_not_allowed` 拦下（见 [api-contracts.md](api-contracts.md) §1.6）。
 
 不要用 `command_execution_tool`、桌面自动化、HTTP 逐行发送或前端直连来绕过 workflow 的确认门和在线检查。
 
@@ -54,11 +54,11 @@
 - SD 上传后核对固件返回的文件哈希；固件不返回哈希（未启用 HashFS）时**拒绝 `$SD/Run`**，任务记为 failed（2026-10-14 用户决定，此前为继续执行并警告）。软件比对通过也不能当作实机验收。
 - SD 取消期间持续按脱机监控处理，即使状态报告已去掉 `SD:` 字段。`<Alarm|…>`、`ALARM:N`、迟到的 `error:N`、复位、断线或未能确认停稳均记为 `failed`，保留故障原因并尽力发送 `0x18`。
 - 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径；`resolve_connection_spec` 只在参数缺失时回退到 `GRBL_DEFAULT_PORT` / `LASER_NETWORK_HOST`，且忽略含 `<` 的占位值。
-- 局域网配对 token 哈希与固定码哈希在 `AuthManager` 的 `state` 锁内同步持久化到 `settings.json`（写盘失败中止变更，支持全部撤销；临时配对码只在内存）；配对码只允许回环签发。
+- 局域网配对 token 哈希与固定码哈希在 `AuthManager` 的 `state` 锁内同步持久化到 `settings.json`（写盘失败中止变更，支持全部撤销；临时配对码只在内存）；配对码只允许回环签发，启用桌面会话时另须校验 `X-Moss-Desktop-Session`（403 `desktop_session_required`）。
 
 ## 4. 当前边界与已知未接线项
 
-- NV9 第三方 MCP 已接入桌面内置语音：配置命令只能来自主窗口当前实际回环来源，不提供 HTTP 管理接口；stdio 仍具有当前用户系统权限，不是沙箱。工具默认 Ask，不因激光严格模式关闭或第三方声明只读而免批。名称、64 工具预算、停用状态在列表和调用处校验；来源会话、凭据／配置／schema 与参数绑定单次审批，改配置或撤销设备使未消费审批失效。执行前审计失败不放行；执行后写失败、超时或掉线不自动重发。详见 [第三方 MCP](../integration/moss-external-mcp.md)。
+- NV9 第三方 MCP 已接入桌面内置语音：配置命令只能来自主窗口当前实际回环来源，不提供 HTTP 管理接口；stdio 仍具有当前用户系统权限，不是沙箱，但子进程在 Unix 下通过独立进程组、Windows 下通过 `CREATE_NO_WINDOW` + `JobObject` 约束整棵进程树，HTTP 传输禁用系统代理（`.no_proxy()`）并将 `localhost` 固定解析至 `127.0.0.1`。工具默认 Ask，不因激光严格模式关闭或第三方声明只读而免批。名称、64 工具预算、停用状态在列表和调用处校验；来源会话、凭据／配置／schema 与参数绑定单次审批，改配置或撤销设备使未消费审批失效。执行前审计失败不放行；执行后写失败、超时或掉线不自动重发。详见 [第三方 MCP](../integration/moss-external-mcp.md)。
 
 改相关代码时先核对这些现状，不要按文档或提示词想当然：
 

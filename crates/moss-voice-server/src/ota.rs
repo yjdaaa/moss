@@ -184,7 +184,15 @@ pub(crate) fn host_without_port(host: &str) -> Option<String> {
         return None;
     }
     if let Some(rest) = host.strip_prefix('[') {
-        return rest.split_once(']').map(|(inner, _)| format!("[{inner}]"));
+        let (inner, after) = rest.split_once(']')?;
+        inner.parse::<std::net::Ipv6Addr>().ok()?;
+        if !after.is_empty() {
+            let port = after.strip_prefix(':')?;
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+        }
+        return Some(format!("[{inner}]"));
     }
     let name = match host.rsplit_once(':') {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
@@ -291,7 +299,8 @@ async fn ota_post(
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "127.0.0.1".into()),
     };
-    let token = if status == DeviceStatus::Allowed {
+    // 仅在设备已允许且 Client-Id 与绑定记录一致（bound）时签发 token 与 MQTT 配置，防止仅凭 MAC 冒领签名或探测
+    let token = if bound {
         shared
             .signer
             .issue(&info.client_id, &info.device_id, unix_now())
@@ -343,7 +352,8 @@ async fn ota_post(
         info.model,
         info.version,
         match status {
-            DeviceStatus::Allowed => "已允许，已下发连接地址与 token",
+            DeviceStatus::Allowed if bound => "已允许，已下发连接地址与 token",
+            DeviceStatus::Allowed => "设备编号已登记但 Client-Id 不一致，未下发 token",
             DeviceStatus::Pending => "待允许：请在语音中心允许后重启设备",
             DeviceStatus::Revoked => "已撤销，不下发 token",
         }
@@ -355,10 +365,10 @@ async fn ota_post(
         now_ms: unix_now().saturating_mul(1000),
         timezone_offset_minutes: timezone_offset_minutes(),
         current_version: info.version,
-        // n71 常连模式：只给已允许、拿到 token 的设备；MQTT 用户名是设备编号，密码就是同一个 token
+        // n71 常连模式：只给已允许且 Client-Id 绑定一致、拿到 token 的设备；MQTT 用户名是设备编号，密码就是同一个 token
         mqtt: shared
             .mqtt_ports
-            .filter(|_| status == DeviceStatus::Allowed && !token.is_empty())
+            .filter(|_| bound && !token.is_empty())
             .map(|ports| moss_xiaozhi_proto::ota::MqttOffer {
                 endpoint: format!("{host}:{}", ports.port),
                 client_id: info.client_id.clone(),
@@ -401,6 +411,11 @@ mod tests {
         );
         assert_eq!(host_without_port(""), None);
         assert_eq!(host_without_port("evil/host:80"), None);
+        // 畸形方括号 Host（非合法 IPv6 或 ] 后尾随非法字符）必须拒绝
+        assert_eq!(host_without_port("[evil.example/p?x=1#]:8003"), None);
+        assert_eq!(host_without_port("[fe80::1]evil:8003"), None);
+        assert_eq!(host_without_port("[fe80::1]:abc"), None);
+        assert_eq!(host_without_port("[::1]"), Some("[::1]".to_owned()));
     }
 
     #[test]

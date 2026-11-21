@@ -304,26 +304,54 @@ pub fn scan_hosts_port(
     scan_hosts_port_with(hosts, port, connect_timeout, &|_| {})
 }
 
-/// 每个地址一个线程同时连接（一个 /24 最多 253 个，约一个连接超时即可扫完），连上即回调。
+/// 固定工作线程池并发探测一批地址的 `port`（上限 32 线程，避免按 IP 建线程触发系统线程耗尽），连上即回调。
 pub fn scan_hosts_port_with(
     hosts: Vec<std::net::Ipv4Addr>,
     port: u16,
     connect_timeout: Duration,
     on_open: &(dyn Fn(std::net::Ipv4Addr) + Sync),
 ) -> Vec<std::net::Ipv4Addr> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MAX_SCAN_WORKERS: usize = 32;
+    if hosts.is_empty() {
+        return Vec::new();
+    }
     let open = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for host in hosts {
-            let open = &open;
-            scope.spawn(move || {
-                let addr = std::net::SocketAddr::from((host, port));
-                if TcpStream::connect_timeout(&addr, connect_timeout).is_ok() {
-                    on_open(host);
-                    if let Ok(mut found) = open.lock() {
-                        found.push(host);
-                    }
+    let next_index = AtomicUsize::new(0);
+    let worker_count = hosts.len().min(MAX_SCAN_WORKERS);
+    let probe_loop = |hosts: &[std::net::Ipv4Addr],
+                      next_index: &AtomicUsize,
+                      open: &Mutex<Vec<std::net::Ipv4Addr>>| {
+        loop {
+            let idx = next_index.fetch_add(1, Ordering::Relaxed);
+            let Some(&host) = hosts.get(idx) else {
+                break;
+            };
+            let addr = std::net::SocketAddr::from((host, port));
+            if TcpStream::connect_timeout(&addr, connect_timeout).is_ok() {
+                on_open(host);
+                if let Ok(mut found) = open.lock() {
+                    found.push(host);
                 }
-            });
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        let mut spawned = 0usize;
+        for _ in 0..worker_count {
+            let hosts_ref = hosts.as_slice();
+            let next_ref = &next_index;
+            let open_ref = &open;
+            if std::thread::Builder::new()
+                .name("moss-lan-scan".into())
+                .spawn_scoped(scope, move || probe_loop(hosts_ref, next_ref, open_ref))
+                .is_ok()
+            {
+                spawned += 1;
+            }
+        }
+        if spawned == 0 {
+            probe_loop(hosts.as_slice(), &next_index, &open);
         }
     });
     let mut found = open.into_inner().unwrap_or_default();

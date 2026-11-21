@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
+import { notifyMaterialsUpdated } from "../materialSelectState.js";
 import {
   WIZARD_STEPS,
   buildPatternPreviewPayload,
@@ -117,6 +118,7 @@ export function CalibrationWizard({
       ...body,
     });
     if (res.ok && res.data?.success) {
+      notifyMaterialsUpdated();
       setNote(target.note ? `${okText}${target.note}` : okText);
       return true;
     }
@@ -172,7 +174,11 @@ export function CalibrationWizard({
     });
     if (!ok) return;
     const res = await postJson("/api/time-calibration", { action: "reset" });
-    if (res.ok && res.data?.success) setTimeStatus(res.data.result);
+    if (res.ok && res.data?.success) {
+      setTimeStatus(res.data.result);
+    } else {
+      showAlert(res.data?.result || res.error || "清除工时校准失败", { title: "清除失败", tone: "error" });
+    }
   };
 
   const sendButton = (stepId) =>

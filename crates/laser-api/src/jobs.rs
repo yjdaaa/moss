@@ -267,7 +267,9 @@ impl UncertainJob {
             .take()
     }
 
-    fn current_handle(&self) -> Option<std::sync::Arc<dyn laser_device::DeviceTransport>> {
+    pub(crate) fn current_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn laser_device::DeviceTransport>> {
         self.transport
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -347,6 +349,51 @@ impl UncertainJob {
 pub type UncertainJobs = std::sync::Arc<JobRegistry<UncertainJob>>;
 pub(crate) type TargetOpenLocks =
     std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>>;
+/// 正在执行只读探测或非变更安全动作（status / laser_off / 倍率 / 急停直写）的独占句柄表。
+/// 键为 `ConnectionSpec::describe()`，值为 `(唯一代次, 传输句柄)`，防止并发双开串口/Telnet，
+/// 同时允许实时急停复用在途句柄写 0x18 而不等待探测结束。
+pub(crate) type ShortIoTargets = std::sync::Arc<
+    std::sync::Mutex<HashMap<String, (u64, std::sync::Arc<dyn laser_device::DeviceTransport>)>>,
+>;
+
+static SHORT_IO_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) struct ShortIoGuard {
+    targets: ShortIoTargets,
+    target: String,
+    id: u64,
+}
+
+impl Drop for ShortIoGuard {
+    fn drop(&mut self) {
+        let mut map = self
+            .targets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if map.get(&self.target).is_some_and(|(id, _)| *id == self.id) {
+            // 在锁内 drop 最后一个传输 Arc，确保底层串口/TCP fd 释放先于下一请求通过占位校验
+            let removed = map.remove(&self.target);
+            drop(removed);
+        }
+    }
+}
+
+pub(crate) fn register_short_io_target(
+    targets: &ShortIoTargets,
+    target: &str,
+    transport: std::sync::Arc<dyn laser_device::DeviceTransport>,
+) -> ShortIoGuard {
+    let id = SHORT_IO_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut map = targets
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.insert(target.to_owned(), (id, transport));
+    ShortIoGuard {
+        targets: targets.clone(),
+        target: target.to_owned(),
+        id,
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct LaunchReservationState {

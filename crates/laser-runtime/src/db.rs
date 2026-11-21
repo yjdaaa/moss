@@ -1793,6 +1793,19 @@ impl RuntimeDb {
             .optional()?;
         match existing {
             None => {
+                // 未认证局域网设备最多保留 64 条 pending 记录，超限淘汰最旧 pending，防止无限膨胀拖慢主库锁。
+                const MAX_PENDING_VOICE_DEVICES: i64 = 64;
+                tx.execute(
+                    "DELETE FROM voice_devices
+                     WHERE status = ?1
+                       AND device_id NOT IN (
+                           SELECT device_id FROM voice_devices
+                           WHERE status = ?1
+                           ORDER BY last_seen DESC, rowid DESC
+                           LIMIT ?2
+                       )",
+                    params![VOICE_DEVICE_PENDING, MAX_PENDING_VOICE_DEVICES - 1],
+                )?;
                 tx.execute(
                     "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen, status_revision)
                      VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)",

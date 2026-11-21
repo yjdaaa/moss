@@ -1,6 +1,7 @@
 import React from "react";
 import { AlertTriangle, Box, Clock, Cpu, Download, Flame, PauseCircle, Ruler, Square } from "lucide-react";
 import { resolveApiUrl } from "../../api/client.js";
+import { isRemoteMode, readAuthToken } from "../../authSession.js";
 import { writeFramingShape } from "../../aiPreviewState.js";
 import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
 import { timeEstimateNote } from "../../fillOptions.js";
@@ -52,6 +53,8 @@ export function WorkbenchMonitorCard({
                 src={previewUrl}
                 alt="加工轨迹预览"
                 onError={(e) => {
+                  // 远程 App 或局域网配对浏览器下 /preview 需要 Bearer 头，<img> 直链会 401，不覆写为无鉴权直链
+                  if (isRemoteMode() || Boolean(readAuthToken())) return;
                   const imgFile = currentWorkflow?.artifacts?.image_file;
                   if (imgFile && !e.currentTarget.dataset.retried) {
                     e.currentTarget.dataset.retried = "true";

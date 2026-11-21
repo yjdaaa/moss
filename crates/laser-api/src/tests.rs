@@ -246,7 +246,8 @@ fn gated_transport_factory(
             while !self.gate.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err("测试结束：模拟连接断开".into())
+            // 放行当前阻塞写，让 JobWorker 在紧接的取消检查点进入正常 ! -> ? -> 0x18 取消路径（不再伪造写报错）
+            Ok(())
         }
         fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
             if command == laser_device::RealtimeCommand::StatusQuery {

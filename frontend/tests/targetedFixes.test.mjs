@@ -381,3 +381,69 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   assert.match(builtinCard, /stopMicSession\(true\)/, "切换模型来源与卸载时须中止在途录音与麦克风授权");
   assert.match(builtinCard, /disabled=\{Boolean\(busy \|\| mixBusy \|\| pipeline\?\.running \|\| recordingChain \|\| openingMic\)\}/, "试跑与录音期间须禁用整栏模型切换下拉框");
 });
+
+test("前端安全与状态止血回归护栏（发送未知结果、拖拽不吞急停、局域网鉴权预览、弹窗层级与关闭重置）", () => {
+  // C-1: HomePage / MaterialLabPage / AiPreviewCenter 遇到 res.status === 0 必须按结果未知继续轮询
+  const homeSrc = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  assert.equal((homeSrc.match(/res\.status === 0/g) || []).length >= 2, true, "工作台发送与续雕均须处理 status === 0");
+  assert.match(homeSrc, /sendInFlightRef\.current/, "工作台确认开刻后自动握手期间须防重入双发");
+
+  const matLabSrc = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
+  assert.match(matLabSrc, /res\.status === 0[\s\S]{0,600}startMatrixPolling\(matrixId\)/, "材料矩阵发送断连须继续轮询原任务");
+
+  const aiPreviewSrc = readFileSync(path.join(srcRoot, "components/AiPreviewCenter.jsx"), "utf8");
+  assert.match(aiPreviewSrc, /res\.status === 0[\s\S]{0,600}connectionLost:\s*true/, "AI 预览窗开刻断连须转入跟踪态");
+
+  // C-2: WorkbenchCanvas 拖拽吞 click 必须带 setTimeout 撤除、监听 pointercancel 并在卸载时清理
+  const canvasSrc = readFileSync(path.join(srcRoot, "components/WorkbenchCanvas.jsx"), "utf8");
+  assert.match(canvasSrc, /window\.setTimeout\(\(\)\s*=>\s*\{\s*document\.removeEventListener\("click",\s*swallowClick/);
+  assert.match(canvasSrc, /pointercancel/);
+
+  // C-3: PreviewImage 与 WorkbenchMonitorCard 均按 isRemoteMode() || Boolean(readAuthToken()) 走鉴权 blob
+  const previewImgSrc = readFileSync(path.join(srcRoot, "components/draw/PreviewImage.jsx"), "utf8");
+  assert.match(previewImgSrc, /isRemoteMode\(\)\s*\|\|\s*Boolean\(readAuthToken\(\)\)/);
+  const monitorSrc = readFileSync(path.join(srcRoot, "components/workbench/WorkbenchMonitorCard.jsx"), "utf8");
+  assert.match(monitorSrc, /if\s*\(isRemoteMode\(\)\s*\|\|\s*Boolean\(readAuthToken\(\)\)\)\s*return;/);
+
+  // C-4: ApprovalCenter 必须压在 AiPreviewCenter 之上
+  const approvalSrc = readFileSync(path.join(srcRoot, "components/ApprovalCenter.jsx"), "utf8");
+  assert.match(approvalSrc, /approval-center-modal/);
+
+  // C-5: MaterialModal 过滤 surface 键且按 resolvedExistingThicknesses 判裁剪
+  const matModalSrc = readFileSync(path.join(srcRoot, "components/MaterialModal.jsx"), "utf8");
+  assert.match(matModalSrc, /pruneMissingThicknesses:\s*isEditing && Boolean\(resolvedExistingThicknesses\)/);
+
+  // C-7: SettingsModal 与 CloseConfirmModal 采用外层 visible 卸载重置内层状态
+  const settingsSrc = readFileSync(path.join(srcRoot, "components/SettingsModal.jsx"), "utf8");
+  assert.match(settingsSrc, /if\s*\(!props\.visible\)\s*return null;\s*return <SettingsModalBody/);
+  const closeSrc = readFileSync(path.join(srcRoot, "components/CloseConfirmModal.jsx"), "utf8");
+  assert.match(closeSrc, /if\s*\(!visible\)\s*return null;\s*return <CloseConfirmModalBody/);
+
+  // C-13: LiveDebugTraces 清空确认使用合法 warning + danger
+  const tracesSrc = readFileSync(path.join(srcRoot, "components/voice-builtin/LiveDebugTraces.jsx"), "utf8");
+  assert.match(tracesSrc, /tone:\s*"warning",\s*danger:\s*true/);
+
+  // Round-1 复核补齐：串口未知结果急停目标格式、DrawMaterialCard 表面材料、TwinPage 轮询防死锁、5 个语音卡单调序守卫
+  assert.match(homeSrc, /const canonicalTarget =[\s\S]{0,160}\$\{serialPort\}@\$\{Number\(baudrate\) \|\| 115200\}/);
+  assert.match(matLabSrc, /const canonicalTarget =[\s\S]{0,160}\$\{built\.payload\.port\}@\$\{Number\(built\.payload\.baudrate\) \|\| 115200\}/);
+  assert.match(aiPreviewSrc, /const canonicalTarget =[\s\S]{0,160}\$\{liveConn\.payload\.port\}@\$\{Number\(liveConn\.payload\.baudrate\) \|\| 115200\}/);
+
+  const drawMatSrc = readFileSync(path.join(srcRoot, "components/draw/DrawMaterialCard.jsx"), "utf8");
+  assert.match(drawMatSrc, /表面通用（\$\{form\.thickness_mm \|\| 3\} mm）/);
+
+  const twinSrc = readFileSync(path.join(srcRoot, "pages/TwinPage.jsx"), "utf8");
+  assert.equal((twinSrc.match(/telemetryInFlightRef\.current = false;/g) || []).length >= 3, true);
+  assert.match(twinSrc, /if \(telemetryInFlightRef\.current\)\s*\{\s*if \(!cancelled && !document\.hidden\)/);
+
+  for (const rel of [
+    "pages/VoicePage.jsx",
+    "components/VoiceFirmwareCard.jsx",
+    "components/VoiceWakeWordCard.jsx",
+    "components/VoiceAgentCard.jsx",
+    "components/VoiceHomeApprovalCard.jsx",
+  ]) {
+    const s = readFileSync(path.join(srcRoot, rel), "utf8");
+    assert.match(s, /SeqRef\.current/, `${rel} 须有单调序号守卫防乱序覆盖`);
+    assert.match(s, /InFlightRef\.current|inFlightRef\.current/, `${rel} 须有单飞守卫防慢轮询堆积`);
+  }
+});

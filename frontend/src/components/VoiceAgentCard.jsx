@@ -80,26 +80,49 @@ export default function VoiceAgentCard() {
       setLoaded(true);
     }
   };
+  const mountedRef = useRef(true);
+  const pollSeqRef = useRef(0);
+  const pollInFlightRef = useRef(false);
   useEffect(() => {
-    let active = true;
+    mountedRef.current = true;
     const pollEpoch = epochRef.current;
+    const seq = ++pollSeqRef.current;
+    pollInFlightRef.current = true;
     voiceApi.agentStatus()
-      .then((data) => { if (active) applyPoll(data, pollEpoch); })
-      .catch((e) => { if (active && pollEpoch === epochRef.current) setLoadError(e.message || "读取 Agent 配置失败"); });
-    return () => { active = false; };
+      .then((data) => {
+        if (mountedRef.current && seq === pollSeqRef.current) applyPoll(data, pollEpoch);
+      })
+      .catch((e) => {
+        if (mountedRef.current && seq === pollSeqRef.current && pollEpoch === epochRef.current) {
+          setLoadError(e.message || "读取 Agent 配置失败");
+        }
+      })
+      .finally(() => {
+        if (seq === pollSeqRef.current) pollInFlightRef.current = false;
+      });
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      pollInFlightRef.current = false;
+    };
   }, []);
 
-  const refresh = async () => {
+  const refresh = async (fromPoll = false) => {
+    if (fromPoll && pollInFlightRef.current) return;
     const pollEpoch = epochRef.current;
+    const seq = ++pollSeqRef.current;
+    pollInFlightRef.current = true;
     try {
       const data = await voiceApi.agentStatus();
-      if (pollEpoch < epochRef.current) return;
+      if (!mountedRef.current || seq !== pollSeqRef.current || pollEpoch < epochRef.current) return;
       applyPoll(data, pollEpoch);
       setLoadError("");
     } catch (e) {
-      if (pollEpoch === epochRef.current) {
+      if (mountedRef.current && seq === pollSeqRef.current && pollEpoch === epochRef.current) {
         setLoadError(e.message || "读取 Agent 配置失败");
       }
+    } finally {
+      if (seq === pollSeqRef.current) pollInFlightRef.current = false;
     }
   };
   // 小智可能随时发起任务：每 5 秒刷新一次状态（运行中的任务结束时会显示为已完成 / 已停止）。
@@ -109,7 +132,7 @@ export default function VoiceAgentCard() {
     refreshRef.current = refresh;
   });
   useEffect(() => {
-    const timer = setInterval(() => { void refreshRef.current(); }, 5000);
+    const timer = setInterval(() => { void refreshRef.current(true); }, 5000);
     return () => clearInterval(timer);
   }, []);
   const change = (name, value) => {

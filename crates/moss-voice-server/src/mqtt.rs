@@ -84,13 +84,15 @@ impl MqttLink {
     }
 }
 
-/// 接受设备的 MQTT 连接。
+/// 接受设备的 MQTT 连接（有界并发，防止局域网洪泛无限制创建任务）。
 pub(crate) async fn serve(
     shared: Arc<Shared>,
     listener: TcpListener,
     hub: Arc<UdpHub>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    const MAX_MQTT_CONNECTIONS: usize = 64;
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_MQTT_CONNECTIONS));
     loop {
         let accepted = tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => return,
@@ -99,8 +101,17 @@ pub(crate) async fn serve(
         let Ok((stream, peer)) = accepted else {
             continue;
         };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
         let _ = stream.set_nodelay(true);
-        tokio::spawn(handle(shared.clone(), stream, peer, hub.clone()));
+        let shared = shared.clone();
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            handle(shared, stream, peer, hub).await;
+        });
     }
 }
 

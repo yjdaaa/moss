@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    ConnectionSpec, DeviceConnection, DeviceState, MachineFeatures, MachineLimits,
+    ConnectionSpec, DeviceConnection, DeviceState, DeviceTransport, MachineFeatures, MachineLimits,
     laser_off_on_alarm_warning, open_transport, parse_grbl_settings_limits,
 };
 
@@ -55,17 +55,50 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
             };
         }
     };
+    probe_opened_device(spec, transport, timeout)
+}
+
+/// 对已打开的传输通道执行有界握手与 `$CD` 探测，便于上层在释放设备打开锁后再执行耗时 I/O。
+pub fn probe_opened_device(
+    spec: &ConnectionSpec,
+    transport: Box<dyn DeviceTransport>,
+    timeout: Duration,
+) -> ProbeReport {
+    let target = spec.describe();
+    let mode = spec.mode();
+    let label = if mode == "network" {
+        "网络"
+    } else {
+        "串口"
+    };
     let mut device = DeviceConnection::new(transport);
     match device.handshake_with_deadline(timeout) {
         Ok(settings) => {
             let fallback_limits = parse_grbl_settings_limits(&settings);
-            // FluidNC：再读 $CD 拿 YAML 配置（宏、急停引脚、planner_blocks 等）；旧 GRBL 回 error:3 时静默跳过
+            // FluidNC：再读 $CD 拿 YAML 配置（宏、急停引脚、planner_blocks 等）；仅旧 GRBL 回 error:3 时静默跳过
             let (yaml_limits, features) = match device.fetch_fluidnc_config(timeout) {
-                Ok((limits, features)) => {
+                Ok(Some((limits, features))) => {
                     device.features = Some(features.clone());
                     (Some(limits), Some(features))
                 }
-                Err(_) => (None, None),
+                Ok(None) => (None, None),
+                Err(error) => {
+                    let alarm = device.state() == DeviceState::Alarm;
+                    return ProbeReport {
+                        mode,
+                        target: target.clone(),
+                        connected: alarm,
+                        laser_mode_ok: false,
+                        firmware_settings: Vec::new(),
+                        machine_limits: None,
+                        features: None,
+                        summary: if alarm {
+                            format!("已连接 {target}，但读取 $CD 时触发报警: {error}")
+                        } else {
+                            format!("{target} 读取 $CD 异常: {error}")
+                        },
+                    };
+                }
             };
             let mut merged_limits = fallback_limits;
             if let Some(l) = yaml_limits {
@@ -165,6 +198,10 @@ mod tests {
                     let mut line = String::new();
                     if reader.read_line(&mut line).is_ok() && line.trim() == "$$" {
                         let _ = write!(writer, "$0=10\r\n$32={laser_mode}\r\nok\r\n");
+                        line.clear();
+                        if reader.read_line(&mut line).is_ok() && line.trim() == "$CD" {
+                            let _ = write!(writer, "error:3\r\n");
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }

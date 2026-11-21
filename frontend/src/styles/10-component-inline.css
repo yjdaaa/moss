@@ -10,6 +10,8 @@
 
 /* ---- 审批中心 ApprovalCenter（UI-02：原组件内联样式迁移，2026-10-13） ---- */
 .approval-center-box { z-index: 125; }
+/* 严格模式审批卡必须压在 AI 预览窗（125）之上、关闭确认（140）与全局弹窗（150）之下 */
+.approval-center-modal { z-index: 128; }
 .approval-center-code.approval-center-code { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 
 /* ---- 配对认证 AuthModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */

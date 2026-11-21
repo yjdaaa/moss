@@ -127,6 +127,7 @@ struct SendWorkerParams {
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     active_jobs: ActiveJobs,
     uncertain_jobs: UncertainJobs,
+    shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_sink: SharedLaserEventSink,
 }
 
@@ -350,7 +351,27 @@ fn build_terminal_send_outcome(
     let elapsed_ms = params.job.started_at.elapsed().as_millis() as u64;
     let target = &params.target;
 
+    let shutdown_interrupted = params.shutdown_requested.load(Ordering::Acquire);
     let (status, mut send_result) = match outcome {
+        Ok(_) if shutdown_interrupted => (
+            "failed",
+            serde_json::json!({
+                "success": false,
+                "running": false,
+                "cancelled": true,
+                "phase": "result_unknown",
+                "can_resume": false,
+                "resumable_from_line": 0,
+                "resume_boundary_source": "shutdown",
+                "mode": sent_mode,
+                "target": target,
+                "lines_sent": confirmed_acked,
+                "lines_completed": 0,
+                "total_lines": total,
+                "elapsed_ms": elapsed_ms,
+                "error": "服务正在关闭，已发急停中止在途任务，执行结果未知；请核实设备状态",
+            }),
+        ),
         Ok(_) if params.cancel.is_cancelled() => {
             let can_resume =
                 !params.is_offline_sd && confirmed_completed > 0 && confirmed_completed < total;
@@ -835,43 +856,90 @@ impl ApiService {
         (u16, serde_json::Value),
     > {
         use std::sync::atomic::Ordering;
-        // 按设备目标串行化“释放旧待确认停止句柄 -> 打开独占新句柄”，杜绝同串口并发关闭/打开竞争。
-        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
-            let open_mutex = target_open_mutex(&self.target_open_locks, &plan.target);
-            let _open_guard = open_mutex
+        // 按设备目标串行化“复查活动任务 -> 释放旧待确认停止句柄 -> 打开独占新句柄 -> 登记 ActiveJob”，
+        // 杜绝同设备并发打开双句柄（串口 DTR 复位 / Telnet 顶号），统一锁序 target_open_mutex -> active_jobs -> uncertain_jobs。
+        let open_mutex = target_open_mutex(&self.target_open_locks, &plan.target);
+        let _open_guard = open_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.is_shutdown_requested() {
+            return Err((
+                503,
+                failure(
+                    "服务正在关闭，已拒绝建立新的设备连接",
+                    Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                ),
+            ));
+        }
+        if cancel.is_cancelled() {
+            return Err((
+                409,
+                failure(
+                    "预检前任务已被取消，未下发刀路",
+                    Some(serde_json::json!({"error_code": "workflow_cancelled"})),
+                ),
+            ));
+        }
+        {
+            let jobs = self
+                .active_jobs
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.is_shutdown_requested() {
+                .map_err(|_| (500, failure("活动任务注册表不可用", None)))?;
+            if let Some(busy) = jobs
+                .get(workflow_id)
+                .or_else(|| jobs.values().find(|j| j.target == plan.target))
+            {
                 return Err((
-                    503,
+                    409,
                     failure(
-                        "服务正在关闭，已拒绝建立新的设备连接",
-                        Some(serde_json::json!({"error_code": "host_shutting_down"})),
+                        format!(
+                            "设备 {} 正在执行 workflow {}，请等待完成或先取消",
+                            plan.target, busy.workflow_id
+                        ),
+                        Some(serde_json::json!({"error_code": "device_busy"})),
                     ),
                 ));
             }
-            release_uncertain_target_handle(&self.uncertain_jobs, &plan.target);
-            let opened = self.open_device_transport(&plan.spec).map_err(|e| {
-                let status = if self.is_shutdown_requested() {
-                    503
-                } else {
-                    400
-                };
-                let code = if self.is_shutdown_requested() {
-                    "host_shutting_down"
-                } else {
-                    "device_unreachable"
-                };
-                (
-                    status,
-                    failure(
-                        format!("设备连接失败 ({}): {e}", plan.target),
-                        Some(serde_json::json!({"error_code": code})),
+        }
+        release_uncertain_target_handle(&self.uncertain_jobs, &plan.target);
+        if self
+            .short_io_targets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&plan.target)
+        {
+            return Err((
+                409,
+                failure(
+                    format!(
+                        "设备 {} 正在执行连接探测或状态查询，请稍后重试",
+                        plan.target
                     ),
-                )
-            })?;
-            std::sync::Arc::from(opened)
-        };
+                    Some(serde_json::json!({"error_code": "device_busy"})),
+                ),
+            ));
+        }
+        let opened = self.open_device_transport(&plan.spec).map_err(|e| {
+            let status = if self.is_shutdown_requested() {
+                503
+            } else {
+                400
+            };
+            let code = if self.is_shutdown_requested() {
+                "host_shutting_down"
+            } else {
+                "device_unreachable"
+            };
+            (
+                status,
+                failure(
+                    format!("设备连接失败 ({}): {e}", plan.target),
+                    Some(serde_json::json!({"error_code": code})),
+                ),
+            )
+        })?;
+        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
+            std::sync::Arc::from(opened);
         // 开连接后立刻登记 ActiveJob，覆盖握手 / $CD / $X / 二次哈希复核全预检窗口，使急停与退出可实时中止
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress
@@ -934,6 +1002,7 @@ impl ApiService {
             }
             jobs.insert(workflow_id.to_owned(), job.clone());
         }
+        drop(_open_guard);
         let preflight_guard = SendPreflightGuard {
             active_jobs: self.active_jobs.clone(),
             uncertain_jobs: self.uncertain_jobs.clone(),
@@ -972,8 +1041,22 @@ impl ApiService {
                 )
             })?;
 
-        // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；旧 GRBL 静默跳过
-        device.load_features(std::time::Duration::from_secs(3));
+        // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；仅旧 GRBL error:3 静默跳过，复位/报警/断线一律中止预检
+        if let Err(e) = device.load_features(std::time::Duration::from_secs(3)) {
+            let status = if cancel.is_cancelled() { 409 } else { 400 };
+            let code = if cancel.is_cancelled() {
+                "workflow_cancelled"
+            } else {
+                "device_not_ready"
+            };
+            return Err((
+                status,
+                failure(
+                    format!("设备 $CD 配置读取异常 ({}): {e}", plan.target),
+                    Some(serde_json::json!({"error_code": code})),
+                ),
+            ));
+        }
         // 先于 $X 解锁执行二次物理 SHA-256 与行程复核，杜绝建连期间 TOCTOU 篡改刀路却提前触发 $X 移动（#4）
         let verified = read_and_verify_gcode(gcode_path, expected_sha, plan.start_from_line)?;
         progress
@@ -1230,6 +1313,7 @@ impl ApiService {
             calibrations: self.calibrations.clone(),
             active_jobs: self.active_jobs.clone(),
             uncertain_jobs: self.uncertain_jobs.clone(),
+            shutdown_requested: self.shutdown_requested.clone(),
             event_sink: self.event_sink.clone(),
         };
         std::thread::Builder::new()

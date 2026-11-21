@@ -137,11 +137,17 @@ export function storeAuthToken(token, storage = tokenStorage()) {
     throw new Error("认证 token 不能为空");
   }
   storage?.setItem(AUTH_TOKEN_KEY, token);
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+    window.dispatchEvent(new CustomEvent("laser-auth-changed"));
+  }
   return token;
 }
 
 export function clearAuthToken(storage = tokenStorage()) {
   storage?.removeItem(AUTH_TOKEN_KEY);
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+    window.dispatchEvent(new CustomEvent("laser-auth-changed"));
+  }
 }
 
 export function authenticatedHeaders(headers = {}, storage = tokenStorage()) {

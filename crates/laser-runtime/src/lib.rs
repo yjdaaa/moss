@@ -485,6 +485,31 @@ mod tests {
         let list = db.voice_devices().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].device_id, "cc:dd", "最近来访的在前");
+
+        // 未认证局域网设备洪泛：pending 数量有 64 条上限，淘汰最旧 pending，不触碰 allowed/revoked
+        for i in 0..80 {
+            db.voice_device_seen(
+                &format!("ff:00:00:00:00:{i:02x}"),
+                &format!("pending-client-{i}"),
+                "m",
+                "1",
+                "192.0.2.50",
+                100.0 + i as f64,
+            )
+            .unwrap();
+        }
+        let after = db.voice_devices().unwrap();
+        let pending_count = after
+            .iter()
+            .filter(|d| d.status == VOICE_DEVICE_PENDING)
+            .count();
+        assert_eq!(pending_count, 64, "pending 设备必须封顶 64 条");
+        assert!(
+            after
+                .iter()
+                .any(|d| d.device_id == "aa:bb" && d.status == VOICE_DEVICE_REVOKED),
+            "已撤销设备不得被 pending 淘汰"
+        );
     }
 
     /// USB 物理配网：重绑空/旧 Client-Id、保留已记录的真实板型与固件版本。

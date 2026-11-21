@@ -152,7 +152,7 @@ fn handshake_recovers_after_boot_banner_without_duplicating_welcome_banner_ack()
         .expect("带欢迎横幅的正常握手应一次通过");
     assert_eq!(settings.len(), 3);
     assert_eq!(welcome.lines(), vec!["$$".to_owned()]);
-    assert!(welcome_dev.load_features(Duration::from_secs(1)));
+    assert_eq!(welcome_dev.load_features(Duration::from_secs(1)), Ok(true));
     assert_eq!(welcome_dev.travel_limits.x_travel_mm, Some(220.0));
 
     // 2. USB 串口 DTR/RTS 软重启：引导期超时丢弃首条 $$，吐出启动横幅后沉默超时，此时补发一次 $$ 成功握手

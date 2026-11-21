@@ -805,7 +805,7 @@ fn mixed_case_emergency_stop_during_running_job_writes_realtime_estop() {
             while !self.gate.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err("测试结束：模拟连接断开".into())
+            Ok(())
         }
         fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
             if command == laser_device::RealtimeCommand::StatusQuery {
@@ -1009,7 +1009,7 @@ fn exclusive_serial_transport_keeps_uncertain_for_voice_stop_and_releases_before
                 while !self.gate.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                return Err("模拟传输中断".into());
+                return Ok(());
             }
             self.responses.lock().unwrap().push_back("ok".into());
             Ok(())
@@ -2625,5 +2625,416 @@ fn http_framing_and_safe_asset_path_reject_smuggling_chunked_and_backslash_trave
     assert!(
         chunked_text.contains("transfer_encoding_unsupported"),
         "{chunked_text}"
+    );
+}
+
+#[test]
+fn image_workflow_preview_rejects_out_of_sandbox_path_traversal() {
+    let temp = tempfile::tempdir().unwrap();
+    let uploads = temp.path().join("uploads");
+    let generated = temp.path().join("generated");
+    std::fs::create_dir_all(&uploads).unwrap();
+    std::fs::create_dir_all(&generated).unwrap();
+    // 在沙箱外写入一张合法 PNG，验证绝对路径与 ../ 穿越均被拦截
+    let outside_png = temp.path().join("secret.png");
+    let img = image::GrayImage::from_pixel(4, 4, image::Luma([128]));
+    img.save(&outside_png).unwrap();
+
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_upload_root(uploads.clone())
+    .with_generated_root(generated)
+    .with_preview_roots(vec![uploads]);
+
+    for evil_path in [
+        outside_png.to_string_lossy().into_owned(),
+        "../secret.png".to_owned(),
+    ] {
+        let resp = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "source_type": "image",
+                "image_file": evil_path,
+                "material": "3mm椴木板",
+                "thickness_mm": 3.0
+            }),
+        );
+        assert_eq!(
+            resp["success"], false,
+            "沙箱外路径 {evil_path} 必须被拒绝: {resp}"
+        );
+        assert!(
+            resp["result"].as_str().unwrap_or("").contains("找不到"),
+            "{resp}"
+        );
+    }
+}
+
+#[test]
+fn probe_connections_preserves_uncertain_job_handle_and_does_not_probe() {
+    let realtime = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    struct SpyTransport(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl laser_device::DeviceTransport for SpyTransport {
+        fn write_line(&self, _line: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn write_realtime(&self, cmd: laser_device::RealtimeCommand) -> Result<(), String> {
+            self.0.lock().unwrap().push(cmd.byte());
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+    let target = "127.0.0.1:2399";
+    let active = ActiveJob {
+        workflow_id: "wf-uncertain-1".into(),
+        mode: "network",
+        target: target.into(),
+        cancel: laser_device::CancellationToken::default(),
+        progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+        transport: std::sync::Arc::new(SpyTransport(realtime.clone())),
+        started_at: std::time::Instant::now(),
+        spec: Some(laser_device::ConnectionSpec::Tcp {
+            host: "127.0.0.1".into(),
+            port: 2399,
+        }),
+    };
+    service.uncertain_jobs.lock().unwrap().insert(
+        "wf-uncertain-1".into(),
+        UncertainJob::from_active(&active, active.spec.clone()),
+    );
+    let probe = post_json(
+        &service,
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": 2399
+        }),
+    );
+    assert_eq!(probe["result"]["connected"], false, "{probe}");
+    assert!(
+        probe["result"]["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("待确认停止"),
+        "{probe}"
+    );
+    // 急停仍直接命中原活句柄写出 0x18，未被只读探测剥走
+    let estop = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "emergency_stop", "confirmed": true, "job_id": "wf-uncertain-1"}),
+    );
+    assert_eq!(estop["success"], true, "{estop}");
+    assert_eq!(*realtime.lock().unwrap(), vec![0x18]);
+}
+
+#[test]
+fn failed_mutating_safe_action_migrates_to_uncertain_jobs() {
+    struct FailAfterMoveTransport {
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+    impl laser_device::DeviceTransport for FailAfterMoveTransport {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut q = self.responses.lock().unwrap();
+            if line == "$$" {
+                q.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if line == "$CD" {
+                q.push_back("error:3".into());
+            } else {
+                // 运动命令下发后返回报警，触发 0x18 兜底并失败（无用户取消）
+                q.push_back("ALARM:2".into());
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, _cmd: laser_device::RealtimeCommand) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(self.responses.lock().unwrap().pop_front())
+        }
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(std::sync::Arc::new(|_| {
+        Ok(Box::new(FailAfterMoveTransport {
+            responses: Default::default(),
+        }))
+    }));
+    let res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "relative_move",
+            "confirmed": true,
+            "x": 5.0,
+            "y": 0.0,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2345
+        }),
+    );
+    assert_eq!(res["success"], false, "{res}");
+    assert_eq!(service.active_job_count(), 0);
+    let targets = parse_json_response(
+        &service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    let jobs = targets["result"]["jobs"].as_array().unwrap();
+    assert_eq!(
+        jobs.len(),
+        1,
+        "发令后失败的安全动作必须迁入 uncertain_jobs: {targets}"
+    );
+    assert_eq!(jobs[0]["state"], "unknown");
+    assert_eq!(jobs[0]["target"], "127.0.0.1:2345");
+}
+
+#[test]
+fn finalize_workflow_record_preserves_shutdown_result_unknown() {
+    use laser_runtime::RuntimeStore;
+    let store = std::sync::Arc::new(laser_runtime::MemoryStore::default());
+    let record = laser_runtime::StoredRecord {
+        id: "wf-shutdown-1".into(),
+        kind: laser_runtime::RecordKind::Workflow,
+        status: Some("failed".into()),
+        payload: serde_json::json!({
+            "workflow_id": "wf-shutdown-1",
+            "status": "failed",
+            "send_result": {
+                "success": false,
+                "running": false,
+                "phase": "result_unknown",
+                "can_resume": false,
+                "error": "host 退出中断，任务安全终止"
+            }
+        }),
+    };
+    store.put(&record).unwrap();
+    let workflows = Default::default();
+    let calibrations = Default::default();
+    let sink = Default::default();
+    crate::workflow::finalize_workflow_record(
+        Some(store.as_ref()),
+        &workflows,
+        &calibrations,
+        &sink,
+        laser_runtime::RecordKind::Workflow,
+        "wf-shutdown-1",
+        "cancelled",
+        serde_json::json!({"can_resume": true, "resumable_from_line": 5}),
+    );
+    let after = store
+        .get(laser_runtime::RecordKind::Workflow, "wf-shutdown-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status.as_deref(), Some("failed"));
+    assert_eq!(after.payload["send_result"]["phase"], "result_unknown");
+    assert_eq!(after.payload["send_result"]["can_resume"], false);
+}
+
+#[test]
+fn discover_controllers_is_single_flight() {
+    let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered_cb = entered.clone();
+    let release_cb = release.clone();
+    let service = std::sync::Arc::new(
+        ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_controller_candidates(std::sync::Arc::new(move |_emit| {
+            entered_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+            while !release_cb.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        })),
+    );
+    let srv = service.clone();
+    let first = std::thread::spawn(move || {
+        post_json(&srv, "/api/ui/discover-controllers", &serde_json::json!({}))
+    });
+    let start = std::time::Instant::now();
+    while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let second = post_json(
+        &service,
+        "/api/ui/discover-controllers",
+        &serde_json::json!({}),
+    );
+    assert!(
+        second["result"]["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("正在进行"),
+        "并发扫描应被单飞闸门拦截: {second}"
+    );
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = first.join().unwrap();
+}
+
+#[test]
+fn resume_rejects_non_cancelled_status_and_estop_bumps_cancel_epoch() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().to_path_buf();
+    let gcode_path = dir.join("job.gcode");
+    let gcode = "G21\nG90\nG1 X5 F1000 S200\nG1 X10 F1000 S200\nM5\n";
+    std::fs::write(&gcode_path, gcode).unwrap();
+    let sha = hex::encode(Sha256::digest(gcode.as_bytes()));
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(dir.clone())
+    .with_preview_roots(vec![dir]);
+
+    for bad_status in ["failed", "preview_ready"] {
+        let wf_id = format!("wf-resume-{bad_status}");
+        service.workflows.lock().unwrap().insert(
+            wf_id.clone(),
+            serde_json::json!({
+                "workflow_id": wf_id,
+                "status": bad_status,
+                "artifacts": { "gcode_file": "job.gcode", "gcode_sha256": sha },
+                "confirmation_snapshot": { "gcode_file": "job.gcode", "gcode_sha256": sha },
+                "send_result": {
+                    "success": false,
+                    "target": "tcp://127.0.0.1:23",
+                    "lines_sent": 2,
+                    "lines_completed": 2,
+                    "resumable_from_line": 2,
+                    "resume_boundary_source": "device_hold_ln",
+                    "total_lines": 5,
+                    "can_resume": true
+                }
+            }),
+        );
+        let resp = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "resume",
+                "workflow_id": wf_id,
+                "confirmed": true,
+                "connection_mode": "network",
+                "network_host": "127.0.0.1"
+            }),
+        );
+        assert_eq!(resp["success"], false, "{bad_status}: {resp}");
+        assert_eq!(
+            resp["detail"]["error_code"], "workflow_not_resumable",
+            "{bad_status}: {resp}"
+        );
+    }
+
+    // 急停命中在途作业时须同步递增 cancel_epoch，阻止并发续雕复用急停前快照
+    let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let job_id = "wf-estop-epoch";
+    let before_epoch = current_cancel_epoch(&service.launching_workflows, job_id);
+    service.active_jobs.lock().unwrap().insert(
+        job_id.into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: job_id.into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            cancel: laser_device::CancellationToken::default(),
+            progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+            transport: std::sync::Arc::new(fake.clone()),
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+    let stop = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "emergency_stop",
+            "confirmed": true,
+            "job_id": job_id
+        }),
+    );
+    assert_eq!(stop["success"], true, "{stop}");
+    assert!(fake.realtime().contains(&0x18));
+    assert!(
+        current_cancel_epoch(&service.launching_workflows, job_id) > before_epoch,
+        "emergency_stop on active job must increment cancel_epoch"
+    );
+}
+
+#[test]
+fn short_io_blocks_concurrent_double_open_but_allows_emergency_stop_reuse() {
+    let factory_opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let opens_cb = factory_opens.clone();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(std::sync::Arc::new(move |_spec| {
+        opens_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(laser_device::FakeGrbl::new(
+            ["<Idle|MPos:0,0,0>"].map(str::to_owned),
+        )))
+    }));
+
+    let held_transport = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let held_arc: std::sync::Arc<dyn laser_device::DeviceTransport> =
+        std::sync::Arc::new(held_transport.clone());
+    let target = "127.0.0.1:23";
+    let _guard = register_short_io_target(&service.short_io_targets, target, held_arc);
+
+    // 非急停的顺序安全动作（如 status）必须被 short_io_targets 拦截，不得并发双开
+    let status_res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "status",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+    );
+    assert_eq!(status_res["success"], false, "{status_res}");
+    assert_eq!(
+        factory_opens.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "short_io 占位期间不得打开第二个传输通道"
+    );
+
+    // 急停必须直接复用 short_io_targets 中在途连接写 0x18，绝不被阻塞也不必双开
+    let estop_res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "emergency_stop",
+            "confirmed": true,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+    );
+    assert_eq!(estop_res["success"], true, "{estop_res}");
+    assert!(
+        held_transport.realtime().contains(&0x18),
+        "急停必须经由在途 short_io 通道送达 0x18"
+    );
+    assert_eq!(
+        factory_opens.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "复用在途通道写急停时不应重复打开新连接"
     );
 }

@@ -88,7 +88,8 @@ export function LiveDebugTraces({ builtin }) {
     const ok = await showConfirm("确定清空本机保存的全部语音对话记录吗？清空后无法恢复。", {
       title: "清空对话记录",
       confirmText: "清空",
-      tone: "danger",
+      tone: "warning",
+      danger: true,
     });
     if (!ok) return;
     setSaving(true);

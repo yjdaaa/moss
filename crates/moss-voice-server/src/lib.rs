@@ -377,6 +377,10 @@ pub(crate) struct Shared {
     snapshot_seq: std::sync::atomic::AtomicU64,
     snapshot_write_gate:
         Arc<std::sync::Mutex<std::collections::HashMap<(String, &'static str), u64>>>,
+    /// 全网卡监听的并发连接与固件下载上限，防止局域网洪泛拖垮桌面主库或内存。
+    pub ws_connections: Arc<tokio::sync::Semaphore>,
+    pub http_requests: Arc<tokio::sync::Semaphore>,
+    pub firmware_downloads: Arc<tokio::sync::Semaphore>,
 }
 
 impl Shared {
@@ -581,6 +585,9 @@ impl VoiceServer {
             device_requests: Default::default(),
             snapshot_seq: std::sync::atomic::AtomicU64::new(0),
             snapshot_write_gate: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            ws_connections: Arc::new(tokio::sync::Semaphore::new(64)),
+            http_requests: Arc::new(tokio::sync::Semaphore::new(64)),
+            firmware_downloads: Arc::new(tokio::sync::Semaphore::new(2)),
         });
         shared.state.event(
             EventRecord::from(format!(
@@ -589,11 +596,26 @@ impl VoiceServer {
             .source(DiagSource::Moss),
         );
         let ws_app = session::router(shared.clone());
+        let http_limit = shared.http_requests.clone();
         let http_app = ota::router(shared.clone())
             .merge(vision::router(shared.clone()))
             .merge(firmware::router(shared.clone()))
             .merge(wake_assets::router(shared.clone()))
-            .merge(preview_push::router(shared.clone()));
+            .merge(preview_push::router(shared.clone()))
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    let limit = http_limit.clone();
+                    async move {
+                        let Ok(_permit) = limit.try_acquire_owned() else {
+                            return axum::response::IntoResponse::into_response((
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                "并发请求过多，请稍后重试",
+                            ));
+                        };
+                        next.run(req).await
+                    }
+                },
+            ));
         let mut stop_ws = shutdown_tx.subscribe();
         let mut stop_http = shutdown_tx.subscribe();
         // 不用 block_on：调用方可能处在另一个 tokio 运行时的阻塞线程里（Tauri 命令），嵌套 block_on 会 panic

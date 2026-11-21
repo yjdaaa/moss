@@ -44,16 +44,29 @@ export default function VoiceVisionCard() {
     voiceApi.visionStatus().then((state) => { if (mounted) apply(state); }).catch((e) => { if (mounted) setLoadError(e.message); });
     return () => { mounted = false; };
   }, []);
-  // 本地视觉模型加载中时每 2 秒刷新一次运行状态（只更新状态，不覆盖正在编辑的表单）
+  // 本地视觉模型加载中时每 2 秒刷新一次运行状态（只更新状态，不覆盖正在编辑的表单；单飞 + 卸载清理 + 显式报错）
   useEffect(() => {
     if (runtime?.state !== "starting") return undefined;
+    let alive = true;
+    let inFlight = false;
     const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
       voiceApi.visionStatus().then((state) => {
+        if (!alive) return;
+        setLoadError("");
         setRuntime(state.local_runtime || null);
         setReady(!!state.ready);
-      }).catch(() => {});
+      }).catch((e) => {
+        if (alive) setLoadError(e?.message || "刷新本地视觉模型状态失败");
+      }).finally(() => {
+        inFlight = false;
+      });
     }, 2000);
-    return () => clearInterval(timer);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
   }, [runtime?.state]);
   const source = visionSource(config);
   const localPicked = localModels.find((item) => item.id === config.local_model);

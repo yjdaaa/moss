@@ -1121,7 +1121,7 @@ fn cancel_completion_requires_device_proven_hold_ln_and_blocks_estimates() {
     };
     let mut dev = DeviceConnection::new(tr.clone());
     dev.handshake().unwrap();
-    assert!(dev.load_features(Duration::from_secs(1)));
+    assert_eq!(dev.load_features(Duration::from_secs(1)), Ok(true));
     let prog = Arc::new(JobProgress::default());
     let mut worker = JobWorker::with_progress(dev, tok, prog.clone());
     // 这里只传 4 行并在 read_line 消费到第 4 个加工 ACK 时置 cancel（模拟 4 行皆收 ok 后仍在运行/Hold:0|Ln:3）
@@ -1137,4 +1137,123 @@ fn cancel_completion_requires_device_proven_hold_ln_and_blocks_estimates() {
     assert!(wire.contains(&"N1 G1 X1".to_owned()), "{wire:?}");
     assert!(wire.contains(&"N3 G1 X3".to_owned()), "{wire:?}");
     assert_eq!(prog.lines_completed.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn rescale_gcode_line_s_handles_whitespace_and_plus_sign() {
+    let scale = 255.0 / 1000.0;
+    assert_eq!(rescale_gcode_line_s("M4 S 500", scale), "M4 S128");
+    assert_eq!(rescale_gcode_line_s("M3 S+500", scale), "M3 S128");
+    assert_eq!(rescale_gcode_line_s("G1 X10 S +1000", scale), "G1 X10 S255");
+    assert_eq!(
+        rescale_gcode_line_s("G1 X10 s\t+250.0", scale),
+        "G1 X10 s64"
+    );
+    assert_eq!(rescale_gcode_line_s("$30=1000", scale), "$30=1000");
+}
+
+#[test]
+fn awaiting_completion_alarm_and_send_line_error_are_not_swallowed_by_cancel() {
+    // 1. G4 P0 / wait_until_idle 期间发生 ALARM 且并发触发取消：必须保留真实报警错误并仍补发 0x18
+    struct AlarmThenCancel {
+        responses: Mutex<std::collections::VecDeque<String>>,
+        realtime: Arc<Mutex<Vec<u8>>>,
+        cancel: CancellationToken,
+    }
+    impl DeviceTransport for AlarmThenCancel {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut q = self.responses.lock().unwrap();
+            if line == "$$" {
+                q.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+            } else if line == "G4 P0" {
+                q.push_back("ALARM:1".into());
+            } else {
+                q.push_back("ok".into());
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+            self.realtime.lock().unwrap().push(cmd.byte());
+            if cmd == RealtimeCommand::StatusQuery {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .push_back("<Alarm|MPos:0,0,0>".into());
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let line = self.responses.lock().unwrap().pop_front();
+            if line.as_deref() == Some("ALARM:1") {
+                self.cancel.cancel();
+            }
+            Ok(line)
+        }
+    }
+    let cancel = CancellationToken::default();
+    let rt = Arc::new(Mutex::new(Vec::new()));
+    let mut dev = DeviceConnection::new(AlarmThenCancel {
+        responses: Mutex::new(Default::default()),
+        realtime: rt.clone(),
+        cancel: cancel.clone(),
+    });
+    dev.handshake().unwrap();
+    let mut worker = JobWorker::new(dev, cancel);
+    let err = worker.send_lines(["G1 X5 S100".into()]).unwrap_err();
+    assert!(
+        err.contains("ALARM:1"),
+        "报警故障绝不能被并发取消吞掉: {err}"
+    );
+    assert!(
+        rt.lock().unwrap().contains(&0x18),
+        "报警收尾应尽力补发 0x18"
+    );
+
+    // 2. send_line 写 I/O 报错且并发触发取消：必须保留写报错
+    struct WriteFailThenCancel {
+        cancel: CancellationToken,
+        realtime: Arc<Mutex<Vec<u8>>>,
+        responses: Mutex<std::collections::VecDeque<String>>,
+    }
+    impl DeviceTransport for WriteFailThenCancel {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            if line == "$$" {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                return Ok(());
+            }
+            self.cancel.cancel();
+            Err("串口写入断连".into())
+        }
+        fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+            self.realtime.lock().unwrap().push(cmd.byte());
+            if cmd == RealtimeCommand::StatusQuery {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .push_back("<Hold:0|MPos:0,0,0>".into());
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            Ok(self.responses.lock().unwrap().pop_front())
+        }
+    }
+    let cancel2 = CancellationToken::default();
+    let rt2 = Arc::new(Mutex::new(Vec::new()));
+    let mut dev2 = DeviceConnection::new(WriteFailThenCancel {
+        cancel: cancel2.clone(),
+        realtime: rt2.clone(),
+        responses: Mutex::new(Default::default()),
+    });
+    dev2.handshake().unwrap();
+    let mut worker2 = JobWorker::new(dev2, cancel2);
+    let err2 = worker2.send_lines(["G1 X5".into()]).unwrap_err();
+    assert!(
+        err2.contains("串口写入断连"),
+        "写错误绝不能被并发取消吞掉: {err2}"
+    );
+    assert!(rt2.lock().unwrap().contains(&0x18));
 }

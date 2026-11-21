@@ -112,6 +112,22 @@ impl ApiService {
             if !loopback {
                 return http_json(403, failure("仅允许本地回环客户端生成配对挑战码", None));
             }
+            // 桌面壳启用会话后，只允许受信任的 MOSS 桌面端签发配对码，防止本机其他网页跨源窃取配对码。
+            if self.desktop_session.get().is_some() {
+                match self.check_desktop_session(&head, loopback) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return http_json(
+                            403,
+                            failure(
+                                "仅允许 MOSS 桌面端生成配对挑战码",
+                                Some(serde_json::json!({"error_code": "desktop_session_required"})),
+                            ),
+                        );
+                    }
+                    Err(response) => return response,
+                }
+            }
             let Some(auth) = self.auth.as_ref() else {
                 return http_json(500, failure("认证服务未配置", None));
             };

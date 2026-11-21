@@ -310,7 +310,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
   return (
     <>
       {approvalOpen && (
-        <div className="mat-modal-backdrop approval-backdrop approval-center-box">
+        <div className="mat-modal-backdrop approval-backdrop approval-center-box approval-center-modal">
           <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="approval-title" id="approval-card">
             <div className="mat-modal-head">
               <h3 id="approval-title" className="approval-title">

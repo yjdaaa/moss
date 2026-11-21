@@ -3195,6 +3195,8 @@ name = "moss-mcp-client"
 version = "0.3.12"
 dependencies = [
  "axum",
+ "libc",
+ "process-wrap",
  "reqwest",
  "rmcp",
  "serde",
@@ -3202,6 +3204,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "url",
+ "windows",
 ]
 
 [[package]]

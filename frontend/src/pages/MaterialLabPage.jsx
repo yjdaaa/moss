@@ -528,6 +528,8 @@ export function MaterialLabPage({ onNavigate }) {
       setMatrixBusy(false);
       if (res.ok && res.data?.success && res.data.result?.calibration_id) {
         const resData = res.data.result;
+        matrixPollRef.current?.();
+        matrixPollRef.current = null;
         setMatrixId(resData.calibration_id);
         setMatrixPreview(resData);
         setMatrixSignature(sigSnapshot);
@@ -620,6 +622,15 @@ export function MaterialLabPage({ onNavigate }) {
         setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: sendResult.total_lines || 0, target: sendResult.target });
         setMatrixStatus(`握手通过，正在逐行下发 (0/${sendResult.total_lines || 0} 行)…`);
         startMatrixPolling(matrixId);
+      } else if (res.status === 0) {
+        // 网络中断或超时：后端可能已启动激光加工，保留任务编号与规范目标供顶栏急停并立即拉起状态轮询，严禁误报失败诱导重发
+        const canonicalTarget =
+          built.payload?.connection_mode === "serial"
+            ? `${built.payload.port}@${Number(built.payload.baudrate) || 115200}`
+            : built.targetLabel;
+        setMatrixSendState({ status: "sending", lines_sent: 0, total_lines: 0, target: canonicalTarget, connectionLost: true });
+        setMatrixStatus("发送结果未知（连接中断或超时），正在查询原标定任务，请勿重复发送；必要时使用顶栏急停。");
+        startMatrixPolling(matrixId);
       } else {
         setMatrixStatus(`发送失败: ${res.data?.result || "门禁拦截"}`);
       }
@@ -679,6 +690,7 @@ export function MaterialLabPage({ onNavigate }) {
         : matrixPreview?.engraving_mode || (matrixMode === "outline" ? "outline" : "raster");
     const targetUiMode = targetLaserMode === "cut" ? "cut" : targetEngravingMode || "raster";
 
+    const prevSelectedCellNum = selectedCellNum;
     setSelectedCellNum(cellNumber);
     setMatrixStatus(`正在保存最佳单元格 #${cellNumber}...`);
 
@@ -719,9 +731,11 @@ export function MaterialLabPage({ onNavigate }) {
           mode: targetUiMode,
         });
       } else {
+        setSelectedCellNum(prevSelectedCellNum);
         setMatrixStatus(`保存单元格失败: ${res.data?.result || "错误"}`);
       }
     } catch (e) {
+      setSelectedCellNum(prevSelectedCellNum);
       setMatrixStatus(`保存单元格网络异常: ${e.message}`);
     }
   };

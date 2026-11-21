@@ -245,6 +245,7 @@ async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety
     let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools {
         original: Arc::new(FastTools::default()),
         persona: persona.clone(),
+        permitted: None,
     });
     let conversation = Arc::new(
         Conversation::new(

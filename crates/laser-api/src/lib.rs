@@ -94,6 +94,7 @@ pub struct ApiService {
     uncertain_jobs: UncertainJobs,
     launching_workflows: LaunchReservations,
     target_open_locks: TargetOpenLocks,
+    short_io_targets: ShortIoTargets,
     material_write_lock: std::sync::Mutex<()>,
     feedback_adoption: std::sync::Mutex<()>,
     draw_state_lock: std::sync::Mutex<()>,
@@ -108,6 +109,8 @@ pub struct ApiService {
     event_sink: SharedLaserEventSink,
     /// 局域网扫描时等每台设备回应的时限（默认 1.5 秒；收齐回应即返回）
     discovery_reply_timeout: std::time::Duration,
+    /// 局域网设备扫描单飞闸门：同一时刻只允许一趟扫描，防止并发触发大量探测线程耗尽系统资源。
+    discovery_in_flight: std::sync::atomic::AtomicBool,
     /// 严格模式（`MOSS_FUSION_STRICT`，技术书 §6.2）：开启后 R3 动作需要桌面会话或审批授权。
     /// 语音中心的严格模式开关可在运行中改变（n27），因此用原子量。
     strict_mode: std::sync::atomic::AtomicBool,
