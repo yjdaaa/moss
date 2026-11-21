@@ -1,6 +1,6 @@
 # 数据库表结构与旧 JSON 字段映射
 
-状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表；2026-11-18 升级至 schema v20（`voice_devices.status_revision`）
+状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表；2026-11-18 升级至 schema v20（`voice_devices.status_revision`）；2026-11-21 `db.rs` 按域拆成 `db/` 目录（`mod.rs` 连接与共享类型，`migrate`、`materials`、`approvals`、`voice`、`secrets`、`maintenance` 各一文件），对外接口与 schema 不变
 代码：`crates/laser-runtime/src/{db,store,root,migration}.rs`
 历史依据：旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
 
@@ -358,7 +358,7 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 | `voice_speakers` | id（PK，1～64 位字母数字 / `-` / `_`）、name（1～64 字，不可重名）、model_id（当前只接受 `campplus_sv_zh_cn_16k_common`）、dimension（CHECK 64～1024，当前固定 192）、embedding（BLOB，3 段录音均值归一化后的 f32 小端向量）、revision（从 1 开始）、created_at | 最多 64 人 |
 | `voice_person_memory` | speaker_id（PK，引用 `voice_speakers(id)` ON DELETE CASCADE）、summary（默认空）、revision（从 0 开始）、updated_at | 登记时同事务插入空摘要 |
 
-`RuntimeDb`（`db.rs`）：`enroll_voice_speaker`、`list_voice_speakers`（不返回向量）、`native_voice_speaker_templates`、`voice_person_summary`、`update_voice_person_summary_if_revision`（revision 相符才改）、`delete_voice_speaker_if_revision`（数据库未开外键，同事务显式删除对应摘要）。
+`RuntimeDb`（`db/voice.rs`）：`enroll_voice_speaker`、`list_voice_speakers`（不返回向量）、`native_voice_speaker_templates`、`voice_person_summary`、`update_voice_person_summary_if_revision`（revision 相符才改）、`delete_voice_speaker_if_revision`（数据库未开外键，同事务显式删除对应摘要）。
 
 ### 3.20 `voice_chat_logs`（schema v19，n81）
 

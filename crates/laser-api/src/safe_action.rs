@@ -35,77 +35,13 @@ impl ApiService {
                 "job_id 只用于查询或停止任务，不能改变其他动作的目标",
             );
         }
-        let realtime_cmd_info = match action {
-            "emergency_stop" | "soft_reset" => Some((
-                laser_device::RealtimeCommand::EmergencyStop,
-                "急停 0x18",
-                true,
-            )),
-            "feed_override_reset" | "feed_reset" | "feed_100" => Some((
-                laser_device::RealtimeCommand::FeedOvrReset,
-                "进给速度恢复100% (0x90)",
-                false,
-            )),
-            "feed_override_plus_10" | "feed_plus_10" | "feed_+10%" => Some((
-                laser_device::RealtimeCommand::FeedOvrCoarsePlus,
-                "进给速度增加10% (0x91)",
-                false,
-            )),
-            "feed_override_minus_10" | "feed_minus_10" | "feed_-10%" => Some((
-                laser_device::RealtimeCommand::FeedOvrCoarseMinus,
-                "进给速度降低10% (0x92)",
-                false,
-            )),
-            "feed_override_plus_1" | "feed_plus_1" | "feed_+1%" => Some((
-                laser_device::RealtimeCommand::FeedOvrFinePlus,
-                "进给速度增加1% (0x93)",
-                false,
-            )),
-            "feed_override_minus_1" | "feed_minus_1" | "feed_-1%" => Some((
-                laser_device::RealtimeCommand::FeedOvrFineMinus,
-                "进给速度降低1% (0x94)",
-                false,
-            )),
-            "spindle_override_reset" | "power_override_reset" | "power_reset" | "power_100" => {
-                Some((
-                    laser_device::RealtimeCommand::SpindleOvrReset,
-                    "激光功率恢复100% (0x99)",
-                    false,
-                ))
-            }
-            "spindle_override_plus_10"
-            | "power_override_plus_10"
-            | "power_plus_10"
-            | "power_+10%" => Some((
-                laser_device::RealtimeCommand::SpindleOvrCoarsePlus,
-                "激光功率增加10% (0x9A)",
-                false,
-            )),
-            "spindle_override_minus_10"
-            | "power_override_minus_10"
-            | "power_minus_10"
-            | "power_-10%" => Some((
-                laser_device::RealtimeCommand::SpindleOvrCoarseMinus,
-                "激光功率降低10% (0x9B)",
-                false,
-            )),
-            "spindle_override_plus_1" | "power_override_plus_1" | "power_plus_1" | "power_+1%" => {
-                Some((
-                    laser_device::RealtimeCommand::SpindleOvrFinePlus,
-                    "激光功率增加1% (0x9C)",
-                    false,
-                ))
-            }
-            "spindle_override_minus_1"
-            | "power_override_minus_1"
-            | "power_minus_1"
-            | "power_-1%" => Some((
-                laser_device::RealtimeCommand::SpindleOvrFineMinus,
-                "激光功率降低1% (0x9D)",
-                false,
-            )),
-            _ => None,
-        };
+        let realtime_cmd_info = laser_tools::realtime_action(action).map(|realtime| {
+            (
+                realtime.command,
+                realtime.label,
+                realtime.alters_alarm_state,
+            )
+        });
 
         let alters_alarm = realtime_cmd_info.is_some_and(|(_, _, alters)| alters);
         let has_host = args.host.as_deref().is_some_and(|s| !s.trim().is_empty());

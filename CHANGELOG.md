@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 第三批重构 3C：按域拆分 RuntimeDb 与 laser-mcp、合并 GRBL 实时命令表（2026-11-21）
+
+- **现象**：`laser-runtime/src/db.rs`（3,042 行）与 `laser-mcp/src/lib.rs`（3,444 行）单文件过大；GRBL 实时字节命令表（急停 / 软复位、进给与功率倍率）在 `laser-api` 与 `laser-tools` 各抄一份。
+- **根因与修复**：`RuntimeDb` 按域拆成 `db/{mod,migrate,materials,approvals,voice,secrets,maintenance}.rs`，`laser-mcp` 拆成 `lib`、`schema`、`dispatch`、`rpc`、`bridge` 与 `tests`，代码原样搬移，对外接口、schema v20 与行为不变；实时命令表收口为 `laser_tools::realtime_action`，`laser-api` 后台安全动作复用。行为变更：后台软复位的回执文字由“急停 0x18”改为与直连一致的“软复位 0x18”，字节不变。内置工具提示词模板里的代码路径同步改为 `laser-mcp/src/schema.rs`、`dispatch.rs`。评估后不做：`RECORD_TRANSITION_LOCK` 保持进程级（发送线程里的自由函数持有，改实例字段要穿过 6 处以上调用点，漏一处会重现“永远发送中”的竞态，持锁仅微秒级）；`InProcessBackend` / `VoiceBackend` 合并会改到内置语音 R4 拒绝门禁，收益约 40 行，暂缓。
+- **验证**：`laser-runtime` 86 项、`laser-mcp` 29 项测试拆分前后一致，公开方法数一致；`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1,453 项通过；真实激光设备未验（`unverified`）。
+- **关联**：`crates/laser-runtime/src/db/`、`crates/laser-mcp/src/`、`crates/laser-tools/src/lib.rs`（`realtime_action`）、`crates/laser-api/src/safe_action.rs`、`frontend/src/voiceState/settings.js`、`docs/developer/{architecture,db-schema,frontend-behavior}.md`。
+
 ### 第三批重构 3A：settings.json 统一读写入口，修复 Android 导出设置绕过写锁（2026-11-21）
 
 - **现象**：`settings.json` 在 `laser-api`、`moss-voice`、`laser-host`、`laser-runtime` 与桌面壳各有一套读写；Android 的导出设置直接裸写、绕过进程内写锁，可能与 `/api/settings` 并发保存时互相覆盖；全局设置锁放在第 0 层 `laser-contracts`；Jev 决策接口默认地址在三个包里各写一份。

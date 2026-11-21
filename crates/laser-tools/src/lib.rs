@@ -295,6 +295,96 @@ pub fn execute_laser_safe_action_with(
     execute_laser_safe_action_with_gate(args, opener, &|| true)
 }
 
+/// 安全动作里直接写 GRBL 实时字节的那一类：急停 / 软复位（0x18）与进给、激光功率倍率（0x90–0x9D）。
+pub struct RealtimeAction {
+    pub command: RealtimeCommand,
+    /// 回执与审计里的说明文字（含实际字节）
+    pub label: &'static str,
+    /// 是否会改变报警状态（急停 / 软复位）；倍率调节为假，可免确认执行
+    pub alters_alarm_state: bool,
+}
+
+/// 安全动作名（已去空白并转小写）→ 实时字节命令；不是实时类动作时返回 `None`。
+/// `laser-api` 的后台安全动作与本包的直连执行共用这一张表（2026-11-21 前两边各抄一份）。
+pub fn realtime_action(action: &str) -> Option<RealtimeAction> {
+    Some(match action {
+        "emergency_stop" => RealtimeAction {
+            command: RealtimeCommand::EmergencyStop,
+            label: "急停 0x18",
+            alters_alarm_state: true,
+        },
+        "soft_reset" => RealtimeAction {
+            command: RealtimeCommand::EmergencyStop,
+            label: "软复位 0x18",
+            alters_alarm_state: true,
+        },
+        // 进给速度倍率调节 (Feed Override)
+        "feed_override_reset" | "feed_reset" | "feed_100" => RealtimeAction {
+            command: RealtimeCommand::FeedOvrReset,
+            label: "进给速度恢复100% (0x90)",
+            alters_alarm_state: false,
+        },
+        "feed_override_plus_10" | "feed_plus_10" | "feed_+10%" => RealtimeAction {
+            command: RealtimeCommand::FeedOvrCoarsePlus,
+            label: "进给速度增加10% (0x91)",
+            alters_alarm_state: false,
+        },
+        "feed_override_minus_10" | "feed_minus_10" | "feed_-10%" => RealtimeAction {
+            command: RealtimeCommand::FeedOvrCoarseMinus,
+            label: "进给速度降低10% (0x92)",
+            alters_alarm_state: false,
+        },
+        "feed_override_plus_1" | "feed_plus_1" | "feed_+1%" => RealtimeAction {
+            command: RealtimeCommand::FeedOvrFinePlus,
+            label: "进给速度增加1% (0x93)",
+            alters_alarm_state: false,
+        },
+        "feed_override_minus_1" | "feed_minus_1" | "feed_-1%" => RealtimeAction {
+            command: RealtimeCommand::FeedOvrFineMinus,
+            label: "进给速度降低1% (0x94)",
+            alters_alarm_state: false,
+        },
+        // 激光/主轴功率倍率调节 (Spindle/Laser Power Override)
+        "spindle_override_reset" | "power_override_reset" | "power_reset" | "power_100" => {
+            RealtimeAction {
+                command: RealtimeCommand::SpindleOvrReset,
+                label: "激光功率恢复100% (0x99)",
+                alters_alarm_state: false,
+            }
+        }
+        "spindle_override_plus_10" | "power_override_plus_10" | "power_plus_10" | "power_+10%" => {
+            RealtimeAction {
+                command: RealtimeCommand::SpindleOvrCoarsePlus,
+                label: "激光功率增加10% (0x9A)",
+                alters_alarm_state: false,
+            }
+        }
+        "spindle_override_minus_10"
+        | "power_override_minus_10"
+        | "power_minus_10"
+        | "power_-10%" => RealtimeAction {
+            command: RealtimeCommand::SpindleOvrCoarseMinus,
+            label: "激光功率降低10% (0x9B)",
+            alters_alarm_state: false,
+        },
+        "spindle_override_plus_1" | "power_override_plus_1" | "power_plus_1" | "power_+1%" => {
+            RealtimeAction {
+                command: RealtimeCommand::SpindleOvrFinePlus,
+                label: "激光功率增加1% (0x9C)",
+                alters_alarm_state: false,
+            }
+        }
+        "spindle_override_minus_1" | "power_override_minus_1" | "power_minus_1" | "power_-1%" => {
+            RealtimeAction {
+                command: RealtimeCommand::SpindleOvrFineMinus,
+                label: "激光功率降低1% (0x9D)",
+                alters_alarm_state: false,
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// The host can invalidate a queued request during device opening or read-only preflight.
 /// The gate does not replace confirmation, strict-mode approval or device safety checks.
 pub fn execute_laser_safe_action_with_gate(
@@ -349,79 +439,6 @@ pub fn execute_laser_safe_action_with_gate_cancel_and_dispatch(
     }
     let plan = match action.as_str() {
         "status" => Plan::Status,
-        "emergency_stop" => Plan::Realtime {
-            command: RealtimeCommand::EmergencyStop,
-            label: "急停 0x18",
-            alters_alarm_state: true,
-        },
-        "soft_reset" => Plan::Realtime {
-            command: RealtimeCommand::EmergencyStop,
-            label: "软复位 0x18",
-            alters_alarm_state: true,
-        },
-        // 进给速度倍率调节 (Feed Override)
-        "feed_override_reset" | "feed_reset" | "feed_100" => Plan::Realtime {
-            command: RealtimeCommand::FeedOvrReset,
-            label: "进给速度恢复100% (0x90)",
-            alters_alarm_state: false,
-        },
-        "feed_override_plus_10" | "feed_plus_10" | "feed_+10%" => Plan::Realtime {
-            command: RealtimeCommand::FeedOvrCoarsePlus,
-            label: "进给速度增加10% (0x91)",
-            alters_alarm_state: false,
-        },
-        "feed_override_minus_10" | "feed_minus_10" | "feed_-10%" => Plan::Realtime {
-            command: RealtimeCommand::FeedOvrCoarseMinus,
-            label: "进给速度降低10% (0x92)",
-            alters_alarm_state: false,
-        },
-        "feed_override_plus_1" | "feed_plus_1" | "feed_+1%" => Plan::Realtime {
-            command: RealtimeCommand::FeedOvrFinePlus,
-            label: "进给速度增加1% (0x93)",
-            alters_alarm_state: false,
-        },
-        "feed_override_minus_1" | "feed_minus_1" | "feed_-1%" => Plan::Realtime {
-            command: RealtimeCommand::FeedOvrFineMinus,
-            label: "进给速度降低1% (0x94)",
-            alters_alarm_state: false,
-        },
-        // 激光/主轴功率倍率调节 (Spindle/Laser Power Override)
-        "spindle_override_reset" | "power_override_reset" | "power_reset" | "power_100" => {
-            Plan::Realtime {
-                command: RealtimeCommand::SpindleOvrReset,
-                label: "激光功率恢复100% (0x99)",
-                alters_alarm_state: false,
-            }
-        }
-        "spindle_override_plus_10" | "power_override_plus_10" | "power_plus_10" | "power_+10%" => {
-            Plan::Realtime {
-                command: RealtimeCommand::SpindleOvrCoarsePlus,
-                label: "激光功率增加10% (0x9A)",
-                alters_alarm_state: false,
-            }
-        }
-        "spindle_override_minus_10"
-        | "power_override_minus_10"
-        | "power_minus_10"
-        | "power_-10%" => Plan::Realtime {
-            command: RealtimeCommand::SpindleOvrCoarseMinus,
-            label: "激光功率降低10% (0x9B)",
-            alters_alarm_state: false,
-        },
-        "spindle_override_plus_1" | "power_override_plus_1" | "power_plus_1" | "power_+1%" => {
-            Plan::Realtime {
-                command: RealtimeCommand::SpindleOvrFinePlus,
-                label: "激光功率增加1% (0x9C)",
-                alters_alarm_state: false,
-            }
-        }
-        "spindle_override_minus_1" | "power_override_minus_1" | "power_minus_1" | "power_-1%" => {
-            Plan::Realtime {
-                command: RealtimeCommand::SpindleOvrFineMinus,
-                label: "激光功率降低1% (0x9D)",
-                alters_alarm_state: false,
-            }
-        }
         "unlock" => Plan::Lines(vec!["$X".into()], "解锁 $X".into()),
         "home" => Plan::Lines(vec!["$H".into()], "回原点 $H".into()),
         "set_origin" => Plan::Lines(vec!["G92 X0 Y0".into()], "设置工作原点 G92 X0 Y0".into()),
@@ -448,7 +465,14 @@ pub fn execute_laser_safe_action_with_gate_cancel_and_dispatch(
                 "走边框的暂停、继续、停止要作用在 MOSS 后台（moss-host）正在走的边框上，当前没有连上后台",
             );
         }
-        unknown => return ToolCallResult::err(format!("不支持的安全动作: {unknown}")),
+        unknown => match realtime_action(unknown) {
+            Some(realtime) => Plan::Realtime {
+                command: realtime.command,
+                label: realtime.label,
+                alters_alarm_state: realtime.alters_alarm_state,
+            },
+            None => return ToolCallResult::err(format!("不支持的安全动作: {unknown}")),
+        },
     };
     let is_read_or_override = matches!(
         plan,
