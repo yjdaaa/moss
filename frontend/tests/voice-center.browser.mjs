@@ -87,6 +87,9 @@ try {
       timings: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", at_ms: 1_790_000_003_000, turn: 2, outcome: "ignored", models: ["fake-asr"], stages: { recording_start: 0, final_asr: 320 }, tools: [] }],
       devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
     },
+    // n103：先模拟没给定位权限，用户去系统设置打开后变为已授权
+    wifiPermission: "denied",
+    wifiSettingsOpened: [],
     usbPorts: [
       { port_name: "/dev/cu.usbserial-LASER", description: "FluidNC", vid: 0x1a86, pid: 0x7523, serial_number: "L1", is_usb: true, is_laser_port: true, is_likely_esp: true },
       { port_name: "/dev/cu.usbmodem14201", description: "ESP32-S3 USB JTAG", vid: 0x303a, pid: 0x1001, serial_number: "XZ01", is_usb: true, is_laser_port: false, is_likely_esp: true },
@@ -341,6 +344,41 @@ try {
       switch (input?.action) {
         case "ports":
           return { ports: structuredClone(state.usbPorts), laser_busy: false };
+        case "open_wifi_settings":
+          assert.deepEqual(Object.keys(input).sort(), ["action", "target"], "打开设置只带固定的页面类别");
+          state.wifiSettingsOpened.push(input.target);
+          state.wifiPermission = "granted";
+          return { opened: true };
+        case "wifi_current":
+          assert.deepEqual(Object.keys(input), ["action"], "读本机 Wi-Fi 不带串口等其他字段");
+          if (state.wifiPermission !== "granted") {
+            return {
+              platform: "macos",
+              permission: state.wifiPermission,
+              current: null,
+              networks: [],
+              hint: "MOSS 没有“定位服务”权限，macOS 因此不给出 Wi-Fi 名称（MOSS 不读取、不保存位置）。",
+            };
+          }
+          return {
+            platform: "macos",
+            permission: "granted",
+            current: { ssid: "OfficeNet", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true },
+            networks: [],
+            hint: null,
+          };
+        case "wifi_scan":
+          return {
+            platform: "macos",
+            permission: "granted",
+            current: { ssid: "OfficeNet", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true },
+            networks: [
+              { ssid: "OfficeNet", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true },
+              { ssid: "StudioNet", signal: 72, bands: ["2.4g", "5g"], band_signals: { "2.4g": 35, "5g": 72 }, secure: true, current: false },
+              { ssid: "CafeFree", signal: 40, bands: ["2.4g"], band_signals: { "2.4g": 40 }, secure: false, current: false },
+            ],
+            hint: null,
+          };
         case "inspect":
           assert.equal(input.port, "/dev/cu.usbmodem14201");
           return {
@@ -978,6 +1016,54 @@ try {
   await page.locator("#xiaozhi-usb-port-select").selectOption("/dev/cu.usbmodem14201");
   await page.locator("#xiaozhi-usb-inspect").click();
   await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").getByText("esp32s3").waitFor();
+  // n103：一键填入电脑当前 Wi-Fi；电脑连的是 5 GHz 时提醒板子只认 2.4 GHz，密码不自动填
+  await page.locator("#xiaozhi-wifi-pass").fill("old-pass");
+  // 没有定位权限：弹窗给“去系统设置打开 / 手动输入”，先选手动输入，之后再从提示里去设置打开，切回 MOSS 自动重查
+  const clientOs = await page.evaluate(() => {
+    const p = String(navigator.userAgentData?.platform || navigator.platform || "");
+    return /Mac/i.test(p) ? "macos" : /Win/i.test(p) ? "windows" : "other";
+  });
+  await page.locator("#xiaozhi-wifi-use-current").click();
+  if (clientOs === "macos" || clientOs === "windows") {
+    const permDialog = page.locator('[data-testid="app-dialog"]');
+    await permDialog.getByText("需要定位权限才能读取 Wi-Fi 名称").waitFor();
+    await permDialog.getByText(/MOSS 不读取、不保存位置/).waitFor();
+    await permDialog.getByRole("button", { name: "手动输入" }).click();
+    await permDialog.waitFor({ state: "detached" });
+    await page.waitForFunction(() => document.activeElement?.id === "xiaozhi-wifi-ssid");
+    await page.locator("#xiaozhi-wifi-notice").getByText(/已改为手动输入/).waitFor();
+    assert.deepEqual(state.wifiSettingsOpened, [], "选手动输入不打开系统设置");
+    await page.locator("#xiaozhi-wifi-open-settings").click();
+    await page.locator("#xiaozhi-wifi-notice").getByText(/已打开系统设置.*切回 MOSS，会自动重新检查/).waitFor();
+    assert.deepEqual(state.wifiSettingsOpened, ["location"], "后来改主意可以从提示里去系统设置打开定位权限页");
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  } else {
+    // 没有可跳转设置页的系统：只给提示并聚焦输入框，用“重新检查”再读
+    await page.waitForFunction(() => document.activeElement?.id === "xiaozhi-wifi-ssid");
+    state.wifiPermission = "granted";
+    await page.locator("#xiaozhi-wifi-recheck").click();
+  }
+  await page.locator("#xiaozhi-wifi-notice").getByText(/已填入电脑当前连接的“OfficeNet”.*这块板子（esp32s3）只支持 2\.4 GHz/).waitFor();
+  assert.equal(await page.locator("#xiaozhi-wifi-ssid").inputValue(), "OfficeNet");
+  assert.equal(await page.locator("#xiaozhi-wifi-pass").inputValue(), "", "换了网络名就清掉之前填的密码");
+  // 扫描附近：按读到的 ESP32-S3 只显示 2.4 GHz，仅 5 GHz 的网络隐藏，双频网络只标 2.4 GHz 并按 2.4G 信号显示
+  await page.locator("#xiaozhi-wifi-scan").click();
+  const scanList = page.locator("#xiaozhi-wifi-scan-list");
+  await scanList.waitFor();
+  assert.deepEqual(await scanList.locator(".xz-scan-ssid").allInnerTexts(), ["CafeFree", "StudioNet"], "只列板子能连的网络，按 2.4G 信号排序");
+  await scanList.locator("#xiaozhi-wifi-scan-filter").getByText("按板子 esp32s3 只显示 2.4 GHz，已隐藏 1 个板子连不上的网络").waitFor();
+  const studio = scanList.getByRole("button", { name: /StudioNet/ });
+  assert.equal(await studio.getByText("5 GHz").count(), 0, "2.4G 芯片不显示 5 GHz 标签");
+  await studio.getByText("信号 35%").waitFor();
+  await scanList.getByRole("button", { name: /StudioNet/ }).click();
+  assert.equal(await page.locator("#xiaozhi-wifi-ssid").inputValue(), "StudioNet");
+  await page.locator("#xiaozhi-wifi-notice").getByText(/已选“StudioNet”，请填写它的密码/).waitFor();
+  // 列表里的“重新扫描”再发一次 wifi_scan，结果刷新后仍可点选
+  await scanList.locator("#xiaozhi-wifi-rescan").click();
+  await page.waitForFunction(() => document.querySelector("#xiaozhi-wifi-rescan")?.textContent.includes("重新扫描"));
+  assert.equal(await scanList.locator(".xz-scan-item").count(), 2);
+  assert.equal(calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "wifi_scan").length, 2, "重新扫描再查询一次");
+  assert.equal(calls.filter((c) => c.command === "voice_usb_provision" && String(c.args?.input?.action).startsWith("wifi_")).length, 4, "每次点击 / 切回重查各只查询一次本机 Wi-Fi");
   await page.locator("#xiaozhi-wifi-ssid").fill("StudioNet");
   const writeCountBefore = calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "write").length;
   await page.locator("#xiaozhi-usb-write-wifi").click();

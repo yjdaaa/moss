@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### USB 一键配网可一键填入电脑当前 Wi-Fi 或扫描附近网络（2026-11-22）
+
+- **现象**：USB 一键配网的“新的 Wi-Fi”只能手动输入 SSID，容易输错名字，也看不出路由器是不是板子连不上的 5 GHz。
+- **根因与修复**：新增 `moss_usb_provision::wifi` 与 `voice_usb_provision` 的 `wifi_current` / `wifi_scan` 两个只读动作（不碰串口、不占配网锁、不写诊断、从不读取密码）：macOS 用 CoreWLAN 并在主线程申请定位授权（`Info.plist` 加 `NSLocation*UsageDescription`），Windows 用 wlanapi，Linux 用 `nmcli`；同名多 AP 合并信号与频段。界面在 SSID 下加“用本机当前 Wi-Fi”“扫描附近”，扫描列表按读到的芯片只显示板子能连的频段（非 ESP32-C5 只显示 2.4 GHz，C5 显示 2.4 / 5 GHz，连不上的隐藏并注明个数，双频网络信号按对应频段的 `band_signals` 算），标加密与信号，表头可“重新扫描”；换网络名会清空已填密码。缺定位权限或电脑 Wi-Fi 开关关着时（新错误码 `wifi_radio_off`），macOS / Windows 弹应用内选择框“去系统设置打开 / 手动输入”（USB 配网卡片“全程无弹窗”的唯一例外）：前者经新动作 `open_wifi_settings` 只跳固定的定位权限页或 Wi-Fi 设置页，切回 MOSS 时自动重查；后者聚焦 SSID 输入框，提示行保留“去系统设置打开 / 重新检查”供之后改主意。`scripts/quick-update-desktop.sh` 同步把源码 `Info.plist` 新增的顶层键带进已安装的 `.app`（否则 macOS 静默拒绝定位请求）。Android 不编译 USB 配网，不适用。
+- **验证**：新增 Rust 单测 9 项（频段、信号换算、合并去重、`nmcli` 转义解析、提示与序列化、设置页地址固定）及请求解析断言，前端单测“本机 Wi-Fi：按芯片判断频段…”与渲染断言，浏览器用例覆盖缺权限弹窗选手动输入、之后从提示去设置打开并切回自动重查、填入当前 Wi-Fi、5 GHz 提示、按芯片筛选、点选与重新扫描；`cargo test --workspace` 1,463 项、前端 370 项、浏览器 17 项全部通过，clippy 零警告，Windows / Linux 目标单独交叉 clippy 通过。本机定位服务整体关闭，macOS 授权弹框与真实扫描、Windows 实机扫描均未实测（`unverified`）。
+- **关联**：`crates/moss-usb-provision/src/{wifi,lib}.rs`（`wifi_query`、`UsbProvisionRequest::{WifiCurrent,WifiScan,OpenWifiSettings}`、`wifi::open_settings`）、`scripts/quick-update-desktop.sh`、`crates/moss-voice-host/src/{lib.rs,builtin/usb_provision.rs}`、`apps/desktop/src-tauri/{Info.plist,src/voice_builtin.rs}`、`frontend/src/components/voice-builtin/{XiaozhiUsbProvisionCard.jsx,usbProvisionModel.js}`、`frontend/src/styles/13-voice-devices.css`、`docs/developer/api-contracts.md`、技术书 n103。
+
 ### 修复第三批重构遗留：打包脚本旧 db.rs 路径、局域网扫描绕过开连接锁与残留命令表（2026-11-21）
 
 - **现象**：拆分 `db.rs` 后，`scripts/build-macos-installer.sh`（`--with-voice-sidecar`）与 `scripts/voice-helper/build-sidecar-installer.ps1` 校验 schema 版本时仍读已删除的 `crates/laser-runtime/src/db.rs`，打包直接报错中断；局域网设备扫描的确认线程开 Telnet 连接前没拿 `target_open_mutex`、没查也没登记短连接占用，可能与并发启动的发送或连接探测双开同一端口，且候选键按 `ip:port` 拼接，IPv6 目标匹配不到正在加工的任务；`safe_action` 里还留着一份 38 项实时命令名单；`moss_voice::settings::update_root` 已无生产调用方；文档里材料下拉、审批卡层级与 `voice_devices` 换 `Client-Id` 的说明落后于 2026-11-20 的改动。

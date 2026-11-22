@@ -139,6 +139,130 @@ export function removeSavedWifiSlot(savedSlots, index) {
   return savedSlots.filter((_, idx) => idx !== index);
 }
 
+/**
+ * 本机 Wi-Fi 一键填写 / 扫描附近（2026-11-22，技术书 n103）。后端只给 SSID、信号、频段与是否加密，不给密码。
+ * 小智常见芯片（ESP32 / S3 / C3 / C6）只支持 2.4 GHz，ESP32-C5 另支持 5 GHz。
+ */
+export function boardSupports5g(chip) {
+  return /c5/i.test(String(chip || ""));
+}
+
+const WIFI_BAND_LABELS = { "2.4g": "2.4 GHz", "5g": "5 GHz", "6g": "6 GHz" };
+
+export function wifiBandLabel(band) {
+  return WIFI_BAND_LABELS[band] || String(band || "");
+}
+
+/** 板子能连的频段：ESP32-C5 双频（2.4 / 5 GHz），其余小智常见芯片只有 2.4 GHz；还没读板子时按 2.4 GHz。 */
+export function boardWifiBands(chip) {
+  return boardSupports5g(chip) ? ["2.4g", "5g"] : ["2.4g"];
+}
+
+/**
+ * 按板子筛扫描结果（2026-11-22 用户要求“根据对应的板子来显示”）：只留板子能连的频段，
+ * 频段标签与信号也只按这些频段算（双频同名网络里 2.4 GHz 往往更弱）；系统没给频率的网络保留。
+ * 返回 `{ shown, hiddenCount }`，排序为电脑当前在前、再按信号强弱。
+ */
+export function filterScannedWifiForBoard(networks, chip) {
+  const allowed = boardWifiBands(chip);
+  const shown = [];
+  let hiddenCount = 0;
+  for (const network of Array.isArray(networks) ? networks : []) {
+    const bands = Array.isArray(network?.bands) ? network.bands : [];
+    if (bands.length === 0) {
+      shown.push({ ...network, bands: [] });
+      continue;
+    }
+    const usable = bands.filter((band) => allowed.includes(band));
+    if (usable.length === 0) {
+      hiddenCount += 1;
+      continue;
+    }
+    const perBand = usable
+      .map((band) => network.band_signals?.[band])
+      .filter((value) => Number.isInteger(value));
+    shown.push({
+      ...network,
+      bands: usable,
+      signal: perBand.length ? Math.max(...perBand) : network.signal,
+    });
+  }
+  shown.sort(
+    (a, b) =>
+      Number(Boolean(b.current)) - Number(Boolean(a.current)) ||
+      (b.signal ?? -1) - (a.signal ?? -1),
+  );
+  return { shown, hiddenCount };
+}
+
+/** 扫描列表表头：说明按哪块板子筛的。 */
+export function scanFilterLabel(chip, hiddenCount) {
+  const bands = boardWifiBands(chip).map(wifiBandLabel).join(" / ");
+  const base = chip
+    ? `按板子 ${chip} 只显示 ${bands}`
+    : `还没读取板子，先只显示 ${bands}（读取后按芯片调整）`;
+  return hiddenCount > 0 ? `${base}，已隐藏 ${hiddenCount} 个板子连不上的网络` : base;
+}
+
+/** 一键填入电脑当前 Wi-Fi 后的提示：电脑连的频段板子不支持时，按读到的芯片说明板子能连哪些频段。 */
+export function currentWifiFillNotice(network, chip) {
+  if (!network?.ssid) return "";
+  const bands = Array.isArray(network.bands) ? network.bands : [];
+  const allowed = boardWifiBands(chip);
+  if (bands.length > 0 && !bands.some((band) => allowed.includes(band))) {
+    const boardText = chip
+      ? `这块板子（${chip}）只支持 ${allowed.map(wifiBandLabel).join(" / ")}`
+      : "小智常见芯片只支持 2.4 GHz（ESP32-C5 另支持 5 GHz）";
+    return `已填入电脑当前连接的“${network.ssid}”。电脑连的是 ${bands
+      .map(wifiBandLabel)
+      .join(" / ")}，${boardText}：路由器各频段同名就没问题，否则请改填板子能连的网络名（可点“扫描附近”查看）。密码请手动填写。`;
+  }
+  return `已填入电脑当前连接的“${network.ssid}”，密码请手动填写${
+    network.secure === false ? "（这是开放网络，可留空）" : ""
+  }。`;
+}
+
+/**
+ * 读本机 Wi-Fi 遇到系统层面的阻碍时，弹窗要说什么、“去系统设置打开”跳哪一页（2026-11-22 用户要求弹窗）。
+ * 没授权定位 → 定位权限页；电脑 Wi-Fi 开关关着（`wifi_radio_off`）→ Wi-Fi 设置页；其余返回 null。
+ */
+export function hostWifiProblem(result, error) {
+  if (error?.code === "wifi_radio_off") {
+    return {
+      target: "wifi",
+      permission: "",
+      title: "电脑的 Wi-Fi 没打开",
+      message: error.message || "电脑的 Wi-Fi 是关着的，打开 Wi-Fi 后才能读取附近的网络名称。",
+    };
+  }
+  const permission = result?.permission;
+  if (permission && permission !== "granted") {
+    return {
+      target: "location",
+      permission,
+      title: "需要定位权限才能读取 Wi-Fi 名称",
+      message: result.hint || "系统要求应用有定位权限才给出 Wi-Fi 名称（MOSS 不读取、不保存位置）。",
+    };
+  }
+  return null;
+}
+
+/** 只有 macOS / Windows 有可以直接跳转的系统设置页。 */
+export function canOpenWifiSettings(os) {
+  return os === "macos" || os === "windows";
+}
+
+/** 选中一个网络填进“新的 Wi-Fi”：换了网络名就清掉之前填的密码，免得把别的网络的密码写进去。 */
+export function applyPickedWifi(draft, network) {
+  const ssid = String(network?.ssid || "");
+  if (!ssid) return draft;
+  return {
+    ...draft,
+    newSsid: ssid,
+    newPassword: ssid === draft.newSsid ? draft.newPassword : "",
+  };
+}
+
 export function validateUsbProvisionDraft(draft, { includeNewWifi = true } = {}) {
   const ssid = String(draft?.newSsid || "").trim();
   const password = String(draft?.newPassword || "");

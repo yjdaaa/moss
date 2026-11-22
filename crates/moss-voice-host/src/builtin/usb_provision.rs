@@ -34,6 +34,11 @@ fn active_laser_serial_port(host: &laser_host::HostApplication) -> Option<String
 
 impl BuiltinVoice {
     pub fn usb_provision(&self, input: &Value) -> Result<Value, CenterError> {
+        // 读本机 Wi-Fi 不碰串口，不占配网锁：读板子或写入进行中也能扫描
+        let req = moss_usb_provision::parse_usb_provision_request(input)?;
+        if let Some(result) = moss_usb_provision::wifi_query(&req) {
+            return result;
+        }
         let _guard = self.usb_provision_lock.try_lock().map_err(|_| {
             CenterError::new(
                 "usb_provision_busy",

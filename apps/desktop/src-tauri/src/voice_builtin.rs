@@ -940,6 +940,14 @@ pub async fn voice_usb_provision(
 ) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
+    // macOS 要有定位授权才给出 Wi-Fi 名称：授权框须由主线程上的 CLLocationManager 弹出
+    #[cfg(target_os = "macos")]
+    if matches!(
+        input.get("action").and_then(Value::as_str),
+        Some("wifi_current" | "wifi_scan")
+    ) {
+        let _ = app.run_on_main_thread(moss_voice_host::prepare_wifi_location_permission);
+    }
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.usb_provision(&input)).await;
     #[cfg(mobile)]

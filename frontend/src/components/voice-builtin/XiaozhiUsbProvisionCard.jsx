@@ -5,19 +5,30 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  Laptop,
+  Lock,
+  LockOpen,
   RefreshCw,
+  ScanSearch,
   Sliders,
   Trash2,
   Usb,
   Wifi,
 } from "lucide-react";
+import { showChoice } from "../../appDialog.js";
+import { detectClientOs } from "../../platform.js";
 import { voiceApi } from "../../voiceApi.js";
 import { voiceErrorText } from "../../voiceState.js";
 import {
   MAX_TX_POWER_OPTIONS,
+  applyPickedWifi,
   buildUsbProvisionWritePayload,
+  canOpenWifiSettings,
   createDraftFromInspect,
+  currentWifiFillNotice,
   deriveWsUrlForMoss,
+  filterScannedWifiForBoard,
+  hostWifiProblem,
   formatUsbWriteConfirmText,
   isRecognizedXiaozhiInspect,
   isRevokedInMoss,
@@ -26,7 +37,9 @@ import {
   pinSavedWifiSlot,
   removeSavedWifiSlot,
   utf8ByteLength,
+  scanFilterLabel,
   validateUsbProvisionDraft,
+  wifiBandLabel,
 } from "./usbProvisionModel.js";
 
 const DEVICE_STATUS_LABELS = {
@@ -48,6 +61,20 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   const [draft, setDraft] = useState(() => createDraftFromInspect(null, serviceStatus));
   const [showPassword, setShowPassword] = useState(false);
   const [pendingWrite, setPendingWrite] = useState(null);
+  // 本机 Wi-Fi 读取：不占后端配网锁，与读板子 / 写入互不阻塞，单独记忙碌状态
+  const [wifiBusy, setWifiBusy] = useState("");
+  const [wifiNotice, setWifiNotice] = useState(null);
+  const [wifiScan, setWifiScan] = useState(null);
+  const wifiSeqRef = useRef(0);
+  const ssidInputRef = useRef(null);
+  // 去系统设置后切回 MOSS 时要自动重查的动作（wifi_current / wifi_scan）
+  const pendingRecheckRef = useRef("");
+  const lastWifiActionRef = useRef("wifi_current");
+  // macOS 第一次“还没问过”时系统会自己弹授权框，不再叠一个 MOSS 弹窗
+  const systemPromptSeenRef = useRef(false);
+  const queryHostWifiRef = useRef(null);
+  const wifiBusyRef = useRef("");
+  wifiBusyRef.current = wifiBusy;
 
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
@@ -254,6 +281,142 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     }
   };
 
+  const focusSsidInput = () => {
+    window.setTimeout(() => ssidInputRef.current?.focus(), 0);
+  };
+
+  // 权限 / 开关提示后面带“去系统设置打开”“重新检查”：用户先选了手动输入，之后想开随时能点
+  const problemNotice = (problem, text) => ({
+    tone: "warn",
+    text,
+    settingsTarget: canOpenWifiSettings(detectClientOs()) ? problem.target : "",
+    recheck: true,
+  });
+
+  const openWifiSettings = async (target) => {
+    try {
+      await voiceApi.usbProvision({ action: "open_wifi_settings", target });
+      if (!mountedRef.current) return;
+      pendingRecheckRef.current = lastWifiActionRef.current;
+      setWifiNotice({
+        tone: "ok",
+        text: "已打开系统设置。打开权限或 Wi-Fi 后切回 MOSS，会自动重新检查。",
+        recheck: true,
+      });
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setWifiNotice({ tone: "bad", text: voiceErrorText(error), recheck: true });
+    }
+  };
+
+  /** 弹窗：去系统设置打开 / 手动输入。没有可跳转设置页的系统只给提示并聚焦输入框。 */
+  const offerSystemSettings = async (problem) => {
+    const manualText = `${problem.message} 现在可以先手动输入 Wi-Fi 名称。`;
+    if (!canOpenWifiSettings(detectClientOs())) {
+      setWifiNotice({ tone: "warn", text: manualText, recheck: true });
+      focusSsidInput();
+      return;
+    }
+    const choice = await showChoice(problem.message, {
+      title: problem.title,
+      tone: "warning",
+      confirmText: "去系统设置打开",
+      cancelText: "手动输入",
+    });
+    if (!mountedRef.current) return;
+    if (choice === "confirm") {
+      await openWifiSettings(problem.target);
+      return;
+    }
+    setWifiNotice(
+      problemNotice(problem, "已改为手动输入。之后想让 MOSS 自动读取，可以随时去系统设置打开。"),
+    );
+    if (choice === "cancel") focusSsidInput();
+  };
+
+  const queryHostWifi = async (action, { auto = false } = {}) => {
+    if (wifiBusy) return;
+    lastWifiActionRef.current = action;
+    const seq = ++wifiSeqRef.current;
+    setWifiBusy(action);
+    setWifiNotice(null);
+    let problem = null;
+    try {
+      const res = await voiceApi.usbProvision({ action });
+      if (!mountedRef.current || wifiSeqRef.current !== seq) return;
+      problem = hostWifiProblem(res, null);
+      if (problem?.permission === "not_determined" && !systemPromptSeenRef.current) {
+        // 系统刚弹出授权框：等用户点完切回 MOSS 自动重查
+        systemPromptSeenRef.current = true;
+        pendingRecheckRef.current = action;
+        setWifiNotice(
+          problemNotice(problem, "请在系统弹出的授权框里点“允许”，MOSS 会自动重新读取。"),
+        );
+        return;
+      }
+      if (!problem) {
+        const chip = inspectData?.device?.chip;
+        if (action === "wifi_current") {
+          if (res?.current?.ssid) {
+            updateDraft((prev) => applyPickedWifi(prev, res.current));
+            setWifiNotice({ tone: "ok", text: currentWifiFillNotice(res.current, chip) });
+          } else {
+            setWifiNotice({
+              tone: "warn",
+              text: res?.hint || "没读到电脑当前连接的 Wi-Fi，请手动输入。",
+            });
+          }
+        } else {
+          const list = Array.isArray(res?.networks) ? res.networks : [];
+          setWifiScan(list);
+          if (res?.hint) setWifiNotice({ tone: list.length ? "ok" : "warn", text: res.hint });
+        }
+      }
+    } catch (error) {
+      if (!mountedRef.current || wifiSeqRef.current !== seq) return;
+      problem = hostWifiProblem(null, error);
+      if (!problem) setWifiNotice({ tone: "bad", text: voiceErrorText(error) });
+    } finally {
+      if (wifiSeqRef.current === seq && mountedRef.current) setWifiBusy("");
+    }
+    if (!problem || !mountedRef.current) return;
+    if (auto) {
+      // 自动重查仍不行：只留提示和入口，不反复弹窗打扰
+      setWifiNotice(problemNotice(problem, `还没读到 Wi-Fi 名称。${problem.message}`));
+    } else {
+      await offerSystemSettings(problem);
+    }
+  };
+  queryHostWifiRef.current = queryHostWifi;
+
+  // 从系统设置切回 MOSS（窗口重新获得焦点 / 页面重新可见）时自动重查一次
+  useEffect(() => {
+    const onBack = () => {
+      if (document.visibilityState === "hidden") return;
+      const action = pendingRecheckRef.current;
+      // 正在读时先不消费“待重查”，留到下次切回再查
+      if (!action || wifiBusyRef.current) return;
+      pendingRecheckRef.current = "";
+      void queryHostWifiRef.current?.(action, { auto: true });
+    };
+    window.addEventListener("focus", onBack);
+    document.addEventListener("visibilitychange", onBack);
+    return () => {
+      window.removeEventListener("focus", onBack);
+      document.removeEventListener("visibilitychange", onBack);
+    };
+  }, []);
+
+  const pickScannedWifi = (network) => {
+    updateDraft((prev) => applyPickedWifi(prev, network));
+    setWifiNotice({
+      tone: "ok",
+      text: `已选“${network.ssid}”，${
+        network.secure === false ? "这是开放网络，密码可留空" : "请填写它的密码"
+      }。`,
+    });
+  };
+
   const resetSavedSlots = () => {
     if (!inspectData) return;
     const fresh = createDraftFromInspect(inspectData, serviceStatus);
@@ -332,6 +495,12 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   const dimVal = String(draft.sleepDimMin ?? "").trim() === "" ? -1 : Number(draft.sleepDimMin);
   const offVal = String(draft.sleepOffMin ?? "").trim() === "" ? -1 : Number(draft.sleepOffMin);
   const revoked = isRevokedInMoss(inspectData);
+  const boardChip = inspectData?.device?.chip || "";
+  // 扫描结果按读到的芯片筛：非 C5 只显示 2.4 GHz，C5 显示 2.4 / 5 GHz
+  const scanView =
+    Array.isArray(wifiScan) && wifiScan.length > 0
+      ? filterScannedWifiForBoard(wifiScan, boardChip)
+      : null;
   const ssidEdgeSpaces = draft.newSsid.trim() !== "" && draft.newSsid !== draft.newSsid.trim();
 
   return (
@@ -590,6 +759,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                   </label>
                   <input
                     id="xiaozhi-wifi-ssid"
+                    ref={ssidInputRef}
                     className="text-input"
                     type="text"
                     value={draft.newSsid}
@@ -602,6 +772,30 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                       名称首尾有空格，会按原样写入；不是路由器名字的一部分请删掉。
                     </p>
                   )}
+                  <div className="xz-quick-fills">
+                    <button
+                      type="button"
+                      className="xz-chip-btn"
+                      id="xiaozhi-wifi-use-current"
+                      disabled={Boolean(busy) || Boolean(wifiBusy)}
+                      onClick={() => queryHostWifi("wifi_current")}
+                      title="读取这台电脑当前连接的 Wi-Fi 名称（不读密码）"
+                    >
+                      <Laptop size={12} aria-hidden="true" />{" "}
+                      {wifiBusy === "wifi_current" ? "读取中…" : "用本机当前 Wi-Fi"}
+                    </button>
+                    <button
+                      type="button"
+                      className="xz-chip-btn"
+                      id="xiaozhi-wifi-scan"
+                      disabled={Boolean(busy) || Boolean(wifiBusy)}
+                      onClick={() => queryHostWifi("wifi_scan")}
+                      title="用这台电脑扫描附近的 Wi-Fi"
+                    >
+                      <ScanSearch size={12} aria-hidden="true" />{" "}
+                      {wifiBusy === "wifi_scan" ? "扫描中…" : "扫描附近"}
+                    </button>
+                  </div>
                 </div>
                 <div className="xz-form-group">
                   <label htmlFor="xiaozhi-wifi-pass">Wi-Fi 密码</label>
@@ -628,6 +822,119 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                   </div>
                 </div>
               </div>
+
+              {wifiNotice && (
+                <p
+                  className={`xz-wifi-notice xz-wifi-notice--${wifiNotice.tone}`}
+                  id="xiaozhi-wifi-notice"
+                  role={wifiNotice.tone === "bad" ? "alert" : "status"}
+                >
+                  {wifiNotice.text}
+                  {wifiNotice.settingsTarget && (
+                    <button
+                      type="button"
+                      className="voice-link-btn xz-wifi-notice-action"
+                      id="xiaozhi-wifi-open-settings"
+                      onClick={() => openWifiSettings(wifiNotice.settingsTarget)}
+                    >
+                      去系统设置打开
+                    </button>
+                  )}
+                  {wifiNotice.recheck && (
+                    <button
+                      type="button"
+                      className="voice-link-btn xz-wifi-notice-action"
+                      id="xiaozhi-wifi-recheck"
+                      disabled={Boolean(busy) || Boolean(wifiBusy)}
+                      onClick={() => queryHostWifi(lastWifiActionRef.current)}
+                    >
+                      重新检查
+                    </button>
+                  )}
+                </p>
+              )}
+
+              {scanView && (
+                <div className="xz-scan-box" id="xiaozhi-wifi-scan-list">
+                  <div className="xz-card-head">
+                    <span className="voice-muted" id="xiaozhi-wifi-scan-filter">
+                      附近的 Wi-Fi（{scanView.shown.length}）·{" "}
+                      {scanFilterLabel(boardChip, scanView.hiddenCount)}
+                    </span>
+                    <span className="xz-saved-actions">
+                      <button
+                        type="button"
+                        className="voice-link-btn"
+                        id="xiaozhi-wifi-rescan"
+                        disabled={Boolean(busy) || Boolean(wifiBusy)}
+                        onClick={() => queryHostWifi("wifi_scan")}
+                      >
+                        <RefreshCw
+                          size={12}
+                          aria-hidden="true"
+                          className={wifiBusy === "wifi_scan" ? "voice-spin" : ""}
+                        />{" "}
+                        {wifiBusy === "wifi_scan" ? "扫描中…" : "重新扫描"}
+                      </button>
+                      <button
+                        type="button"
+                        className="voice-link-btn"
+                        onClick={() => setWifiScan(null)}
+                      >
+                        收起
+                      </button>
+                    </span>
+                  </div>
+                  {scanView.shown.length === 0 ? (
+                    <p className="voice-muted xz-scan-empty">
+                      附近没有这块板子能连的网络，可以点“重新扫描”或直接手动输入。
+                    </p>
+                  ) : (
+                    <ul className="xz-scan-list">
+                      {scanView.shown.map((network) => {
+                        const picked = network.ssid === draft.newSsid;
+                        return (
+                          <li key={network.ssid}>
+                            <button
+                              type="button"
+                              className={`xz-scan-item ${picked ? "is-picked" : ""}`}
+                              disabled={Boolean(busy)}
+                              aria-pressed={picked}
+                              onClick={() => pickScannedWifi(network)}
+                            >
+                              <span className="xz-scan-ssid">
+                                {network.secure === false ? (
+                                  <LockOpen size={12} aria-label="开放网络" />
+                                ) : (
+                                  <Lock size={12} aria-label="加密网络" />
+                                )}
+                                <span>{network.ssid}</span>
+                              </span>
+                              <span className="xz-saved-tags">
+                                {network.current && (
+                                  <span className="ob-pill ob-pill--info">电脑当前</span>
+                                )}
+                                {network.bands.length === 0 ? (
+                                  <span className="ob-pill ob-pill--off">频段未知</span>
+                                ) : (
+                                  network.bands.map((band) => (
+                                    <span key={band} className="ob-pill ob-pill--off">
+                                      {wifiBandLabel(band)}
+                                    </span>
+                                  ))
+                                )}
+                                {Number.isInteger(network.signal) && (
+                                  <span className="xz-scan-signal">信号 {network.signal}%</span>
+                                )}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
 
               <div className="xz-ota-preview">
                 <span>

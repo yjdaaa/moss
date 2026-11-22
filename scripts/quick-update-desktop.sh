@@ -250,6 +250,42 @@ if [[ "$BUILD_ONLY" -eq 0 ]]; then
         log "Updated Info.plist bundle version -> $EFFECTIVE_VERSION"
       fi
     fi
+    # --no-bundle never regenerates Info.plist, so top-level keys added to src-tauri/Info.plist (usage
+    # descriptions such as NSLocationUsageDescription) would never reach the installed app, and macOS
+    # silently drops permission requests whose usage description is missing. Sync keys that differ.
+    SRC_PLIST="$TAURI_DIR/Info.plist"
+    if [[ -f "$SRC_PLIST" && -f "$APP/Contents/Info.plist" ]]; then
+      PLIST_KEYS_STALE=()
+      while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        src_val="$(plutil -extract "$key" xml1 -o - "$SRC_PLIST" 2>/dev/null || true)"
+        dst_val="$(plutil -extract "$key" xml1 -o - "$APP/Contents/Info.plist" 2>/dev/null || true)"
+        if [[ "$src_val" != "$dst_val" ]]; then
+          PLIST_KEYS_STALE+=("$key")
+        fi
+      done < <(/usr/libexec/PlistBuddy -c "Print" "$SRC_PLIST" | sed -nE 's/^    ([A-Za-z0-9_.-]+) = .*/\1/p')
+      if [[ "${#PLIST_KEYS_STALE[@]}" -gt 0 ]]; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+          log "DRY RUN: would sync Info.plist keys: ${PLIST_KEYS_STALE[*]}"
+        else
+          PLIST_SYNC="$APP/Contents/Info.plist.new-$$"
+          cp "$APP/Contents/Info.plist" "$PLIST_SYNC"
+          chmod 644 "$PLIST_SYNC"
+          for key in "${PLIST_KEYS_STALE[@]}"; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$PLIST_SYNC" >/dev/null 2>&1 || true
+          done
+          # PlistBuddy splits its -c command on spaces: merge from a space-free temp copy
+          PLIST_SRC_TMP="$(mktemp -t moss-info-plist)"
+          cp "$SRC_PLIST" "$PLIST_SRC_TMP"
+          /usr/libexec/PlistBuddy -c "Merge $PLIST_SRC_TMP" "$PLIST_SYNC" >/dev/null
+          rm -f "$PLIST_SRC_TMP"
+          plutil -lint "$PLIST_SYNC" >/dev/null
+          mv -f "$PLIST_SYNC" "$APP/Contents/Info.plist"
+          CHANGED=1
+          log "Synced Info.plist keys from src-tauri/Info.plist: ${PLIST_KEYS_STALE[*]}"
+        fi
+      fi
+    fi
     # Re-seal the bundle only when something was replaced (ad-hoc, same identity '-' as tauri.conf.json).
     # If moss-desktop itself matched SHA-256 (MAIN_REPLACED=0), swap it onto a fresh inode first so
     # codesign never mutates an active Mach-O vnode mapped by a running MOSS process (Apple Silicon SIGKILL).

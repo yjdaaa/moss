@@ -4,8 +4,16 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import {
+  applyPickedWifi,
+  boardSupports5g,
   buildUsbProvisionWritePayload,
+  canOpenWifiSettings,
   createDraftFromInspect,
+  currentWifiFillNotice,
+  boardWifiBands,
+  filterScannedWifiForBoard,
+  hostWifiProblem,
+  scanFilterLabel,
   deriveWsUrlForMoss,
   formatUsbWriteConfirmText,
   isRecognizedXiaozhiInspect,
@@ -16,6 +24,7 @@ import {
   pinSavedWifiSlot,
   removeSavedWifiSlot,
   validateUsbProvisionDraft,
+  wifiBandLabel,
 } from "../src/components/voice-builtin/usbProvisionModel.js";
 
 test("串口挑选跳过激光端口并优先选择 ESP 端口", () => {
@@ -234,6 +243,8 @@ test("渲染无弹窗暗色双标签小智配网卡片、服务页入口且设�
     assert.match(cardHtml, /新的 Wi-Fi/);
     assert.match(cardHtml, /连接 \/ 写入板子/);
     assert.match(cardHtml, /读取板子配置/);
+    assert.match(cardHtml, /id="xiaozhi-wifi-use-current"[^>]*>.*用本机当前 Wi-Fi/);
+    assert.match(cardHtml, /id="xiaozhi-wifi-scan"[^>]*>.*扫描附近/);
     assert.doesNotMatch(cardHtml, /modal-backdrop|role="dialog"|xiaozhi-usb-close/);
 
     const status = {
@@ -392,4 +403,85 @@ test("乐鑫原生 USB 口优先，转换芯片串口读取前提示确认是小
   assert.equal(needsBoardIdentityWarning(ports[0]), true);
   assert.equal(needsBoardIdentityWarning(ports[1]), false);
   assert.equal(needsBoardIdentityWarning(undefined), false);
+});
+
+test("本机 Wi-Fi：按板子芯片筛选频段、填入当前网络与选中扫描结果", () => {
+  assert.equal(boardSupports5g("esp32s3"), false);
+  assert.equal(boardSupports5g("esp32c5"), true);
+  assert.equal(boardSupports5g("ESP32-C5"), true);
+  assert.equal(boardSupports5g(undefined), false);
+  assert.equal(wifiBandLabel("2.4g"), "2.4 GHz");
+
+  assert.deepEqual(boardWifiBands("esp32s3"), ["2.4g"]);
+  assert.deepEqual(boardWifiBands("esp32c5"), ["2.4g", "5g"]);
+  assert.deepEqual(boardWifiBands(""), ["2.4g"], "还没读板子按 2.4 GHz");
+
+  // 双频同名网络：2.4G 信号 40，5G 信号 90
+  const dual = {
+    ssid: "Home",
+    signal: 90,
+    bands: ["2.4g", "5g"],
+    band_signals: { "2.4g": 40, "5g": 90 },
+    secure: true,
+  };
+  const only5 = { ssid: "Fast", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true };
+  const only6 = { ssid: "Six", signal: 95, bands: ["6g"], band_signals: { "6g": 95 }, secure: true };
+  const plain24 = { ssid: "Cafe", signal: 60, bands: ["2.4g"], band_signals: { "2.4g": 60 }, secure: false };
+  const unknown = { ssid: "Mystery", signal: 30, bands: [], band_signals: {}, secure: null };
+  const all = [only5, dual, only6, plain24, unknown];
+
+  // 非 C5：只显示 2.4 GHz，双频网络只标 2.4 GHz、信号按 2.4G 算
+  const s3 = filterScannedWifiForBoard(all, "esp32s3");
+  assert.deepEqual(s3.shown.map((n) => n.ssid), ["Cafe", "Home", "Mystery"]);
+  assert.equal(s3.hiddenCount, 2);
+  const home = s3.shown.find((n) => n.ssid === "Home");
+  assert.deepEqual(home.bands, ["2.4g"]);
+  assert.equal(home.signal, 40);
+  assert.deepEqual(s3.shown.find((n) => n.ssid === "Mystery").bands, [], "系统没给频率的网络保留");
+  assert.deepEqual(filterScannedWifiForBoard(all, "").shown, s3.shown, "没读板子时与 2.4G 芯片一致");
+
+  // C5：显示 2.4 / 5 GHz，电脑当前在前，6 GHz 隐藏
+  const c5 = filterScannedWifiForBoard(all, "esp32c5");
+  assert.deepEqual(c5.shown.map((n) => n.ssid), ["Fast", "Home", "Cafe", "Mystery"]);
+  assert.equal(c5.hiddenCount, 1);
+  assert.deepEqual(c5.shown.find((n) => n.ssid === "Home").bands, ["2.4g", "5g"]);
+  assert.equal(c5.shown.find((n) => n.ssid === "Home").signal, 90);
+  assert.deepEqual(filterScannedWifiForBoard(null, "esp32s3"), { shown: [], hiddenCount: 0 });
+
+  assert.equal(scanFilterLabel("esp32s3", 2), "按板子 esp32s3 只显示 2.4 GHz，已隐藏 2 个板子连不上的网络");
+  assert.equal(scanFilterLabel("esp32c5", 0), "按板子 esp32c5 只显示 2.4 GHz / 5 GHz");
+  assert.match(scanFilterLabel("", 0), /还没读取板子，先只显示 2\.4 GHz/);
+
+  assert.match(currentWifiFillNotice(only5, "esp32s3"), /电脑连的是 5 GHz，这块板子（esp32s3）只支持 2\.4 GHz/);
+  assert.match(currentWifiFillNotice(only5, ""), /小智常见芯片只支持 2\.4 GHz/);
+  assert.doesNotMatch(currentWifiFillNotice(only5, "esp32c5"), /只支持/);
+  assert.match(currentWifiFillNotice(only6, "esp32c5"), /只支持 2\.4 GHz \/ 5 GHz/);
+  assert.match(currentWifiFillNotice(plain24, "esp32s3"), /开放网络，可留空/);
+  assert.equal(currentWifiFillNotice(null, "esp32s3"), "");
+
+  const draft = { ...createDraftFromInspect(null, null), newSsid: "Old", newPassword: "old-pass" };
+  const picked = applyPickedWifi(draft, dual);
+  assert.equal(picked.newSsid, "Home");
+  assert.equal(picked.newPassword, "", "换网络名清掉旧密码");
+  const same = applyPickedWifi({ ...draft, newSsid: "Home" }, dual);
+  assert.equal(same.newPassword, "old-pass", "同名网络保留已填密码");
+  assert.equal(applyPickedWifi(draft, { ssid: "" }), draft);
+});
+
+test("本机 Wi-Fi 读不到时：缺定位权限跳定位页、Wi-Fi 关着跳 Wi-Fi 设置页", () => {
+  assert.equal(hostWifiProblem({ permission: "granted", current: { ssid: "Home" } }, null), null);
+  assert.equal(hostWifiProblem(null, { code: "wifi_unavailable", message: "没有无线网卡" }), null);
+  const denied = hostWifiProblem({ permission: "denied", hint: "去定位服务里打开 MOSS" }, null);
+  assert.equal(denied.target, "location");
+  assert.equal(denied.permission, "denied");
+  assert.equal(denied.message, "去定位服务里打开 MOSS");
+  assert.match(denied.title, /定位权限/);
+  assert.equal(hostWifiProblem({ permission: "not_determined" }, null).permission, "not_determined");
+  assert.match(hostWifiProblem({ permission: "services_off" }, null).message, /MOSS 不读取、不保存位置/);
+  const radio = hostWifiProblem(null, { code: "wifi_radio_off", message: "电脑的 Wi-Fi 是关着的" });
+  assert.equal(radio.target, "wifi");
+  assert.match(radio.title, /Wi-Fi 没打开/);
+  assert.equal(canOpenWifiSettings("macos"), true);
+  assert.equal(canOpenWifiSettings("windows"), true);
+  assert.equal(canOpenWifiSettings("linux"), false);
 });

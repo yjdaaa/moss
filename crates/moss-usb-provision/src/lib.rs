@@ -21,6 +21,8 @@ use serialport::{SerialPortType, UsbPortInfo};
 use laser_runtime::RuntimeDb;
 use moss_voice::CenterError;
 
+pub mod wifi;
+
 /// 设备令牌签名密钥的来源（与小智 websocket 鉴权共用同一把密钥，由宿主保存）。
 pub type DeviceSecret<'a> = &'a dyn Fn() -> Result<Vec<u8>, String>;
 
@@ -77,6 +79,14 @@ pub struct KnownDeviceView {
 pub enum UsbProvisionRequest {
     // 必须写成结构化空变体，serde 内部标记枚举下的单元变体不会触发 deny_unknown_fields
     Ports {},
+    /// 电脑当前连接的 Wi-Fi 名称（给“新的 Wi-Fi”一栏一键填入，不碰串口）
+    WifiCurrent {},
+    /// 扫描电脑附近的 Wi-Fi（不碰串口）
+    WifiScan {},
+    /// 打开系统设置里的定位权限页或 Wi-Fi 设置页（只用固定地址）
+    OpenWifiSettings {
+        target: wifi::WifiSettingsTarget,
+    },
     Inspect {
         port: String,
     },
@@ -108,6 +118,30 @@ pub fn parse_usb_provision_request(input: &Value) -> Result<UsbProvisionRequest,
             format!("USB 配网请求格式无效：{err}"),
         )
     })
+}
+
+impl UsbProvisionRequest {
+    /// 只读本机 Wi-Fi、不碰串口与板子 Flash 的请求：宿主不必为它占用配网锁。
+    pub fn is_wifi_query(&self) -> bool {
+        matches!(
+            self,
+            Self::WifiCurrent {} | Self::WifiScan {} | Self::OpenWifiSettings { .. }
+        )
+    }
+}
+
+/// 读本机 Wi-Fi（当前连接 / 扫描附近）；不是 Wi-Fi 请求时返回 `None`。
+/// 结果只回给界面，不写诊断（SSID 属于用户的网络环境信息）。
+pub fn wifi_query(req: &UsbProvisionRequest) -> Option<Result<Value, CenterError>> {
+    let report = match req {
+        UsbProvisionRequest::WifiCurrent {} => wifi::current(),
+        UsbProvisionRequest::WifiScan {} => wifi::scan(),
+        UsbProvisionRequest::OpenWifiSettings { target } => {
+            return Some(wifi::open_settings(*target).map(|()| json!({ "opened": true })));
+        }
+        _ => return None,
+    };
+    Some(report.map(|r| serde_json::to_value(r).unwrap_or_default()))
 }
 
 pub trait UsbFlasherSession {
@@ -904,6 +938,14 @@ where
         UsbProvisionRequest::Ports {} => {
             Ok((json!({ "ports": ports, "laser_busy": laser_busy }), None))
         }
+        // 由 [`provision`] / 宿主经 [`wifi_query`] 处理，不会走到串口流程
+        UsbProvisionRequest::WifiCurrent {}
+        | UsbProvisionRequest::WifiScan {}
+        | UsbProvisionRequest::OpenWifiSettings { .. } => Err(CenterError::new(
+            "usb_input_invalid",
+            400,
+            "Wi-Fi 查询不经过串口流程",
+        )),
         UsbProvisionRequest::Inspect { port } => {
             let port_name = port.trim();
             preflight_usb_port(port_name, laser_port, laser_busy, &ports)?;
@@ -967,6 +1009,9 @@ pub fn provision(
     temp_dir: PathBuf,
 ) -> Result<(Value, Option<(UsbChipInfo, Option<String>, bool)>), CenterError> {
     let req = parse_usb_provision_request(input)?;
+    if let Some(result) = wifi_query(&req) {
+        return result.map(|value| (value, None));
+    }
     let raw_ports = serialport::available_ports().map_err(|err| {
         CenterError::new(
             "usb_ports_enum_failed",
@@ -1384,7 +1429,25 @@ mod tests {
             parse_usb_provision_request(&json!({ "action": "ports" })),
             Ok(UsbProvisionRequest::Ports {})
         ));
+        let current = parse_usb_provision_request(&json!({ "action": "wifi_current" })).unwrap();
+        let scan = parse_usb_provision_request(&json!({ "action": "wifi_scan" })).unwrap();
+        assert!(current.is_wifi_query() && scan.is_wifi_query());
+        let open = parse_usb_provision_request(
+            &json!({ "action": "open_wifi_settings", "target": "location" }),
+        )
+        .unwrap();
+        assert!(open.is_wifi_query());
+        assert!(
+            !parse_usb_provision_request(&json!({ "action": "ports" }))
+                .unwrap()
+                .is_wifi_query()
+        );
         for bad in [
+            json!({ "action": "wifi_scan", "port": "/dev/cu.usbmodem14201" }),
+            json!({ "action": "wifi_current", "password": "x" }),
+            json!({ "action": "open_wifi_settings" }),
+            json!({ "action": "open_wifi_settings", "target": "https://example.com" }),
+            json!({ "action": "open_wifi_settings", "target": "wifi", "uri": "ms-settings:x" }),
             json!({ "action": "ports", "extra": 1 }),
             json!({ "action": "ports", "confirmed": true }),
             json!({ "action": "inspect", "port": "/dev/cu.usbmodem14201", "confirmed": true }),

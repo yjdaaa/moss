@@ -8,6 +8,8 @@ pub mod context;
 
 pub use builtin::{BuiltinState, BuiltinVoice, autostart, init, parse_sections, record_moss_event};
 pub use moss_home::home_backup_audit;
+/// macOS 读 Wi-Fi 名称前须在主线程申请定位授权（USB 配网“用本机当前 Wi-Fi / 扫描附近”）。
+pub use moss_usb_provision::wifi::prepare_location_permission as prepare_wifi_location_permission;
 
 fn fallback_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();

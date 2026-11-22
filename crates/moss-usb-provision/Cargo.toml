@@ -19,6 +19,16 @@ getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# 本机 Wi-Fi 读取（USB 配网一键填 SSID / 扫描附近，技术书 n103）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSSet", "NSEnumerator"] }
+objc2-core-wlan = { version = "0.3.2", default-features = false, features = ["std", "CWWiFiClient", "CWInterface", "CWNetwork", "CWChannel", "CoreWLANTypes"] }
+objc2-core-location = { version = "0.3.2", default-features = false, features = ["std", "CLLocationManager"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_WiFi"] }
+
 [dev-dependencies]
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
 laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
