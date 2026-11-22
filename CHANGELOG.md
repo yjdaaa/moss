@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 首次标定向导的每一步都能单独收起（2026-11-22）
+
+- **现象**：材料实验室“首次标定向导”里，点当前步骤的标题收不起来，只能把整个向导折叠。
+- **根因与修复**：收起时展开状态被设为空，组件又回落到“当前步骤”，同一步立刻重新展开。展开状态改为“跟随当前步骤 / 全部收起 / 用户点开的那一步”三种（`resolveOpenWizardStep`、`toggleWizardStep`），完成或跳过一步后恢复跟随；标题加展开箭头与 `aria-expanded` / `aria-controls`。
+- **验证**：新增单测“标定向导每一步都能单独收起……”与面板渲染断言（六个可展开标题、仅当前步骤展开），`calibrationWizard.test.mjs` 8 项通过；材料实验室没有浏览器交互用例，未做浏览器点击验证。
+- **关联**：`frontend/src/components/CalibrationWizard.jsx`、`frontend/src/calibrationWizard.js`、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/calibrationWizard.test.mjs`、融合技术书 r54。
+
 ### USB 一键配网可一键填入电脑当前 Wi-Fi 或扫描附近网络（2026-11-22）
 
 - **现象**：USB 一键配网的“新的 Wi-Fi”只能手动输入 SSID，容易输错名字，也看不出路由器是不是板子连不上的 5 GHz。

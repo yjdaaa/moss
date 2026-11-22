@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { notifyMaterialsUpdated } from "../materialSelectState.js";
@@ -15,6 +16,8 @@ import {
   timeCalibrationSummary,
   wizardMaterialKey,
   patternSaveTarget,
+  resolveOpenWizardStep,
+  toggleWizardStep,
   wizardProgress,
 } from "../calibrationWizard.js";
 import {
@@ -47,10 +50,11 @@ export function CalibrationWizard({
   const materialKey = wizardMaterialKey(material, thickness);
   const progress = wizardProgress(wizard, materialKey);
   const current = currentWizardStep(wizard, materialKey);
-  const [openStep, setOpenStep] = useState(null);
+  // undefined = 跟随当前步骤；"" = 用户全部收起；其余 = 用户点开的那一步
+  const [openStep, setOpenStep] = useState(undefined);
   // 还有没处理的步骤时默认展开
   const [expanded, setExpanded] = useState(() => progress.done + progress.skipped < progress.total);
-  const active = openStep || current || "time";
+  const active = resolveOpenWizardStep(openStep, current);
   const [speedsText, setSpeedsText] = useState("");
   const [measured, setMeasured] = useState({});
   const [overscanAnswer, setOverscanAnswer] = useState("");
@@ -76,7 +80,8 @@ export function CalibrationWizard({
   const mark = (id, status, stepNote = "") => {
     onWizardChange(markWizardStep(wizard, id, status, { materialKey, note: stepNote }));
     setNote("");
-    setOpenStep(null);
+    // 完成 / 跳过后回到跟随下一步
+    setOpenStep(undefined);
   };
 
   const generate = async (testType) => {
@@ -376,15 +381,23 @@ export function CalibrationWizard({
           const isActive = step.id === active;
           return (
             <li key={step.id} className={`lab-wizard-step${isActive ? " on" : ""}${record ? ` ${record.status}` : ""}`}>
-              <button type="button" className="lab-wizard-step-head" onClick={() => setOpenStep(isActive ? null : step.id)}>
+              <button
+                type="button"
+                className="lab-wizard-step-head"
+                aria-expanded={isActive}
+                aria-controls={`lab-wizard-body-${step.id}`}
+                title={isActive ? "收起这一步" : "展开这一步"}
+                onClick={() => setOpenStep(toggleWizardStep(active, step.id))}
+              >
                 <b>{index + 1}. {step.title}</b>
                 <span>
                   {record?.status === "done" ? "已完成" : record?.status === "skipped" ? "已跳过" : step.id === current ? "当前" : "待做"}
                   {step.scope === "machine" ? " · 跟机器" : " · 跟材料"}
+                  <ChevronDown size={14} className="lab-wizard-chevron" aria-hidden="true" />
                 </span>
               </button>
               {isActive ? (
-                <div className="lab-wizard-body">
+                <div className="lab-wizard-body" id={`lab-wizard-body-${step.id}`}>
                   <p className="lab-wizard-summary">{step.summary}</p>
                   {record?.note ? <p className="lab-wizard-status">上次结果：{record.note}</p> : null}
                   {body(step.id)}

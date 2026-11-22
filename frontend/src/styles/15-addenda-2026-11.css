@@ -468,6 +468,10 @@ button.conn-pill:hover {
 .lab-wizard-step.done .lab-wizard-step-head span { color: var(--ok, #4ade80); }
 .lab-wizard-step-head { width: 100%; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 6px 10px; background: none; border: 0; color: inherit; text-align: left; cursor: pointer; }
 .lab-wizard-step-head span { font-size: 11px; color: var(--ink-dim); }
+.lab-wizard-step-head span { display: inline-flex; align-items: center; gap: 4px; }
+.lab-wizard-chevron { flex: none; transition: transform 0.15s; }
+.lab-wizard-step-head[aria-expanded="true"] .lab-wizard-chevron { transform: rotate(180deg); }
+.lab-wizard-step-head:focus-visible { outline: 2px solid var(--ob-accent-2, #8b7bff); outline-offset: -2px; }
 .lab-wizard-body { padding: 0 10px 10px; font-size: 12px; line-height: 1.5; }
 .lab-wizard-body p { margin: 6px 0; }
 .lab-wizard-summary, .lab-wizard-status { font-size: 11px; color: var(--ink-dim); }

@@ -14,9 +14,11 @@ import {
   overscanSuggestion,
   patternSaveTarget,
   readWizardState,
+  resolveOpenWizardStep,
   scanOffsetRowsFromMeasurements,
   stepRecord,
   timeCalibrationSummary,
+  toggleWizardStep,
   wizardMaterialKey,
   wizardProgress,
   writeWizardState,
@@ -178,6 +180,11 @@ test("标定向导面板：列出六步、当前步骤展开、只读时不给�
     assert.match(html, /设置线距测试/);
     assert.match(html, /跳过这一步/);
     assert.doesNotMatch(html, /发送测试/, "没有生成测试图案时不出现发送按钮");
+    // 每一步的标题都是可展开 / 收起的按钮，当前步骤（线距测试）展开
+    assert.equal((html.match(/class="lab-wizard-step-head"/g) || []).length, 6);
+    assert.match(html, /aria-expanded="true" aria-controls="lab-wizard-body-interval"/);
+    assert.equal((html.match(/aria-expanded="false"/g) || []).length, 5);
+    assert.match(html, /id="lab-wizard-body-interval"/);
 
     // 当前步骤是切缝且已生成切缝图案：出现发送（先确认）与测量输入
     let state = normalizeWizardState(null);
@@ -215,4 +222,19 @@ test("向导结果写回测试参数所在的材料库条目（r43）", () => {
   // 旧记录没有来源字段：按请求厚度
   assert.deepEqual(patternSaveTarget({ thickness_mm: 5 }, "5").request, { thickness_mm: 5 });
   assert.deepEqual(patternSaveTarget(null, "4").request, { thickness_mm: 4 });
+});
+
+test("标定向导每一步都能单独收起：当前步骤收起后不会被自动重新展开", () => {
+  // 没点过：跟随当前步骤；全部处理过时落到工时校准
+  assert.equal(resolveOpenWizardStep(undefined, "matrix"), "matrix");
+  assert.equal(resolveOpenWizardStep(undefined, null), "time");
+  // 点当前步骤的标题 → 收起，且不再回落到当前步骤
+  const collapsed = toggleWizardStep("matrix", "matrix");
+  assert.equal(collapsed, "");
+  assert.equal(resolveOpenWizardStep(collapsed, "matrix"), null);
+  // 收起后再点 → 展开；点别的步骤 → 换成那一步
+  assert.equal(resolveOpenWizardStep(toggleWizardStep(null, "matrix"), "matrix"), "matrix");
+  assert.equal(resolveOpenWizardStep(toggleWizardStep("matrix", "kerf"), "matrix"), "kerf");
+  // 别的步骤也能收起
+  assert.equal(resolveOpenWizardStep(toggleWizardStep("kerf", "kerf"), "matrix"), null);
 });

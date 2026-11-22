@@ -137,6 +137,21 @@ export function currentWizardStep(state, materialKey) {
   return WIZARD_STEPS.find((step) => !stepRecord(state, step.id, materialKey))?.id ?? null;
 }
 
+/**
+ * 向导里展开的是哪一步（2026-11-22 用户要求每一步都能单独收起）。
+ * `openStep` 为 `undefined` 表示跟随“当前该做的一步”（全部处理过时落到工时校准）；
+ * 为空字符串表示用户把展开的那步收起了，全部收起；其余为用户点开的步骤 id。
+ */
+export function resolveOpenWizardStep(openStep, current) {
+  if (openStep === undefined) return current || "time";
+  return openStep || null;
+}
+
+/** 点某一步的标题：已展开就收起（全部收起），否则展开它。 */
+export function toggleWizardStep(activeStep, stepId) {
+  return activeStep === stepId ? "" : stepId;
+}
+
 /** 进度：完成、跳过与总步数。 */
 export function wizardProgress(state, materialKey) {
   let done = 0;
