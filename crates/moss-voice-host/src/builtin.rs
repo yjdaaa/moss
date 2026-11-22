@@ -117,6 +117,8 @@ pub struct BuiltinVoice {
     music_warning: Mutex<Option<String>>,
     /// 声纹模型或辅助程序未就绪时的降级提示（保持个人上下文隔离，不回退共享设备记忆）
     speaker_warning: Mutex<Option<String>>,
+    /// Windows 系统重置后检测到 `Windows.old` 同名用户目录下仍有未迁回的旧版语音配置或模型时的启动提示
+    windows_old_notice: Option<WindowsOldMossNotice>,
     /// 本地模型下载与安装（默认运行目录 `models/`，可通过 `MOSS_LAYA_ROOT` 指定外置 `<path>/models`）
     models: ModelManager,
     /// Laya 的 Python 运行环境自动准备（2026-11-07：点下载 Laya 时在软件目录创建虚拟环境并安装 laya[serve]）

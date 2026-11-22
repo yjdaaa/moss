@@ -207,10 +207,13 @@ impl BuiltinVoice {
                 CenterError::new("speaker_helper_missing", 409, "请先准备声纹辅助程序")
             })?;
             *helper = Some(
-                moss_voice_providers::local::SpeakerHelper::spawn(&exe, self.models.root())
-                    .map_err(|_| {
-                        CenterError::new("speaker_model_missing", 409, "声纹模型未安装或校验失败")
-                    })?,
+                moss_voice_providers::local::SpeakerHelper::spawn(
+                    &exe,
+                    self.models.root_for("campplus_sv_zh_cn_16k_common"),
+                )
+                .map_err(|_| {
+                    CenterError::new("speaker_model_missing", 409, "声纹模型未安装或校验失败")
+                })?,
             );
         }
         Ok(())

@@ -388,11 +388,11 @@ impl BuiltinVoice {
     }
 
     pub(super) fn resolve_laya_python() -> (std::path::PathBuf, std::path::PathBuf) {
-        let install_dir = writable_install_dir();
+        let exe_install_dir = existing_exe_install_dir();
         let env_py = moss_laya_python_env();
         let laya_root = moss_laya_root_env()
             .or_else(|| {
-                install_dir.as_ref().and_then(|dir| {
+                exe_install_dir.as_ref().and_then(|dir| {
                     [dir.join("laya"), dir.join("moss-laya")]
                         .into_iter()
                         .find(|cand| Self::laya_venv_python(cand).is_file())
@@ -406,7 +406,7 @@ impl BuiltinVoice {
                     .and_then(|venv| venv.parent().map(std::path::Path::to_path_buf))
             })
             .unwrap_or_else(|| {
-                if let Some(dir) = install_dir {
+                if let Some(dir) = writable_portable_dir() {
                     dir.join("laya")
                 } else {
                     let home = std::env::var_os("HOME")

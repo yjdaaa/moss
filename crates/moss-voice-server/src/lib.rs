@@ -810,6 +810,11 @@ impl VoiceServer {
         self.shared.active_device_sessions()
     }
 
+    /// 热更新小智全量动态补字分片目录（运行期卸载旧目录字库并重下到新主目录后立即生效）。
+    pub fn set_full_font_dir(&self, full_font_dir: Option<std::path::PathBuf>) {
+        self.shared.glyph_fonts.set_full_dir(full_font_dir);
+    }
+
     /// 向已启用设备端 MCP 但尚未完成 `tools/list` 的在线会话发起一次非阻塞工具清单同步。
     pub fn sync_device_tools(&self) {
         if self.runtime.is_none() {

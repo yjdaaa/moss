@@ -130,10 +130,26 @@ impl BuiltinVoice {
         )
     }
 
+    pub(super) fn sync_running_full_font_dir(&self) {
+        let dir = self.full_font_dir();
+        if let Ok(guard) = self.server.lock()
+            && let Some(server) = guard.as_ref()
+        {
+            server.set_full_font_dir(Some(dir));
+        }
+    }
+
     pub(super) fn full_font_dismissed_marker(&self) -> std::path::PathBuf {
         self.models
-            .root_for(local_models::XIAOZHI_NOTO_V1_FULL_ID)
+            .write_root_for(local_models::XIAOZHI_NOTO_V1_FULL_ID)
             .join(".noto_v1_full_dismissed")
+    }
+
+    fn is_full_font_dismissed(&self) -> bool {
+        self.models
+            .all_roots()
+            .into_iter()
+            .any(|root| root.join(".noto_v1_full_dismissed").exists())
     }
 
     pub(super) fn mark_full_font_dismissed(&self) {
@@ -145,7 +161,9 @@ impl BuiltinVoice {
     }
 
     pub(super) fn clear_full_font_dismissed(&self) {
-        let _ = std::fs::remove_file(self.full_font_dismissed_marker());
+        for root in self.models.all_roots() {
+            let _ = std::fs::remove_file(root.join(".noto_v1_full_dismissed"));
+        }
     }
 
     /// n83：内置语音服务启动后，若小智官方全量补字库（`noto-v1-full`，16.6 MB）尚未安装且用户未手动取消/删除，
@@ -156,7 +174,7 @@ impl BuiltinVoice {
             .models
             .path_if_installed(local_models::XIAOZHI_NOTO_V1_FULL_ID)
             .is_some()
-            || self.full_font_dismissed_marker().exists()
+            || self.is_full_font_dismissed()
         {
             return false;
         }

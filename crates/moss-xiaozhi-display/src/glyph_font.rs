@@ -687,28 +687,47 @@ struct LoadedFullBundle {
     provider: Arc<FullGlyphProvider>,
 }
 
+#[derive(Default)]
+struct FullFontSlot {
+    dir: Option<PathBuf>,
+    loaded: Option<LoadedFullBundle>,
+}
+
 /// 服务端动态补字协调器：优先热加载本地 `noto-v1-full` 全量分片（覆盖 `basic` 与 `common` 设备缺字），
 /// 未安装或离线时自动对 `basic` 设备回退内置 `common` 字库。
 #[derive(Default)]
 pub struct GlyphFontService {
-    full_dir: Option<PathBuf>,
-    state: Mutex<Option<LoadedFullBundle>>,
+    slot: Mutex<FullFontSlot>,
 }
 
 impl GlyphFontService {
     pub fn new(full_dir: Option<PathBuf>) -> Self {
         Self {
-            full_dir,
-            state: Mutex::new(None),
+            slot: Mutex::new(FullFontSlot {
+                dir: full_dir,
+                loaded: None,
+            }),
+        }
+    }
+
+    /// 热切换全量补字分片目录（例如从历史回退目录卸载后重新下载到主写目录），目录变化时自动淘汰旧缓存。
+    pub fn set_full_dir(&self, full_dir: Option<PathBuf>) {
+        if let Ok(mut slot) = self.slot.lock()
+            && slot.dir != full_dir
+        {
+            slot.dir = full_dir;
+            slot.loaded = None;
         }
     }
 
     fn full_provider(&self) -> Option<Arc<FullGlyphProvider>> {
-        let dir = self.full_dir.as_deref()?;
+        let dir = self.slot.lock().ok()?.dir.clone()?;
         let manifest_path = dir.join("manifest.json");
         let Ok(meta) = fs::metadata(&manifest_path) else {
-            if let Ok(mut guard) = self.state.lock() {
-                *guard = None;
+            if let Ok(mut slot) = self.slot.lock()
+                && slot.dir.as_ref() == Some(&dir)
+            {
+                slot.loaded = None;
             }
             return None;
         };
@@ -716,21 +735,26 @@ impl GlyphFontService {
             return None;
         }
         let stamp = (meta.len(), meta.modified().ok());
-        if let Ok(guard) = self.state.lock()
-            && let Some(loaded) = guard.as_ref()
+        if let Ok(slot) = self.slot.lock()
+            && slot.dir.as_ref() == Some(&dir)
+            && let Some(loaded) = slot.loaded.as_ref()
             && loaded.manifest_stamp == stamp
         {
             return Some(loaded.provider.clone());
         }
 
-        let Some(provider) = FullGlyphProvider::load(dir).map(Arc::new) else {
-            if let Ok(mut guard) = self.state.lock() {
-                *guard = None;
+        let Some(provider) = FullGlyphProvider::load(&dir).map(Arc::new) else {
+            if let Ok(mut slot) = self.slot.lock()
+                && slot.dir.as_ref() == Some(&dir)
+            {
+                slot.loaded = None;
             }
             return None;
         };
-        if let Ok(mut guard) = self.state.lock() {
-            *guard = Some(LoadedFullBundle {
+        if let Ok(mut slot) = self.slot.lock()
+            && slot.dir.as_ref() == Some(&dir)
+        {
+            slot.loaded = Some(LoadedFullBundle {
                 manifest_stamp: stamp,
                 provider: provider.clone(),
             });
@@ -1118,6 +1142,19 @@ pub(crate) mod tests {
         assert_eq!(
             full_service.undisplayable_chars(Some(&cap("basic")), "雕刻椴木龑"),
             vec!['龑']
+        );
+
+        // 运行期将旧回退目录字库删掉并重新下载到主写目录后，set_full_dir 立即热切换生效
+        fs::remove_dir_all(tmp.path().join("noto_v1_full")).unwrap();
+        assert!(!full_service.full_pack_ready(Some(&cap("common"))));
+        let new_primary_dir = tmp.path().join("primary_noto_v1_full");
+        write_synthetic_full_bundle(&new_primary_dir);
+        full_service.set_full_dir(Some(new_primary_dir));
+        assert!(full_service.full_pack_ready(Some(&cap("common"))));
+        assert!(
+            full_service
+                .undisplayable_chars(Some(&cap("common")), "𠮷野家桜激光雕刻椴木")
+                .is_empty()
         );
     }
 

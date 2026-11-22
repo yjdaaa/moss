@@ -53,6 +53,22 @@ pub(super) fn scrub_bundle(value: &mut Value) {
 }
 
 impl BuiltinVoice {
+    /// 判断给定语音设置在当前宿主（含历史模型回退目录、外置模型覆盖与 Colab 密钥）下是否满足对话模式条件。
+    pub fn chat_ready(&self, settings: &moss_voice::VoiceSettings) -> bool {
+        let colab_key_configured = self
+            .host
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| {
+                db.get_secret(moss_voice::colab::COLAB_SECRET_NAME)
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|value| !value.is_empty());
+        settings.builtin_chat_ready_in(&self.models, colab_key_configured)
+    }
+
     pub fn status(&self) -> Value {
         self.status_with_options(false)
     }
@@ -92,8 +108,7 @@ impl BuiltinVoice {
         let mode = match &view {
             Some(view) => serde_json::to_value(view.mode).unwrap_or_default(),
             None => Value::String(
-                if settings.builtin_chat_ready_with_colab(self.models.root(), colab_key_configured)
-                {
+                if settings.builtin_chat_ready_in(&self.models, colab_key_configured) {
                     "chat"
                 } else {
                     "echo"
@@ -118,13 +133,11 @@ impl BuiltinVoice {
         let onejev_probe_id = active_local_jev_id
             .filter(|id| moss_voice::settings::is_local_onejev_model(id))
             .or_else(|| {
-                [
-                    moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL,
-                    moss_voice::settings::LOCAL_ONEJEV_4B_MODEL,
-                    moss_voice::settings::LOCAL_ONEJEV_9B_MODEL,
-                ]
-                .into_iter()
-                .find(|id| self.models.path_if_installed(id).is_some())
+                local_models::CATALOG
+                    .iter()
+                    .filter(|spec| spec.engine.uses_llama_runtime())
+                    .map(|spec| spec.id)
+                    .find(|id| self.models.path_if_installed(id).is_some())
             })
             .unwrap_or(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL);
         let cached_probes = if lite {
@@ -236,7 +249,7 @@ impl BuiltinVoice {
                 },
                 "jev_key_configured": jev_key_configured || openrouter_llm_key_set || active_local_jev_installed,
                 "default_mirror": local_models::DEFAULT_BASE,
-                "models_dir": self.models.root_for(models_dir_ref).to_string_lossy(),
+                "models_dir": self.models.write_root_for(models_dir_ref).to_string_lossy(),
                 "onejev_env": onejev_env,
                 "speech_env": speech_env,
                 "jev_runtime": self.local_jev_runtime_status(&settings, jev_feedback_enabled),
@@ -246,9 +259,9 @@ impl BuiltinVoice {
                 "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                 "models": self.models.status(),
                 "ready": {
-                    "llm": settings.builtin_section_ready_with_colab(Section::Llm, self.models.root(), colab_key_configured),
-                    "asr": settings.builtin_section_ready_with_colab(Section::Asr, self.models.root(), colab_key_configured),
-                    "tts": settings.builtin_section_ready_with_colab(Section::Tts, self.models.root(), colab_key_configured),
+                    "llm": settings.builtin_section_ready_in(Section::Llm, &self.models, colab_key_configured),
+                    "asr": settings.builtin_section_ready_in(Section::Asr, &self.models, colab_key_configured),
+                    "tts": settings.builtin_section_ready_in(Section::Tts, &self.models, colab_key_configured),
                 },
             },
             "sessions": if view.is_some() {
@@ -260,7 +273,7 @@ impl BuiltinVoice {
             "events": self.diagnostics.events(),
             "events_dropped": self.diagnostics.drops(),
             "timings": self.diagnostics.timings(),
-            "warnings": self.warnings(),
+            "warnings": self.warnings(&settings),
             "debug_enabled": settings.builtin_local.chat_log_enabled,
             "debug_traces": self.persisted_chat_traces(view.as_ref()),
             "device_prefs": settings.builtin_device_prefs,
@@ -318,12 +331,18 @@ impl BuiltinVoice {
     }
 
     /// 启动（或重启）失败都写进诊断记录，界面上的报错弹窗关掉后仍能查到原因。
-    /// 当前生效的降级提示（本地音乐目录不可用、声纹按人记忆未生效）。
-    fn warnings(&self) -> Vec<String> {
-        [&self.music_warning, &self.speaker_warning]
+    /// 当前生效的降级与迁移提示（本地音乐目录不可用、声纹按人记忆未生效、`Windows.old` 旧配置模型未迁回）。
+    fn warnings(&self, settings: &moss_voice::VoiceSettings) -> Vec<String> {
+        let mut out: Vec<String> = [&self.music_warning, &self.speaker_warning]
             .into_iter()
             .filter_map(|slot| slot.lock().ok().and_then(|warning| warning.clone()))
-            .collect()
+            .collect();
+        if let Some(notice) = &self.windows_old_notice
+            && let Some(warning) = notice.warning_text(&self.models, settings)
+        {
+            out.push(warning);
+        }
+        out
     }
 
     /// 诊断包（2026-11-07 n68，`docs/developer/api-contracts.md`“诊断包”一节）：版本、系统、链路、模型名、

@@ -981,6 +981,7 @@ type InstallHook = Arc<dyn Fn(&'static str) + Send + Sync>;
 
 pub struct ModelManager {
     root: PathBuf,
+    fallbacks: Vec<PathBuf>,
     overrides: HashMap<&'static str, PathBuf>,
     tasks: Arc<Mutex<HashMap<&'static str, Task>>>,
     generation: std::sync::atomic::AtomicU64,
@@ -991,10 +992,11 @@ pub struct ModelManager {
 }
 
 impl ModelManager {
-    /// `root` 为运行目录下的 `models/`。
+    /// `root` 为新下载模型的默认写入目录（运行目录下的 `models/`，或免安装便携版同目录 `models/`）。
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            fallbacks: Vec::new(),
             overrides: HashMap::new(),
             tasks: Arc::default(),
             generation: std::sync::atomic::AtomicU64::new(1),
@@ -1009,6 +1011,21 @@ impl ModelManager {
         }
     }
 
+    /// 追加只读回退模型目录：主目录未安装某模型时按序查找，兼容旧安装目录、卸载重装换盘及便携版互切。
+    pub fn with_fallback_root(mut self, fallback: PathBuf) -> Self {
+        if fallback != self.root && !self.fallbacks.contains(&fallback) {
+            self.fallbacks.push(fallback);
+        }
+        self
+    }
+
+    pub fn with_fallback_roots(mut self, fallbacks: impl IntoIterator<Item = PathBuf>) -> Self {
+        for fallback in fallbacks {
+            self = self.with_fallback_root(fallback);
+        }
+        self
+    }
+
     /// 为指定模型 id 覆盖存放父目录（例如通过 `MOSS_LAYA_ROOT` 指向 `<path>/models`）。
     pub fn with_root_override(mut self, id: &'static str, custom_root: PathBuf) -> Self {
         self.overrides.insert(id, custom_root);
@@ -1019,17 +1036,48 @@ impl ModelManager {
         &self.root
     }
 
-    pub fn root_for(&self, id: &str) -> &Path {
+    /// 新下载该模型时的目标父目录（只走显式覆盖或主目录，从不写入历史回退目录）。
+    pub fn write_root_for(&self, id: &str) -> &Path {
         self.overrides
             .get(id)
             .map(PathBuf::as_path)
             .unwrap_or(&self.root)
     }
 
+    fn candidate_roots_for<'a>(&'a self, id: &str) -> Vec<&'a Path> {
+        let mut out: Vec<&'a Path> = Vec::with_capacity(2 + self.fallbacks.len());
+        if let Some(ov) = self.overrides.get(id) {
+            out.push(ov.as_path());
+        }
+        if !out.contains(&self.root.as_path()) {
+            out.push(self.root.as_path());
+        }
+        for fb in &self.fallbacks {
+            let p = fb.as_path();
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    fn installed_root_for_spec(&self, spec: &ModelSpec) -> Option<&Path> {
+        self.candidate_roots_for(spec.id)
+            .into_iter()
+            .find(|cand| installed(cand, spec))
+    }
+
+    /// 模型已安装时返回实际所在父目录（供同目录定位 `.runtime` / `.tts-previews`），未安装时返回下载目标父目录。
+    pub fn root_for(&self, id: &str) -> &Path {
+        spec(id)
+            .and_then(|s| self.installed_root_for_spec(s))
+            .unwrap_or_else(|| self.write_root_for(id))
+    }
+
     pub fn path_if_installed(&self, id: &str) -> Option<PathBuf> {
         let spec = spec(id)?;
-        let root = self.root_for(id);
-        installed(root, spec).then(|| install_path(root, spec))
+        let root = self.installed_root_for_spec(spec)?;
+        Some(install_path(root, spec))
     }
 
     pub fn status(&self) -> Vec<ModelStatus> {
@@ -1039,26 +1087,23 @@ impl ModelManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
-            .map(|spec| {
-                let root = self.root_for(spec.id);
-                ModelStatus {
-                    id: spec.id,
-                    kind: spec.kind,
-                    engine: spec.engine,
-                    label: spec.label,
-                    note: spec.note,
-                    size: spec.download_size(),
-                    streaming: matches!(
-                        spec.engine,
-                        Engine::StreamingTransducer
-                            | Engine::SenseVoice
-                            | Engine::Qwen3Asr
-                            | Engine::FireRedAsr2Ctc
-                    ),
-                    voices: spec.voices,
-                    installed: installed(root, spec),
-                    progress: tasks.get(spec.id).map(|task| task.progress.clone()),
-                }
+            .map(|spec| ModelStatus {
+                id: spec.id,
+                kind: spec.kind,
+                engine: spec.engine,
+                label: spec.label,
+                note: spec.note,
+                size: spec.download_size(),
+                streaming: matches!(
+                    spec.engine,
+                    Engine::StreamingTransducer
+                        | Engine::SenseVoice
+                        | Engine::Qwen3Asr
+                        | Engine::FireRedAsr2Ctc
+                ),
+                voices: spec.voices,
+                installed: self.installed_root_for_spec(spec).is_some(),
+                progress: tasks.get(spec.id).map(|task| task.progress.clone()),
             })
             .collect()
     }
@@ -1074,10 +1119,10 @@ impl ModelManager {
         )
     }
 
-    /// 本进程管理的所有模型目录（默认目录 + 外置覆盖目录，去重）。
-    fn roots(&self) -> Vec<PathBuf> {
+    /// 本进程管理的所有模型目录（默认目录 + 外置覆盖目录 + 回退目录，去重）。
+    pub fn all_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.root.clone()];
-        for root in self.overrides.values() {
+        for root in self.overrides.values().chain(self.fallbacks.iter()) {
             if !roots.contains(root) {
                 roots.push(root.clone());
             }
@@ -1097,7 +1142,7 @@ impl ModelManager {
             return 0;
         }
         let mut removed = 0;
-        for root in self.roots() {
+        for root in self.all_roots() {
             let Ok(entries) = fs::read_dir(&root) else {
                 continue;
             };
@@ -1133,12 +1178,13 @@ impl ModelManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
-            .filter(|spec| uses_runtime(spec.engine) && self.root_for(spec.id) == root)
+            .filter(|spec| uses_runtime(spec.engine))
             .any(|spec| {
                 installed(root, spec)
-                    || tasks
-                        .get(spec.id)
-                        .is_some_and(|task| Self::busy(&task.progress))
+                    || (self.write_root_for(spec.id) == root
+                        && tasks
+                            .get(spec.id)
+                            .is_some_and(|task| Self::busy(&task.progress)))
             })
     }
 
@@ -1187,7 +1233,7 @@ impl ModelManager {
                 },
             );
         }
-        let root = self.root_for(spec.id).to_path_buf();
+        let root = self.write_root_for(spec.id).to_path_buf();
         let tasks = self.tasks.clone();
         let install_lock = self.install_lock.clone();
         let on_installed = self.on_installed.clone();
@@ -1260,7 +1306,12 @@ impl ModelManager {
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let spec = spec(id).ok_or_else(|| format!("未知模型：{id}"))?;
         self.cancel(id);
-        let root = self.root_for(spec.id).to_path_buf();
+        let cands: Vec<PathBuf> = self
+            .candidate_roots_for(spec.id)
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect();
+        let mut touched = Vec::new();
         {
             let _guard = self
                 .install_lock
@@ -1269,16 +1320,26 @@ impl ModelManager {
             if let Ok(mut tasks) = self.tasks.lock() {
                 tasks.remove(spec.id);
             }
-            remove_installed(&root, spec)?;
+            for root in &cands {
+                if fs::symlink_metadata(install_path(root, spec)).is_ok() {
+                    remove_installed(root, spec)?;
+                    touched.push(root.clone());
+                }
+            }
         }
-        if spec.kind == ModelKind::Tts {
-            crate::tts_voices::remove_model_previews(&root, spec.id);
+        if touched.is_empty() {
+            touched.push(self.write_root_for(spec.id).to_path_buf());
         }
-        if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(&root) {
-            crate::onejev::remove_managed_runtime(&root)?;
-        }
-        if spec.engine.uses_speech_runtime() && !self.speech_still_needed(&root) {
-            crate::speech_cpp::remove_managed_runtime(&root)?;
+        for root in &touched {
+            if spec.kind == ModelKind::Tts {
+                crate::tts_voices::remove_model_previews(root, spec.id);
+            }
+            if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(root) {
+                crate::onejev::remove_managed_runtime(root)?;
+            }
+            if spec.engine.uses_speech_runtime() && !self.speech_still_needed(root) {
+                crate::speech_cpp::remove_managed_runtime(root)?;
+            }
         }
         Ok(())
     }
@@ -2475,6 +2536,77 @@ mod tests {
         .unwrap();
         write_sized("tokenizer/tokenizer.json", 1024);
         assert!(!installed(dir.path(), laya));
+    }
+
+    #[test]
+    fn fallback_roots_recognize_legacy_installs_while_new_downloads_use_primary_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("appdata").join("models");
+        let legacy = dir.path().join("install").join("models");
+        fs::create_dir_all(&legacy).unwrap();
+
+        let kokoro = super::spec("kokoro").unwrap();
+        let onejev_small = super::spec("onejev_1_6_0_8b").unwrap();
+        let onejev_mid = super::spec("onejev_1_6_4b").unwrap();
+        fake_install(&legacy, kokoro);
+        fake_install(&legacy, onejev_small);
+        fake_install(&legacy, onejev_mid);
+        let legacy_runtime = legacy
+            .join(".runtime")
+            .join("llama-b12167")
+            .join("platform");
+        fs::create_dir_all(&legacy_runtime).unwrap();
+        fs::write(legacy_runtime.join("llama-server"), b"bin").unwrap();
+
+        let manager = ModelManager::new(primary.clone()).with_fallback_root(legacy.clone());
+        assert_eq!(manager.root(), primary.as_path());
+        assert_eq!(manager.write_root_for("kokoro"), primary.as_path());
+        assert_eq!(
+            manager.root_for("kokoro"),
+            legacy.as_path(),
+            "回退目录已安装模型时 root_for 指向模型实际所在目录以便同目录定位运行时与缓存"
+        );
+        assert_eq!(manager.write_root_for("silero_vad"), primary.as_path());
+        assert_eq!(
+            manager.root_for("silero_vad"),
+            primary.as_path(),
+            "未安装的模型默认指向主写入目录"
+        );
+        assert_eq!(
+            manager.path_if_installed("kokoro"),
+            Some(install_path(&legacy, kokoro))
+        );
+        assert!(
+            manager
+                .status()
+                .iter()
+                .find(|m| m.id == "kokoro")
+                .unwrap()
+                .installed
+        );
+
+        // 新下载落入 primary，不写入 legacy 回退目录
+        let payload = b"vad-bytes-test".to_vec();
+        let custom = spec_for(&payload, Archive::File, "asr-models/vad.onnx", &[]);
+        let (url, _) = serve_once("HTTP/1.1 200 OK", "", payload.clone());
+        manager.download_spec(custom, &url).unwrap();
+        assert_eq!(wait(&manager), None);
+        assert!(primary.join("vad.onnx").is_file());
+        assert!(!legacy.join("vad.onnx").exists());
+
+        // 删除回退目录中的模型与对应受管运行时
+        manager.delete(onejev_mid.id).unwrap();
+        assert!(
+            legacy_runtime.join("llama-server").is_file(),
+            "回退目录仍有另一档 OneJev 时保留该目录的推理引擎"
+        );
+        manager.delete(onejev_small.id).unwrap();
+        assert!(
+            !legacy.join(".runtime").exists(),
+            "回退目录最后一档 OneJev 删除后一并清理该目录的受管推理引擎"
+        );
+        manager.delete("kokoro").unwrap();
+        assert!(manager.path_if_installed("kokoro").is_none());
     }
 }
 

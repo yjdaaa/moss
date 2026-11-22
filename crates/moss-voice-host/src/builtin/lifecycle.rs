@@ -63,19 +63,19 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                     .detail(&error),
                 );
             }
-            let default_models_dir = writable_install_dir()
-                .map(|dir| dir.join("models"))
-                .unwrap_or_else(|| host.runtime_root.path.join("models"));
-            let mut models = ModelManager::new(default_models_dir.clone());
+            let (default_models_dir, fallback_models_dirs) =
+                resolve_model_roots(&host.runtime_root.path);
+            let mut models = ModelManager::new(default_models_dir)
+                .with_fallback_roots(fallback_models_dirs);
             if !cfg!(test)
                 && let Some(env_root) = moss_laya_root_env()
             {
                 let e_models = env_root.join("models");
                 if std::fs::create_dir_all(&e_models).is_ok() {
                     for id in moss_voice::settings::LOCAL_JEV_MODEL_IDS {
-                        let installed_in_default = local_models::spec(id)
-                            .is_some_and(|spec| local_models::installed(&default_models_dir, spec));
-                        if !installed_in_default {
+                        let installed_in_env = local_models::spec(id)
+                            .is_some_and(|spec| local_models::installed(&e_models, spec));
+                        if installed_in_env || models.path_if_installed(id).is_none() {
                             models = models.with_root_override(id, e_models.clone());
                         }
                     }
@@ -99,10 +99,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             // 2026-11-07：macOS / Linux 上 MOSS 崩溃或被强制结束后，OneJev 推理进程会被系统收养继续占着内存；
             // 启动时只结束 MOSS 模型目录里 OneJev 权重对应、父进程已不在的那些（Windows 由 Job Object 自动处理）
             if !cfg!(test) {
-                let mut roots: Vec<std::path::PathBuf> = moss_voice::settings::LOCAL_JEV_MODEL_IDS
-                    .iter()
-                    .map(|id| models.root_for(id).to_path_buf())
-                    .collect();
+                let mut roots = models.all_roots();
                 roots.sort();
                 roots.dedup();
                 let reaped = moss_voice::onejev::reap_orphaned_llama_servers(&roots);
@@ -201,7 +198,21 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                 setting_path.clone(),
                 calibrated_speakers,
             );
-            let initial_local = moss_voice::settings::load(&setting_path).builtin_local;
+            let initial_settings = moss_voice::settings::load(&setting_path);
+            let windows_old_notice = if cfg!(test) {
+                None
+            } else {
+                detect_windows_old_moss()
+            };
+            if let Some(notice) = &windows_old_notice
+                && let Some(event) = notice.event_record(&models, &initial_settings)
+            {
+                if let Some(warn) = notice.warning_text(&models, &initial_settings) {
+                    eprintln!("[moss-desktop] {warn}");
+                }
+                diagnostics.push_from(moss_voice_server::DiagSource::Moss, event);
+            }
+            let initial_local = initial_settings.builtin_local;
             let initial_chat_log = initial_local.chat_log_enabled;
             let persona = Arc::new(PersonaSwitch::new(
                 persona_config(&initial_local),
@@ -226,6 +237,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                 diagnostics,
                 music_warning: Mutex::new(None),
                 speaker_warning: Mutex::new(None),
+                windows_old_notice,
                 models,
                 laya_setup: moss_voice::laya_env::LayaSetup::new(Arc::new(
                     moss_voice::laya_env::SystemHost,
@@ -269,6 +281,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             builtin.models.set_on_installed(move |installed_id| {
                 if let Some(target) = weak_for_tts_cache.upgrade() {
                     if installed_id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                        target.sync_running_full_font_dir();
                         target.diagnostics.push_from(
                             moss_voice_server::DiagSource::Moss,
                             EventRecord::from(

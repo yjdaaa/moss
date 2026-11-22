@@ -704,6 +704,7 @@ impl BuiltinVoice {
     pub fn model_cancel(&self, id: &str) -> Value {
         if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
             self.mark_full_font_dismissed();
+            self.sync_running_full_font_dir();
         }
         self.models.cancel(id);
         self.status()
@@ -833,6 +834,7 @@ impl BuiltinVoice {
             .map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
         if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
             self.mark_full_font_dismissed();
+            self.sync_running_full_font_dir();
         }
         if id == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
             // 2026-11-07：连同 MOSS 自动创建的 Python 虚拟环境一起删（用户自建、未带标记的环境不动）

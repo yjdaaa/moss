@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 收口本地语音模型存放路径至运行数据目录，支持历史安装目录双向回退与 `Windows.old` 重装提醒（2026-11-22）
+
+- **现象**：Windows 普通安装版（如 `%LOCALAPPDATA%\MOSS` 或自定义可写目录）此前将 `settings.json` 存放在 `%APPDATA%\moss`，却把数 GB 本地模型下载进程序目录 `<安装目录>\models`；用户卸载保留数据后换目录重装、切换安装版与便携版/`start.bat` 时，已保存的本地模型全部显示“未下载”并导致内置语音自启失败，勾选“删除应用程序数据”卸载时又把模型残留在旧程序目录；此外 Windows 系统重置把旧 `%APPDATA%\moss` 移入 `C:\Windows.old` 后无任何提示，满 10 天会被系统自动清空。
+- **根因与修复**：`paths::resolve_model_roots` 识别含 `uninstall.exe` 的 NSIS 安装目录（以及 Unix `bin` 与系统临时目录），统一将新下载模型与新建 Laya 环境收口到运行数据目录 `%APPDATA%\moss\models`（仅无 `uninstall.exe` 的独立免安装便携版默认写程序同目录 `models/`，且可写探测采用带进程号序号的独立探针并缓存，不提前建空 `models/`）；`ModelManager` 新增 `with_fallback_roots` / `write_root_for`、`VoiceSettings::builtin_{section,chat}_ready_in` 与 `HostHooks::builtin_chat_ready`，自动对已存在的 `<运行目录>/models`、`<程序目录>/models` 及 `%LOCALAPPDATA%\MOSS\models` 做双向只读回退识别、链路切换就绪判定、按实际目录定位推理运行时与试听缓存，并支持全量补字库跨目录重下后热切换（`GlyphFontService::set_full_dir`），存量模型零迁移直接可用；新增 `detect_windows_old_moss`，分别识别同名用户 `Windows.old` 下 `Roaming\moss` 与 `Local\MOSS\models` 中的旧配置与旧模型，缺失期间写入诊断警告并在全部迁回后自动静默。默认值、接口契约与安全门禁不变。
+- **验证**：新增 `moss_voice::local_models::tests::fallback_roots_recognize_legacy_installs_while_new_downloads_use_primary_root`、`moss_voice::center::tests::mode_changes_uses_host_hook_for_fallback_or_colab_readiness`、`moss_xiaozhi_display::glyph_font::tests::undisplayable_chars_lists_only_what_neither_side_can_draw`（热切换）、`moss_voice_host::builtin::paths::tests::{nsis_install_uses_runtime_models_and_falls_back_to_legacy_install_and_localappdata,windows_old_detection_warns_only_while_current_models_or_config_missing}`；`node scripts/verify.mjs`、全工作区 `cargo clippy` 与 `cargo test --workspace` 通过，已同步本机 `/Applications/MOSS.app`。未在真实 Windows 安装器卸载换盘流程下实机手测（`unverified`）。
+- **关联**：`crates/moss-voice/src/{local_models,settings,center}.rs`、`crates/moss-voice-host/src/{builtin.rs,builtin/{paths,lifecycle,laya_jev,status,speaker,wakeword,models}.rs}`、`crates/moss-xiaozhi-display/src/glyph_font.rs`、`crates/moss-voice-server/src/lib.rs`、`apps/desktop/src-tauri/src/voice.rs`、`docs/developer/{packaging-install,api-contracts}.md`。
+
 ### USB 一键配网体验全面补强：写后报到闭环、有线与多网卡选址、串口自动刷新、纯 WPA3 预警与会话复用（2026-11-22）
 
 - **现象**：USB 配网写完仅提示“几秒后报到”且写前不检查内置语音服务是否已启动，用户难判断板子有没有连上；双网卡（有线 + Wi-Fi）电脑上 `lan_ipv4_addrs` 此前把 Wi-Fi 排在有线前面，导致默认推荐易变的动态无线 IP，界面也写死“Wi-Fi IP”且未列出其余网卡地址；插拔数据线需手点刷新，读写握手期缺少阶段反馈；Windows 扫描附近网络固定硬等 3.5 秒且不区分纯 WPA3，多台板子连续配同一 Wi-Fi 需重复输入密码。

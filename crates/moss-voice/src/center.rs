@@ -33,6 +33,11 @@ pub trait HostHooks: Send + Sync {
     }
     /// 停止内置语音服务（离开内置链路时）。
     fn builtin_stop(&self) {}
+    /// 查询切到内置语音链路后是否满足对话模式条件（含历史模型回退目录、外置覆盖目录与 Colab 密钥）；
+    /// 返回 `None` 时由 `VoiceCenter` 按默认 `<运行目录>/models` 兜底计算。
+    fn builtin_chat_ready(&self, _voice: &VoiceSettings) -> Option<bool> {
+        None
+    }
     /// “接入点与工具”卡片的数据：各接入点的状态与身份、每个工具的开关与调用统计（NV8）。
     fn mcp_overview(&self) -> serde_json::Value {
         serde_json::Value::Null
@@ -391,12 +396,15 @@ impl VoiceCenter {
         )];
         match target {
             VoiceMode::Builtin => {
-                let models_root = self
-                    .settings_file
-                    .parent()
-                    .map(|dir| dir.join("models"))
-                    .unwrap_or_default();
-                let models = if voice.builtin_chat_ready(&models_root) {
+                let chat_ready = self.hooks.builtin_chat_ready(&voice).unwrap_or_else(|| {
+                    let models_root = self
+                        .settings_file
+                        .parent()
+                        .map(|dir| dir.join("models"))
+                        .unwrap_or_default();
+                    voice.builtin_chat_ready(&models_root)
+                });
+                let models = if chat_ready {
                     "已配置识别、大模型与合成：以对话模式运行"
                 } else {
                     "模型未配置齐全：先以回声测试模式运行，配置后自动切换为对话"
@@ -1212,5 +1220,41 @@ mod tests {
             vec!["material_params_tool".to_string()]
         );
         assert!(host.inner.full_tools.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn mode_changes_uses_host_hook_for_fallback_or_colab_readiness() {
+        struct FallbackReadyHost;
+        impl HostHooks for FallbackReadyHost {
+            fn strict_mode(&self) -> bool {
+                false
+            }
+            fn strict_from_env(&self) -> bool {
+                false
+            }
+            fn restart_bridge(&self) -> bool {
+                true
+            }
+            fn bridge_connected(&self) -> bool {
+                false
+            }
+            fn set_device_sessions(&self, _sessions: Option<u32>) {}
+            fn builtin_chat_ready(&self, _voice: &VoiceSettings) -> Option<bool> {
+                Some(true)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            format!(r#"{{"web_port": 9666, "mcp_endpoint": "{OFFICIAL}"}}"#),
+        )
+        .unwrap();
+        let center = VoiceCenter::new(dir.path(), Arc::new(FallbackReadyHost));
+        let changes = center.mode_changes(VoiceMode::Builtin).unwrap();
+        assert!(
+            changes.iter().any(|c| c.contains("以对话模式运行")),
+            "宿主回退目录或 Colab 已满足对话模式时，切换确认框不得误报回声模式: {changes:?}"
+        );
     }
 }

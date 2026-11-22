@@ -95,6 +95,12 @@ mod imp {
             }
         }
 
+        fn builtin_chat_ready(&self, voice: &moss_voice::VoiceSettings) -> Option<bool> {
+            self.builtin
+                .as_ref()
+                .map(|builtin| builtin.chat_ready(voice))
+        }
+
         fn mcp_overview(&self) -> Value {
             self.host.mcp_overview()
         }

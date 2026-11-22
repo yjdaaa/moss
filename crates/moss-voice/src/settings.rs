@@ -1297,6 +1297,37 @@ impl VoiceSettings {
             self.builtin_section_ready_with_colab(section, models_root, colab_key_set)
         })
     }
+
+    /// 按 [`crate::local_models::ModelManager`]（含覆盖目录与历史回退目录）判断分区是否可用。
+    pub fn builtin_section_ready_in(
+        &self,
+        section: Section,
+        models: &crate::local_models::ModelManager,
+        colab_key_set: bool,
+    ) -> bool {
+        let colab_on = self.builtin_colab.active(colab_key_set);
+        let local = |kind| {
+            self.builtin_local
+                .selected(kind)
+                .is_some_and(|spec| models.path_if_installed(spec.id).is_some())
+        };
+        match section {
+            Section::Llm => colab_on || self.builtin_models.llm.is_some(),
+            Section::Asr => local(ModelKind::Asr) || self.builtin_models.asr.is_some(),
+            Section::Tts => colab_on || local(ModelKind::Tts) || self.builtin_models.tts.is_some(),
+        }
+    }
+
+    /// 按 [`crate::local_models::ModelManager`]（含覆盖目录与历史回退目录）判断对话三分区是否齐全。
+    pub fn builtin_chat_ready_in(
+        &self,
+        models: &crate::local_models::ModelManager,
+        colab_key_set: bool,
+    ) -> bool {
+        Section::ALL
+            .into_iter()
+            .all(|section| self.builtin_section_ready_in(section, models, colab_key_set))
+    }
 }
 
 fn read_root(settings_file: &Path) -> serde_json::Map<String, serde_json::Value> {
