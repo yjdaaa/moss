@@ -292,6 +292,9 @@ struct LogInner {
 /// 所以停止、重启和崩溃重启都不会清空。退出 MOSS 时随进程结束。
 pub struct DiagnosticsLog {
     inner: Mutex<LogInner>,
+    /// n105 完整过程记录（默认关）：开着时每条事件与每轮耗时另写一份到 `logs/process-trace/`，
+    /// 退出 MOSS 后仍可查（内存里的这份照旧随进程结束）
+    trace: std::sync::OnceLock<laser_runtime::ProcessTrace>,
 }
 
 impl Default for DiagnosticsLog {
@@ -306,6 +309,7 @@ impl Default for DiagnosticsLog {
                 },
                 ..LogInner::default()
             }),
+            trace: std::sync::OnceLock::new(),
         }
     }
 }
@@ -313,6 +317,15 @@ impl Default for DiagnosticsLog {
 impl DiagnosticsLog {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// 宿主启动时接上完整过程记录器（只接一次）。
+    pub fn set_process_trace(&self, trace: laser_runtime::ProcessTrace) {
+        let _ = self.trace.set(trace);
+    }
+
+    fn trace_on(&self) -> Option<&laser_runtime::ProcessTrace> {
+        self.trace.get().filter(|trace| trace.enabled())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, LogInner> {
@@ -337,6 +350,9 @@ impl DiagnosticsLog {
             hint: record.hint,
             detail: record.detail,
         };
+        let traced = self
+            .trace_on()
+            .map(|trace| (trace.clone(), serde_json::to_value(&event)));
         if event.level == EventLevel::Info {
             inner.info.push_back(event);
             while inner.info.len() > MAX_INFO_EVENTS {
@@ -349,6 +365,11 @@ impl DiagnosticsLog {
                 inner.problems.pop_front();
                 inner.drops.problems += 1;
             }
+        }
+        drop(inner);
+        if let Some((trace, Ok(mut value))) = traced {
+            crate::session::scrub_trace_value(&mut value);
+            trace.record("voice", "event", value);
         }
     }
 
@@ -375,6 +396,11 @@ impl DiagnosticsLog {
     }
 
     pub fn finish_timing(&self, timing: TurnTiming) {
+        if let Some(trace) = self.trace_on()
+            && let Ok(value) = serde_json::to_value(&timing)
+        {
+            trace.record("voice", "timing", value);
+        }
         let mut inner = self.lock();
         inner.timings.push_back(timing);
         while inner.timings.len() > MAX_TIMINGS {

@@ -58,6 +58,8 @@ impl<'a> Session<'a> {
             _ => None,
         };
         self.turn_number += 1;
+        self.trace_turn_input(&input, kind);
+        let trace_tts = self.trace_handle().map(|_| Vec::new());
         let recording_offset = if kind == TurnKind::Answer {
             self.recording_started.elapsed().as_millis() as u64
         } else {
@@ -179,6 +181,7 @@ impl<'a> Session<'a> {
             debug_corrected_asr: None,
             debug_tools: Vec::new(),
             debug_text_reply: Vec::new(),
+            trace_tts,
             pending_messages: Vec::new(),
             resampler: None,
             audio_started: false,
@@ -498,12 +501,17 @@ impl<'a> Session<'a> {
                     timing.tools.push(crate::ToolTiming { name, ms });
                 }
             }
+            TurnEvent::Trace { kind, data } => self.trace_record(kind, data),
             TurnEvent::SmartTurnProb(prob) => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.smart_turn_prob = Some(prob);
                 }
             }
             TurnEvent::RawHeard { raw, corrected } => {
+                self.trace_record(
+                    "asr",
+                    serde_json::json!({"raw": raw, "corrected": corrected}),
+                );
                 if let Some(turn) = self.turn.as_mut() {
                     turn.debug_raw_asr = Some(raw);
                     turn.debug_corrected_asr = Some(corrected);
@@ -698,6 +706,7 @@ impl<'a> Session<'a> {
                 let downlink = self.shared.config.downlink_sample_rate;
                 let mut resampler = Resampler::new(pcm.sample_rate, downlink);
                 let samples = resampler.process(&pcm.samples);
+                self.trace_tts_push(&samples);
                 let segments =
                     moss_voice_providers::text::subtitle_segments(&text, self.subtitle_units());
                 if segments.len() > 1 {
@@ -741,6 +750,7 @@ impl<'a> Session<'a> {
                     .get_or_insert_with(|| Resampler::new(pcm.sample_rate, downlink));
                 let samples = resampler.process(&pcm.samples);
                 self.pump.push(&samples);
+                self.trace_tts_push(&samples);
                 if self.listen.playback_started.is_none()
                     && self.pump.ready_to_start()
                     && let Phase::Speaking { next, .. } = &mut self.phase

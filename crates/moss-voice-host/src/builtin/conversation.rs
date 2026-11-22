@@ -1295,6 +1295,8 @@ impl BuiltinVoice {
         .with_memory(self.memory.clone())
         .with_speaker_enrollment(self.speaker.clone())
         .with_persona(self.persona.clone());
+        // n105 完整过程记录（默认关）：与激光侧共用同一个记录器，开关在偏好设置里，改了不用重启
+        conversation.process_trace = self.host.api_service.process_trace().cloned();
         if let Some(fallback_tts) = local.fallback_tts.take() {
             conversation = conversation.with_fallback_tts(fallback_tts);
         }

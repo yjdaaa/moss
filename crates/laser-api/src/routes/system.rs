@@ -27,6 +27,7 @@ impl ApiService {
             }
             ("POST", "/api/jev/reveal") => Some(self.handle_jev_reveal(ctx)),
             ("POST", "/api/settings") => Some(self.handle_settings_update(body, ctx)),
+            ("POST", "/api/process-trace") => Some(self.handle_process_trace(body, ctx)),
             ("GET", "/v1/events") => Some(self.handle_events_sse(path)),
             ("GET", "/api/text-origin") => Some(http_json(200, success(self.text_origin_json()))),
             ("POST", "/api/text-origin") => Some(self.handle_set_text_origin(body)),
@@ -40,6 +41,41 @@ impl ApiService {
             ("POST", "/api/time-calibration") => Some(self.handle_reset_time_calibration(body)),
             _ => None,
         }
+    }
+
+    /// 完整过程记录的状态与清空（n105 / r55）：只给桌面端，局域网与语音、接入点一律拒绝。
+    fn handle_process_trace(&self, body: &[u8], ctx: &laser_contracts::CallerContext) -> Vec<u8> {
+        if let Some(denied) = self.require_operator_settings_access(ctx) {
+            return denied;
+        }
+        let object = match parse_json_object(body, 4 * 1024) {
+            Ok(value) => value,
+            Err(error) => return http_json(400, failure(error, None)),
+        };
+        let Some(trace) = self.process_trace() else {
+            return http_json(503, failure("没有运行目录，无法使用完整过程记录", None));
+        };
+        match object.get("action").and_then(|v| v.as_str()) {
+            Some("status") => {}
+            Some("clear") => {
+                if let Err(error) = trace.clear() {
+                    return http_json(500, failure(format!("清空过程记录失败：{error}"), None));
+                }
+            }
+            _ => return http_json(400, failure("action 只能是 status 或 clear", None)),
+        }
+        let usage = trace.usage();
+        http_json(
+            200,
+            success(serde_json::json!({
+                "enabled": trace.enabled(),
+                "dir": trace.dir().to_string_lossy(),
+                "bytes": usage.bytes,
+                "days": usage.days,
+                "retention_days": laser_runtime::process_trace::RETENTION_DAYS,
+                "max_bytes": laser_runtime::process_trace::MAX_TOTAL_BYTES,
+            })),
+        )
     }
 
     fn handle_system_lan_info(&self, ctx: &laser_contracts::CallerContext) -> Vec<u8> {
@@ -226,6 +262,11 @@ impl ApiService {
             .get("check_prerelease")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // n105 / r55：完整过程记录默认关闭；目录与占用只经 /api/process-trace（仅桌面）给出
+        let process_trace_enabled = saved_settings
+            .get(laser_runtime::process_trace::SETTING_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let mcp_endpoint = configured_mcp_endpoint(self.runtime_path.as_deref());
         let telemetry = self.mcp_telemetry.snapshot();
@@ -249,6 +290,7 @@ impl ApiService {
                 "version": current_moss_version(),
                 "auto_check_update": auto_check_update,
                 "check_prerelease": check_prerelease,
+                "process_trace_enabled": process_trace_enabled,
                 "actual_port": actual,
                 "preferred_port": preferred,
                 "is_fallback": actual != preferred,
@@ -417,6 +459,16 @@ impl ApiService {
             };
             file_changes.push(("check_prerelease", Some(serde_json::json!(enabled))));
         }
+        let process_trace_changed = object.contains_key(laser_runtime::process_trace::SETTING_KEY);
+        if let Some(value) = object.get(laser_runtime::process_trace::SETTING_KEY) {
+            let Some(enabled) = value.as_bool() else {
+                return http_json(400, failure("process_trace_enabled 必须是布尔值", None));
+            };
+            file_changes.push((
+                laser_runtime::process_trace::SETTING_KEY,
+                Some(serde_json::json!(enabled)),
+            ));
+        }
         if let Some(pin_val) = object.get("lan_static_pin") {
             let Some(pin_str) = pin_val.as_str() else {
                 return http_json(400, failure("lan_static_pin 必须是字符串", None));
@@ -488,6 +540,9 @@ impl ApiService {
                         Some(serde_json::json!({"error_code": "settings_write_failed"})),
                     ),
                 );
+            }
+            if process_trace_changed && let Some(trace) = self.process_trace() {
+                trace.invalidate();
             }
         }
         if let Some(api_key) = object.get("jev_api_key") {

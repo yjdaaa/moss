@@ -172,7 +172,10 @@ impl ApiService {
                     self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
                     object.insert("_artifacts".into(), serde_json::Value::Object(artifacts));
                 }
-                Err(error) => return http_json(400, failure(error, None)),
+                Err(error) => {
+                    self.trace_generation_failed(route, ctx.label(), &object, &error);
+                    return http_json(400, failure(error, None));
+                }
             }
         } else if route == "/api/workflow" {
             let action = object.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -240,7 +243,10 @@ impl ApiService {
                                 .insert("_artifacts".into(), serde_json::Value::Object(artifacts));
                         }
                         Ok(None) => {}
-                        Err(error) => return http_json(400, failure(error, None)),
+                        Err(error) => {
+                            self.trace_generation_failed(route, ctx.label(), &object, &error);
+                            return http_json(400, failure(error, None));
+                        }
                     }
                 }
             }
@@ -254,7 +260,7 @@ impl ApiService {
              request: &serde_json::Map<String, serde_json::Value>| {
                 self.launch_send_job(workflow_id, gcode_path, expected_sha, request, ctx)
             };
-        self.with_effective_store(|store| {
+        let response = self.with_effective_store(|store| {
             handle_workflow_store_request(
                 store,
                 route,
@@ -265,7 +271,24 @@ impl ApiService {
                 &requested_spec,
                 &launcher,
             )
-        })
+        });
+        // 完整过程记录（默认关）：生成了预览产物的请求记下参数、发起方与产物
+        if creates_preview && let Some(artifacts) = object.get("_artifacts") {
+            if let Some(error) = crate::process_trace::response_failure(&response) {
+                // 产物生成了但预览没保存（编号冲突等）：记失败，不冒充一次成功的生成
+                self.trace_generation_failed(route, ctx.label(), &object, &error);
+                return response;
+            }
+            let workflow_id = crate::process_trace::response_workflow_id(&response);
+            self.trace_generation(
+                route,
+                ctx.label(),
+                workflow_id.as_deref(),
+                &object,
+                artifacts,
+            );
+        }
+        response
     }
 
     fn handle_draw_preview(&self, body: &[u8]) -> Vec<u8> {
@@ -294,7 +317,10 @@ impl ApiService {
             self.engrave_route(),
         ) {
             Ok(a) => a,
-            Err(error) => return http_json(400, failure(error, None)),
+            Err(error) => {
+                self.trace_generation_failed("/api/draw/preview", "draw", &object, &error);
+                return http_json(400, failure(error, None));
+            }
         };
         self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
         let workflow_id = format!("draw-{}", next_workflow_id());
@@ -348,6 +374,13 @@ impl ApiService {
         {
             return http_json(500, failure("画板预览保存失败", None));
         }
+        self.trace_generation(
+            "/api/draw/preview",
+            "draw",
+            Some(&workflow_id),
+            &object,
+            &record["artifacts"],
+        );
         http_json(200, success(record))
     }
 

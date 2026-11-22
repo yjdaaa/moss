@@ -225,6 +225,17 @@ pub(super) fn call_jev_with_model(
     model: &str,
     state: &Value,
 ) -> Result<Value, String> {
+    call_jev_capture(endpoint, api_key, model, state, &mut None)
+}
+
+/// 同 [`call_jev_with_model`]，另把模型原始返回放进 `raw`（完整过程记录用，n105）。
+fn call_jev_capture(
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    state: &Value,
+    raw: &mut Option<Value>,
+) -> Result<Value, String> {
     let local = is_local_jev_endpoint(endpoint);
     let service = if local {
         "本机 Jev 服务"
@@ -254,7 +265,9 @@ pub(super) fn call_jev_with_model(
     if bytes.len() > 64 * 1024 {
         return Err(format!("{service} 响应过大"));
     }
-    let value = serde_json::from_slice(&bytes).map_err(|_| format!("{service} 返回无效 JSON"))?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| format!("{service} 返回无效 JSON"))?;
+    *raw = Some(value.clone());
     parse_answer(&value)
 }
 
@@ -586,19 +599,30 @@ impl ApiService {
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             let local_upstream = jev_model.and_then(local_jev_upstream_model);
+            let mut raw_response = None;
+            let mut request_model = None;
             let decision = if enabled {
                 if let Some(upstream_model) = local_upstream {
-                    call_jev_with_model(
+                    request_model = Some(upstream_model);
+                    call_jev_capture(
                         "http://127.0.0.1:18090/v1/systemone",
                         "moss-local-laya",
                         upstream_model,
                         &state,
+                        &mut raw_response,
                     )
                 } else {
                     let model_to_use = jev_model.unwrap_or(JEV_MODEL);
                     match effective_key.as_deref() {
                         Some(key) => {
-                            call_jev_with_model(DEFAULT_JEV_ENDPOINT, key, model_to_use, &state)
+                            request_model = Some(model_to_use);
+                            call_jev_capture(
+                                DEFAULT_JEV_ENDPOINT,
+                                key,
+                                model_to_use,
+                                &state,
+                                &mut raw_response,
+                            )
                         }
                         None => Err("未配置 OpenRouter API Key".into()),
                     }
@@ -637,6 +661,19 @@ impl ApiService {
                     && matches!(workflow["source_type"].as_str(), Some("text" | "draw" | "image")),
             });
             self.save_feedback(id, &entry).map_err(|e| (500, e))?;
+            // 完整过程记录（默认关）：发给 Jev 的内容（不含密钥）、原始返回与最终结论
+            if let Some(trace) = self.process_trace().filter(|t| t.enabled()) {
+                trace.record(
+                    "laser",
+                    "feedback_jev",
+                    json!({
+                        "workflow_id": id,
+                        "request": request_model.map(|model| request_payload_for(model, &state)),
+                        "raw_response": raw_response,
+                        "entry": entry,
+                    }),
+                );
+            }
             Ok(entry)
         })();
         match result {

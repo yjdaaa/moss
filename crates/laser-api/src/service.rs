@@ -43,6 +43,7 @@ impl ApiService {
             generated_root: None,
             actual_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             runtime_path: None,
+            process_trace: None,
             active_jobs: Default::default(),
             uncertain_jobs: Default::default(),
             launching_workflows: std::sync::Arc::new(std::sync::Mutex::new(
@@ -280,8 +281,14 @@ impl ApiService {
             })
             .unwrap_or_default();
         self.set_disabled_tools(disabled);
+        self.process_trace = Some(laser_runtime::ProcessTrace::new(runtime_path.clone()));
         self.runtime_path = Some(runtime_path);
         self
+    }
+
+    /// 完整过程记录器（有运行目录时才有；开关关着时写入调用什么也不做）。
+    pub fn process_trace(&self) -> Option<&laser_runtime::ProcessTrace> {
+        self.process_trace.as_ref()
     }
 
     pub fn set_actual_port(&self, port: u16) {

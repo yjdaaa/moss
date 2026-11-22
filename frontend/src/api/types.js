@@ -69,6 +69,7 @@
  * @property {string} version
  * @property {boolean} auto_check_update
  * @property {boolean} check_prerelease
+ * @property {boolean} process_trace_enabled 完整过程记录开关（默认 false）
  * @property {number} actual_port
  * @property {number} preferred_port
  * @property {boolean} is_fallback

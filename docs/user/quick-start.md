@@ -75,6 +75,8 @@ cargo tauri android build --debug --target aarch64 --apk
 
 目录内包含 `uploads/`、`previews/`、`generated_assets/`、数据库 `moss.sqlite`、界面设置 `settings.json` 和实例锁 `moss.lock`。同一运行目录同时只允许一个实例，第二个实例会因为拿不到锁而初始化失败。
 
+**完整过程记录**（默认关闭）：在“偏好设置 → 完整过程记录”打开后，MOSS 会在运行目录的 `logs/process-trace/<日期>/` 下保存语音对话的全过程（你说话的录音、识别出的文字、发给大模型的完整内容和原始回复、工具调用、MOSS 合成的语音、每一步耗时）和激光生成的参数与产物（G-code、预览图）。`voice.jsonl` / `laser.jsonl` 一行一条记录，录音和语音是同日 `voice-files/` 里的 WAV 文件。不保存密钥，不上传；只留最近 7 天、最多 2 GB，到期自动删除，也可以在设置里一键清空。遇到“它刚才明明这么说了”的问题时，把当天的目录发给排查的人即可。
+
 从旧 Python 版迁移数据：
 
 ```powershell

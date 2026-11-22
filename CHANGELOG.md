@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增“完整过程记录”：语音对话与激光生成的全过程可保存在本机（默认关闭，2026-11-22）
+
+- **现象**：事后想核对“当时说了什么、模型怎么回的、生成了什么”时，只有最近 500 条脱敏对话摘要；诊断事件、耗时只在内存里，退出 MOSS 就没了；发给大模型的完整内容、模型原始回复、录音与合成语音从不保存。
+- **根因与修复**：新增共用记录器 `laser_runtime::ProcessTrace` 与偏好设置“完整过程记录”开关（`settings.json` 的 `process_trace_enabled`，**默认关闭**，关着时什么都不写、行为不变；打开前确认一次，改了立即生效）。打开后写入运行目录 `logs/process-trace/<日期>/`：语音每轮的用户录音 WAV、识别原文与纠正后、每轮大模型完整请求与回复、工具完整参数与结果、播出的句子与合成语音 WAV、耗时与诊断事件（新增 `TurnEvent::Trace`，会话层统一带上设备 / 会话 / 轮次）；激光每次生成的参数、发起方、产物与 SHA-256（G-code、预览图复制一份）、生成失败原因、加工反馈的 Jev 请求与原始返回。写入前去掉密钥与令牌，不上传；保留 7 天、总量上限 2 GiB，可一键清空。新增 `POST /api/process-trace {action:"status"|"clear"}`，与 `/api/settings` 同权限，语音、接入点与局域网一律拒绝。
+- **验证**：新增 Rust 测试：记录器 4 项（关着不写、写事件与附件、开关即时生效、7 天与总量清理）、激光 3 项（生成记录与产物复制、带路径文件名不复制、接口权限与清空）、语音 3 项（端到端一轮依次记下录音 / 识别 / 两轮大模型 / 工具结果 / 轮次结束含合成语音 / 耗时；关着时不建目录；凭据去除与图片省略）；前端单测 2 项与设置页浏览器用例（默认关、取消不保存、确认后打开、占用显示、清空、关闭）。未用真实小智设备与真实模型听验录音和合成语音文件（`unverified`）。
+- **关联**：`crates/laser-runtime/src/process_trace.rs`、`crates/laser-api/src/{process_trace.rs,routes/system.rs,routes/workflow.rs,feedback.rs,access.rs,service.rs}`、`crates/laser-host/src/lib.rs`、`crates/moss-voice-server/src/{session/trace.rs,conversation.rs,state.rs,session/turn.rs,session/lifecycle.rs}`、`crates/moss-voice-host/src/builtin/{conversation.rs,lifecycle.rs}`、`frontend/src/components/{ProcessTraceSection.jsx,SettingsModal.jsx}`、`frontend/src/processTrace.js`、技术书 n105、融合技术书 r55、`docs/developer/{api-contracts,frontend-behavior,db-schema,feature-glossary}.md`、`docs/user/quick-start.md`。
+
 ### USB 一键配网读出的旧 OTA 地址会提醒并可一键换成 MOSS 当前地址（2026-11-22）
 
 - **现象**：读取小智板子后，“自定义 OTA 地址”显示板子里存的历史值，不再跟随 MOSS 当前地址；电脑换了 IP 或改了内置服务端口时，确认条只写“写入 OTA 地址：旧地址”，写完板子连不上 MOSS。

@@ -76,6 +76,16 @@ try {
       };
     }, { initialProgress: progressState, loopbackOrigin: local.replace(/\/$/, "") });
 
+    // n105 完整过程记录：设置页开关、确认框、占用显示与清空
+    const traceState = { enabled: false, bytes: 0, days: 0, settings: [], cleared: 0 };
+    const traceResult = () => ({
+      enabled: traceState.enabled,
+      dir: "/tmp/moss-runtime/logs/process-trace",
+      bytes: traceState.bytes,
+      days: traceState.days,
+      retention_days: 7,
+      max_bytes: 2 * 1024 * 1024 * 1024,
+    });
     await page.route("**/*", async (route) => {
       const req = route.request();
       const url = new URL(req.url());
@@ -99,7 +109,29 @@ try {
           }),
         });
       }
+      if (url.pathname === "/api/process-trace") {
+        const body = JSON.parse(req.postData() || "{}");
+        if (body.action === "clear") {
+          traceState.cleared += 1;
+          traceState.bytes = 0;
+          traceState.days = 0;
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ success: true, result: traceResult() }),
+        });
+      }
       if (url.pathname === "/api/settings") {
+        const body = JSON.parse(req.postData() || "{}");
+        if ("process_trace_enabled" in body) {
+          traceState.settings.push(body.process_trace_enabled);
+          traceState.enabled = body.process_trace_enabled;
+          if (traceState.enabled) {
+            traceState.bytes = 5 * 1024 * 1024;
+            traceState.days = 1;
+          }
+        }
         return route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -260,6 +292,39 @@ try {
       installCalls.push(...(await page.evaluate(() => window.__MOCK_INSTALL_CALLS__)));
       assert.equal(installCalls.length, 3);
       assert.equal(installCalls[2]?.tag, "v0.4.1-beta.1");
+    }
+
+    if (platform === "macos") {
+      // 完整过程记录默认关；打开前先弹确认框说明会保存哪些内容，取消则不保存
+      await page.getByRole("button", { name: "完整过程记录" }).click();
+      const traceBox = page.locator("#settings-process-trace");
+      await traceBox.waitFor({ state: "visible" });
+      assert.equal(await traceBox.isChecked(), false, "完整过程记录默认关闭");
+      await page.locator("#settings-process-trace-status").getByText(/目前没有记录。只保留最近 7 天，最多 2\.0 GB/).waitFor();
+      assert.equal(await page.locator("#settings-process-trace-clear").isDisabled(), true, "没有记录时不能清空");
+      await traceBox.click();
+      const traceDialog = page.locator('[data-testid="app-dialog"]');
+      await traceDialog.getByText(/你对小智说话的录音/).waitFor();
+      await traceDialog.getByText(/不保存任何密钥或令牌/).waitFor();
+      await traceDialog.locator('[data-dialog-action="cancel"]').click();
+      assert.deepEqual(traceState.settings, [], "取消确认不写设置");
+      assert.equal(await traceBox.isChecked(), false);
+      await traceBox.click();
+      assert.equal(await traceDialog.locator('[data-dialog-action="confirm"]').innerText(), "打开记录");
+      await traceDialog.locator('[data-dialog-action="confirm"]').click();
+      await page.waitForFunction(() => document.querySelector("#settings-process-trace")?.checked === true);
+      assert.deepEqual(traceState.settings, [true]);
+      await page.locator("#settings-process-trace-status").getByText(/已记录 1 天，共 5\.0 MB/).waitFor();
+      await page.locator("#settings-process-trace-status").getByText("/tmp/moss-runtime/logs/process-trace").waitFor();
+      // 清空要再确认；关闭开关不弹确认
+      await page.locator("#settings-process-trace-clear").click();
+      assert.equal(await traceDialog.locator('[data-dialog-action="confirm"]').innerText(), "清空");
+      await traceDialog.locator('[data-dialog-action="confirm"]').click();
+      await page.locator("#settings-process-trace-status").getByText(/目前没有记录/).waitFor();
+      assert.equal(traceState.cleared, 1);
+      await traceBox.click();
+      await page.waitForFunction(() => document.querySelector("#settings-process-trace")?.checked === false);
+      assert.deepEqual(traceState.settings, [true, false]);
     }
 
     if (installCalls.length === 0) {

@@ -56,6 +56,8 @@ mod lifecycle;
 mod listen;
 mod playback;
 mod screen;
+mod trace;
+pub(crate) use trace::scrub_trace_value;
 mod turn;
 
 pub use connect::router;
@@ -300,7 +302,7 @@ impl UtteranceEnd {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TurnKind {
     /// 回答用户的一段话
     Answer,
@@ -356,6 +358,8 @@ struct ActiveTurn {
     debug_corrected_asr: Option<String>,
     debug_tools: Vec<crate::DebugToolTrace>,
     debug_text_reply: Vec<String>,
+    /// n105 完整过程记录：这一轮合成语音（下行采样率）；轮次开始时开关打开才为 `Some`
+    trace_tts: Option<Vec<i16>>,
     /// 生成完成不等于播放完成；正常播完后才提交完整历史。
     pending_messages: Vec<ChatMessage>,
     /// 当前句子的重采样器（流式合成的后续分段沿用，保证分段之间连续）

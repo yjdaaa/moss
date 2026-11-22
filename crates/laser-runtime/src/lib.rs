@@ -6,6 +6,7 @@ pub mod firmware_store;
 mod home_secret;
 pub mod knowledge_store;
 pub mod migration;
+pub mod process_trace;
 pub mod root;
 pub mod settings_store;
 pub mod store;
@@ -27,6 +28,7 @@ pub use migration::{
     normalize_material_version, remap_path, remap_path_to, run_migration, scan_uploads,
     sha256_file,
 };
+pub use process_trace::{ProcessTrace, TraceUsage};
 pub use root::{RuntimeRoot, RuntimeRootError};
 pub use store::{
     MemoryStore, RecordKind, RuntimeStore, SplitSqliteStore, SqliteStore, StoredRecord,

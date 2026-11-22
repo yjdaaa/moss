@@ -362,6 +362,8 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 
 ### 3.20 `voice_chat_logs`（schema v19，n81）
 
+> 完整过程记录（n105，默认关）不进 SQLite：录音、合成语音、大模型完整请求 / 回复与激光生成过程写在运行目录 `logs/process-trace/` 的按日 JSONL 与附件里，格式见 [api-contracts.md](api-contracts.md) §3.15；本表照旧只存脱敏摘要。
+
 有界语音对话记录，方便排障。只存经 `moss_voice_server::scrub_debug_text` 脱敏、按上限截断后的文字，不存录音。
 
 | 列 | 类型 | 说明 |

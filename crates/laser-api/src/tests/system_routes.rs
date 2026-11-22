@@ -1171,3 +1171,108 @@ fn draw_state_recovers_corrupt_files_and_discards_connection_fields() {
     backups.sort_unstable();
     assert_eq!(backups, [r#"{"scene":42}"#, "{broken"]);
 }
+
+/// n105 完整过程记录：默认关；只有桌面（或无桌面会话时的本机回环）能开关、查看与清空，语音 / 局域网一律拒绝。
+#[test]
+fn process_trace_switch_status_and_clear_are_desktop_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+    let info = parse_json_response(
+        &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    assert_eq!(info["result"]["process_trace_enabled"], false, "默认关闭");
+    assert!(
+        info["result"].get("process_trace_dir").is_none(),
+        "公开的系统信息不带本机目录"
+    );
+
+    let status = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert_eq!(status["success"], true, "{status}");
+    assert_eq!(status["result"]["enabled"], false);
+    assert_eq!(status["result"]["bytes"], 0);
+    assert_eq!(status["result"]["retention_days"], 7);
+    assert!(
+        status["result"]["dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("process-trace")
+    );
+
+    let bad = post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"process_trace_enabled": "yes"}),
+    );
+    assert_eq!(bad["success"], false, "{bad}");
+
+    let saved = post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"process_trace_enabled": true}),
+    );
+    assert_eq!(saved["success"], true, "{saved}");
+    assert_eq!(
+        parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        )["result"]["process_trace_enabled"],
+        true
+    );
+    // 保存后立即生效（不用等 2 秒缓存）
+    let trace = service.process_trace().unwrap();
+    assert!(trace.enabled());
+    trace.record("laser", "generate", serde_json::json!({"text": "你好"}));
+    let status = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert!(status["result"]["bytes"].as_u64().unwrap() > 0, "{status}");
+    assert_eq!(status["result"]["days"], 1);
+
+    // 语音身份与局域网不能开关、查看或清空
+    for ctx in [
+        laser_contracts::CallerContext::Voice {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        },
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "p".into(),
+        },
+    ] {
+        for (path, body) in [
+            ("/api/process-trace", r#"{"action":"clear"}"#),
+            ("/api/settings", r#"{"process_trace_enabled":false}"#),
+        ] {
+            let request = format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let denied =
+                parse_json_response(&service.handle_http_with_ctx(request.as_bytes(), ctx.clone()));
+            assert_eq!(denied["success"], false, "{path} {denied}");
+        }
+    }
+    assert!(trace.enabled(), "被拒绝的请求不改开关");
+    assert!(trace.usage().bytes > 0, "被拒绝的请求不清空");
+    assert!(
+        is_reference_data_write("POST", "/api/process-trace", b"{}"),
+        "手机连接不允许操作"
+    );
+
+    let cleared = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "clear"}),
+    );
+    assert_eq!(cleared["result"]["bytes"], 0, "{cleared}");
+    let unknown = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "delete_all"}),
+    );
+    assert_eq!(unknown["success"], false);
+}

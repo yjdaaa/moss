@@ -148,6 +148,8 @@ pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
         // select-cell 会把校准单元格保存为材料推荐参数
         // time-calibration 只有清除（reset）一种写操作（r40）
         "/api/settings"
+        // 完整过程记录的状态（含本机目录）与清空（n105）
+        | "/api/process-trace"
         | "/api/jev/test"
         | "/api/jev/reveal"
         | "/api/material-lab/select-cell"

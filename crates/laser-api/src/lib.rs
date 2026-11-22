@@ -24,6 +24,7 @@ mod jobs;
 mod material_lab;
 mod material_lab_patterns;
 mod materials;
+mod process_trace;
 mod registration;
 mod resume;
 mod routes;
@@ -89,6 +90,8 @@ pub struct ApiService {
     generated_root: Option<std::path::PathBuf>,
     actual_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     runtime_path: Option<std::path::PathBuf>,
+    /// 完整过程记录（`settings.json` 的 `process_trace_enabled`，默认关；n105 / r55）：激光生成与语音共用一份。
+    process_trace: Option<laser_runtime::ProcessTrace>,
     active_jobs: ActiveJobs,
     /// 已结束但物理停机未获确认的任务：保留原设备实时通道供 0x18 重试，绝不猜测其他目标。
     uncertain_jobs: UncertainJobs,

@@ -31,6 +31,7 @@ mod preview;
 mod screen;
 mod shortcut;
 mod streaming;
+mod trace;
 mod turns;
 
 #[derive(Default)]

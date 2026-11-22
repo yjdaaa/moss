@@ -494,6 +494,9 @@ pub struct Conversation {
     pub persona: Option<Arc<crate::persona::PersonaSwitch>>,
     /// n88 尾音语义判停预测器；默认为空，开启后用于辅助评估用户停顿时是否意犹未尽。
     pub turn_predictor: Option<Arc<dyn TurnEndPredictor>>,
+    /// n105 完整过程记录（默认关）：开着时每轮把大模型请求 / 回复、工具完整结果经 [`TurnEvent::Trace`]
+    /// 交给会话，由会话带上设备、会话与轮次写入 `logs/process-trace/`
+    pub process_trace: Option<laser_runtime::ProcessTrace>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
 }
@@ -530,6 +533,7 @@ impl Conversation {
             jev_filter: None,
             persona: None,
             turn_predictor: None,
+            process_trace: None,
             cache: Mutex::new(Vec::new()),
         }
     }
@@ -902,6 +906,11 @@ pub enum TurnEvent {
     },
     /// 退出词已经确认，合成再见之前就关闭插话检测。
     Closing,
+    /// n105 完整过程记录的一条（只在开关打开时发送）：`llm_round` / `tool_call`
+    Trace {
+        kind: &'static str,
+        data: Value,
+    },
     /// 这一轮开始执行工具：此后用户接着说话不再整轮重来（工具可能有副作用，不能执行两遍）
     ToolsStarted,
     Timing {
@@ -970,6 +979,14 @@ struct Turn {
 }
 
 impl Turn {
+    /// 完整过程记录是否打开（开关每 2 秒最多读一次设置文件）。
+    fn trace_on(&self) -> bool {
+        self.conversation
+            .process_trace
+            .as_ref()
+            .is_some_and(laser_runtime::ProcessTrace::enabled)
+    }
+
     async fn wait_release(&self) {
         if let Some(mut release) = self.gate.as_ref().map(|gate| gate.release.clone())
             && release.wait_for(|released| *released).await.is_err()
@@ -1533,6 +1550,7 @@ impl Turn {
     ) -> (Result<moss_voice_providers::LlmReply, ProviderError>, bool) {
         let (delta_tx, mut delta_rx) = unbounded_channel::<String>();
         let llm = self.conversation.llm.clone();
+        let trace_began = Instant::now();
         let generation = async move { llm.chat(messages, tools, delta_tx).await };
         let speaking = async {
             let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(4);
@@ -1593,7 +1611,23 @@ impl Turn {
             let (_, spoke) = tokio::join!(feeder, tts_consumer);
             spoke
         };
-        tokio::join!(generation, speaking)
+        let (reply, spoke) = tokio::join!(generation, speaking);
+        if self.trace_on() {
+            // 发给模型的完整内容（系统提示词、历史、本句、工具定义）与模型原始回复
+            self.send(TurnEvent::Trace {
+                kind: "llm_round",
+                data: serde_json::json!({
+                    "elapsed_ms": trace_began.elapsed().as_millis() as u64,
+                    "messages": messages,
+                    "tools": tools.iter().map(ToolSpec::to_openai).collect::<Vec<_>>(),
+                    "reply_text": reply.as_ref().ok().map(|r| r.text.clone()),
+                    "reply_tool_calls": reply.as_ref().ok().map(|r| r.tool_calls.clone()),
+                    "error": reply.as_ref().err().map(ToString::to_string),
+                    "spoke": spoke,
+                }),
+            });
+        }
+        (reply, spoke)
     }
 
     async fn run_tools(&self, calls: &[ToolCall]) -> Vec<(ToolCall, ToolOutcome)> {
@@ -1606,6 +1640,7 @@ impl Turn {
         calls: Vec<ToolCall>,
     ) -> impl std::future::Future<Output = Vec<(ToolCall, ToolOutcome)>> + Send + 'static {
         let mut set = tokio::task::JoinSet::new();
+        let trace_on = self.trace_on();
         for (index, call) in calls.iter().cloned().enumerate() {
             let tools = self.conversation.tools.clone();
             let device = self.device.clone();
@@ -1651,6 +1686,24 @@ impl Turn {
                     arguments: call.function.arguments.chars().take(1200).collect(),
                     result: out_preview,
                 });
+                if trace_on {
+                    let (result_kind, result) = match &outcome {
+                        ToolOutcome::Reply(s) => ("reply", s.clone()),
+                        ToolOutcome::Speak(s) => ("speak", s.clone()),
+                        ToolOutcome::PlayMusic { title, .. } => ("play_music", title.clone()),
+                    };
+                    let _ = events.send(TurnEvent::Trace {
+                        kind: "tool_call",
+                        data: serde_json::json!({
+                            "name": call.function.name,
+                            "call_id": call.id,
+                            "arguments": call.function.arguments,
+                            "result_kind": result_kind,
+                            "result": result,
+                            "elapsed_ms": began.elapsed().as_millis() as u64,
+                        }),
+                    });
+                }
                 (index, call.id, outcome)
             });
         }

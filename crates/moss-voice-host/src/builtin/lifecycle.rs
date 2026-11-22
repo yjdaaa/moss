@@ -19,6 +19,9 @@ pub fn record_moss_event(record: EventRecord) {
 pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
     BuiltinState(host.map(|host| {
             let diagnostics = moss_voice_server::DiagnosticsLog::new();
+            if let Some(trace) = host.api_service.process_trace() {
+                diagnostics.set_process_trace(trace.clone());
+            }
             let _ = HOST_LOG.set(diagnostics.clone());
             // 2026-11-09：激光雕刻机相关事件也写进同一本记录，标为“激光雕刻”（语音中心“记录与诊断”）
             {

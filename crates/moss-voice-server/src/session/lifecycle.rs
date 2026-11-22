@@ -4,6 +4,7 @@ use super::*;
 
 impl<'a> Session<'a> {
     pub(super) fn finish_timing(&mut self, outcome: &str) {
+        self.trace_turn_end(outcome);
         if let Some(turn) = self.turn.as_mut()
             && let Some(mut timing) = turn.timing.take()
         {

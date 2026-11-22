@@ -7,6 +7,7 @@ import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
+import { ProcessTraceSection } from "./ProcessTraceSection.jsx";
 import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
 import { isRemoteMode } from "../authSession.js";
 import { voiceApi } from "../voiceApi.js";
@@ -621,6 +622,9 @@ function SettingsModalBody({
 
           {/* 导出目录（仅桌面版） */}
           <ExportSettingsSection />
+
+          {/* 完整过程记录（n105，默认关；只在电脑本机） */}
+          <ProcessTraceSection />
 
           {/* 软件更新（Magpie 风格：当前版本 + 启动时自动检查更新 + 包含预览版 + 立即检查更新） */}
           {!isRemoteMode() && (
