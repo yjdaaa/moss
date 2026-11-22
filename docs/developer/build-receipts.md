@@ -2,6 +2,23 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.12` 三端正式发布（2026-11-19）
+
+从 `main` 的 `a7c3c80` 手动启动发布工作流，传入已有标签 `v0.3.12`（应用源码 `64761a6`）。[Run `44529797517`](https://github.com/yjdaaa/moss/actions/runs/44529797517) 的 Windows、macOS、Android 构建和发布任务均成功。Android 固定使用 Build Tools 36.0.0 完成正式证书校验，离线语音版按原生许可门禁跳过。[Release v0.3.12](https://github.com/yjdaaa/moss/releases/tag/v0.3.12) 于 13:36:35 UTC 公开，并设为最新版本。
+
+| 产物 | 上传时间（UTC） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.12_android_aarch64.apk` | 13:36:32 | 43,322,514 | `0f518dd76f2e01d2ed67c3ab645e02c5e341dffc7cfb1b90a37ebe1c7346f207` |
+| `MOSS_0.3.12_macos_universal.dmg` | 13:36:34 | 81,235,417 | `df85ed257b48650cce7a5e83d00a08fba9ea90d82279226a60256cb01ee82c4d` |
+| `MOSS_0.3.12_windows_x64_portable.exe` | 13:36:34 | 91,942,912 | `505a597bc5dfbedabaf59e6fbb8e09e1beb619b913d264f2e35fa2e50dfde522` |
+| `MOSS_0.3.12_x64-lite-setup.exe` | 13:36:31 | 29,657,015 | `166229cfcdf62be1b0f5249e87fc11f4556fc0bbc79bebf59c38535730cdefbe` |
+| `SHA256SUMS.txt` | 13:36:28 | 474 | `88024041ee6e3cb1ff6bfa018fe6225f25d6e4961985829f985b98381974877f` |
+| `latest.json` | 13:36:29 | 1,312 | `16b70b9305b5b784f9a8878cf50933599a2162b8653547516e1152ad400069ec` |
+
+核对：六个公开下载地址均返回 HTTP 200。安装包的 GitHub 资产摘要与 `SHA256SUMS.txt` 逐项一致，另下载并复算两个清单文件。`latest.json` 为 `0.3.12`，含 `windows-x86_64-lite` 和 `android-aarch64` 的更新地址与签名。
+
+**未验证**：未下载全部安装包复算哈希或实机安装。macOS 包采用 ad-hoc 签名，未公证。
+
 ## `v0.3.12` 本机 macOS 通用与 Android arm64 发布包（2026-11-19）
 
 应用源码为标签 `v0.3.12`（`64761a6`）。前端以 `npm ci` 和 `npm run build` 重新构建。macOS 使用 `scripts/build-macos-installer.sh --without-voice-sidecar` 生成通用 DMG。Android 使用 `cargo tauri android build --target aarch64 --apk --ci` 构建，启用固定签名门禁，SDK 为 API 36，NDK 为 27.0.12077973。交付文件与 `SHA256SUMS.txt` 位于 `target/moss-v0.3.12-local-release/`。
@@ -14,7 +31,7 @@
 
 核对：macOS 应用版本为 0.3.12，包含 `arm64` 和 `x86_64`，应用签名和 DMG 完整性校验均通过。Android 包名为 `com.moss.laser`，版本为 0.3.12（3012），仅含 `arm64-v8a`。通过修复后的验签步骤，证书 SHA-256 与固定证书及已发布的 v0.3.11 APK 一致。更新签名使用应用内置公钥完成校验，且绑定 0.3.12。
 
-**未验证**：两包均未实机安装，macOS 采用 ad-hoc 签名且未公证。Windows 精简安装版和便携版已由同一标签的 [GitHub 发布任务](https://github.com/yjdaaa/moss/actions/runs/44494968209/job/135460109154) 构建成功，需登录下载核验。GitHub Release 待发布。
+**未验证**：两包均未实机安装，macOS 采用 ad-hoc 签名且未公证。三端正式发布包见上节。
 
 ## macOS 本机 Apple Silicon `0.3.7` 安装包构建（含离线语音辅助程序协议 7，2026-11-15）
 
