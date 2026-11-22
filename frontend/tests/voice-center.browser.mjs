@@ -90,6 +90,8 @@ try {
     // n103：先模拟没给定位权限，用户去系统设置打开后变为已授权
     wifiPermission: "denied",
     wifiSettingsOpened: [],
+    // 第一次读板子时模拟板子里还存着电脑换 IP 前的旧 OTA 地址
+    usbInspectCount: 0,
     usbPorts: [
       { port_name: "/dev/cu.usbserial-LASER", description: "FluidNC", vid: 0x1a86, pid: 0x7523, serial_number: "L1", is_usb: true, is_laser_port: true, is_likely_esp: true },
       { port_name: "/dev/cu.usbmodem14201", description: "ESP32-S3 USB JTAG", vid: 0x303a, pid: 0x1001, serial_number: "XZ01", is_usb: true, is_laser_port: false, is_likely_esp: true },
@@ -381,13 +383,14 @@ try {
           };
         case "inspect":
           assert.equal(input.port, "/dev/cu.usbmodem14201");
+          state.usbInspectCount += 1;
           return {
             device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33", flash_size: "16MB" },
             partition: { label: "nvs", offset: "0x9000", size: 20480, all_labels: ["nvs", "otadata", "phy_init", "ota_0", "ota_1", "assets"], has_xiaozhi_markers: true },
             known_device: null,
             nvs: {
               wifi_slots: [{ slot: 0, ssid: "HomeNet", has_password: true, channel: 6 }],
-              ota_url: state.builtin.ota_url,
+              ota_url: state.usbInspectCount === 1 ? "http://192.0.2.99:8003/xiaozhi/ota/" : state.builtin.ota_url,
               max_tx_power: 0,
               remember_bssid: false,
               sleep_mode: false,
@@ -1002,6 +1005,13 @@ try {
   await page.locator("#xiaozhi-usb-inspect").click();
   await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").getByText("esp32s3").waitFor();
   await page.locator("#xiaozhi-usb-card").getByText("HomeNet").waitFor();
+  // 板子里存的 OTA 地址已不是 MOSS 当前地址：提醒且默认不替换，点按钮才换成当前地址
+  const staleOta = page.locator("#xiaozhi-ota-stale");
+  await staleOta.getByText("http://192.0.2.99:8003/xiaozhi/ota/").waitFor();
+  assert.equal(await page.locator("#xiaozhi-usb-card .xz-ota-preview code").innerText(), "http://192.0.2.99:8003/xiaozhi/ota/", "默认保留板子原来的地址");
+  await staleOta.getByRole("button", { name: "换成 MOSS 当前地址" }).click();
+  await staleOta.waitFor({ state: "detached" });
+  assert.equal(await page.locator("#xiaozhi-usb-card .xz-ota-preview code").innerText(), state.builtin.ota_url);
   if (process.env.VOICE_QA_DIR) {
     await page.locator("#xiaozhi-usb-card").scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-usb-inline-inspected.png") });
@@ -1016,6 +1026,7 @@ try {
   await page.locator("#xiaozhi-usb-port-select").selectOption("/dev/cu.usbmodem14201");
   await page.locator("#xiaozhi-usb-inspect").click();
   await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").getByText("esp32s3").waitFor();
+  assert.equal(await page.locator("#xiaozhi-ota-stale").count(), 0, "板子里存的就是 MOSS 当前地址时不提醒");
   // n103：一键填入电脑当前 Wi-Fi；电脑连的是 5 GHz 时提醒板子只认 2.4 GHz，密码不自动填
   await page.locator("#xiaozhi-wifi-pass").fill("old-pass");
   // 没有定位权限：弹窗给“去系统设置打开 / 手动输入”，先选手动输入，之后再从提示里去设置打开，切回 MOSS 自动重查

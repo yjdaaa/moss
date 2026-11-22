@@ -335,6 +335,42 @@ export function isRecognizedXiaozhiInspect(inspectData) {
   return namespaces.includes("board") || namespaces.includes("websocket");
 }
 
+/** OTA 地址比较用的规范形式：协议与主机不分大小写、默认端口省略、路径末尾斜杠不计。 */
+function normalizeOtaForCompare(urlText) {
+  const trimmed = String(urlText || "").trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/, "")}${parsed.search}`.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+/** MOSS 内置服务当前能用的 OTA 地址（本机 Wi-Fi IP、各网卡 IP 与 moss.local）。 */
+export function mossOtaUrls(serviceStatus) {
+  return [
+    serviceStatus?.ota_ip_url,
+    serviceStatus?.ota_url,
+    ...(Array.isArray(serviceStatus?.ota_ip_urls) ? serviceStatus.ota_ip_urls : []),
+  ].filter((url) => typeof url === "string" && url.trim());
+}
+
+/**
+ * 读出的板子 OTA 地址已不是 MOSS 当前的任何一个地址（电脑换了 IP、改了端口等）时返回
+ * `{ boardUrl, mossUrl }`，界面据此提醒并给“换成 MOSS 当前地址”（2026-11-22 用户决定，默认不自动替换，
+ * 因为也可能是故意指向别的服务器）。输入框已被改掉、板子没存过地址或服务没给出地址时返回 null。
+ */
+export function staleBoardOta(inspectData, draftOtaUrl, serviceStatus) {
+  const boardUrl = typeof inspectData?.nvs?.ota_url === "string" ? inspectData.nvs.ota_url.trim() : "";
+  if (!boardUrl || String(draftOtaUrl || "").trim() !== boardUrl) return null;
+  const known = mossOtaUrls(serviceStatus);
+  if (known.length === 0) return null;
+  const target = normalizeOtaForCompare(boardUrl);
+  if (known.some((url) => normalizeOtaForCompare(url) === target)) return null;
+  return { boardUrl, mossUrl: known[0] };
+}
+
 export function deriveWsUrlForMoss(otaUrl, serviceStatus) {
   const trimmed = String(otaUrl || "").trim();
   const wsPort = Number(serviceStatus?.ws_port || 0);

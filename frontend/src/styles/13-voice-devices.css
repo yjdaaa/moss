@@ -551,6 +551,11 @@
   margin: 0;
 }
 .xz-banner svg { flex: none; margin-top: 3px; }
+/* 板子里存的 OTA 地址已不是 MOSS 当前地址（2026-11-22） */
+#xiaozhi-ota-stale,
+#xiaozhi-ota-stale-advanced { flex-wrap: wrap; align-items: center; }
+#xiaozhi-ota-stale span,
+#xiaozhi-ota-stale-advanced span { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 
 /* 暗色双标签胶囊切换条（Wi-Fi 配置 / 高级选项） */
 .xz-tabs {

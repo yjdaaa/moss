@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### USB 一键配网读出的旧 OTA 地址会提醒并可一键换成 MOSS 当前地址（2026-11-22）
+
+- **现象**：读取小智板子后，“自定义 OTA 地址”显示板子里存的历史值，不再跟随 MOSS 当前地址；电脑换了 IP 或改了内置服务端口时，确认条只写“写入 OTA 地址：旧地址”，写完板子连不上 MOSS。
+- **根因与修复**：读取后直接沿用板子原值，没有与 MOSS 当前地址比对。新增 `staleBoardOta` / `mossOtaUrls`：板子原值不在 `ota_ip_url` / `ota_url` / `ota_ip_urls` 之中（协议与主机不分大小写、末尾斜杠不计）且输入框仍是原值时，在 Wi-Fi 标签与高级选项提醒并给“换成 MOSS 当前地址”；默认不替换（可能故意指向别的服务器）。
+- **验证**：新增单测“读出的板子 OTA 地址不是 MOSS 当前地址时提醒，默认不替换”（换 IP、改端口、多网卡、大小写与末尾斜杠、已改掉 / 没存过 / 服务无地址），浏览器用例覆盖旧地址提醒、默认保留与一键替换、地址一致时不提醒。
+- **关联**：`frontend/src/components/voice-builtin/{XiaozhiUsbProvisionCard.jsx,usbProvisionModel.js}`、`frontend/src/styles/13-voice-devices.css`、`frontend/tests/{usbProvisionModal.test.mjs,voice-center.browser.mjs}`、技术书 n104。
+
 ### 首次标定向导的每一步都能单独收起（2026-11-22）
 
 - **现象**：材料实验室“首次标定向导”里，点当前步骤的标题收不起来，只能把整个向导折叠。

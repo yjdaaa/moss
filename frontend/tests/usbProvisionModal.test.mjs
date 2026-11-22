@@ -14,6 +14,8 @@ import {
   filterScannedWifiForBoard,
   hostWifiProblem,
   scanFilterLabel,
+  staleBoardOta,
+  mossOtaUrls,
   deriveWsUrlForMoss,
   formatUsbWriteConfirmText,
   isRecognizedXiaozhiInspect,
@@ -484,4 +486,41 @@ test("本机 Wi-Fi 读不到时：缺定位权限跳定位页、Wi-Fi 关着跳 
   assert.equal(canOpenWifiSettings("macos"), true);
   assert.equal(canOpenWifiSettings("windows"), true);
   assert.equal(canOpenWifiSettings("linux"), false);
+});
+
+test("读出的板子 OTA 地址不是 MOSS 当前地址时提醒，默认不替换", () => {
+  const status = {
+    ota_ip_url: "http://192.168.1.50:9666/xiaozhi/ota/",
+    ota_url: "http://moss.local:9666/xiaozhi/ota/",
+    ota_ip_urls: ["http://192.168.1.50:9666/xiaozhi/ota/", "http://10.0.0.8:9666/xiaozhi/ota/"],
+  };
+  const inspect = (ota) => ({ nvs: { ota_url: ota } });
+  assert.deepEqual(mossOtaUrls(status), [
+    "http://192.168.1.50:9666/xiaozhi/ota/",
+    "http://moss.local:9666/xiaozhi/ota/",
+    "http://192.168.1.50:9666/xiaozhi/ota/",
+    "http://10.0.0.8:9666/xiaozhi/ota/",
+  ]);
+  // 电脑换了 IP：板子里还是旧地址
+  const old = "http://192.168.1.23:9666/xiaozhi/ota/";
+  assert.deepEqual(staleBoardOta(inspect(old), old, status), {
+    boardUrl: old,
+    mossUrl: "http://192.168.1.50:9666/xiaozhi/ota/",
+  });
+  // 改过端口也算旧地址
+  const oldPort = "http://192.168.1.50:8003/xiaozhi/ota/";
+  assert.ok(staleBoardOta(inspect(oldPort), oldPort, status));
+  // 与 MOSS 任一当前地址一致（含另一块网卡、moss.local，大小写与末尾斜杠不计）不提醒
+  for (const same of [
+    "http://192.168.1.50:9666/xiaozhi/ota/",
+    "http://10.0.0.8:9666/xiaozhi/ota/",
+    "http://MOSS.local:9666/xiaozhi/ota",
+  ]) {
+    assert.equal(staleBoardOta(inspect(same), same, status), null, same);
+  }
+  // 用户已在输入框改掉、板子没存过、或服务没给出地址时不提醒
+  assert.equal(staleBoardOta(inspect(old), "http://192.168.1.50:9666/xiaozhi/ota/", status), null);
+  assert.equal(staleBoardOta(inspect(""), "", status), null);
+  assert.equal(staleBoardOta(null, old, status), null);
+  assert.equal(staleBoardOta(inspect(old), old, {}), null);
 });

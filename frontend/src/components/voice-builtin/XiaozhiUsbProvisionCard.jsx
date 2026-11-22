@@ -38,6 +38,7 @@ import {
   removeSavedWifiSlot,
   utf8ByteLength,
   scanFilterLabel,
+  staleBoardOta,
   validateUsbProvisionDraft,
   wifiBandLabel,
 } from "./usbProvisionModel.js";
@@ -495,6 +496,28 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   const dimVal = String(draft.sleepDimMin ?? "").trim() === "" ? -1 : Number(draft.sleepDimMin);
   const offVal = String(draft.sleepOffMin ?? "").trim() === "" ? -1 : Number(draft.sleepOffMin);
   const revoked = isRevokedInMoss(inspectData);
+  const staleOta = staleBoardOta(inspectData, draft.otaUrl, serviceStatus);
+  const renderStaleOta = (id) =>
+    staleOta ? (
+      <div className="voice-hint voice-hint--warn xz-banner" id={id} role="status">
+        <AlertTriangle size={14} />{" "}
+        <span>
+          板子里存的是 <code>{staleOta.boardUrl}</code>，MOSS 现在的地址是{" "}
+          <code>{staleOta.mossUrl}</code>。照原样写入，板子可能连不上 MOSS（除非你是故意指向别的服务器）。
+        </span>
+        <button
+          type="button"
+          className="xz-chip-btn"
+          disabled={Boolean(busy)}
+          onClick={() => {
+            otaTouchedRef.current = true;
+            updateDraft((prev) => ({ ...prev, otaUrl: staleOta.mossUrl }));
+          }}
+        >
+          换成 MOSS 当前地址
+        </button>
+      </div>
+    ) : null;
   const boardChip = inspectData?.device?.chip || "";
   // 扫描结果按读到的芯片筛：非 C5 只显示 2.4 GHz，C5 显示 2.4 / 5 GHz
   const scanView =
@@ -949,6 +972,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                   去高级选项修改
                 </button>
               </div>
+              {renderStaleOta("xiaozhi-ota-stale")}
 
               <label className="xz-checkbox">
                 <input
@@ -1046,6 +1070,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                       </button>
                     )}
                   </div>
+                  {renderStaleOta("xiaozhi-ota-stale-advanced")}
                 </div>
 
                 <div className="xz-form-group">
