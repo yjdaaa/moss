@@ -335,6 +335,11 @@ impl DiagnosticsLog {
     }
 
     pub fn push(&self, record: impl Into<EventRecord>) {
+        self.push_in_flow(record, None);
+    }
+
+    /// 同 [`Self::push`]；`flow` 为完整过程记录里这条事件所属的流程（会话事件带上“语音·设备·第几轮”）。
+    pub fn push_in_flow(&self, record: impl Into<EventRecord>, flow: Option<String>) {
         let record = record.into();
         let at_ms = crate::unix_now_ms();
         let mut inner = self.lock();
@@ -369,7 +374,9 @@ impl DiagnosticsLog {
         drop(inner);
         if let Some((trace, Ok(mut value))) = traced {
             crate::session::scrub_trace_value(&mut value);
-            trace.record("voice", "event", value);
+            let step = crate::session::event_step_text(&value);
+            let flow = flow.unwrap_or_else(|| crate::session::event_flow(&value));
+            trace.record("diag", &flow, "event", &step, value);
         }
     }
 
@@ -399,7 +406,9 @@ impl DiagnosticsLog {
         if let Some(trace) = self.trace_on()
             && let Ok(value) = serde_json::to_value(&timing)
         {
-            trace.record("voice", "timing", value);
+            let step = crate::session::timing_step_text(&value);
+            let flow = crate::session::turn_flow(&timing.device_id, timing.turn);
+            trace.record("voice", &flow, "timing", &step, value);
         }
         let mut inner = self.lock();
         inner.timings.push_back(timing);
@@ -549,6 +558,11 @@ impl LiveState {
     /// 写一条事件：传字符串为日常记录（info / general），传 [`EventRecord`] 可指定级别与分类。
     pub fn event(&self, record: impl Into<EventRecord>) {
         self.log.push(record);
+    }
+
+    /// 会话里的事件：完整过程记录打开时归到这台设备这一轮的流程下。
+    pub fn event_in_flow(&self, record: impl Into<EventRecord>, flow: String) {
+        self.log.push_in_flow(record, Some(flow));
     }
 
     pub fn events(&self) -> Vec<ServerEvent> {

@@ -1224,7 +1224,13 @@ fn process_trace_switch_status_and_clear_are_desktop_only() {
     // 保存后立即生效（不用等 2 秒缓存）
     let trace = service.process_trace().unwrap();
     assert!(trace.enabled());
-    trace.record("laser", "generate", serde_json::json!({"text": "你好"}));
+    trace.record(
+        "laser",
+        "激光",
+        "generate",
+        "生成预览",
+        serde_json::json!({"text": "你好"}),
+    );
     let status = post_json(
         &service,
         "/api/process-trace",
@@ -1275,4 +1281,107 @@ fn process_trace_switch_status_and_clear_are_desktop_only() {
         &serde_json::json!({"action": "delete_all"}),
     );
     assert_eq!(unknown["success"], false);
+}
+
+/// n105：完整过程记录打开后，改动类接口调用按先后记进时间线（发起方、做什么、结果），密钥隐藏，只读轮询不记。
+#[test]
+fn process_trace_timeline_records_api_calls_in_order_and_hides_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+    let enabled = post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"process_trace_enabled": true}),
+    );
+    assert_eq!(enabled["success"], true, "{enabled}");
+    post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"auto_check_update": false}),
+    );
+    post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"jev_api_key": "fake-jev-value-for-trace-test"}),
+    );
+    post_json(
+        &service,
+        "/api/settings",
+        &serde_json::json!({"mcp_endpoint": "wss://mcp.example.com/ws?TOKEN=secret-ep-token-123"}),
+    );
+    post_json(
+        &service,
+        "/api/workflow",
+        &serde_json::json!({"action": "recent"}),
+    );
+    // 缺省 action 的 /api/workflow 等价只读 status，以及无 action 的材料实验室只读 POST，均不记入时间线
+    post_json(&service, "/api/workflow", &serde_json::json!({}));
+    post_json(
+        &service,
+        "/api/material-lab/status",
+        &serde_json::json!({"calibration_id": "cal-1"}),
+    );
+    post_json(&service, "/api/material-lab/recent", &serde_json::json!({}));
+    post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    service.process_trace().unwrap().flush();
+    let day = std::fs::read_dir(temp.path().join(laser_runtime::process_trace::TRACE_DIR))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let timeline =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL)).unwrap();
+    assert!(
+        !timeline.contains("fake-jev-value-for-trace-test"),
+        "密钥不进记录：{timeline}"
+    );
+    assert!(
+        !timeline.contains("secret-ep-token-123"),
+        "端点 URL 中的大小写 token 也不进记录：{timeline}"
+    );
+    let lines: Vec<serde_json::Value> = timeline
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let steps: Vec<&str> = lines.iter().filter_map(|l| l["step"].as_str()).collect();
+    // 打开开关这一步本身在开关生效后才写，共 4 条改动类调用（只读轮询全部过滤）
+    assert_eq!(lines.len(), 4, "{steps:?}");
+    assert!(
+        steps[0].contains("修改设置：process_trace_enabled → 成功"),
+        "{steps:?}"
+    );
+    assert!(
+        steps[1].contains("修改设置：auto_check_update → 成功"),
+        "{steps:?}"
+    );
+    assert!(steps[2].contains("修改设置：jev_api_key"), "{steps:?}");
+    assert_eq!(lines[2]["request"]["jev_api_key"], "[已隐藏]");
+    assert_eq!(lines[3]["request"]["mcp_endpoint"], "[已隐藏]");
+    assert_eq!(lines[0]["flow"], "激光");
+    assert_eq!(lines[0]["kind"], "api_call");
+    let seqs: Vec<u64> = lines.iter().map(|l| l["seq"].as_u64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "按先后编号：{seqs:?}");
+    assert!(!timeline.contains("\"recent\""), "只读轮询不进时间线");
+    assert!(
+        !timeline.contains("/api/material-lab/status")
+            && !timeline.contains("/api/material-lab/recent"),
+        "材料实验室只读 POST 不进时间线：{timeline}"
+    );
+    let readable =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_TXT)).unwrap();
+    assert_eq!(readable.lines().count(), 4);
+    assert!(
+        !readable.contains("secret-ep-token-123")
+            && !readable.contains("fake-jev-value-for-trace-test"),
+        "可读时间线不得泄露凭据：{readable}"
+    );
+    assert!(
+        readable.contains("[激光] 本机发起：修改设置：auto_check_update → 成功"),
+        "{readable}"
+    );
 }

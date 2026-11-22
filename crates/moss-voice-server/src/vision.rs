@@ -805,6 +805,55 @@ async fn explain(
     ) {
         return fail(StatusCode::FORBIDDEN, "vision_disabled");
     }
+    // 只有设备仍被允许且看图开关未关闭时才允许写入过程记录与照片附件，先脱敏再拼可读 step。
+    let record_vision_trace = |answer: Option<String>, error: Option<String>| {
+        let Some(trace) = shared
+            .config
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.process_trace.clone())
+            .filter(laser_runtime::ProcessTrace::enabled)
+        else {
+            return;
+        };
+        let ext = if mime == "image/png" { "png" } else { "jpg" };
+        let file = trace.save_file("voice", "camera-photo", ext, &bytes);
+        let mut data = json!({
+            "device_id": permit.device,
+            "question": question,
+            "mime": mime,
+            "width": w,
+            "height": h,
+            "file": file,
+            "answer": answer,
+            "error": error,
+        });
+        crate::session::scrub_trace_value(&mut data);
+        let safe_q: String = data["question"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect();
+        let file_label = data["file"].as_str().unwrap_or("未保存");
+        let step = match (data["answer"].as_str(), data["error"].as_str()) {
+            (Some(text), _) => format!(
+                "设备拍照请 MOSS 看图（{w}×{h}），问题「{safe_q}」→ 回答「{}」，照片：{file_label}",
+                text.chars().take(80).collect::<String>()
+            ),
+            (None, err) => format!(
+                "设备拍照请 MOSS 看图失败：{}，照片：{file_label}",
+                err.unwrap_or("未知原因")
+            ),
+        };
+        trace.record(
+            "voice",
+            &crate::session::device_flow(&permit.device),
+            "vision",
+            &step,
+            data,
+        );
+    };
     match result {
         Ok(Ok(text)) if !text.trim().is_empty() => {
             let clean_text: String = text.chars().take(2000).collect();
@@ -827,7 +876,7 @@ async fn explain(
                     source: "voice",
                     question: question.chars().take(200).collect(),
                     summary: clean_text.chars().take(600).collect(),
-                    mime,
+                    mime: mime.clone(),
                     width: w,
                     height: h,
                     size_bytes: bytes.len(),
@@ -840,14 +889,24 @@ async fn explain(
                 let _ = shared.vision_photos.take(&permit.device);
                 return fail(StatusCode::FORBIDDEN, "vision_revoked");
             }
+            record_vision_trace(Some(clean_text.clone()), None);
             response(StatusCode::OK, json!({"success":true,"text":clean_text}))
         }
         Err(GuardedVisionError::Revoked) => fail(StatusCode::FORBIDDEN, "vision_revoked"),
         Err(GuardedVisionError::Disabled) => fail(StatusCode::FORBIDDEN, "vision_disabled"),
         Err(GuardedVisionError::Timeout) | Ok(Err(VisionFailure::Timeout)) => {
+            record_vision_trace(None, Some("timeout".into()));
             fail(StatusCode::GATEWAY_TIMEOUT, "vision_model_timeout")
         }
-        _ => fail(StatusCode::BAD_GATEWAY, "vision_model_error"),
+        other => {
+            let detail = match other {
+                Ok(Ok(_)) => "empty_answer".to_owned(),
+                Ok(Err(failure)) => format!("{failure:?}"),
+                Err(guard) => format!("{guard:?}"),
+            };
+            record_vision_trace(None, Some(detail));
+            fail(StatusCode::BAD_GATEWAY, "vision_model_error")
+        }
     }
 }
 

@@ -1120,10 +1120,11 @@ fn bridge_round_trips_json_rpc_over_loopback_websocket() {
     assert_eq!(stats.messages_out.load(Ordering::Relaxed), 2);
 }
 
-/// 关闭了部分工具的假后端（NV8）。
+/// 关闭了部分工具的假后端（NV8）。使用独立遥测实例，避免并行测试互相污染全局工具计数。
 struct SwitchBackend {
     inner: FakeBackend,
     disabled: Vec<&'static str>,
+    telemetry: laser_contracts::McpTelemetry,
 }
 impl HostBackend for SwitchBackend {
     fn request(
@@ -1139,6 +1140,9 @@ impl HostBackend for SwitchBackend {
     }
     fn audit_client(&self) -> String {
         "mcp-switch-test".into()
+    }
+    fn mcp_telemetry(&self) -> &laser_contracts::McpTelemetry {
+        &self.telemetry
     }
 }
 
@@ -1158,6 +1162,7 @@ fn disabled_tools_are_neither_listed_nor_callable() {
             ),
         ]),
         disabled: vec!["material_params_tool", "laser_safe_action_tool"],
+        telemetry: laser_contracts::McpTelemetry::new(),
     };
     let list = handle_json_rpc_with(
         &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
@@ -1174,12 +1179,6 @@ fn disabled_tools_are_neither_listed_nor_callable() {
     assert_eq!(names.len(), 17, "{names:?}");
     assert!(!names.contains(&"material_params_tool") && !names.contains(&"laser_safe_action_tool"));
 
-    let before = global_mcp_telemetry()
-        .snapshot()
-        .tool_stats
-        .get("material_params_tool")
-        .cloned()
-        .unwrap_or_default();
     let call = handle_json_rpc_with(
         &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"material_params_tool","arguments":{"action":"list"}}}),
         false,
@@ -1194,10 +1193,10 @@ fn disabled_tools_are_neither_listed_nor_callable() {
             .contains("tool_disabled")
     );
     assert!(backend.inner.calls().is_empty(), "关闭的工具不得触达后端");
-    let after = global_mcp_telemetry().snapshot().tool_stats["material_params_tool"].clone();
-    assert_eq!(after.calls - before.calls, 1);
-    assert_eq!(after.denied - before.denied, 1);
-    assert_eq!(after.failures, before.failures, "被开关拒绝不算失败");
+    let after = backend.telemetry.snapshot().tool_stats["material_params_tool"].clone();
+    assert_eq!(after.calls, 1);
+    assert_eq!(after.denied, 1);
+    assert_eq!(after.failures, 0, "被开关拒绝不算失败");
 
     // 停止类工具不能关闭：即使后端报告关闭，调用照常转发
     assert!(!tool_can_be_disabled("laser_safe_action_tool"));
@@ -1209,17 +1208,10 @@ fn disabled_tools_are_neither_listed_nor_callable() {
     );
     assert!(stop.success, "{stop:?}");
     assert_eq!(backend.inner.calls()[0].1, "/api/safe-action");
-    let stat = global_mcp_telemetry().snapshot().tool_stats["laser_safe_action_tool"].clone();
-    assert!(stat.calls >= 1);
+    let stat = backend.telemetry.snapshot().tool_stats["laser_safe_action_tool"].clone();
+    assert_eq!(stat.calls, 1);
 
-    // 未知工具名统一计入“未知工具”，不按名字新增条目（其他测试也会计入，只比较本次的增量）
-    let unknown = |stats: &std::collections::BTreeMap<String, laser_contracts::ToolCallStat>| {
-        stats
-            .get("（未知工具）")
-            .map(|stat| stat.calls + stat.failures)
-            .unwrap_or(0)
-    };
-    let before = unknown(&global_mcp_telemetry().snapshot().tool_stats);
+    // 未知工具名统一计入“未知工具”，不按名字新增条目
     let made_up = dispatch_tool_call_with(
         "made_up_tool_for_stats",
         &serde_json::json!({}),
@@ -1227,12 +1219,11 @@ fn disabled_tools_are_neither_listed_nor_callable() {
         Some(&backend),
     );
     assert!(!made_up.success);
-    let stats = global_mcp_telemetry().snapshot().tool_stats;
+    let stats = backend.telemetry.snapshot().tool_stats;
     assert!(!stats.contains_key("made_up_tool_for_stats"));
-    assert!(
-        unknown(&stats) >= before + 2,
-        "未知工具计一次调用、一次失败"
-    );
+    let unknown = &stats["（未知工具）"];
+    assert_eq!(unknown.calls, 1, "未知工具计一次调用");
+    assert_eq!(unknown.failures, 1, "未知工具计一次失败");
 }
 
 /// NV8：桥定时发 Ping；对方长时间没有任何数据（连 Pong 都没有）时判定断线并自动重连，
@@ -1412,6 +1403,7 @@ fn disabled_gate_never_blocks_r2_workflow_cancel() {
             serde_json::json!({"success": true, "result": {"workflow_id": "wf-9", "status": "cancelled"}}),
         )]),
         disabled: vec!["laser_workflow_tool"],
+        telemetry: laser_contracts::McpTelemetry::new(),
     };
     // 非停止类调用被关闭开关拦截
     let blocked = dispatch_tool_call_with(

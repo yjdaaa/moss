@@ -663,15 +663,29 @@ impl ApiService {
             self.save_feedback(id, &entry).map_err(|e| (500, e))?;
             // 完整过程记录（默认关）：发给 Jev 的内容（不含密钥）、原始返回与最终结论
             if let Some(trace) = self.process_trace().filter(|t| t.enabled()) {
+                let mut payload = json!({
+                    "workflow_id": id,
+                    "request": request_model.map(|model| request_payload_for(model, &state)),
+                    "raw_response": raw_response,
+                    "entry": entry,
+                });
+                crate::process_trace::scrub_trace_value(&mut payload);
+                let safe_text = payload["entry"]["feedback_text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect::<String>();
+                let safe_speech = payload["entry"]["speech"].as_str().unwrap_or("");
+                let step = format!(
+                    "加工反馈「{safe_text}」→ 判断为 {class}（来源 {source}），建议：{safe_speech}"
+                );
                 trace.record(
                     "laser",
+                    &crate::process_trace::laser_flow(Some(id)),
                     "feedback_jev",
-                    json!({
-                        "workflow_id": id,
-                        "request": request_model.map(|model| request_payload_for(model, &state)),
-                        "raw_response": raw_response,
-                        "entry": entry,
-                    }),
+                    &step,
+                    payload,
                 );
             }
             Ok(entry)

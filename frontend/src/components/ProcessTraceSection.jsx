@@ -57,7 +57,7 @@ function ProcessTracePanel() {
   };
 
   const clear = async () => {
-    const ok = await showConfirm("删除全部完整过程记录（录音、合成语音、对话与生成过程）？删除后无法恢复。", {
+    const ok = await showConfirm("删除全部完整过程记录（录音、看图照片、合成语音、对话与激光操作记录）？删除后无法恢复。", {
       title: "清空过程记录",
       confirmText: "清空",
       cancelText: "取消",
@@ -79,7 +79,7 @@ function ProcessTracePanel() {
     <div className="ob-fold settings-spacer" id="settings-process-trace-section">
       <FoldHeader variant="section" id="settings-process-trace" icon={History} title="完整过程记录" defaultOpen={false} />
       <div className="settings-box-4">
-        打开后保存语音对话（含你的录音和 MOSS 合成的语音）、发给大模型的完整内容与原始回复、工具调用，以及激光生成的参数和产物，方便事后核对。默认关闭，不打开时 MOSS 的行为不变。
+        打开后按先后把每一步写成一条时间线：语音对话（含你的录音、设备拍照看图的照片和 MOSS 合成的语音）、发给大模型的完整内容与原始回复、工具调用，以及激光生成、确认发送、急停、加工进度与结果等操作，每一步都写明在干什么，方便事后核对。默认关闭，不打开时 MOSS 的行为不变。
       </div>
       <label className="settings-label">
         <input

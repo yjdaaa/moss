@@ -57,6 +57,8 @@ impl<'a> Session<'a> {
             TurnInput::Utterance { pcm, .. } if silence_ended => Some(pcm.clone()),
             _ => None,
         };
+        // 上一轮还没收尾就被这一轮接上：先把它已合成的语音与结果记下
+        self.trace_turn_end("replaced");
         self.turn_number += 1;
         self.trace_turn_input(&input, kind);
         let trace_tts = self.trace_handle().map(|_| Vec::new());
@@ -160,6 +162,7 @@ impl<'a> Session<'a> {
             gate,
         );
         if let Some(mut replaced) = self.turn.replace(ActiveTurn {
+            turn_number: self.turn_number,
             person_scope: None,
             person_verified: false,
             pending_photo,
@@ -182,6 +185,7 @@ impl<'a> Session<'a> {
             debug_tools: Vec::new(),
             debug_text_reply: Vec::new(),
             trace_tts,
+            trace_rounds: 0,
             pending_messages: Vec::new(),
             resampler: None,
             audio_started: false,
@@ -411,6 +415,7 @@ impl<'a> Session<'a> {
                     | TurnEvent::SmartTurnProb(_)
                     | TurnEvent::Timing { .. }
                     | TurnEvent::PersonResolved { .. }
+                    | TurnEvent::Trace { .. }
                     | TurnEvent::Warning(_),
                 ) => {}
                 Some(TurnEvent::Heard(text)) if self.can_ask_whether_addressed() => {
@@ -501,7 +506,7 @@ impl<'a> Session<'a> {
                     timing.tools.push(crate::ToolTiming { name, ms });
                 }
             }
-            TurnEvent::Trace { kind, data } => self.trace_record(kind, data),
+            TurnEvent::Trace { kind, data } => self.trace_turn_event(kind, data),
             TurnEvent::SmartTurnProb(prob) => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.smart_turn_prob = Some(prob);
@@ -834,7 +839,7 @@ impl<'a> Session<'a> {
                         &turn_ctx,
                         Some(verified_person),
                         &messages,
-                        conversation.llm.clone(),
+                        trace::background_llm(conversation, self.device_id, "长期记忆提取"),
                     );
                 }
                 let photo_in_messages = turn
@@ -852,7 +857,12 @@ impl<'a> Session<'a> {
                 }
             } else {
                 if let Some(extraction) = &conversation.context_extraction {
-                    extraction.turn_completed(&turn_ctx, None, &messages, conversation.llm.clone());
+                    extraction.turn_completed(
+                        &turn_ctx,
+                        None,
+                        &messages,
+                        trace::background_llm(conversation, self.device_id, "长期记忆提取"),
+                    );
                 }
                 append_history(
                     &mut self.history,
@@ -1156,6 +1166,9 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         reason: &str,
     ) -> Result<(), String> {
+        if self.turn.is_some() {
+            self.trace_record("interrupt", serde_json::json!({"reason": reason}));
+        }
         self.finish_timing("interrupted");
         self.screen.preview_hold = None;
         self.screen.pending_oled_preview = None;

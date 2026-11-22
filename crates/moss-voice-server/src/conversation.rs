@@ -1993,6 +1993,24 @@ impl Turn {
             if decision.applied {
                 self.timing("jev_filter");
             }
+            if self.trace_on() {
+                let kept = decision.filter_tools(&tools, &text, &history);
+                self.send(TurnEvent::Trace {
+                    kind: "jev",
+                    data: serde_json::json!({
+                        "applied": decision.applied,
+                        "cached": decision.cached,
+                        "unfinished": decision.unfinished,
+                        "fast_read": decision.fast_read.as_ref().map(|intent| format!("{intent:?}")),
+                        "allowed_groups": decision.allowed_groups.as_ref().map(|groups| {
+                            groups.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>()
+                        }),
+                        "keep_memories": decision.keep_memories,
+                        "tools_before": tools.len(),
+                        "tools_after": kept.len(),
+                    }),
+                });
+            }
             if settings.read_only_shortcuts
                 && let Some(intent) = decision.fast_read
             {

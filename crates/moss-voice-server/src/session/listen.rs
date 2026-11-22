@@ -156,6 +156,7 @@ impl<'a> Session<'a> {
             }
         }
         if began {
+            self.trace_record("speech_began", serde_json::json!({}));
             self.screen.preview_hold = None;
             // VAD 刚确认开始说话：建立流式识别，先补送保留的开头与这一帧
             let stream = self.open_stream();

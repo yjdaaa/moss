@@ -121,6 +121,8 @@ struct SendWorkerParams {
     voice_permit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     on_terminal: Option<JobTerminalHook>,
     store: Option<std::sync::Arc<dyn laser_runtime::RuntimeStore + Send + Sync>>,
+    /// 完整过程记录（n105，默认关）：加工开始、每 10% 进度与结束结果写进时间线
+    process_trace: Option<laser_runtime::ProcessTrace>,
     workflows:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     calibrations:
@@ -521,6 +523,136 @@ fn finish_active_send_job(params: SendWorkerParams, status: &str) {
     }
 }
 
+/// 加工进度记录线程守卫：离开作用域或显式 drop 时立刻唤醒并等待线程退出，
+/// 避免异常退出漏线程，也保证 `job_progress` 绝不会排在 `job_end` 之后。
+pub(crate) struct ProgressTraceGuard {
+    stop: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ProgressTraceGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.stop;
+        {
+            let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *done = true;
+            cvar.notify_one();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// 加工进度每过 10% 记一步（只在完整过程记录打开时起这个线程）。
+fn spawn_progress_trace(params: &SendWorkerParams, total: usize) -> Option<ProgressTraceGuard> {
+    let trace = params.process_trace.clone().filter(|t| t.enabled())?;
+    spawn_progress_trace_with(
+        trace,
+        params.workflow_id.clone(),
+        params.progress.clone(),
+        total,
+        params.start_from_line,
+        std::time::Duration::from_millis(500),
+    )
+}
+
+pub(crate) fn spawn_progress_trace_with(
+    trace: laser_runtime::ProcessTrace,
+    workflow_id: String,
+    progress: std::sync::Arc<laser_device::JobProgress>,
+    total: usize,
+    start_from: usize,
+    interval: std::time::Duration,
+) -> Option<ProgressTraceGuard> {
+    if total == 0 {
+        return None;
+    }
+    let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let stop_worker = stop.clone();
+    let handle = std::thread::Builder::new()
+        .name(format!("laser-trace-{workflow_id}"))
+        .spawn(move || {
+            use std::sync::atomic::Ordering;
+            let began = std::time::Instant::now();
+            // 续雕任务从已完成的档位起算，只记后续前进的 10% 档位
+            let mut reported = (start_from.min(total) * 10 / total).min(9);
+            let (lock, cvar) = &*stop_worker;
+            loop {
+                {
+                    let done = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    if *done {
+                        break;
+                    }
+                    let (done, _) = cvar
+                        .wait_timeout(done, interval)
+                        .unwrap_or_else(|e| e.into_inner());
+                    if *done {
+                        break;
+                    }
+                }
+                // 加工过程中只有 lines_sent 实时增长（lines_completed 在收尾/取消时才写回），
+                // 两者取大值按总行数换算 10%~90% 档位。
+                let sent = progress.lines_sent.load(Ordering::Relaxed);
+                let completed = progress.lines_completed.load(Ordering::Relaxed);
+                let current = sent.max(completed).min(total);
+                let decile = (current * 10 / total).min(9);
+                if decile > reported {
+                    reported = decile;
+                    crate::process_trace::trace_job_step(
+                        Some(&trace),
+                        &workflow_id,
+                        "job_progress",
+                        &format!(
+                            "加工进度 {}%：已发送 {sent} / {total} 行（用时 {} 秒）",
+                            decile * 10,
+                            began.elapsed().as_secs()
+                        ),
+                        serde_json::json!({
+                            "percent": decile * 10,
+                            "lines_completed": completed,
+                            "lines_sent": sent,
+                            "total_lines": total,
+                            "start_from_line": start_from,
+                            "elapsed_ms": began.elapsed().as_millis() as u64,
+                            "status_report": progress.status_report(),
+                        }),
+                    );
+                }
+            }
+        })
+        .ok()?;
+    Some(ProgressTraceGuard {
+        stop,
+        handle: Some(handle),
+    })
+}
+
+fn job_end_step(status: &str, send_result: &serde_json::Value) -> String {
+    let lines = format!(
+        "{} / {} 行",
+        send_result["lines_completed"].as_u64().unwrap_or(0),
+        send_result["total_lines"].as_u64().unwrap_or(0)
+    );
+    let seconds = send_result["elapsed_ms"].as_u64().unwrap_or(0) / 1000;
+    if send_result["phase"].as_str() == Some("result_unknown") {
+        return format!(
+            "加工结果未知（停机状态待确认）：已发送 {} / {} 行，{}",
+            send_result["lines_sent"].as_u64().unwrap_or(0),
+            send_result["total_lines"].as_u64().unwrap_or(0),
+            send_result["error"].as_str().unwrap_or("请核实设备状态")
+        );
+    }
+    match status {
+        "completed" => format!("加工完成：{lines}，用时 {seconds} 秒"),
+        "cancelled" => format!("加工已取消：完成 {lines}，用时 {seconds} 秒"),
+        _ => format!(
+            "加工失败：完成 {lines}，{}",
+            send_result["error"].as_str().unwrap_or("原因未知")
+        ),
+    }
+}
+
 fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerParams) {
     use std::sync::atomic::Ordering;
     let total = params.lines.len();
@@ -529,6 +661,35 @@ fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerPar
     } else {
         params.mode
     };
+    crate::process_trace::trace_job_step(
+        params.process_trace.as_ref(),
+        &params.workflow_id,
+        "job_start",
+        &format!(
+            "开始加工：{} 行 G-code（{}，目标 {}{}）",
+            total,
+            if params.is_offline_sd {
+                "脱机 SD 卡"
+            } else {
+                "逐行下发"
+            },
+            params.target,
+            if params.start_from_line > 0 {
+                format!("，从第 {} 行续雕", params.start_from_line + 1)
+            } else {
+                String::new()
+            }
+        ),
+        serde_json::json!({
+            "mode": sent_mode,
+            "target": params.target,
+            "total_lines": total,
+            "start_from_line": params.start_from_line,
+            "estimated_seconds": params.raw_estimate,
+            "scale_factor": params.scale_factor,
+        }),
+    );
+    let progress_trace = spawn_progress_trace(&params, total);
     let outcome = if params
         .voice_permit
         .as_ref()
@@ -547,6 +708,15 @@ fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerPar
     };
 
     let (status, send_result) = build_terminal_send_outcome(&params, sent_mode, outcome, total);
+    // 立即唤醒并回收进度线程（微秒级），保证 job_progress 不会晚到排在 job_end 之后
+    drop(progress_trace);
+    crate::process_trace::trace_job_step(
+        params.process_trace.as_ref(),
+        &params.workflow_id,
+        "job_end",
+        &job_end_step(status, &send_result),
+        serde_json::json!({"status": status, "send_result": send_result}),
+    );
     if let Some(hook) = params.on_terminal.take() {
         hook(status, &send_result);
     }
@@ -1309,6 +1479,7 @@ impl ApiService {
             voice_permit,
             on_terminal,
             store: self.store.clone(),
+            process_trace: self.process_trace().cloned(),
             workflows: self.workflows.clone(),
             calibrations: self.calibrations.clone(),
             active_jobs: self.active_jobs.clone(),

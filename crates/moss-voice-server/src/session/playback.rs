@@ -54,6 +54,11 @@ impl<'a> Session<'a> {
                         return Err("设备权限已撤销".into());
                     }
                     for text in marks {
+                        let index = self.turn.as_ref().map_or(0, |turn| turn.spoken.len()) + 1;
+                        self.trace_record(
+                            "sentence_play",
+                            serde_json::json!({"index": index, "text": text}),
+                        );
                         self.tts(socket, TtsState::SentenceStart, Some(text.clone()))
                             .await?;
                         self.shared.state.inc_spoken_sentences(self.session_id);

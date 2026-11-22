@@ -342,6 +342,12 @@ impl<'a> Session<'a> {
                 }
                 self.listen.barge_resumed = false;
                 self.listen.listen_realtime = realtime;
+                self.trace_record(
+                    "listen_start",
+                    serde_json::json!({
+                        "mode": if manual { "按住说话" } else if realtime { "实时" } else { "自动" },
+                    }),
+                );
                 // 唤醒后设备紧接着发 listen start：不打断唤醒回应，播完再拾音
                 if let Some(turn) = self.turn.as_mut()
                     && turn.kind == TurnKind::Greeting
@@ -361,6 +367,7 @@ impl<'a> Session<'a> {
                 state: ListenState::Stop,
                 ..
             }) => {
+                self.trace_record("listen_stop", serde_json::json!({}));
                 self.finish_listen_stop(socket).await?;
             }
             Ok(ClientMessage::Listen {

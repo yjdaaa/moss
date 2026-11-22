@@ -187,7 +187,7 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn event(&self, record: impl Into<EventRecord>) {
-        self.shared.state.event(record);
+        self.shared.state.event_in_flow(record, self.trace_flow());
     }
 
     pub(super) fn stash_uncommitted_photo(&mut self, turn: &mut ActiveTurn) {
@@ -339,14 +339,17 @@ impl<'a> Session<'a> {
             session_id: self.session_id.to_owned(),
         };
         if let Some(personal) = &conversation.personal_context {
-            let person_histories = personal.session_closed(&end_ctx, conversation.llm.clone());
+            let person_histories = personal.session_closed(
+                &end_ctx,
+                trace::background_llm(conversation, self.device_id, "按人记忆整理"),
+            );
             if let Some(extraction) = &conversation.context_extraction {
                 for (scope, person_history) in &person_histories {
                     extraction.session_closed_for_person(
                         &end_ctx,
                         Some(scope),
                         person_history,
-                        conversation.llm.clone(),
+                        trace::background_llm(conversation, self.device_id, "长期记忆提取"),
                     );
                 }
             }
@@ -357,11 +360,19 @@ impl<'a> Session<'a> {
                 .as_ref()
                 .is_some_and(|e| e.extractor.enabled());
             if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting) {
-                memory.queue_summary(self.device_id, &self.history, conversation.llm.clone());
+                memory.queue_summary(
+                    self.device_id,
+                    &self.history,
+                    trace::background_llm(conversation, self.device_id, "对话记忆摘要"),
+                );
             }
             // NV19-03: independent of the NV10 summary; off unless the user enabled it.
             if let Some(extraction) = &conversation.context_extraction {
-                extraction.session_closed(&end_ctx, &self.history, conversation.llm.clone());
+                extraction.session_closed(
+                    &end_ctx,
+                    &self.history,
+                    trace::background_llm(conversation, self.device_id, "长期记忆提取"),
+                );
             }
         }
     }
@@ -377,6 +388,8 @@ impl<'a> Session<'a> {
         if let Some(music) = self.music.as_mut() {
             music.cancel(&mut self.pump);
         }
+        // 先收尾在途轮次的完整过程记录与耗时，再清空 self.turn，避免常连结束时漏记 turn_end 与合成语音
+        self.finish_timing("disconnected");
         self.turn = None;
         self.listen.paused = None;
         self.listen.paused_waits_for_model = false;
@@ -403,7 +416,6 @@ impl<'a> Session<'a> {
         }
         self.history.clear();
         self.last_verified_person = None;
-        self.finish_timing("disconnected");
         self.event(format!("这一轮对话结束（{reason}），设备保持常连在线"));
         Ok(())
     }

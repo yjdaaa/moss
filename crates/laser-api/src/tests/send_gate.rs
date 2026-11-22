@@ -842,3 +842,169 @@ fn confirm_send_persist_failure_cancels_launched_worker_and_clears_active_jobs()
     );
     assert_eq!(attempts[0]["mode"], "network");
 }
+
+/// n105：完整过程记录打开时，加工线程把开始与结束（含行数、用时）写进时间线。
+#[test]
+fn send_job_start_and_end_are_traced_when_enabled() {
+    let runtime = tempfile::tempdir().unwrap();
+    laser_runtime::settings_store::update(
+        &laser_runtime::settings_store::settings_path(runtime.path()),
+        |map| {
+            map.insert(
+                laser_runtime::process_trace::SETTING_KEY.into(),
+                serde_json::json!(true),
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(runtime.path().to_path_buf())
+    .with_transport_factory(fake_transport_factory(200_000));
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("job.gcode");
+    std::fs::write(&file, "M4 S100\nG1 X1 F100\nM5\n").unwrap();
+    let object = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23});
+    let sha = hex::encode(Sha256::digest(std::fs::read(&file).unwrap()));
+    service
+        .launch_send_job(
+            "wf-traced",
+            file,
+            &sha,
+            object.as_object().unwrap(),
+            &laser_contracts::CallerContext::Loopback,
+        )
+        .unwrap();
+    let trace_dir = runtime.path().join(laser_runtime::process_trace::TRACE_DIR);
+    let read = || -> Vec<serde_json::Value> {
+        std::fs::read_dir(&trace_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|day| {
+                std::fs::read_to_string(
+                    day.path()
+                        .join(laser_runtime::process_trace::TIMELINE_JSONL),
+                )
+                .ok()
+            })
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut lines = read();
+    while !lines.iter().any(|l| l["kind"] == "job_end") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        lines = read();
+    }
+    let start = lines
+        .iter()
+        .find(|l| l["kind"] == "job_start")
+        .expect("开始加工");
+    let end = lines
+        .iter()
+        .find(|l| l["kind"] == "job_end")
+        .expect("加工结束");
+    assert_eq!(start["flow"], "激光·wf-traced");
+    assert!(
+        start["step"]
+            .as_str()
+            .unwrap()
+            .starts_with("开始加工：3 行 G-code（逐行下发"),
+        "{start}"
+    );
+    assert!(
+        end["step"]
+            .as_str()
+            .unwrap()
+            .starts_with("加工完成：3 / 3 行"),
+        "{end}"
+    );
+    assert!(start["seq"].as_u64() < end["seq"].as_u64());
+}
+
+/// n106：加工进度线程按 `lines_sent` 每过 10% 记一步（不重复、续雕不回记旧档位），并在 drop 后保证不晚于 `job_end`。
+#[test]
+fn send_job_progress_trace_emits_deciles_from_lines_sent_and_stops_before_job_end() {
+    use std::sync::atomic::Ordering;
+    let runtime = tempfile::tempdir().unwrap();
+    laser_runtime::settings_store::update(
+        &laser_runtime::settings_store::settings_path(runtime.path()),
+        |map| {
+            map.insert(
+                laser_runtime::process_trace::SETTING_KEY.into(),
+                serde_json::json!(true),
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    let trace = laser_runtime::ProcessTrace::new(runtime.path());
+    let progress = std::sync::Arc::new(laser_device::JobProgress::default());
+    // 模拟从第 20 行续雕（总 100 行，起始档位 20%），仅应记录后续 30%、60%
+    progress.lines_sent.store(20, Ordering::Relaxed);
+    let guard = crate::send::spawn_progress_trace_with(
+        trace.clone(),
+        "wf-progress".to_owned(),
+        progress.clone(),
+        100,
+        20,
+        std::time::Duration::from_millis(15),
+    )
+    .expect("progress guard");
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    progress.lines_sent.store(35, Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    progress.lines_sent.store(62, Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // 收尾立即回收进度线程，再写 job_end
+    drop(guard);
+    crate::process_trace::trace_job_step(
+        Some(&trace),
+        "wf-progress",
+        "job_end",
+        "加工完成：100 / 100 行，用时 1 秒",
+        serde_json::json!({"status": "completed"}),
+    );
+    trace.flush();
+
+    let day = std::fs::read_dir(trace.dir())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lines: Vec<serde_json::Value> =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let percents: Vec<u64> = lines
+        .iter()
+        .filter(|l| l["kind"] == "job_progress")
+        .map(|l| l["percent"].as_u64().unwrap())
+        .collect();
+    assert_eq!(percents, [30, 60], "只记前进的 10% 档位：{lines:?}");
+    let last_progress_seq = lines
+        .iter()
+        .filter(|l| l["kind"] == "job_progress")
+        .map(|l| l["seq"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let end_seq = lines.iter().find(|l| l["kind"] == "job_end").unwrap()["seq"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        last_progress_seq < end_seq,
+        "job_progress 必须排在 job_end 之前"
+    );
+}

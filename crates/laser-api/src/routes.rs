@@ -210,7 +210,30 @@ impl ApiService {
     }
 
     /// 已完成传输层鉴权与调用方识别后的统一路由分发（HTTP 与进程内调用共用同一门禁与状态机）。
+    /// 完整过程记录打开时（n105，默认关），改动类请求在这里记一步：发起方、参数、结果与耗时。
     pub(crate) fn dispatch_authenticated(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        ctx: &laser_contracts::CallerContext,
+        short_job_watch: Option<&std::sync::Arc<ShortJobWatch>>,
+    ) -> Vec<u8> {
+        let began = std::time::Instant::now();
+        let response = self.dispatch_authenticated_inner(method, path, body, ctx, short_job_watch);
+        let route = path.split('?').next().unwrap_or(path);
+        self.trace_api_call(
+            method,
+            route,
+            body,
+            ctx,
+            &response,
+            began.elapsed().as_millis() as u64,
+        );
+        response
+    }
+
+    fn dispatch_authenticated_inner(
         &self,
         method: &str,
         path: &str,

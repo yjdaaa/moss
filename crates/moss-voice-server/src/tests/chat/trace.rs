@@ -9,7 +9,10 @@ fn trace_lines(dir: &std::path::Path) -> Vec<Value> {
     };
     let mut lines = Vec::new();
     for day in days.flatten() {
-        if let Ok(text) = std::fs::read_to_string(day.path().join("voice.jsonl")) {
+        if let Ok(text) = std::fs::read_to_string(
+            day.path()
+                .join(laser_runtime::process_trace::TIMELINE_JSONL),
+        ) {
             lines.extend(
                 text.lines()
                     .filter_map(|l| serde_json::from_str::<Value>(l).ok()),
@@ -87,7 +90,7 @@ fn process_trace_records_full_turn_with_audio_when_enabled() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let mut lines = trace_lines(&trace_dir);
-    while !lines.iter().any(|l| l["kind"] == "turn_end") && std::time::Instant::now() < deadline {
+    while !lines.iter().any(|l| l["kind"] == "timing") && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
         lines = trace_lines(&trace_dir);
     }
@@ -131,6 +134,64 @@ fn process_trace_records_full_turn_with_audio_when_enabled() {
         "合成语音不是空文件"
     );
     assert!(!of("timing").is_empty(), "耗时也写进记录：{kinds:?}");
+
+    // 时间线：按发生先后编号，每一步都有一句中文说明，属于同一台设备的第 1 轮
+    let seq_of = |kind: &str, nth: usize| -> u64 { of(kind)[nth]["seq"].as_u64().unwrap() };
+    let order = [
+        seq_of("listen_start", 0),
+        seq_of("listen_stop", 0),
+        seq_of("user_audio", 0),
+        seq_of("asr", 0),
+        seq_of("llm_round", 0),
+        seq_of("tool_call", 0),
+        seq_of("llm_round", 1),
+        seq_of("sentence_play", 0),
+        seq_of("turn_end", 0),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?} {kinds:?}");
+    assert_eq!(rounds[0]["round"], 1);
+    assert_eq!(rounds[1]["round"], 2);
+    assert!(
+        audio[0]["flow"].as_str().unwrap().ends_with("·第1轮"),
+        "用户录音步骤须归入第1轮：{}",
+        audio[0]
+    );
+    assert!(end[0]["flow"].as_str().unwrap().ends_with("·第1轮"));
+    let step = |l: &Value| l["step"].as_str().unwrap().to_owned();
+    assert!(
+        step(audio[0]).starts_with("用户说完一句话（"),
+        "{}",
+        step(audio[0])
+    );
+    assert_eq!(step(of("asr")[0]), "识别结果：「帮我查一下时间」");
+    assert!(step(rounds[0]).contains("要求调用工具 get_time"));
+    assert!(step(rounds[1]).contains("回复「现在十二点。」"));
+    assert!(step(tool[0]).contains("结果「12:00」"));
+    assert_eq!(
+        step(of("sentence_play")[0]),
+        "开始播放第1句：「现在十二点。」"
+    );
+    assert!(step(end[0]).starts_with("本轮结束（正常播完）：播出「现在十二点。」，合成语音："));
+    let day = std::fs::read_dir(&trace_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let readable =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_TXT)).unwrap();
+    for text in [
+        "设备开始拾音",
+        "用户说完一句话",
+        "大模型第1轮",
+        "工具 get_time 执行完",
+        "本轮结束（正常播完）",
+    ] {
+        assert!(
+            readable.contains(text),
+            "可读时间线缺少「{text}」：\n{readable}"
+        );
+    }
     drop(server);
 }
 

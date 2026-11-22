@@ -57,7 +57,9 @@ mod listen;
 mod playback;
 mod screen;
 mod trace;
-pub(crate) use trace::scrub_trace_value;
+pub(crate) use trace::{
+    device_flow, event_flow, event_step_text, scrub_trace_value, timing_step_text, turn_flow,
+};
 mod turn;
 
 pub use connect::router;
@@ -326,6 +328,8 @@ const SHORT_UTTERANCE_CONTINUITY_WINDOW: Duration = Duration::from_secs(30);
 const MAX_CONSECUTIVE_SHORT_UTTERANCES: u8 = 2;
 
 struct ActiveTurn {
+    /// 本轮编号（暂停插话切回时沿用原轮次，不串到插话新轮）
+    turn_number: u64,
     person_scope: Option<crate::person_context::PersonScope>,
     person_verified: bool,
     timing: Option<crate::TurnTiming>,
@@ -360,6 +364,8 @@ struct ActiveTurn {
     debug_text_reply: Vec<String>,
     /// n105 完整过程记录：这一轮合成语音（下行采样率）；轮次开始时开关打开才为 `Some`
     trace_tts: Option<Vec<i16>>,
+    /// n105 这一轮已记录的大模型轮数（时间线里写“大模型第几轮”）
+    trace_rounds: u32,
     /// 生成完成不等于播放完成；正常播完后才提交完整历史。
     pending_messages: Vec<ChatMessage>,
     /// 当前句子的重采样器（流式合成的后续分段沿用，保证分段之间连续）

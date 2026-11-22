@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 完整过程记录改为按先后的统一时间线，补齐加工全流程与语音细节（2026-11-22）
+
+- **现象**：完整过程记录只覆盖语音每轮对话和激光生成预览，加工本身（连接、确认发送、急停、进度、结束）、审批、接入点调用、拾音与逐句播放、后台记忆整理和看图都没记；语音与激光分在两个文件里，每条也没有说明这一步在干什么。
+- **根因与修复**：`ProcessTrace::record` / `save_file` 改为经独立后台单写线程非阻塞落盘（绝不阻塞急停 `0x18` 或异步音频协程，严格保证递增序号 `seq` 顺序、单行 `timeline.txt` 换行清理、附件与清空串行化及文本硬上限），输出 `timeline.jsonl` 与可读 `timeline.txt`。激光侧在统一入口记每次改动类接口调用（`api_call`，发起方、做什么、请求、结果与耗时，过滤只读轮询含缺省 `action` 的 `/api/workflow` 与 `/api/material-lab/{status,recent}`、凭据接口及 >256 KiB 大报文体，先递归脱敏凭据/URL/内嵌 `sk-`/`Bearer`/数值 PIN 再拼 `step` 摘要）；加工线程经 `Condvar` 守卫按实时 `lines_sent` 记开始、每 10% 进度与结束（不晚于 `job_end` 且不漏线程）。语音侧补记拾音、开口、Jev 筛选、大模型轮次编号、逐句播放、打断、被下一轮接替与常连断开时的收尾、后台记忆整理的大模型调用与看图（照片仅在设备与视觉开关复核通过后落盘），按 `ActiveTurn.turn_number` 固定每轮 `flow`，并在偏好设置确认文案中明示包含设备拍照看图的照片。顺手将 `laser-mcp` 开关测试 `SwitchBackend` 改为独立遥测实例，消除与并行测试争用全局计数器的偶发失败。开关、默认关闭、保留 7 天与权限均不变。
+- **验证**：新增 / 更新测试覆盖时间线后台单写顺序与 `flow` 换行防断、激光脱敏（含 `step`/URL/`Bearer`/`sk-`/数值 PIN/只读 POST 过滤）、加工开始/10% 进度节流/结束先后顺序、语音一轮完整步骤与第 1 轮 `flow` 归属、`TracingLlm` `step` 脱敏、`laser-mcp` 隔离遥测及前端看图照片提示；`node scripts/verify.mjs --e2e`（静态门禁、脚本、全工作区 Rust、前端单测/构建/浏览器交互与回环 E2E）全通过，已同步本地正式版 `/Applications/MOSS.app`。未连真实激光机与小智设备（`unverified`）。
+- **关联**：`crates/laser-runtime/src/process_trace.rs`、`crates/laser-api/src/{process_trace.rs,routes.rs,send.rs,feedback.rs}`、`crates/laser-mcp/src/tests.rs`、`crates/moss-voice-server/src/{session.rs,session/trace.rs,session/{input,listen,playback,turn,lifecycle}.rs,state.rs,conversation.rs,vision.rs}`、`frontend/src/{processTrace.js,components/ProcessTraceSection.jsx}`、`docs/developer/{api-contracts,frontend-behavior,feature-glossary}.md`、`docs/user/quick-start.md`、技术书 n106、融合技术书 r56。
+
 ### 新增“完整过程记录”：语音对话与激光生成的全过程可保存在本机（默认关闭，2026-11-22）
 
 - **现象**：事后想核对“当时说了什么、模型怎么回的、生成了什么”时，只有最近 500 条脱敏对话摘要；诊断事件、耗时只在内存里，退出 MOSS 就没了；发给大模型的完整内容、模型原始回复、录音与合成语音从不保存。
