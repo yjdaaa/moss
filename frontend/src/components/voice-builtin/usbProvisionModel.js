@@ -204,22 +204,43 @@ export function scanFilterLabel(chip, hiddenCount) {
   return hiddenCount > 0 ? `${base}，已隐藏 ${hiddenCount} 个板子连不上的网络` : base;
 }
 
-/** 一键填入电脑当前 Wi-Fi 后的提示：电脑连的频段板子不支持时，按读到的芯片说明板子能连哪些频段。 */
+/** 一键填入电脑当前 Wi-Fi 后的提示：电脑连的频段板子不支持或网络为仅 WPA3 时提前提醒。 */
 export function currentWifiFillNotice(network, chip) {
   if (!network?.ssid) return "";
   const bands = Array.isArray(network.bands) ? network.bands : [];
   const allowed = boardWifiBands(chip);
+  const wpa3Tail = network.wpa3_only
+    ? " 另外该网络为“仅 WPA3”，部分小智 ESP32 固件只兼容 WPA2，如连不上请到路由器改为 WPA2-PSK 或 WPA2/WPA3 混合。"
+    : "";
   if (bands.length > 0 && !bands.some((band) => allowed.includes(band))) {
     const boardText = chip
       ? `这块板子（${chip}）只支持 ${allowed.map(wifiBandLabel).join(" / ")}`
       : "小智常见芯片只支持 2.4 GHz（ESP32-C5 另支持 5 GHz）";
     return `已填入电脑当前连接的“${network.ssid}”。电脑连的是 ${bands
       .map(wifiBandLabel)
-      .join(" / ")}，${boardText}：路由器各频段同名就没问题，否则请改填板子能连的网络名（可点“扫描附近”查看）。密码请手动填写。`;
+      .join(" / ")}，${boardText}：路由器各频段同名就没问题，否则请改填板子能连的网络名（可点“扫描附近”查看）。密码请手动填写。${wpa3Tail}`;
   }
   return `已填入电脑当前连接的“${network.ssid}”，密码请手动填写${
     network.secure === false ? "（这是开放网络，可留空）" : ""
-  }。`;
+  }。${wpa3Tail}`;
+}
+
+/** 选中扫描列表中的 Wi-Fi 后的提示：纯 WPA3 网络提前预警。 */
+export function pickedWifiNotice(network) {
+  const ssid = String(network?.ssid || "");
+  if (!ssid) return { tone: "ok", text: "" };
+  if (network.wpa3_only) {
+    return {
+      tone: "warn",
+      text: `已选“${ssid}”（仅 WPA3）：部分小智 ESP32 固件只兼容 WPA2，如连不上请到路由器把 2.4 GHz 改为 WPA2-PSK 或 WPA2/WPA3 混合；请填写它的密码。`,
+    };
+  }
+  return {
+    tone: "ok",
+    text: `已选“${ssid}”，${
+      network.secure === false ? "这是开放网络，密码可留空" : "请填写它的密码"
+    }。`,
+  };
 }
 
 /**
@@ -347,13 +368,153 @@ function normalizeOtaForCompare(urlText) {
   }
 }
 
-/** MOSS 内置服务当前能用的 OTA 地址（本机 Wi-Fi IP、各网卡 IP 与 moss.local）。 */
+/** MOSS 内置服务当前能用的 OTA 地址（本机局域网各网卡 IP 与 moss.local）。 */
 export function mossOtaUrls(serviceStatus) {
   return [
     serviceStatus?.ota_ip_url,
     serviceStatus?.ota_url,
     ...(Array.isArray(serviceStatus?.ota_ip_urls) ? serviceStatus.ota_ip_urls : []),
   ].filter((url) => typeof url === "string" && url.trim());
+}
+
+/** 高级选项里“填入本机地址”快捷按钮列表：列出所有真实局域网 IP（有线/默认出网优先）与 moss.local。 */
+export function mossOtaQuickFillOptions(serviceStatus) {
+  const mdns = typeof serviceStatus?.ota_url === "string" ? serviceStatus.ota_url.trim() : "";
+  const rawIps = [
+    serviceStatus?.ota_ip_url,
+    ...(Array.isArray(serviceStatus?.ota_ip_urls) ? serviceStatus.ota_ip_urls : []),
+  ].filter((url) => typeof url === "string" && url.trim());
+  const seen = new Set();
+  const ipUrls = [];
+  for (const url of rawIps) {
+    const trimmed = url.trim();
+    const key = normalizeOtaForCompare(trimmed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ipUrls.push(trimmed);
+  }
+  const options = ipUrls.map((url, idx) => {
+    const host = parseUrlInfo(url)?.hostname || url;
+    const label =
+      ipUrls.length === 1
+        ? "填入本机局域网 IP"
+        : idx === 0
+          ? `填入 ${host}（首选）`
+          : `填入 ${host}`;
+    return { url, label, kind: "ip" };
+  });
+  const mdnsKey = normalizeOtaForCompare(mdns);
+  if (mdns && mdnsKey && !seen.has(mdnsKey)) {
+    const mdnsHost = parseUrlInfo(mdns)?.hostname || "";
+    const label = mdnsHost.endsWith(".local") ? `填入 ${mdnsHost} 地址` : "填入 MOSS 默认地址";
+    options.push({ url: mdns, label, kind: "mdns" });
+  }
+  return options;
+}
+
+export const USB_CHECKIN_TIMEOUT_MS = 20_000;
+export const USB_CHECKIN_POLL_MS = 2_000;
+
+/** 读/写 Flash 过程中的分阶段提示，避免握手重试或回读校验期间用户误以为卡死。 */
+export function usbOperationStageHint(busy, elapsedSec = 0) {
+  const sec = Math.max(0, Math.floor(Number(elapsedSec) || 0));
+  if (busy === "inspect") {
+    if (sec < 3) return "正在握手小智芯片并进入下载模式…";
+    if (sec < 8) {
+      return "正在读取分区表与 NVS 配置（若板子未自动进下载模式，可按住 BOOT 键后重试）…";
+    }
+    return `仍在等待芯片响应（已等待 ${sec} 秒）；请确认数据线支持传输数据，或按住 BOOT 键重试。`;
+  }
+  if (busy === "write") {
+    if (sec < 2) return "正在连接芯片并核对 MAC 与分区表…";
+    if (sec < 6) return "正在写入 NVS 分区并执行芯片侧 MD5 回读校验…";
+    return `正在完成回读校验并重启小智（已等待 ${sec} 秒），期间请勿拔掉 USB 线…`;
+  }
+  return "";
+}
+
+/**
+ * 写入完成后核对这块板子是否已连上 Wi-Fi 并向 MOSS 报到。
+ * 区分：已在线（online）、OTA 已报到待允许（pending）、已撤销（revoked）、OTA 已报到正连语音（ota_seen）、
+ * 仅完成 OTA 后超时（checked_in）、服务未启动（service_stopped）、P4 手动核对（p4_manual）、等待中（waiting）与超时（timeout）。
+ */
+export function evaluateBoardCheckin(serviceStatus, tracker) {
+  if (!tracker || !tracker.mac) return null;
+  if (serviceStatus?.running === false) {
+    return {
+      phase: "service_stopped",
+      tone: "warn",
+      text: "MOSS 内置语音服务当前未运行，小智开机后无法报到；请先启动内置服务。",
+    };
+  }
+  if (String(tracker.chip || "").toLowerCase() === "esp32p4") {
+    return {
+      phase: "p4_manual",
+      tone: "info",
+      text: "ESP32-P4 上报的 Wi-Fi MAC 与 USB 芯片 MAC 不同，请在上方「已连接设备」查看它是否上线。",
+    };
+  }
+  const mac = String(tracker.mac).toLowerCase();
+  const sessions = Array.isArray(serviceStatus?.sessions) ? serviceStatus.sessions : [];
+  const preSessions = new Set(Array.isArray(tracker.preSessionIds) ? tracker.preSessionIds : []);
+  const liveSession = sessions.find(
+    (s) =>
+      String(s?.device_id || "").toLowerCase() === mac &&
+      (!s?.session_id || !preSessions.has(s.session_id)),
+  );
+  if (liveSession) {
+    return {
+      phase: "online",
+      tone: "ok",
+      text: "小智已连上 Wi-Fi 并上线 MOSS，现在可以直接对话了。",
+    };
+  }
+  const devices = Array.isArray(serviceStatus?.devices) ? serviceStatus.devices : [];
+  const device = devices.find((d) => String(d?.device_id || "").toLowerCase() === mac);
+  const lastSeen = Number(device?.last_seen || 0);
+  const baseline = Number(tracker.baselineLastSeen || 0);
+  const hasRealIp = Boolean(String(device?.last_ip || "").trim());
+  const freshOta = Boolean(device) && hasRealIp && lastSeen > baseline;
+  if (freshOta) {
+    if (device.status === "pending") {
+      return {
+        phase: "pending",
+        tone: "warn",
+        text: "小智已连上 Wi-Fi 并向 MOSS 报到！当前为“待允许”，请在上方「已连接设备」点允许。",
+      };
+    }
+    if (device.status === "revoked") {
+      return {
+        phase: "revoked",
+        tone: "warn",
+        text: "小智已连上 Wi-Fi 并向 MOSS 报到，但当前为“已撤销”，请在上方「已连接设备」重新允许。",
+      };
+    }
+    if (tracker.timedOut) {
+      return {
+        phase: "checked_in",
+        tone: "ok",
+        text: "小智已连上 Wi-Fi 并完成向 MOSS 报到（语音连接可能稍后就绪，可在上方「已连接设备」确认）。",
+      };
+    }
+    return {
+      phase: "ota_seen",
+      tone: "info",
+      text: "小智已连上 Wi-Fi 并向 MOSS 报到，正在等待语音连接就绪…",
+    };
+  }
+  if (tracker.timedOut) {
+    return {
+      phase: "timeout",
+      tone: "warn",
+      text: "等待 20 秒仍未收到小智报到。请排查：Wi-Fi 密码是否输错、路由器 2.4 GHz 是否开启且未开 AP 隔离、电脑防火墙是否放行 MOSS，或按一下板子 RST 键重试。",
+    };
+  }
+  return {
+    phase: "waiting",
+    tone: "info",
+    text: "正在等待小智重启连网并向 MOSS 报到（约 5～15 秒）…",
+  };
 }
 
 /**

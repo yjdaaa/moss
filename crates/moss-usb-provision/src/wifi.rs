@@ -54,6 +54,8 @@ pub struct WifiObservation {
     pub signal: Option<u8>,
     pub band: Option<WifiBand>,
     pub secure: Option<bool>,
+    /// 仅支持 WPA3（不含 WPA2 / 开放）：部分小智 ESP32 固件只兼容 WPA2，界面据此提前提醒
+    pub wpa3_only: Option<bool>,
     pub current: bool,
 }
 
@@ -66,6 +68,9 @@ pub struct WifiNetwork {
     /// 每个频段各自最强的信号：双频同名网络里 2.4 GHz 往往比 5 GHz 弱，界面按板子支持的频段显示
     pub band_signals: BTreeMap<WifiBand, u8>,
     pub secure: Option<bool>,
+    /// 仅支持 WPA3（不含 WPA2 过渡模式）；无法判断时为 `None`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wpa3_only: Option<bool>,
     pub current: bool,
 }
 
@@ -104,6 +109,7 @@ pub fn merge_observations(observations: Vec<WifiObservation>) -> Vec<WifiNetwork
                 bands: Vec::new(),
                 band_signals: BTreeMap::new(),
                 secure: None,
+                wpa3_only: None,
                 current: false,
             });
         entry.signal = match (entry.signal, obs.signal) {
@@ -123,6 +129,12 @@ pub fn merge_observations(observations: Vec<WifiObservation>) -> Vec<WifiNetwork
         entry.secure = match (entry.secure, obs.secure) {
             (Some(a), Some(b)) => Some(a || b),
             (a, b) => a.or(b),
+        };
+        // 同名多 AP 只要任一 AP 兼容 WPA2 / 开放（false），板子就能连，不算“仅 WPA3”
+        entry.wpa3_only = match (entry.wpa3_only, obs.wpa3_only) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (None, None) => None,
         };
         entry.current |= obs.current;
     }
@@ -396,6 +408,7 @@ mod imp {
                 signal: Some(rssi_to_percent(iface.rssiValue() as i64)),
                 band: band(iface.wlanChannel()),
                 secure: None,
+                wpa3_only: None,
                 current: true,
             })
         }
@@ -405,11 +418,31 @@ mod imp {
         // SAFETY: 只读属性
         unsafe {
             let ssid = net.ssid()?.to_string();
+            let is_open = net.supportsSecurity(CWSecurity::None);
+            let supports_wpa3 = net.supportsSecurity(CWSecurity::WPA3Personal)
+                || net.supportsSecurity(CWSecurity::WPA3Enterprise);
+            let supports_compat = is_open
+                || net.supportsSecurity(CWSecurity::WPA2Personal)
+                || net.supportsSecurity(CWSecurity::WPA3Transition)
+                || net.supportsSecurity(CWSecurity::WPAPersonal)
+                || net.supportsSecurity(CWSecurity::WPAPersonalMixed)
+                || net.supportsSecurity(CWSecurity::WPA2Enterprise)
+                || net.supportsSecurity(CWSecurity::WPAEnterprise)
+                || net.supportsSecurity(CWSecurity::WPAEnterpriseMixed)
+                || net.supportsSecurity(CWSecurity::WEP);
+            let wpa3_only = if supports_wpa3 && !supports_compat {
+                Some(true)
+            } else if supports_compat {
+                Some(false)
+            } else {
+                None
+            };
             Some(WifiObservation {
                 ssid,
                 signal: Some(rssi_to_percent(net.rssiValue() as i64)),
                 band: band(net.wlanChannel()),
-                secure: Some(!net.supportsSecurity(CWSecurity::None)),
+                secure: Some(!is_open),
+                wpa3_only,
                 current: false,
             })
         }
@@ -454,27 +487,108 @@ mod imp {
 // ---------------------------------------------------------------------------------------------
 #[cfg(windows)]
 mod imp {
+    use std::collections::HashSet;
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE};
     use windows_sys::Win32::NetworkManagement::WiFi::{
-        DOT11_SSID, WLAN_AVAILABLE_NETWORK, WLAN_AVAILABLE_NETWORK_LIST, WLAN_BSS_ENTRY,
-        WLAN_BSS_LIST, WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST,
-        WLAN_RADIO_STATE, WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory,
-        WlanGetAvailableNetworkList, WlanGetNetworkBssList, WlanOpenHandle, WlanQueryInterface,
-        WlanScan, dot11_BSS_type_any, dot11_radio_state_off, wlan_interface_state_connected,
-        wlan_intf_opcode_current_connection, wlan_intf_opcode_radio_state,
+        DOT11_BSS_TYPE, DOT11_SSID, L2_NOTIFICATION_DATA, WLAN_AVAILABLE_NETWORK,
+        WLAN_AVAILABLE_NETWORK_LIST, WLAN_BSS_ENTRY, WLAN_BSS_LIST, WLAN_CONNECTION_ATTRIBUTES,
+        WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST, WLAN_NOTIFICATION_SOURCE_ACM,
+        WLAN_NOTIFICATION_SOURCE_NONE, WLAN_RADIO_STATE, WlanCloseHandle, WlanEnumInterfaces,
+        WlanFreeMemory, WlanGetAvailableNetworkList, WlanGetNetworkBssList, WlanOpenHandle,
+        WlanQueryInterface, WlanRegisterNotification, WlanScan, dot11_BSS_type_any,
+        dot11_radio_state_off, wlan_interface_state_connected, wlan_intf_opcode_current_connection,
+        wlan_intf_opcode_radio_state, wlan_notification_acm_scan_complete,
+        wlan_notification_acm_scan_fail,
     };
     use windows_sys::core::GUID;
 
-    use super::{CenterError, WifiBand, WifiObservation, WifiPermission, radio_off, unavailable};
+    use super::{
+        CenterError, WifiBand, WifiObservation, WifiPermission, radio_off, rsn_ie_is_wpa3_only,
+        unavailable,
+    };
 
     pub const PLATFORM: &str = "windows";
     /// WLAN AutoConfig 服务没运行（台式机没装无线网卡时常见）
     const ERROR_SERVICE_NOT_ACTIVE: u32 = 1062;
-    /// WlanScan 发起后系统通常 2～4 秒内刷新列表
-    const SCAN_WAIT: std::time::Duration = std::time::Duration::from_millis(3500);
+    /// WlanScan 最长等待兜底（多数网卡 0.8～1.5 秒内会发 scan_complete 通知提前结束）
+    const SCAN_WAIT: Duration = Duration::from_millis(3500);
+
+    fn guid_key(g: &GUID) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[0..4].copy_from_slice(&g.data1.to_le_bytes());
+        out[4..6].copy_from_slice(&g.data2.to_le_bytes());
+        out[6..8].copy_from_slice(&g.data3.to_le_bytes());
+        out[8..16].copy_from_slice(&g.data4);
+        out
+    }
+
+    struct ScanWaitState {
+        pending: Mutex<HashSet<[u8; 16]>>,
+        cv: Condvar,
+    }
+
+    unsafe extern "system" fn scan_notify_cb(data: *mut L2_NOTIFICATION_DATA, ctx: *mut c_void) {
+        if data.is_null() || ctx.is_null() {
+            return;
+        }
+        // SAFETY: data 由 wlanapi 在回调期间保证有效，ctx 指向 ScanWaitState 且在注销回调前一直存活
+        let (source, code, key) = unsafe {
+            let d = &*data;
+            (
+                d.NotificationSource,
+                d.NotificationCode,
+                guid_key(&d.InterfaceGuid),
+            )
+        };
+        if source != WLAN_NOTIFICATION_SOURCE_ACM
+            || (code != wlan_notification_acm_scan_complete as u32
+                && code != wlan_notification_acm_scan_fail as u32)
+        {
+            return;
+        }
+        // SAFETY: 同上；不 unwrap，避免跨 FFI panic
+        let state = unsafe { &*(ctx as *const ScanWaitState) };
+        if let Ok(mut pending) = state.pending.lock() {
+            pending.remove(&key);
+            if pending.is_empty() {
+                state.cv.notify_all();
+            }
+        }
+    }
+
+    struct ScanNotifyGuard {
+        handle: HANDLE,
+        registered: bool,
+    }
+
+    impl Drop for ScanNotifyGuard {
+        fn drop(&mut self) {
+            if self.registered {
+                // SAFETY: 注销回调会同步等待在途回调退出，保证先于 ScanWaitState 释放
+                unsafe {
+                    WlanRegisterNotification(
+                        self.handle,
+                        WLAN_NOTIFICATION_SOURCE_NONE,
+                        0,
+                        None,
+                        null(),
+                        null(),
+                        null_mut(),
+                    );
+                }
+            }
+        }
+    }
+
+    struct BssSummary {
+        entry: WLAN_BSS_ENTRY,
+        wpa3_only: Option<bool>,
+    }
 
     struct Client(HANDLE);
 
@@ -623,14 +737,25 @@ mod imp {
         let Some(ssid) = ssid_text(&assoc.dot11Ssid) else {
             return Ok(None);
         };
-        let band = bss_entries(client, guid, Some(&assoc.dot11Ssid))
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|e| e.dot11Bssid == assoc.dot11Bssid)
-                    .and_then(|e| WifiBand::from_mhz(e.ulChCenterFrequency / 1000))
-            });
+        let matched_bss = bss_entries(
+            client,
+            guid,
+            Some((
+                &assoc.dot11Ssid,
+                assoc.dot11BssType,
+                attrs.wlanSecurityAttributes.bSecurityEnabled,
+            )),
+        )
+        .ok()
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|item| item.entry.dot11Bssid == assoc.dot11Bssid)
+        });
+        let band = matched_bss
+            .as_ref()
+            .and_then(|item| WifiBand::from_mhz(item.entry.ulChCenterFrequency / 1000));
+        let wpa3_only = matched_bss.and_then(|item| item.wpa3_only);
         Ok(Some((
             assoc.dot11Ssid,
             WifiObservation {
@@ -638,6 +763,7 @@ mod imp {
                 signal: Some(assoc.wlanSignalQuality.min(100) as u8),
                 band,
                 secure: Some(attrs.wlanSecurityAttributes.bSecurityEnabled != 0),
+                wpa3_only,
                 current: true,
             },
         )))
@@ -646,17 +772,17 @@ mod imp {
     fn bss_entries(
         client: &Client,
         guid: &GUID,
-        ssid: Option<&DOT11_SSID>,
-    ) -> Result<Vec<WLAN_BSS_ENTRY>, Denied> {
+        ssid: Option<(&DOT11_SSID, DOT11_BSS_TYPE, i32)>,
+    ) -> Result<Vec<BssSummary>, Denied> {
         let mut list: *mut WLAN_BSS_LIST = null_mut();
-        // SAFETY: 输出指针由 WlanMem 释放；bSecurityEnabled 只在指定 SSID 时生效
+        // SAFETY: 输出指针由 WlanMem 释放；指定 SSID 时 dot11BssType 与 bSecurityEnabled 须传入具体网络类型及加密状态，否则返回空表
         let code = unsafe {
             WlanGetNetworkBssList(
                 client.0,
                 guid,
-                ssid.map_or(null(), |s| s as *const DOT11_SSID),
-                dot11_BSS_type_any,
-                0,
+                ssid.map_or(null(), |(s, _, _)| s as *const DOT11_SSID),
+                ssid.map_or(dot11_BSS_type_any, |(_, bss_type, _)| bss_type),
+                ssid.map_or(0, |(_, _, security_enabled)| security_enabled),
                 null(),
                 &mut list,
             )
@@ -665,11 +791,33 @@ mod imp {
         if code != ERROR_SUCCESS || list.0.is_null() {
             return Err(api_error("BSS 列表", code));
         }
-        // SAFETY: 变长数组，长度为 dwNumberOfItems
+        // SAFETY: 所有指针偏移均按 dwTotalSize 做边界裁剪后再解引用
         Ok(unsafe {
+            let total_size = (*list.0).dwTotalSize as usize;
+            let base = list.0 as *const u8;
             let count = (*list.0).dwNumberOfItems as usize;
             let first = std::ptr::addr_of!((*list.0).wlanBssEntries) as *const WLAN_BSS_ENTRY;
-            (0..count).map(|i| *first.add(i)).collect()
+            let entries_off = (first as usize).saturating_sub(base as usize);
+            let max_count =
+                total_size.saturating_sub(entries_off) / std::mem::size_of::<WLAN_BSS_ENTRY>();
+            let safe_count = count.min(max_count);
+            (0..safe_count)
+                .map(|i| {
+                    let ptr = first.add(i);
+                    let entry = *ptr;
+                    let entry_off = (ptr as usize).saturating_sub(base as usize);
+                    let wpa3_only = entry_off
+                        .checked_add(entry.ulIeOffset as usize)
+                        .and_then(|start| {
+                            let end = start.checked_add(entry.ulIeSize as usize)?;
+                            (end <= total_size && entry.ulIeSize > 0).then(|| {
+                                std::slice::from_raw_parts(base.add(start), entry.ulIeSize as usize)
+                            })
+                        })
+                        .and_then(rsn_ie_is_wpa3_only);
+                    BssSummary { entry, wpa3_only }
+                })
+                .collect()
         })
     }
 
@@ -714,11 +862,61 @@ mod imp {
 
     pub fn scan() -> Result<(WifiPermission, Vec<WifiObservation>), CenterError> {
         let (client, guids) = open()?;
+        // 优先监听 wlanapi 扫描完成通知，扫描一完成立即返回，不再每次硬等 3.5 秒；注册失败再退回固定等待
+        let wait_state = Box::new(ScanWaitState {
+            pending: Mutex::new(guids.iter().map(guid_key).collect()),
+            cv: Condvar::new(),
+        });
+        let ctx_ptr = &*wait_state as *const ScanWaitState as *const c_void;
+        // SAFETY: wait_state 在堆上地址稳定，且 _notify_guard 声明在后保证先注销回调再释放 wait_state
+        let reg_code = unsafe {
+            WlanRegisterNotification(
+                client.0,
+                WLAN_NOTIFICATION_SOURCE_ACM,
+                0,
+                Some(scan_notify_cb),
+                ctx_ptr,
+                null(),
+                null_mut(),
+            )
+        };
+        let _notify_guard = ScanNotifyGuard {
+            handle: client.0,
+            registered: reg_code == ERROR_SUCCESS,
+        };
+        let mut any_scan_started = false;
         for guid in &guids {
-            // SAFETY: 句柄与 GUID 有效；只发起扫描，结果稍后读取
-            unsafe { WlanScan(client.0, guid, null(), null(), null()) };
+            // SAFETY: 句柄与 GUID 有效；只发起扫描，结果通过通知或超时后读取
+            let code = unsafe { WlanScan(client.0, guid, null(), null(), null()) };
+            if code == ERROR_SUCCESS {
+                any_scan_started = true;
+            } else if let Ok(mut pending) = wait_state.pending.lock() {
+                pending.remove(&guid_key(guid));
+            }
         }
-        std::thread::sleep(SCAN_WAIT);
+        if any_scan_started {
+            if _notify_guard.registered {
+                let deadline = Instant::now() + SCAN_WAIT;
+                if let Ok(mut pending) = wait_state.pending.lock() {
+                    while !pending.is_empty() {
+                        let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                            break;
+                        };
+                        let Ok((guard, timeout)) = wait_state.cv.wait_timeout(pending, rem) else {
+                            break;
+                        };
+                        pending = guard;
+                        if timeout.timed_out() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                std::thread::sleep(SCAN_WAIT);
+            }
+        }
+        drop(_notify_guard);
+        drop(wait_state);
         finish((|| {
             let mut list = Vec::new();
             for guid in &guids {
@@ -734,20 +932,22 @@ mod imp {
                         signal: Some(net.wlanSignalQuality.min(100) as u8),
                         band: None,
                         secure: Some(net.bSecurityEnabled != 0),
+                        wpa3_only: None,
                         current: false,
                     });
                 }
-                // 可用网络列表不带频率，频段从 BSS 列表补（同名多 AP 各算一次，合并时取并集）
+                // 可用网络列表不带频率与准确 RSN AKM，频段与仅 WPA3 判定从 BSS 列表补齐
                 if let Ok(entries) = bss_entries(&client, guid, None) {
-                    for entry in entries {
-                        let Some(ssid) = ssid_text(&entry.dot11Ssid) else {
+                    for item in entries {
+                        let Some(ssid) = ssid_text(&item.entry.dot11Ssid) else {
                             continue;
                         };
                         list.push(WifiObservation {
                             ssid,
-                            signal: Some(entry.uLinkQuality.min(100) as u8),
-                            band: WifiBand::from_mhz(entry.ulChCenterFrequency / 1000),
+                            signal: Some(item.entry.uLinkQuality.min(100) as u8),
+                            band: WifiBand::from_mhz(item.entry.ulChCenterFrequency / 1000),
                             secure: None,
+                            wpa3_only: item.wpa3_only,
                             current: false,
                         });
                     }
@@ -834,6 +1034,73 @@ mod imp {
     }
 }
 
+/// 解析 802.11 Beacon / Probe Response 原始 IE 字节流中的 RSN（Tag 48）AKM 套件，
+/// 识别是否“仅 WPA3（只宣告 SAE / FT-SAE，不含 WPA2-PSK / FT-PSK）”。
+/// 混合模式（WPA2/WPA3 Transition）同时宣告 PSK 与 SAE，返回 `Some(false)`，不误报。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rsn_ie_is_wpa3_only(ies: &[u8]) -> Option<bool> {
+    const IEEE_OUI: [u8; 3] = [0x00, 0x0F, 0xAC];
+    let mut pos = 0usize;
+    let mut saw_rsn = false;
+    let mut has_sae = false;
+    let mut has_wpa2_psk = false;
+    while pos + 2 <= ies.len() {
+        let id = ies[pos];
+        let len = ies[pos + 1] as usize;
+        let body_start = pos + 2;
+        let body_end = body_start.checked_add(len)?;
+        if body_end > ies.len() {
+            break;
+        }
+        let body = &ies[body_start..body_end];
+        pos = body_end;
+        if id != 48 || body.len() < 8 {
+            continue;
+        }
+        // RSN version (2B) == 1，Group Cipher (4B)，Pairwise Count (2B)
+        if u16::from_le_bytes([body[0], body[1]]) != 1 {
+            continue;
+        }
+        let pairwise_count = u16::from_le_bytes([body[6], body[7]]) as usize;
+        let Some(akm_count_off) = pairwise_count.checked_mul(4).and_then(|n| n.checked_add(8))
+        else {
+            continue;
+        };
+        if akm_count_off + 2 > body.len() {
+            continue;
+        }
+        let akm_count = u16::from_le_bytes([body[akm_count_off], body[akm_count_off + 1]]) as usize;
+        let akm_list_off = akm_count_off + 2;
+        let Some(akm_end) = akm_count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(akm_list_off))
+        else {
+            continue;
+        };
+        if akm_end > body.len() {
+            continue;
+        }
+        saw_rsn = true;
+        let (akm_chunks, _) = body[akm_list_off..akm_end].as_chunks::<4>();
+        for chunk in akm_chunks {
+            if chunk[..3] != IEEE_OUI {
+                continue;
+            }
+            match chunk[3] {
+                // IEEE 802.11 OUI 00-0F-AC：2 = WPA2-PSK，4 = FT-PSK（802.11r），6 = PSK-SHA256
+                2 | 4 | 6 => has_wpa2_psk = true,
+                // 8 = SAE (WPA3-Personal)，9 = FT-SAE，24 = SAE-EXT-KEY
+                8 | 9 | 24 => has_sae = true,
+                _ => {}
+            }
+        }
+    }
+    if !saw_rsn {
+        return None;
+    }
+    Some(has_sae && !has_wpa2_psk)
+}
+
 /// 解析 `nmcli -t -e yes -f IN-USE,SSID,SIGNAL,FREQ,SECURITY device wifi list` 的输出：
 /// 字段以 `:` 分隔，字段内的 `:` 与 `\` 转义为 `\:`、`\\`。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -865,11 +1132,26 @@ fn parse_nmcli(text: &str) -> Vec<WifiObservation> {
                 .next()
                 .and_then(|v| v.parse::<u32>().ok());
             let security = security.trim();
+            let is_open = security.is_empty() || security == "--";
+            let upper = security.to_ascii_uppercase();
+            let has_wpa3 = upper.contains("WPA3") || upper.contains("SAE");
+            let has_compat = is_open
+                || upper.contains("WPA2")
+                || upper.contains("WPA1")
+                || upper.contains("WEP");
+            let wpa3_only = if has_wpa3 && !has_compat {
+                Some(true)
+            } else if has_compat {
+                Some(false)
+            } else {
+                None
+            };
             Some(WifiObservation {
                 ssid: ssid.clone(),
                 signal: signal.trim().parse::<u8>().ok().map(|v| v.min(100)),
                 band: mhz.and_then(WifiBand::from_mhz),
-                secure: Some(!(security.is_empty() || security == "--")),
+                secure: Some(!is_open),
+                wpa3_only,
                 current: in_use.trim() == "*",
             })
         })
@@ -886,6 +1168,7 @@ mod tests {
             signal: Some(signal),
             band: Some(band),
             secure: Some(secure),
+            wpa3_only: None,
             current,
         }
     }
@@ -1060,6 +1343,77 @@ mod tests {
         assert_eq!(
             value["networks"][0]["band_signals"],
             serde_json::json!({"2.4g": 70, "5g": 70})
+        );
+        assert!(value["networks"][0].get("wpa3_only").is_none());
+    }
+
+    fn build_rsn_ie(akm_types: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        // version = 1
+        body.extend_from_slice(&1u16.to_le_bytes());
+        // group cipher = CCMP (00-0F-AC:04)
+        body.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]);
+        // 1 pairwise cipher = CCMP
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]);
+        // AKM suites
+        body.extend_from_slice(&(akm_types.len() as u16).to_le_bytes());
+        for &suite in akm_types {
+            body.extend_from_slice(&[0x00, 0x0F, 0xAC, suite]);
+        }
+        let mut ie = vec![48u8, body.len() as u8];
+        ie.extend_from_slice(&body);
+        ie
+    }
+
+    #[test]
+    fn rsn_ie_distinguishes_wpa3_only_from_wpa2_and_transition() {
+        // 前置一个普通 SSID IE（Tag 0），紧跟 RSN IE（Tag 48）
+        let mut wpa3_only = vec![0, 4, b'T', b'e', b's', b't'];
+        wpa3_only.extend_from_slice(&build_rsn_ie(&[8]));
+        assert_eq!(rsn_ie_is_wpa3_only(&wpa3_only), Some(true));
+
+        let mixed = build_rsn_ie(&[2, 8]);
+        assert_eq!(rsn_ie_is_wpa3_only(&mixed), Some(false));
+
+        // 启用 802.11r 快速漫游的 WPA2/WPA3 过渡模式（FT-PSK 4 + FT-SAE 9）不得误报为纯 WPA3
+        let ft_mixed = build_rsn_ie(&[4, 9]);
+        assert_eq!(rsn_ie_is_wpa3_only(&ft_mixed), Some(false));
+
+        let wpa2_only = build_rsn_ie(&[2]);
+        assert_eq!(rsn_ie_is_wpa3_only(&wpa2_only), Some(false));
+
+        // 截断或无 RSN IE 返回 None 且不崩溃
+        assert_eq!(rsn_ie_is_wpa3_only(&[0, 3, b'a', b'b', b'c']), None);
+        assert_eq!(rsn_ie_is_wpa3_only(&[48, 10, 1, 0]), None);
+    }
+
+    #[test]
+    fn wpa3_only_parsing_and_merge_behavior() {
+        let nm = parse_nmcli(
+            ":Pure3:80:2412 MHz:WPA3\n\
+             :Mixed:75:2437 MHz:WPA2 WPA3\n\
+             :Plain2:70:2462 MHz:WPA2\n\
+             :OpenNet:65:2412 MHz:--\n",
+        );
+        assert_eq!(nm[0].wpa3_only, Some(true));
+        assert_eq!(nm[1].wpa3_only, Some(false));
+        assert_eq!(nm[2].wpa3_only, Some(false));
+        assert_eq!(nm[3].wpa3_only, Some(false));
+
+        let mut pure = obs("Corp", 60, WifiBand::G2_4, true, false);
+        pure.wpa3_only = Some(true);
+        let unknown = obs("Corp", 40, WifiBand::G2_4, true, false);
+        assert_eq!(
+            merge_observations(vec![pure.clone(), unknown])[0].wpa3_only,
+            Some(true)
+        );
+
+        let mut compat = obs("Corp", 50, WifiBand::G2_4, true, false);
+        compat.wpa3_only = Some(false);
+        assert_eq!(
+            merge_observations(vec![pure, compat])[0].wpa3_only,
+            Some(false)
         );
     }
 }

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### USB 一键配网体验全面补强：写后报到闭环、有线与多网卡选址、串口自动刷新、纯 WPA3 预警与会话复用（2026-11-22）
+
+- **现象**：USB 配网写完仅提示“几秒后报到”且写前不检查内置语音服务是否已启动，用户难判断板子有没有连上；双网卡（有线 + Wi-Fi）电脑上 `lan_ipv4_addrs` 此前把 Wi-Fi 排在有线前面，导致默认推荐易变的动态无线 IP，界面也写死“Wi-Fi IP”且未列出其余网卡地址；插拔数据线需手点刷新，读写握手期缺少阶段反馈；Windows 扫描附近网络固定硬等 3.5 秒且不区分纯 WPA3，多台板子连续配同一 Wi-Fi 需重复输入密码。
+- **根因与修复**：① 选址与多网卡：`moss_voice_server::ota::lan_ipv4_addrs` 优先选系统默认出网真实网卡，代理 TUN 接管默认路由时改为有线网口（`以太网`/`Ethernet`/`eth*`/`enp*`）优先于无线；服务页改称“本机局域网 IP”，USB 配网高级选项按 `mossOtaQuickFillOptions` 列出全部真实局域网 IP 与 `moss.local`。② 写前写后闭环：`XiaozhiUsbProvisionCard` 在内置服务未运行时顶部提示并支持一键启动；写完指向本机 MOSS 的地址后自动启动 20 秒报到跟踪（`evaluateBoardCheckin`，合并写前后瞬时会话并兜底基线防旧连接/写盘时间戳误报，服务启动后才起算超时），实时区分上线 / 待允许 / 已撤销 / 超时排查。③ 串口与进度：未读板子时切回窗口静默刷新串口（无串口时每 4 秒后台探测一次，新插乐鑫原生口自动选中且不清空已预填草稿），读写期间展示分阶段进度提示。④ Wi-Fi 扫描与复用：`moss_usb_provision::wifi` 在 Windows 改用 `WlanRegisterNotification` 监听扫描完成提前返回（3.5 秒兜底），同步修正 `current_on` 传 `dot11BssType` 与 `bSecurityEnabled` 并跨平台识别纯 WPA3（macOS `CWSecurity`、Windows RSN IE Tag 48 AKM `2/4/6` vs `8/9/24`、Linux `nmcli`）提前标“仅 WPA3”预警；同进程内存保留上次成功写入的 Wi-Fi 供一键复用与手动清除，永不落盘。默认值、授权与安全门禁不变。
+- **验证**：新增 `moss_voice_server::ota::tests::lan_ip_sorting_prefers_default_route_then_wired_over_wifi`、`moss_usb_provision::wifi::tests::{rsn_ie_distinguishes_wpa3_only_from_wpa2_and_transition,wpa3_only_parsing_and_merge_behavior}`，前端单测新增“多网卡快捷填入、纯 WPA3 预警、分阶段提示与写后报到闭环判断”与未启动渲染断言，浏览器用例补齐纯 WPA3 预警、多网卡填入、服务未启动一键启动、写后上线跟踪及内存复用与清除；`cargo test --workspace` 全工作区、前端 ESLint 零 error、前端单测 376/376、Vite 构建、`voice-center.browser.mjs`、脚本单测 58/58 与仓库分层/卫生检查全部通过。未在真实 Windows 无线网卡、真实小智 ESP32 与纯 WPA3 路由器上实机验收（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/ota.rs`、`crates/moss-usb-provision/src/wifi.rs`、`frontend/src/components/voice-builtin/{usbProvisionModel.js,XiaozhiUsbProvisionCard.jsx,BuiltinServicePanel.jsx}`、`frontend/src/styles/13-voice-devices.css`、`frontend/tests/{usbProvisionModal.test.mjs,voice-center.browser.mjs}`、`docs/developer/{api-contracts,frontend-behavior}.md`、`docs/user/quick-start.md`。
+
 ### 内置语音与小智控制台提示词收口：补齐对话层材料澄清、走边框中途控制并精简规则文档（2026-11-22）
 
 - **现象**：内置语音底层安全铁律（`IMMUTABLE_SAFETY_RULES`）与 `DEFAULT_SYSTEM_PROMPT`、`PLAIN_HEAD` 存在重复字面量维护，且未在对话层提示词写明 PVC 拒刻、塑料/软卡成分澄清与预览后实物核对（仅靠调用工具触发后端报错）；官方小智控制台提示词误含内置语音专属 `play_music` 段落与已禁用的 `M3-5/改GRBL` 表述，占满 2000 字预算导致无法写入走边框途中的暂停/停止说明；`AGENTS.md` 与开发文档残留格式化指令冲突及已删除链路的旧快照。

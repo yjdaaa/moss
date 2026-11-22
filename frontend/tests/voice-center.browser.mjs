@@ -47,7 +47,10 @@ try {
     mode: "official",
     settings: { builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
-      running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
+      running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003,
+      ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
+      ota_ip_url: "http://192.0.2.10:8003/xiaozhi/ota/",
+      ota_ip_urls: ["http://192.0.2.10:8003/xiaozhi/ota/", "http://192.0.2.20:8003/xiaozhi/ota/"],
       models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
       debug_enabled: true,
       debug_traces: [
@@ -129,6 +132,10 @@ try {
     get_desktop_session: () => "a".repeat(64),
     voice_status: () => voiceStatus(),
     voice_builtin_status: () => structuredClone(state.builtin),
+    voice_builtin_start: () => {
+      state.builtin.running = true;
+      return structuredClone(state.builtin);
+    },
     voice_diagnostics_export: () => ({ saved: true, file_name: "moss-voice-diagnostics-1790000000.json", bytes: 4096, events: state.builtin.events.length }),
     voice_mcp_status: () => ({ servers: [], connections: [], audit: [], revision: "r1", max_servers: 8 }),
     voice_context_pick_folder: () => {
@@ -376,8 +383,9 @@ try {
             current: { ssid: "OfficeNet", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true },
             networks: [
               { ssid: "OfficeNet", signal: 80, bands: ["5g"], band_signals: { "5g": 80 }, secure: true, current: true },
-              { ssid: "StudioNet", signal: 72, bands: ["2.4g", "5g"], band_signals: { "2.4g": 35, "5g": 72 }, secure: true, current: false },
-              { ssid: "CafeFree", signal: 40, bands: ["2.4g"], band_signals: { "2.4g": 40 }, secure: false, current: false },
+              { ssid: "StudioNet", signal: 72, bands: ["2.4g", "5g"], band_signals: { "2.4g": 35, "5g": 72 }, secure: true, wpa3_only: false, current: false },
+              { ssid: "CafeFree", signal: 40, bands: ["2.4g"], band_signals: { "2.4g": 40 }, secure: false, wpa3_only: false, current: false },
+              { ssid: "StrictWpa3", signal: 30, bands: ["2.4g"], band_signals: { "2.4g": 30 }, secure: true, wpa3_only: true, current: false },
             ],
             hint: null,
           };
@@ -1061,8 +1069,12 @@ try {
   await page.locator("#xiaozhi-wifi-scan").click();
   const scanList = page.locator("#xiaozhi-wifi-scan-list");
   await scanList.waitFor();
-  assert.deepEqual(await scanList.locator(".xz-scan-ssid").allInnerTexts(), ["CafeFree", "StudioNet"], "只列板子能连的网络，按 2.4G 信号排序");
+  assert.deepEqual(await scanList.locator(".xz-scan-ssid").allInnerTexts(), ["CafeFree", "StudioNet", "StrictWpa3"], "只列板子能连的网络，按 2.4G 信号排序");
   await scanList.locator("#xiaozhi-wifi-scan-filter").getByText("按板子 esp32s3 只显示 2.4 GHz，已隐藏 1 个板子连不上的网络").waitFor();
+  const wpa3Row = scanList.getByRole("button", { name: /StrictWpa3/ });
+  await wpa3Row.getByText("仅 WPA3").waitFor();
+  await wpa3Row.click();
+  await page.locator("#xiaozhi-wifi-notice").getByText(/仅 WPA3.*WPA2/).waitFor();
   const studio = scanList.getByRole("button", { name: /StudioNet/ });
   assert.equal(await studio.getByText("5 GHz").count(), 0, "2.4G 芯片不显示 5 GHz 标签");
   await studio.getByText("信号 35%").waitFor();
@@ -1072,10 +1084,18 @@ try {
   // 列表里的“重新扫描”再发一次 wifi_scan，结果刷新后仍可点选
   await scanList.locator("#xiaozhi-wifi-rescan").click();
   await page.waitForFunction(() => document.querySelector("#xiaozhi-wifi-rescan")?.textContent.includes("重新扫描"));
-  assert.equal(await scanList.locator(".xz-scan-item").count(), 2);
+  assert.equal(await scanList.locator(".xz-scan-item").count(), 3);
   assert.equal(calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "wifi_scan").length, 2, "重新扫描再查询一次");
   assert.equal(calls.filter((c) => c.command === "voice_usb_provision" && String(c.args?.input?.action).startsWith("wifi_")).length, 4, "每次点击 / 切回重查各只查询一次本机 Wi-Fi");
+  // 高级选项列出全部真实局域网 IP 供一键填入
+  await page.locator("#xiaozhi-tab-advanced").click();
+  await page.locator("#xiaozhi-ota-quick-fills").getByRole("button", { name: "填入 192.0.2.10（首选）" }).waitFor();
+  await page.locator("#xiaozhi-ota-quick-fills").getByRole("button", { name: "填入 192.0.2.20" }).click();
+  assert.equal(await page.locator("#xiaozhi-ota-url").inputValue(), "http://192.0.2.20:8003/xiaozhi/ota/");
+  await page.locator("#xiaozhi-ota-quick-fills").getByRole("button", { name: "填入 192.0.2.10（首选）" }).click();
+  await page.locator("#xiaozhi-tab-wifi").click();
   await page.locator("#xiaozhi-wifi-ssid").fill("StudioNet");
+  await page.locator("#xiaozhi-wifi-pass").fill("pass-1234");
   const writeCountBefore = calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "write").length;
   await page.locator("#xiaozhi-usb-write-wifi").click();
   await page.locator("#xiaozhi-usb-confirm-box").waitFor();
@@ -1090,18 +1110,41 @@ try {
   await page.locator("#xiaozhi-usb-write-wifi").click();
   await page.locator("#xiaozhi-usb-confirm-write").click();
   await page.locator('#xiaozhi-usb-card [role="status"]').getByText(/已写入 NVS 并回读校验无误，小智板子正在重启/).waitFor();
+  // 内置服务未启动时，卡片顶部和写后报到栏均提醒并支持一键启动；启动后进入等待报到，板子连上 MOSS 后变绿上线
+  await page.locator("#xiaozhi-usb-service-stopped").waitFor();
+  await page.locator("#xiaozhi-usb-checkin[data-phase=service_stopped]").waitFor();
+  await page.locator("#xiaozhi-usb-start-service").click();
+  await page.locator("#xiaozhi-usb-service-stopped").waitFor({ state: "detached" });
+  await page.locator("#xiaozhi-usb-checkin[data-phase=waiting]").waitFor();
+  state.builtin.sessions.push({
+    session_id: "s-usb-new",
+    device_id: "dc:da:0c:11:22:33",
+    ip: "192.0.2.88",
+    protocol_version: 1,
+    connected_at: 1_790_000_200,
+    state: "idle",
+  });
+  await page.locator("#xiaozhi-usb-checkin[data-phase=online]").waitFor({ timeout: 6000 });
+  state.builtin.sessions = state.builtin.sessions.filter((s) => s.session_id !== "s-usb-new");
+  state.builtin.running = false;
   const writeArgs = last("voice_usb_provision").args.input;
   assert.equal(writeArgs.action, "write");
   assert.equal(writeArgs.confirmed, true);
   assert.equal(writeArgs.expected_mac, "dc:da:0c:11:22:33");
   assert.equal(writeArgs.patch.new_wifi.ssid, "StudioNet5G");
   assert.equal(await page.locator('[role="dialog"], [role="alertdialog"], .modal-backdrop').count(), 0, "整个 USB 配网写入过程零弹窗");
-  // 收起后再直接点开 USB 折叠栏标题，同样原地展开且扫描完成后自动选中串口
+  // 收起后再直接点开 USB 折叠栏标题，同样原地展开、自动选中串口，并可一键复用上次刚配过的 Wi-Fi（内存会话）
   await page.locator("#voice-group-device-usb-provision > .voice-group-h").click();
   await page.locator("#xiaozhi-usb-card").waitFor({ state: "detached" });
   await page.locator("#voice-group-device-usb-provision > .voice-group-h").click();
   await page.locator("#xiaozhi-usb-card").waitFor();
   await page.waitForFunction(() => document.querySelector("#xiaozhi-usb-port-select")?.value === "/dev/cu.usbmodem14201");
+  await page.locator("#xiaozhi-wifi-use-last").click();
+  assert.equal(await page.locator("#xiaozhi-wifi-ssid").inputValue(), "StudioNet5G");
+  assert.equal(await page.locator("#xiaozhi-wifi-pass").inputValue(), "pass-1234", "复用上次成功写入的 Wi-Fi 与密码");
+  await page.locator("#xiaozhi-wifi-ssid").fill("");
+  await page.locator("#xiaozhi-wifi-clear-last").click();
+  assert.equal(await page.locator("#xiaozhi-wifi-use-last").count(), 0, "清除记忆后不再显示复用按钮");
   await page.locator("#voice-builtin-devices").getByRole("button", { name: "控制与信息" }).click();
   const ctrlBox = page.locator("#voice-device-controls-aa\\:bb\\:cc\\:11\\:22\\:33");
   await ctrlBox.waitFor();

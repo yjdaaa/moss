@@ -71,16 +71,26 @@ pub fn is_virtual_or_tunnel_ipv4(if_name: &str, ip: Ipv4Addr) -> bool {
 
 fn interface_priority(if_name: &str, ip: Ipv4Addr) -> (u8, u8, u8) {
     let lower = if_name.to_ascii_lowercase();
-    let name_rank = if lower.contains("wlan")
-        || lower.contains("wi-fi")
-        || lower.contains("wifi")
-        || lower == "en0"
+    // 有线网口通常走固定 IP 且更稳定，双网卡（有线 + Wi-Fi）同时在线时优先于无线
+    let name_rank = if lower.contains("以太网")
+        || lower.contains("ethernet")
+        || lower.starts_with("eth")
+        || lower.starts_with("enp")
+        || lower.starts_with("eno")
+        || lower.starts_with("ens")
     {
         0
-    } else if lower.contains("eth") || lower.contains("以太网") || lower.starts_with("en") {
+    } else if lower.contains("wlan")
+        || lower.contains("wi-fi")
+        || lower.contains("wifi")
+        || lower.starts_with("wlp")
+        || lower == "en0"
+    {
         1
-    } else {
+    } else if lower.starts_with("en") {
         2
+    } else {
+        3
     };
     let octets = ip.octets();
     // Windows 移动热点固定为 192.168.137.1，属于真实可用热点网关；其余 .1 结尾多为未命名的本地虚拟网桥
@@ -94,20 +104,24 @@ fn interface_priority(if_name: &str, ip: Ipv4Addr) -> (u8, u8, u8) {
     (name_rank, host_rank, private_rank)
 }
 
-/// 枚举本机所有真实局域网 IPv4 地址（已排除 Clash TUN、Tailscale、VMware 等虚拟网卡，按 Wi-Fi/有线优先级排序）。
-pub fn lan_ipv4_addrs() -> Vec<Ipv4Addr> {
-    let Ok(interfaces) = if_addrs::get_if_addrs() else {
-        return Vec::new();
-    };
-    let mut candidates: Vec<(String, Ipv4Addr)> = interfaces
-        .into_iter()
-        .filter(|iface| !iface.is_loopback())
-        .filter_map(|iface| match iface.ip() {
-            IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4(&iface.name, v4) => Some((iface.name, v4)),
-            _ => None,
-        })
-        .collect();
-    candidates.sort_by_key(|(name, ip)| (interface_priority(name, *ip), ip.octets()));
+/// 询问系统路由表默认出网的真实 IPv4（只用于选路，不发送任何数据；代理 TUN 虚拟网卡会被过滤掉）。
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => Some(v4),
+        _ => None,
+    }
+}
+
+fn sort_lan_candidates(
+    mut candidates: Vec<(String, Ipv4Addr)>,
+    default_route: Option<Ipv4Addr>,
+) -> Vec<Ipv4Addr> {
+    candidates.sort_by_key(|(name, ip)| {
+        let route_rank = u8::from(default_route != Some(*ip));
+        (route_rank, interface_priority(name, *ip), ip.octets())
+    });
     let mut result = Vec::with_capacity(candidates.len());
     for (_, ip) in candidates {
         if !result.contains(&ip) {
@@ -117,17 +131,29 @@ pub fn lan_ipv4_addrs() -> Vec<Ipv4Addr> {
     result
 }
 
+/// 枚举本机所有真实局域网 IPv4 地址（已排除 Clash TUN、Tailscale、VMware 等虚拟网卡，
+/// 优先系统默认出网口，代理接管默认路由时按有线优先、再无线排序）。
+pub fn lan_ipv4_addrs() -> Vec<Ipv4Addr> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let candidates: Vec<(String, Ipv4Addr)> = interfaces
+        .into_iter()
+        .filter(|iface| !iface.is_loopback())
+        .filter_map(|iface| match iface.ip() {
+            IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4(&iface.name, v4) => Some((iface.name, v4)),
+            _ => None,
+        })
+        .collect();
+    sort_lan_candidates(candidates, default_route_ipv4())
+}
+
 /// 本机用于局域网通信的首选地址（只用于选路，不发送任何数据；自动跳过 198.18.0.1 等虚拟网卡）。
 pub fn local_ip() -> Option<IpAddr> {
     if let Some(ip) = lan_ipv4_addrs().into_iter().next() {
         return Some(IpAddr::V4(ip));
     }
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:80").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => Some(IpAddr::V4(v4)),
-        _ => None,
-    }
+    default_route_ipv4().map(IpAddr::V4)
 }
 
 /// 针对来访设备 `peer` 选择与其同网段的本机真实网卡地址。
@@ -391,7 +417,7 @@ async fn ota_post(
 
 #[cfg(test)]
 mod tests {
-    use super::{host_without_port, is_virtual_or_tunnel_ipv4};
+    use super::{host_without_port, is_virtual_or_tunnel_ipv4, sort_lan_candidates};
     use std::net::Ipv4Addr;
 
     #[test]
@@ -448,5 +474,42 @@ mod tests {
             "Wi-Fi",
             Ipv4Addr::new(192, 168, 1, 105)
         ));
+    }
+
+    #[test]
+    fn lan_ip_sorting_prefers_default_route_then_wired_over_wifi() {
+        let wired = Ipv4Addr::new(192, 168, 8, 127);
+        let wifi = Ipv4Addr::new(192, 168, 8, 249);
+        let mac_usb_eth = Ipv4Addr::new(192, 168, 8, 88);
+
+        // 代理 TUN 接管默认路由（default_route = None）时，Windows 有线口优先于无线口
+        let sorted =
+            sort_lan_candidates(vec![("WLAN".into(), wifi), ("以太网".into(), wired)], None);
+        assert_eq!(sorted, vec![wired, wifi]);
+
+        // 英文 Ethernet / Linux enp* 同样优先于 Wi-Fi
+        let sorted_en = sort_lan_candidates(
+            vec![("Wi-Fi".into(), wifi), ("Ethernet".into(), wired)],
+            None,
+        );
+        assert_eq!(sorted_en, vec![wired, wifi]);
+
+        // 系统明确走某张物理网卡（如 macOS 扩展坞有线口 en5）时，默认出网口排第一
+        let sorted_route = sort_lan_candidates(
+            vec![("en0".into(), wifi), ("en5".into(), mac_usb_eth)],
+            Some(mac_usb_eth),
+        );
+        assert_eq!(sorted_route, vec![mac_usb_eth, wifi]);
+
+        // 同 IP 去重保持排序
+        let deduped = sort_lan_candidates(
+            vec![
+                ("WLAN".into(), wifi),
+                ("以太网".into(), wired),
+                ("以太网".into(), wired),
+            ],
+            None,
+        );
+        assert_eq!(deduped, vec![wired, wifi]);
     }
 }

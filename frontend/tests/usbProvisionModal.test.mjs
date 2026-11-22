@@ -11,8 +11,11 @@ import {
   createDraftFromInspect,
   currentWifiFillNotice,
   boardWifiBands,
+  evaluateBoardCheckin,
   filterScannedWifiForBoard,
   hostWifiProblem,
+  mossOtaQuickFillOptions,
+  pickedWifiNotice,
   scanFilterLabel,
   staleBoardOta,
   mossOtaUrls,
@@ -25,6 +28,7 @@ import {
   pickDefaultUsbPort,
   pinSavedWifiSlot,
   removeSavedWifiSlot,
+  usbOperationStageHint,
   validateUsbProvisionDraft,
   wifiBandLabel,
 } from "../src/components/voice-builtin/usbProvisionModel.js";
@@ -247,7 +251,16 @@ test("渲染无弹窗暗色双标签小智配网卡片、服务页入口且设�
     assert.match(cardHtml, /读取板子配置/);
     assert.match(cardHtml, /id="xiaozhi-wifi-use-current"[^>]*>.*用本机当前 Wi-Fi/);
     assert.match(cardHtml, /id="xiaozhi-wifi-scan"[^>]*>.*扫描附近/);
+    assert.doesNotMatch(cardHtml, /xiaozhi-usb-service-stopped/, "未传 running=false 时不误报服务未启动");
     assert.doesNotMatch(cardHtml, /modal-backdrop|role="dialog"|xiaozhi-usb-close/);
+
+    const stoppedCardHtml = renderToStaticMarkup(
+      React.createElement(XiaozhiUsbProvisionCard, {
+        serviceStatus: { running: false, ota_ip_url: "http://192.168.1.50:9666/xiaozhi/ota/", ws_port: 9667 },
+      }),
+    );
+    assert.match(stoppedCardHtml, /id="xiaozhi-usb-service-stopped"/);
+    assert.match(stoppedCardHtml, /id="xiaozhi-usb-start-service"[^>]*>.*启动内置服务/);
 
     const status = {
       running: true,
@@ -523,4 +536,118 @@ test("读出的板子 OTA 地址不是 MOSS 当前地址时提醒，默认不替
   assert.equal(staleBoardOta(inspect(""), "", status), null);
   assert.equal(staleBoardOta(null, old, status), null);
   assert.equal(staleBoardOta(inspect(old), old, {}), null);
+});
+
+test("多网卡快捷填入、纯 WPA3 预警、分阶段提示与写后报到闭环判断", () => {
+  // 单网卡 vs 多网卡快捷按钮
+  const single = mossOtaQuickFillOptions({
+    ota_ip_url: "http://192.168.8.127:8003/xiaozhi/ota/",
+    ota_url: "http://moss.local:8003/xiaozhi/ota/",
+    ota_ip_urls: ["http://192.168.8.127:8003/xiaozhi/ota/"],
+  });
+  assert.deepEqual(
+    single.map((o) => [o.label, o.url]),
+    [
+      ["填入本机局域网 IP", "http://192.168.8.127:8003/xiaozhi/ota/"],
+      ["填入 moss.local 地址", "http://moss.local:8003/xiaozhi/ota/"],
+    ],
+  );
+  const multi = mossOtaQuickFillOptions({
+    ota_ip_url: "http://192.168.8.127:8003/xiaozhi/ota/",
+    ota_url: "http://moss.local:8003/xiaozhi/ota/",
+    ota_ip_urls: [
+      "http://192.168.8.127:8003/xiaozhi/ota/",
+      "http://192.168.8.249:8003/xiaozhi/ota/",
+    ],
+  });
+  assert.deepEqual(
+    multi.map((o) => o.label),
+    ["填入 192.168.8.127（首选）", "填入 192.168.8.249", "填入 moss.local 地址"],
+  );
+
+  // 纯 WPA3 预警（扫描选中与当前 Wi-Fi 填入）
+  const wpa3Picked = pickedWifiNotice({ ssid: "Strict3", secure: true, wpa3_only: true });
+  assert.equal(wpa3Picked.tone, "warn");
+  assert.match(wpa3Picked.text, /仅 WPA3.*WPA2/);
+  assert.equal(pickedWifiNotice({ ssid: "Open", secure: false, wpa3_only: false }).tone, "ok");
+  assert.match(
+    currentWifiFillNotice({ ssid: "Strict3", bands: ["2.4g"], secure: true, wpa3_only: true }, "esp32s3"),
+    /仅 WPA3/,
+  );
+
+  // 读/写分阶段提示
+  assert.match(usbOperationStageHint("inspect", 1), /握手/);
+  assert.match(usbOperationStageHint("inspect", 5), /分区表/);
+  assert.match(usbOperationStageHint("inspect", 10), /10 秒/);
+  assert.match(usbOperationStageHint("write", 1), /MAC/);
+  assert.match(usbOperationStageHint("write", 4), /MD5/);
+  assert.match(usbOperationStageHint("write", 9), /9 秒/);
+  assert.equal(usbOperationStageHint("", 5), "");
+
+  // 写后报到闭环
+  const tracker = {
+    mac: "dc:da:0c:11:22:33",
+    chip: "esp32s3",
+    baselineLastSeen: 1000,
+    preSessionIds: ["old-sess"],
+    startedAtMs: 1_000_000,
+    timedOut: false,
+  };
+  assert.equal(evaluateBoardCheckin({ running: false }, tracker).phase, "service_stopped");
+  assert.equal(
+    evaluateBoardCheckin({ running: true }, { ...tracker, chip: "esp32p4" }).phase,
+    "p4_manual",
+  );
+  // 写入期间 bind_usb_voice_device 留下的记录（last_ip 为空、last_seen 等于基线）不得误判为已报到
+  assert.equal(
+    evaluateBoardCheckin(
+      {
+        running: true,
+        sessions: [{ session_id: "old-sess", device_id: "dc:da:0c:11:22:33" }],
+        devices: [{ device_id: "dc:da:0c:11:22:33", status: "allowed", last_ip: "", last_seen: 1000 }],
+      },
+      tracker,
+    ).phase,
+    "waiting",
+  );
+  // OTA 报到但待允许
+  assert.equal(
+    evaluateBoardCheckin(
+      {
+        running: true,
+        sessions: [],
+        devices: [{ device_id: "dc:da:0c:11:22:33", status: "pending", last_ip: "192.168.8.55", last_seen: 1006 }],
+      },
+      tracker,
+    ).phase,
+    "pending",
+  );
+  // OTA 报到且已允许、语音连接未就绪 → ota_seen；超时后升为 checked_in（不误报失败）
+  const allowedOtaStatus = {
+    running: true,
+    sessions: [],
+    devices: [{ device_id: "dc:da:0c:11:22:33", status: "allowed", last_ip: "192.168.8.55", last_seen: 1006 }],
+  };
+  assert.equal(evaluateBoardCheckin(allowedOtaStatus, tracker).phase, "ota_seen");
+  assert.equal(
+    evaluateBoardCheckin(allowedOtaStatus, { ...tracker, timedOut: true }).phase,
+    "checked_in",
+  );
+  // 新会话上线 → online
+  assert.equal(
+    evaluateBoardCheckin(
+      {
+        running: true,
+        sessions: [{ session_id: "new-sess", device_id: "DC:DA:0C:11:22:33" }],
+        devices: [],
+      },
+      tracker,
+    ).phase,
+    "online",
+  );
+  // 20 秒无报到 → timeout
+  assert.equal(
+    evaluateBoardCheckin({ running: true, sessions: [], devices: [] }, { ...tracker, timedOut: true }).phase,
+    "timeout",
+  );
 });

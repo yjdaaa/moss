@@ -551,11 +551,15 @@
   margin: 0;
 }
 .xz-banner svg { flex: none; margin-top: 3px; }
-/* 板子里存的 OTA 地址已不是 MOSS 当前地址（2026-11-22） */
+/* 带内联操作按钮的提示横幅（OTA 地址失配、内置服务未启动、写后报到跟踪） */
 #xiaozhi-ota-stale,
-#xiaozhi-ota-stale-advanced { flex-wrap: wrap; align-items: center; }
+#xiaozhi-ota-stale-advanced,
+#xiaozhi-usb-service-stopped,
+#xiaozhi-usb-checkin { flex-wrap: wrap; align-items: center; }
 #xiaozhi-ota-stale span,
-#xiaozhi-ota-stale-advanced span { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+#xiaozhi-ota-stale-advanced span,
+#xiaozhi-usb-service-stopped span,
+#xiaozhi-usb-checkin span { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 
 /* 暗色双标签胶囊切换条（Wi-Fi 配置 / 高级选项） */
 .xz-tabs {
@@ -764,6 +768,15 @@
 }
 .xz-chip-btn:disabled { opacity: 0.5; cursor: default; }
 .xz-chip-btn svg { vertical-align: -2px; }
+.xz-chip-btn--muted {
+  border-color: var(--ob-line);
+  background: transparent;
+  color: var(--ob-ink-3);
+}
+.xz-chip-btn--muted:hover:not(:disabled) {
+  border-color: var(--ob-line-2);
+  color: var(--ob-ink-2);
+}
 /* 本机 Wi-Fi 一键填写 / 扫描附近（n103） */
 .xz-wifi-notice {
   margin: 0;

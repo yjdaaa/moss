@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  History,
   Laptop,
   Lock,
   LockOpen,
+  Play,
   RefreshCw,
   ScanSearch,
   Sliders,
@@ -21,27 +23,43 @@ import { voiceApi } from "../../voiceApi.js";
 import { voiceErrorText } from "../../voiceState.js";
 import {
   MAX_TX_POWER_OPTIONS,
+  USB_CHECKIN_POLL_MS,
+  USB_CHECKIN_TIMEOUT_MS,
   applyPickedWifi,
   buildUsbProvisionWritePayload,
   canOpenWifiSettings,
   createDraftFromInspect,
   currentWifiFillNotice,
   deriveWsUrlForMoss,
+  evaluateBoardCheckin,
   filterScannedWifiForBoard,
   hostWifiProblem,
   formatUsbWriteConfirmText,
   isRecognizedXiaozhiInspect,
   isRevokedInMoss,
+  mossOtaQuickFillOptions,
   needsBoardIdentityWarning,
   pickDefaultUsbPort,
+  pickedWifiNotice,
   pinSavedWifiSlot,
   removeSavedWifiSlot,
   utf8ByteLength,
   scanFilterLabel,
   staleBoardOta,
+  usbOperationStageHint,
   validateUsbProvisionDraft,
   wifiBandLabel,
 } from "./usbProvisionModel.js";
+
+const ESPRESSIF_USB_VID = 0x303a;
+const PORT_AUTOSCAN_MS = 4_000;
+
+// 仅在当前进程内存中记住最近一次成功写入的 Wi-Fi，方便连续给多台小智配网；关闭或刷新即清，不落盘
+let lastWrittenWifiSession = null;
+
+export function clearLastWrittenWifiSession() {
+  lastWrittenWifiSession = null;
+}
 
 const DEVICE_STATUS_LABELS = {
   allowed: "已允许",
@@ -56,12 +74,16 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   const [laserBusy, setLaserBusy] = useState(false);
   const [selectedPort, setSelectedPort] = useState("");
   const [busy, setBusy] = useState("");
+  const [busyElapsedSec, setBusyElapsedSec] = useState(0);
   const [errText, setErrText] = useState("");
   const [noticeText, setNoticeText] = useState("");
   const [inspectData, setInspectData] = useState(null);
   const [draft, setDraft] = useState(() => createDraftFromInspect(null, serviceStatus));
   const [showPassword, setShowPassword] = useState(false);
   const [pendingWrite, setPendingWrite] = useState(null);
+  const [startingService, setStartingService] = useState(false);
+  const [checkin, setCheckin] = useState(null);
+  const [lastWifi, setLastWifi] = useState(() => lastWrittenWifiSession);
   // 本机 Wi-Fi 读取：不占后端配网锁，与读板子 / 写入互不阻塞，单独记忙碌状态
   const [wifiBusy, setWifiBusy] = useState("");
   const [wifiNotice, setWifiNotice] = useState(null);
@@ -79,9 +101,17 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
 
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
+  const silentPortsInFlightRef = useRef(false);
   const requestSeqRef = useRef(0);
+  const userPickedPortRef = useRef(false);
   const cardRef = useRef(null);
   const portSelectRef = useRef(null);
+  const portsRef = useRef(ports);
+  portsRef.current = ports;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const inspectDataRef = useRef(inspectData);
+  inspectDataRef.current = inspectData;
   const selectedPortRef = useRef(selectedPort);
   selectedPortRef.current = selectedPort;
   const serviceStatusRef = useRef(serviceStatus);
@@ -93,9 +123,23 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     return () => {
       mountedRef.current = false;
       inFlightRef.current = false;
+      silentPortsInFlightRef.current = false;
       requestSeqRef.current += 1;
     };
   }, []);
+
+  // 读取 / 写入期间按秒更新分阶段提示
+  useEffect(() => {
+    if (busy !== "inspect" && busy !== "write") {
+      setBusyElapsedSec(0);
+      return;
+    }
+    setBusyElapsedSec(0);
+    const timer = window.setInterval(() => {
+      setBusyElapsedSec((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   // 服务状态晚于卡片挂载返回时，若尚未读取板子且用户未手动改过 OTA，同步填入默认本机地址
   useEffect(() => {
@@ -130,47 +174,89 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     otaTouchedRef.current = false;
     setInspectData(null);
     setPendingWrite(null);
+    setCheckin(null);
     setNoticeText("");
     setDraft(createDraftFromInspect(null, serviceStatusRef.current));
   }, []);
 
-  const loadPorts = useCallback(async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-    const seq = ++requestSeqRef.current;
-    setBusy("ports");
-    setErrText("");
-    setPendingWrite(null);
-    try {
-      const res = await voiceApi.usbProvision({ action: "ports" });
-      if (!mountedRef.current || requestSeqRef.current !== seq) return;
-      const list = Array.isArray(res?.ports) ? res.ports : [];
-      const prevPort = selectedPortRef.current;
-      const nextPort =
-        prevPort && list.some((p) => p.port_name === prevPort && !p.is_laser_port)
-          ? prevPort
-          : pickDefaultUsbPort(list);
-      setPorts(list);
-      setLaserBusy(Boolean(res?.laser_busy));
-      setSelectedPort(nextPort);
-      if (nextPort !== prevPort) {
-        resetBoardDraft();
+  const loadPorts = useCallback(
+    async ({ silent = false } = {}) => {
+      if (silent) {
+        if (inFlightRef.current || silentPortsInFlightRef.current) return;
+        silentPortsInFlightRef.current = true;
+      } else {
+        if (inFlightRef.current) return;
+        inFlightRef.current = true;
+        setBusy("ports");
+        setErrText("");
+        setPendingWrite(null);
       }
-    } catch (error) {
-      if (!mountedRef.current || requestSeqRef.current !== seq) return;
-      setNoticeText("");
-      setErrText(voiceErrorText(error));
-    } finally {
-      if (requestSeqRef.current === seq) {
-        inFlightRef.current = false;
-        if (mountedRef.current) setBusy("");
+      const seq = silent ? requestSeqRef.current : ++requestSeqRef.current;
+      try {
+        const res = await voiceApi.usbProvision({ action: "ports" });
+        if (!mountedRef.current || requestSeqRef.current !== seq) return;
+        if (silent && inFlightRef.current) return;
+        const list = Array.isArray(res?.ports) ? res.ports : [];
+        const prevPort = selectedPortRef.current;
+        const prevPortNames = new Set(portsRef.current.map((p) => p.port_name));
+        const prevPortItem = list.find((p) => p.port_name === prevPort && !p.is_laser_port);
+        // 后台发现新插上的乐鑫原生 USB 口且用户未手动指定别的串口时，自动切过去
+        const newlyPluggedEsp =
+          silent &&
+          !userPickedPortRef.current &&
+          (!prevPortItem || prevPortItem.vid !== ESPRESSIF_USB_VID) &&
+          list.some(
+            (p) =>
+              p.vid === ESPRESSIF_USB_VID &&
+              !p.is_laser_port &&
+              !prevPortNames.has(p.port_name),
+          );
+        const nextPort =
+          prevPortItem && !newlyPluggedEsp ? prevPort : pickDefaultUsbPort(list);
+        setPorts(list);
+        setLaserBusy(Boolean(res?.laser_busy));
+        setSelectedPort(nextPort);
+        if (nextPort !== prevPort) {
+          if (inspectDataRef.current) {
+            resetBoardDraft();
+          } else {
+            // 尚未读取板子时切口或后台新插上串口，保留用户已先填好的 Wi-Fi / 密码 / OTA 草稿
+            setPendingWrite(null);
+            setCheckin(null);
+          }
+        }
+      } catch (error) {
+        if (silent || !mountedRef.current || requestSeqRef.current !== seq) return;
+        setNoticeText("");
+        setErrText(voiceErrorText(error));
+      } finally {
+        if (silent) {
+          silentPortsInFlightRef.current = false;
+        } else if (requestSeqRef.current === seq) {
+          inFlightRef.current = false;
+          if (mountedRef.current) setBusy("");
+        }
       }
-    }
-  }, [resetBoardDraft]);
+    },
+    [resetBoardDraft],
+  );
 
   useEffect(() => {
     void loadPorts();
   }, [loadPorts]);
+
+  // 还没检测到任何串口且尚未读取板子时，每 4 秒后台扫一次，插上数据线自动出现，不用手点刷新
+  useEffect(() => {
+    if (ports.length > 0 || inspectData || busy) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadPorts({ silent: true });
+    }, PORT_AUTOSCAN_MS);
+    return () => window.clearInterval(timer);
+  }, [ports.length, inspectData, busy, loadPorts]);
+
+  const loadPortsRef = useRef(loadPorts);
+  loadPortsRef.current = loadPorts;
 
   const updateDraft = useCallback((updater) => {
     setPendingWrite(null);
@@ -185,6 +271,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     setErrText("");
     setNoticeText("");
     setPendingWrite(null);
+    setCheckin(null);
     try {
       const res = await voiceApi.usbProvision({
         action: "inspect",
@@ -245,7 +332,11 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     inFlightRef.current = true;
     const seq = ++requestSeqRef.current;
     const { payload } = pendingWrite;
+    const preSessionIds = Array.isArray(serviceStatusRef.current?.sessions)
+      ? serviceStatusRef.current.sessions.map((s) => s?.session_id).filter(Boolean)
+      : [];
     setPendingWrite(null);
+    setCheckin(null);
     setBusy("write");
     setErrText("");
     setNoticeText("");
@@ -254,21 +345,55 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
       if (!mountedRef.current || requestSeqRef.current !== seq) return;
       setInspectData(res);
       setDraft(createDraftFromInspect(res, serviceStatusRef.current));
+      if (payload.patch?.new_wifi?.ssid) {
+        lastWrittenWifiSession = {
+          ssid: payload.patch.new_wifi.ssid,
+          password: payload.patch.new_wifi.password || "",
+        };
+        setLastWifi(lastWrittenWifiSession);
+      }
       const notes = ["已写入 NVS 并回读校验无误，小智板子正在重启，几秒后会连上 Wi-Fi 并向 MOSS 报到。"];
       if (res?.auto_allow_skipped) notes.push(res.auto_allow_skipped);
       if (res?.reset_warning) {
         notes.push(`配置已写好，但板子没能自动重启（${res.reset_warning}），请手动按一下 RST 键。`);
       }
       setNoticeText(notes.join(" "));
-      if (typeof onSetStatus === "function") {
-        try {
-          const nextStatus = await voiceApi.builtinStatus();
-          if (mountedRef.current && requestSeqRef.current === seq && nextStatus) {
-            onSetStatus(nextStatus);
-          }
-        } catch {
-          // 忽略后台状态刷新失败
+      let latestStatus = serviceStatusRef.current;
+      let statusFetched = false;
+      try {
+        const nextStatus = await voiceApi.builtinStatus();
+        if (mountedRef.current && requestSeqRef.current === seq && nextStatus) {
+          latestStatus = nextStatus;
+          statusFetched = true;
+          if (typeof onSetStatus === "function") onSetStatus(nextStatus);
         }
+      } catch {
+        // 忽略后台状态刷新失败
+      }
+      if (!mountedRef.current || requestSeqRef.current !== seq) return;
+      const mac = String(res?.device?.mac_address || "").toLowerCase();
+      const pointsToMoss = Boolean(deriveWsUrlForMoss(payload.patch?.ota_url, latestStatus));
+      if (mac && pointsToMoss) {
+        // 合并写前与写后瞬间的在线会话：写入刚复位时服务端可能还留着旧 TCP 半开会话，不能误判为新上线
+        const postSessionIds = Array.isArray(latestStatus?.sessions)
+          ? latestStatus.sessions.map((s) => s?.session_id).filter(Boolean)
+          : [];
+        const mergedPreSessions = Array.from(new Set([...preSessionIds, ...postSessionIds]));
+        const matched = Array.isArray(latestStatus?.devices)
+          ? latestStatus.devices.find((d) => String(d?.device_id || "").toLowerCase() === mac)
+          : null;
+        // 写后状态拉取失败时用当前秒数抬高基线，避免老设备 bind_usb_voice_device 刷新的 last_seen 被误判为新 OTA 报到
+        const baselineLastSeen = statusFetched
+          ? Number(matched?.last_seen || 0)
+          : Math.max(Number(matched?.last_seen || 0), Date.now() / 1000);
+        setCheckin({
+          mac,
+          chip: res?.device?.chip || "",
+          baselineLastSeen,
+          preSessionIds: mergedPreSessions,
+          retrySeq: 0,
+          timedOut: false,
+        });
       }
     } catch (error) {
       if (!mountedRef.current || requestSeqRef.current !== seq) return;
@@ -279,6 +404,26 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
         inFlightRef.current = false;
         if (mountedRef.current) setBusy("");
       }
+    }
+  };
+
+  const startBuiltinService = async () => {
+    if (startingService) return;
+    setStartingService(true);
+    setErrText("");
+    try {
+      const next = await voiceApi.builtinStart();
+      if (!mountedRef.current) return;
+      if (next && typeof onSetStatus === "function") onSetStatus(next);
+      // 启动服务后如果刚才写过板子，清零超时并重新开启 20 秒报到跟踪
+      setCheckin((prev) =>
+        prev ? { ...prev, retrySeq: (prev.retrySeq || 0) + 1, timedOut: false } : prev,
+      );
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setErrText(`启动内置语音服务失败：${voiceErrorText(error)}`);
+    } finally {
+      if (mountedRef.current) setStartingService(false);
     }
   };
 
@@ -390,15 +535,23 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   };
   queryHostWifiRef.current = queryHostWifi;
 
-  // 从系统设置切回 MOSS（窗口重新获得焦点 / 页面重新可见）时自动重查一次
+  // 切回 MOSS（窗口重新获得焦点 / 页面重新可见）时：
+  // 1) 若刚去系统设置开定位或 Wi-Fi，自动重查一次 Wi-Fi；
+  // 2) 若尚未读取板子且空闲，静默刷新一次串口列表（插拔数据线不用手点刷新）。
   useEffect(() => {
     const onBack = () => {
       if (document.visibilityState === "hidden") return;
       const action = pendingRecheckRef.current;
-      // 正在读时先不消费“待重查”，留到下次切回再查
-      if (!action || wifiBusyRef.current) return;
-      pendingRecheckRef.current = "";
-      void queryHostWifiRef.current?.(action, { auto: true });
+      if (action) {
+        // 正在读时先不消费“待重查”，留到下次切回再查
+        if (wifiBusyRef.current) return;
+        pendingRecheckRef.current = "";
+        void queryHostWifiRef.current?.(action, { auto: true });
+        return;
+      }
+      if (!busyRef.current && !inFlightRef.current && !inspectDataRef.current && !wifiBusyRef.current) {
+        void loadPortsRef.current?.({ silent: true });
+      }
     };
     window.addEventListener("focus", onBack);
     document.addEventListener("visibilitychange", onBack);
@@ -408,14 +561,82 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     };
   }, []);
 
+  const checkinView = evaluateBoardCheckin(serviceStatus, checkin);
+  const checkinPolling = Boolean(
+    checkin && checkinView && (checkinView.phase === "waiting" || checkinView.phase === "ota_seen"),
+  );
+  const checkinRetrySeq = checkin?.retrySeq || 0;
+
+  // 写入后跟踪小智重启连网并向 MOSS 报到（仅在服务运行后才起算 20 秒超时，每 2 秒轻查一次）
+  useEffect(() => {
+    if (!checkinPolling) return;
+    let cancelled = false;
+    let pollBusy = false;
+    const pollOnce = async () => {
+      if (cancelled || pollBusy || document.visibilityState === "hidden") return;
+      pollBusy = true;
+      try {
+        const next = await voiceApi.builtinStatus({ lite: true });
+        if (!cancelled && mountedRef.current && next && typeof onSetStatus === "function") {
+          onSetStatus(next);
+        }
+      } catch {
+        // 忽略偶发轮询失败，等下个节拍再查
+      } finally {
+        pollBusy = false;
+      }
+    };
+    const timeoutId = window.setTimeout(() => {
+      if (!cancelled && mountedRef.current) {
+        setCheckin((prev) => (prev ? { ...prev, timedOut: true } : null));
+      }
+    }, USB_CHECKIN_TIMEOUT_MS);
+    const intervalId = window.setInterval(() => {
+      void pollOnce();
+    }, USB_CHECKIN_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [checkinPolling, checkinRetrySeq, onSetStatus]);
+
+  const retryCheckin = async () => {
+    if (!checkin) return;
+    setCheckin((prev) =>
+      prev ? { ...prev, retrySeq: (prev.retrySeq || 0) + 1, timedOut: false } : null,
+    );
+    try {
+      const next = await voiceApi.builtinStatus({ lite: true });
+      if (mountedRef.current && next && typeof onSetStatus === "function") {
+        onSetStatus(next);
+      }
+    } catch {
+      // 轮询会继续重试
+    }
+  };
+
   const pickScannedWifi = (network) => {
     updateDraft((prev) => applyPickedWifi(prev, network));
+    setWifiNotice(pickedWifiNotice(network));
+  };
+
+  const useLastWrittenWifi = () => {
+    if (!lastWifi?.ssid) return;
+    updateDraft((prev) => ({
+      ...prev,
+      newSsid: lastWifi.ssid,
+      newPassword: lastWifi.password || "",
+    }));
     setWifiNotice({
       tone: "ok",
-      text: `已选“${network.ssid}”，${
-        network.secure === false ? "这是开放网络，密码可留空" : "请填写它的密码"
-      }。`,
+      text: `已填入本次刚配过的“${lastWifi.ssid}”及其密码（仅保存在本次内存中，关闭 MOSS 即清除）。`,
     });
+  };
+
+  const clearLastWifi = () => {
+    clearLastWrittenWifiSession();
+    setLastWifi(null);
   };
 
   const resetSavedSlots = () => {
@@ -425,6 +646,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   };
 
   const renderWriteArea = (buttonId, buttonLabel) => {
+    const writeStage = busy === "write" ? usbOperationStageHint("write", busyElapsedSec) : "";
     if (pendingWrite) {
       return (
         <div
@@ -466,24 +688,32 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
       );
     }
     return (
-      <div className="wakeword-actions">
-        <button
-          type="button"
-          className="btn btn-hud-primary"
-          disabled={Boolean(busy) || !inspectData || !recognizedXiaozhi || laserBusy}
-          onClick={requestWrite}
-          id={buttonId}
-        >
-          {busy === "write" ? "正在写入板子 Flash…" : buttonLabel}
-        </button>
-        {!inspectData ? (
-          <span className="voice-muted">请先在上方读取板子配置</span>
-        ) : (
-          !recognizedXiaozhi && (
-            <span className="voice-muted">未检出小智固件特征，已禁止写入</span>
-          )
+      <>
+        <div className="wakeword-actions">
+          <button
+            type="button"
+            className="btn btn-hud-primary"
+            disabled={Boolean(busy) || !inspectData || !recognizedXiaozhi || laserBusy}
+            onClick={requestWrite}
+            id={buttonId}
+          >
+            {busy === "write" ? "正在写入板子 Flash…" : buttonLabel}
+          </button>
+          {!inspectData ? (
+            <span className="voice-muted">请先在上方读取板子配置</span>
+          ) : (
+            !recognizedXiaozhi && (
+              <span className="voice-muted">未检出小智固件特征，已禁止写入</span>
+            )
+          )}
+        </div>
+        {writeStage && (
+          <div className="voice-hint xz-banner" id="xiaozhi-usb-progress" role="status">
+            <RefreshCw size={14} className="voice-spin" aria-hidden="true" />{" "}
+            <span>{writeStage}</span>
+          </div>
         )}
-      </div>
+      </>
     );
   };
 
@@ -491,8 +721,9 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
     draft.savedSlots.length !== draft.originalSlotIds.length ||
     draft.savedSlots.some((item, idx) => item.slot !== draft.originalSlotIds[idx]);
   const ssidBytes = utf8ByteLength(draft.newSsid.trim());
-  const otaIp = serviceStatus?.ota_ip_url || "";
-  const otaMdns = serviceStatus?.ota_url || "";
+  const otaQuickOptions = mossOtaQuickFillOptions(serviceStatus);
+  const serviceStopped = serviceStatus?.running === false;
+  const inspectStage = busy === "inspect" ? usbOperationStageHint("inspect", busyElapsedSec) : "";
   const dimVal = String(draft.sleepDimMin ?? "").trim() === "" ? -1 : Number(draft.sleepDimMin);
   const offVal = String(draft.sleepOffMin ?? "").trim() === "" ? -1 : Number(draft.sleepOffMin);
   const revoked = isRevokedInMoss(inspectData);
@@ -532,6 +763,26 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
         用 USB 数据线连接小智（若无法自动进下载模式，先按住板子 BOOT 键再点“读取板子配置”），免开手机热点直写闪存 NVS 分区的 Wi-Fi、本机语音地址与设备密钥；原已保存的 Wi-Fi 密码不回显。
       </p>
 
+      {serviceStopped && (
+        <div
+          className="voice-hint voice-hint--warn xz-banner"
+          id="xiaozhi-usb-service-stopped"
+          role="status"
+        >
+          <AlertTriangle size={14} />{" "}
+          <span>MOSS 内置语音服务还没启动，现在写入后小智开机连不上 MOSS。</span>
+          <button
+            type="button"
+            className="xz-chip-btn"
+            id="xiaozhi-usb-start-service"
+            disabled={startingService}
+            onClick={startBuiltinService}
+          >
+            <Play size={12} aria-hidden="true" />{" "}
+            {startingService ? "启动中…" : "启动内置服务"}
+          </button>
+        </div>
+      )}
       {errText && (
         <div className="voice-hint voice-hint--bad xz-banner" role="alert">
           <AlertTriangle size={14} /> <span>{errText}</span>
@@ -540,6 +791,52 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
       {noticeText && (
         <div className="voice-hint voice-hint--ok xz-banner" role="status">
           <CheckCircle2 size={14} /> <span>{noticeText}</span>
+        </div>
+      )}
+      {checkinView && (
+        <div
+          className={`voice-hint ${
+            checkinView.tone === "ok"
+              ? "voice-hint--ok"
+              : checkinView.tone === "warn"
+                ? "voice-hint--warn"
+                : ""
+          } xz-banner`}
+          id="xiaozhi-usb-checkin"
+          data-phase={checkinView.phase}
+          role="status"
+        >
+          {checkinView.tone === "ok" ? (
+            <CheckCircle2 size={14} aria-hidden="true" />
+          ) : checkinView.tone === "warn" ? (
+            <AlertTriangle size={14} aria-hidden="true" />
+          ) : checkinView.phase === "waiting" || checkinView.phase === "ota_seen" ? (
+            <RefreshCw size={14} className="voice-spin" aria-hidden="true" />
+          ) : (
+            <Usb size={14} aria-hidden="true" />
+          )}{" "}
+          <span>{checkinView.text}</span>
+          {checkinView.phase === "service_stopped" && (
+            <button
+              type="button"
+              className="xz-chip-btn"
+              disabled={startingService}
+              onClick={startBuiltinService}
+            >
+              <Play size={12} aria-hidden="true" />{" "}
+              {startingService ? "启动中…" : "启动内置服务"}
+            </button>
+          )}
+          {checkinView.phase === "timeout" && (
+            <button
+              type="button"
+              className="xz-chip-btn"
+              id="xiaozhi-usb-checkin-retry"
+              onClick={retryCheckin}
+            >
+              <RefreshCw size={12} aria-hidden="true" /> 重新检查
+            </button>
+          )}
         </div>
       )}
 
@@ -563,8 +860,14 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
             value={selectedPort}
             disabled={Boolean(busy) || ports.length === 0}
             onChange={(e) => {
+              userPickedPortRef.current = true;
               setSelectedPort(e.target.value);
-              resetBoardDraft();
+              if (inspectDataRef.current) {
+                resetBoardDraft();
+              } else {
+                setPendingWrite(null);
+                setCheckin(null);
+              }
               setErrText("");
             }}
           >
@@ -590,7 +893,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
             type="button"
             className="btn btn-ghost"
             disabled={Boolean(busy)}
-            onClick={loadPorts}
+            onClick={() => void loadPorts()}
             title="重新扫描串口"
             id="xiaozhi-usb-refresh"
           >
@@ -606,6 +909,13 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
             <Usb size={14} /> {busy === "inspect" ? "读取中…" : "读取板子配置"}
           </button>
         </div>
+
+        {inspectStage && (
+          <div className="voice-hint xz-banner" id="xiaozhi-usb-progress" role="status">
+            <RefreshCw size={14} className="voice-spin" aria-hidden="true" />{" "}
+            <span>{inspectStage}</span>
+          </div>
+        )}
 
         {needsBoardIdentityWarning(ports.find((p) => p.port_name === selectedPort)) && (
           <div className="voice-hint voice-hint--warn xz-banner" id="xiaozhi-usb-port-identity-warn">
@@ -818,6 +1128,30 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                       <ScanSearch size={12} aria-hidden="true" />{" "}
                       {wifiBusy === "wifi_scan" ? "扫描中…" : "扫描附近"}
                     </button>
+                    {lastWifi?.ssid && draft.newSsid !== lastWifi.ssid && (
+                      <>
+                        <button
+                          type="button"
+                          className="xz-chip-btn"
+                          id="xiaozhi-wifi-use-last"
+                          disabled={Boolean(busy)}
+                          onClick={useLastWrittenWifi}
+                          title="填入本次内存会话中刚成功写入的 Wi-Fi 名称与密码（不落盘）"
+                        >
+                          <History size={12} aria-hidden="true" /> 复用上次：{lastWifi.ssid}
+                        </button>
+                        <button
+                          type="button"
+                          className="xz-chip-btn xz-chip-btn--muted"
+                          id="xiaozhi-wifi-clear-last"
+                          disabled={Boolean(busy)}
+                          onClick={clearLastWifi}
+                          title="清除内存中暂存的上次 Wi-Fi 密码"
+                        >
+                          清除记忆
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="xz-form-group">
@@ -946,6 +1280,14 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                                     </span>
                                   ))
                                 )}
+                                {network.wpa3_only === true && (
+                                  <span
+                                    className="ob-pill ob-pill--warn"
+                                    title="部分小智 ESP32 固件只支持 WPA2，纯 WPA3 可能连不上"
+                                  >
+                                    仅 WPA3
+                                  </span>
+                                )}
                                 {Number.isInteger(network.signal) && (
                                   <span className="xz-scan-signal">信号 {network.signal}%</span>
                                 )}
@@ -1042,33 +1384,22 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
                       </button>
                     )}
                   </div>
-                  <div className="xz-quick-fills">
-                    {otaIp && (
+                  <div className="xz-quick-fills" id="xiaozhi-ota-quick-fills">
+                    {otaQuickOptions.map((opt) => (
                       <button
+                        key={opt.url}
                         type="button"
                         className="xz-chip-btn"
                         disabled={Boolean(busy)}
+                        title={opt.url}
                         onClick={() => {
                           otaTouchedRef.current = true;
-                          updateDraft((prev) => ({ ...prev, otaUrl: otaIp }));
+                          updateDraft((prev) => ({ ...prev, otaUrl: opt.url }));
                         }}
                       >
-                        填入本机 Wi-Fi IP 地址
+                        {opt.label}
                       </button>
-                    )}
-                    {otaMdns && otaMdns !== otaIp && (
-                      <button
-                        type="button"
-                        className="xz-chip-btn"
-                        disabled={Boolean(busy)}
-                        onClick={() => {
-                          otaTouchedRef.current = true;
-                          updateDraft((prev) => ({ ...prev, otaUrl: otaMdns }));
-                        }}
-                      >
-                        填入 moss.local 地址
-                      </button>
-                    )}
+                    ))}
                   </div>
                   {renderStaleOta("xiaozhi-ota-stale-advanced")}
                 </div>

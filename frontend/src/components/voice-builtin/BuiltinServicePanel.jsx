@@ -75,9 +75,9 @@ export function BuiltinServicePanel({ builtin }) {
             )}
             {status.ota_ip_url && status.ota_ip_url !== status.ota_url && (
               <>
-                <span className="voice-muted">· 当前 Wi-Fi IP：</span>
+                <span className="voice-muted">· 本机局域网 IP：</span>
                 <span className="mono voice-break" id="voice-builtin-ota-ip">{status.ota_ip_url}</span>
-                <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_ip_url, "当前 Wi-Fi OTA 地址")} id="voice-builtin-ota-ip-copy" title="复制当前 Wi-Fi IP 地址">
+                <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_ip_url, "本机局域网 OTA 地址")} id="voice-builtin-ota-ip-copy" title="复制本机局域网 IP 地址">
                   <Copy size={13} /> 复制 IP
                 </button>
               </>
@@ -93,7 +93,7 @@ export function BuiltinServicePanel({ builtin }) {
             </button>
           </span>
           <span className="voice-muted">
-            在设备配网页面填入上方 <code>moss.local</code> 地址后，换 Wi-Fi 无需重改；若公共网络屏蔽局域网广播，可改用右侧当前 Wi-Fi IP 地址。端口 {status.ws_port} / {status.http_port}，在下面“内置服务端口”组修改。
+            在设备配网页面填入上方 <code>moss.local</code> 地址后，换网无需重改；若局域网广播解析不稳定，可改用右侧本机局域网 IP 地址。端口 {status.ws_port} / {status.http_port}，在下面“内置服务端口”组修改。
           </span>
         </div>
       </div>
