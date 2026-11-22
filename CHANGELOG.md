@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 内置语音与小智控制台提示词收口：补齐对话层材料澄清、走边框中途控制并精简规则文档（2026-11-22）
+
+- **现象**：内置语音底层安全铁律（`IMMUTABLE_SAFETY_RULES`）与 `DEFAULT_SYSTEM_PROMPT`、`PLAIN_HEAD` 存在重复字面量维护，且未在对话层提示词写明 PVC 拒刻、塑料/软卡成分澄清与预览后实物核对（仅靠调用工具触发后端报错）；官方小智控制台提示词误含内置语音专属 `play_music` 段落与已禁用的 `M3-5/改GRBL` 表述，占满 2000 字预算导致无法写入走边框途中的暂停/停止说明；`AGENTS.md` 与开发文档残留格式化指令冲突及已删除链路的旧快照。
+- **根因与修复**：`moss-voice-server` 将 `DEFAULT_SYSTEM_PROMPT` 与 `PLAIN_HEAD` 收口为单源宏拼装，并在 `IMMUTABLE_SAFETY_RULES` 补齐 PVC/含氯材料拒刻、塑料/软卡先问材质及生成预览后提醒核对实物材料与厚度（对全部内置与自定义角色生效，后端门禁不变）；`xiaozhi-prompts/latest.md` 移除 `play_music` 与 `M3-5/改GRBL` 旧词并新增日期快照，补齐走边框中途 `pause` / `resume`（须确认）/ `stop_framing` 路由（1958/2000 字）；同步精简 `AGENTS.md`（统一 `verify.mjs --fmt-write`、下沉隐私细则、补齐触发路径与 macOS 打包命令）及 `safety.md`、`architecture.md`、`packaging-install.md`、`quick-start.md`、`docs/README.md`。
+- **验证**：`guide.rs` 补充系统提示词材料澄清与实物核对断言，`persona` 与 `local_runtime_tests` 角色铁律回归通过，`node scripts/verify.mjs` 通过，已执行 `bash scripts/quick-update-desktop.sh` 同步本地正式版 `/Applications/MOSS.app`。未连接真实小智设备与激光机实测对话（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{conversation,persona}.rs`、`crates/moss-voice-server/src/tests/chat/guide.rs`、`docs/integration/xiaozhi-prompts/{latest.md,history/2026-11-22-framing-controls-trim.md}`、`AGENTS.md`、`docs/README.md`、`docs/developer/{safety,architecture,packaging-install}.md`、`docs/user/quick-start.md`。
+
 ### 完整过程记录改为按先后的统一时间线，补齐加工全流程与语音细节（2026-11-22）
 
 - **现象**：完整过程记录只覆盖语音每轮对话和激光生成预览，加工本身（连接、确认发送、急停、进度、结束）、审批、接入点调用、拾音与逐句播放、后台记忆整理和看图都没记；语音与激光分在两个文件里，每条也没有说明这一步在干什么。

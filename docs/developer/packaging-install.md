@@ -32,11 +32,11 @@
 | I-8 | 缺少 WebView2 时自动安装 |
 | I-9 | Android 继续使用标准 APK 安装与系统卸载（系统不支持自定义安装目录） |
 
-## 2. 现状核实（2026-10-05 读代码）
+## 2. 运行与打包边界
 
 | 项 | 代码事实 | 对安装包的影响 |
 | --- | --- | --- |
-| 打包开关 | `tauri.conf.json`：`bundle.active=false`，无 `windows.nsis` 配置；`identifier=com.moss.laser`，`productName=MOSS`，`version=0.1.0` | 需开启打包并补全安装器配置 |
+| 打包开关 | `tauri.conf.json`：`bundle.active=true`，`targets=["nsis", "app", "dmg", "deb", "appimage"]`，`identifier=com.moss.laser`，`productName=MOSS` | Tauri 按当前编译宿主自动筛选目标产物（细则见 §2a） |
 | 运行数据目录 | `laser-host` 调用 `RuntimeRoot::resolve(None, None)`，默认目录由 `RuntimeRoot::default_base()` 决定：Windows 为 `%APPDATA%\moss`，macOS 为 `~/Library/Application Support/moss`，Linux 为 `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`，均缺失时退回当前目录 `.runtime/`；`moss-host migrate` 不写 `--target` 时也用它 | **各桌面系统实际写入当前用户的应用数据目录，不在程序目录旁**。安装到 `C:\Program Files` 或 `/Applications/MOSS.app` 都不需要程序目录写权限，Finder 双击启动不会因只读 `/` 失败，覆盖升级也不会碰到用户数据 |
 | `.env` 读取 | `config::load_env_files`：先读进程环境变量，再读**启动时当前目录**（向上查找）的 `.env`，最后读**运行目录**的 `.env`（Windows 为 `%APPDATA%\moss\.env`）；先加载的优先，后者不覆盖前者 | 已修复（PKG-02）：快捷方式启动时当前目录不确定也不影响，运行目录里的 `.env` 一定能读到。`settings.json` 的 `web_port`、`mcp_endpoint` 照常可用 |
 | 实例锁 | 运行目录下 `moss.lock`（`fs4` 独占锁） | 安装器可据此判断是否有实例在运行 |

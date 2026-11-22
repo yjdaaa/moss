@@ -81,11 +81,11 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 
 - crate `crates/moss-voice` 不依赖 Tauri，由 `apps/desktop/src-tauri` 在非 Android / iOS 目标引入（`src/voice.rs`，Tauri 命令见 [接口契约](api-contracts.md) §5）；`laser-host` 的 `external_mcp`（同样限非移动目标）与 `moss-agent`、`moss-home`、`moss-usb-provision` 只用其设置读写；`laser-api`、`moss-host`、Android 不包含进程管理代码。
 - `VoiceCenter` 编排页面操作；MOSS 后端的能力经 `HostHooks` 交入：严格模式状态（只读展示；开关由 `voice_strict_set` 写 `.env` 并热切换）、小智桥重连（`HostApplication::restart_mcp_bridge`：先停旧桥、等待其退出，再按 `settings.json` 接新桥）、桥连接状态、设备会话数（切到官方时清零；内置链路由内置服务写入注入的 `VoiceTelemetry` 实例，默认共享 `laser_contracts::global_voice_telemetry` 单例，`/api/system/info` 的 `voice.device_sessions` 读取）、内置服务启停。
-- 链路切换：官方 / 内置二选一，切换不改 `mcp_endpoint` 与严格模式，只写 `settings.json` 的 `voice.mode` 并启停内置服务，失败恢复设置与内置服务。2026-11-17 起自建服务端链路连代码删除（原 `supervisor` 子进程管理、`config_yaml` 模型向导、`health` 接入点健康检查、服务端日志与“自建链路强制严格模式”一并移除）。旧设置里的 `voice.mode = "self_hosted"` 读作 `builtin`，桌面端在后端初始化后、启动小智桥前调用 `moss_voice::settings::migrate_legacy_self_hosted` 一次性改写（有官方接入点备份则写回顶层 `mcp_endpoint`）。
+- 链路切换：官方 / 内置二选一，切换不改 `mcp_endpoint` 与严格模式，只写 `settings.json` 的 `voice.mode` 并启停内置服务，失败恢复设置与内置服务。旧设置里的历史值 `voice.mode = "self_hosted"` 读作 `builtin`，桌面端在后端初始化后、启动小智桥前调用 `moss_voice::settings::migrate_legacy_self_hosted` 一次性改写（有官方接入点备份则写回顶层 `mcp_endpoint`）。
 - 子进程句柄：内置服务的全部本地子进程（OneJev、本地视觉、Laya、`moss-voice-local`、`speech.cpp`）统一共用 `moss_process::JobHandle`（Windows Job Object `KILL_ON_JOB_CLOSE`，随 MOSS 关闭或异常退出结束进程树）。
 - 退出顺序：`ShutdownState::request()`（急停与任务清零）→ 停止内置语音服务与第三方 MCP 子进程 → 退出。
 
-## 4c. 内置语音服务（NV，仅桌面端，建设中）
+## 4c. 内置语音服务（NV，仅桌面端）
 
 - 方案见 [MOSS 内置语音服务技术书](../integration/moss-native-voice-spec.md)。小智设备直接连到 MOSS，不再需要 xiaozhi-server 与接入点。
 - `crates/moss-xiaozhi-proto`：纯协议（消息、帧协议 v1/v2/v3、设备 token、OTA、ESP-IDF 分区表与 NVS v2 编解码 `nvs`）。`crates/moss-voice-server`：专用 tokio 运行时（2 个工作线程）+ axum，OTA（默认 8003）与设备 WebSocket（默认 8000）两个端口，监听所有网卡但只提供 `/xiaozhi/*`，不暴露 MOSS API；每台设备一个会话。

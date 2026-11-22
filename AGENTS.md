@@ -1,7 +1,7 @@
 # Project Instructions
 
-仓库级唯一规则源，供 Antigravity (agy)、Codex、Claude Code、Cursor 等工具共用。实现约定见
-[`docs/developer/standards.md`](docs/developer/standards.md)，高风险代码先读
+仓库级唯一规则源，供 Antigravity (agy)、Codex、Claude Code、Cursor 等工具共用。增删改 MCP 工具、Tauri 命令、数据库迁移或前端弹窗前必读
+[`docs/developer/standards.md`](docs/developer/standards.md)；改动命中 `laser-device`、`laser-api`（发送门禁/审批/CORS）、`laser-host`、`moss-voice-server`、`moss-mcp-client` 或 `apps/desktop/src-tauri` 前必读
 [`docs/developer/safety.md`](docs/developer/safety.md)。其他文档只引用本文件，不复制规则。
 
 ## 项目
@@ -15,7 +15,6 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 ## 工作方式
 
-- You are the owner and long-term maintainer of this codebase, and its design is up to you.
 - 先读待改文件、直接依赖、相关测试和对应文档；不扫描无关目录。
 - 复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
 - 未经明确授权，不提交、推送、重置或覆盖他人改动。
@@ -31,7 +30,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 - 急停 `0x18` 走实时通道，不得排在 G-code 队列之后；刀路门禁对物理 G-code 文件重新计算 SHA-256。
 - 不为全绿放宽断言、伪造预期数据或添加虚假桩代码。
 - 语音对话任务可能在用户话还没说完时就抢跑（2026-11-13 n86）：新增任何由大模型触发、有副作用的执行路径，都必须排在 `TurnGate` 闸门（`Turn::wait_release`）之后；只有整句停止这类必须立即执行的快路径可以不过闸门。
-- 新的外部控制或隐私能力（家居、Agent 执行、声纹、固件、联网插件）默认关闭，改由用户自己显式开启（2026-10-14 / 2026-10-15 用户决定）：家居控制须在语音中心“隐私与家居”设置（经来源校验的本机主窗口就地展开；2026-11-07 n67 起不再有独立安全窗口）填好地址、令牌、勾选实体并明确同意，每个动作仍逐次在桌面审批；声纹识别须完成简易标定（仅作候选身份提示，不授权任何动作）；本机 Agent 执行仅在严格模式下开放，每次运行须在桌面审批卡单独批准；固件导入与按台推送、设备唤醒词推送仅在语音中心（经来源校验的本机主窗口）由用户逐台确认（2026-11-07 n67 用户决定取消独立安全窗口）；唯一例外是“副屏预览 › 自动保持全屏画风”（默认关，开启时确认一次）：开启后 MOSS 可给还没装好全屏画风包（含换画风后按新画风重刷）的在线彩屏小智自动推送资源包，沿用原唤醒词，加工中、有待批准请求、对话中不推，每台每天最多一次（2026-11-09 n78 用户决定）。mock 结果不能充当实机验收。
+- 外部控制与隐私能力（家居、本机 Agent 执行、声纹、固件与唤醒词推送、联网插件）默认关闭，须由用户在经来源校验的桌面主窗口显式开启；家居动作与严格模式下的本机 Agent 每次运行均须在桌面审批卡逐次批准，声纹仅作候选身份提示绝不授权任何动作，固件与唤醒词按台确认推送（各模块门禁与“副屏全屏画风”自动推送唯一例外见 [`safety.md`](docs/developer/safety.md) §4）。mock 结果不能充当实机验收。
 
 ## 开发约束
 
@@ -47,16 +46,17 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 | 时机 | 必须执行 |
 | --- | --- |
-| 每次代码改动（修复或新增功能） | `cargo fmt --all`，`cargo clippy --workspace --all-targets -- -D warnings` 零警告，改前端加 `cd frontend; npm run lint` 零 error（CI 同样把关，2026-11-07）；受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（改 `apps/moss-voice-local` 加 `-WithVoiceHelper`，改 `moss-host` 加 `-WithHost`），把最新正式版 `moss-desktop.exe` 编译并原地同步到本机正式程序**（2026-11-01 用户决定；跳过 NSIS 重压包，MOSS 运行时不强杀，自动将旧文件改名挪开并写入新版，用户关掉重开即生效）；macOS 上执行 `bash scripts/quick-update-desktop.sh`（对应参数 `--with-voice-helper` / `--with-host`，原地替换 `/Applications/MOSS.app` 内的程序并重新 ad-hoc 签名，2026-11-05） |
+| 每次代码改动（修复或新增功能） | `node scripts/verify.mjs --fmt-write`（仅格式化改动 `.rs`，无并行会话时可跑 `cargo fmt --all`），`cargo clippy --workspace --all-targets -- -D warnings` 零警告，改前端加 `cd frontend; npm run lint` 零 error；受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（macOS 执行 `bash scripts/quick-update-desktop.sh`；改 `apps/moss-voice-local` 加 `-WithVoiceHelper` / `--with-voice-helper`，改 `moss-host` 加 `-WithHost` / `--with-host`），把最新正式版桌面程序原地同步到本机安装目录**（跳过安装包重压，MOSS 运行时不强杀，用户关掉重开即生效） |
 | 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（API 链路 + 工作台界面，使用回环 GRBL 模拟器；`moss-host` 编译时内嵌 `frontend/dist`，须先 `npm run build` 再构建 release `moss-host`；界面用例在 Windows 上用本机 Edge，其他系统用 Playwright 自带 Chromium，可用 `PLAYWRIGHT_CHANNEL` 指定） |
 | 改前端交互、浏览器测试或其调度脚本 | `cd frontend; npm run test:browser`（Playwright 浏览器交互测试） |
-| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper`；根工作区测试不覆盖它 |
-| 阶段收尾、交付 | 以上全部，加三端完整 release 安装包构建（见下） |
+| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper` / `--with-voice-helper`；根工作区测试不覆盖它 |
+| 阶段收尾、交付 | 以上全部，加全平台 release 安装包构建（见下） |
 
-三端 release 构建：
+全平台 release 安装包构建：
 
 - 前端：`cd frontend; npm run build`
 - Windows：`cd apps/desktop/src-tauri; cargo tauri build`，产物 `target/release/moss-desktop.exe` 与 `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe`
+- macOS：`bash scripts/build-macos-installer.sh --without-voice-sidecar`，产物 `target/<triple>/release/bundle/dmg/MOSS_<版本>_<arch>.dmg`
 - Android：`cd apps/desktop/src-tauri; cargo tauri android build --target aarch64 --apk`，产物在 `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/`
 
 `--debug` 构建只用于临时调试（桌面热重载 `scripts/dev-desktop.ps1`），不算验证证据。日常本机快速同步正式版主程序用 `scripts/quick-update-desktop.ps1`（`cargo tauri build --no-bundle`，跳过 NSIS 压包；阶段收尾仍须跑完整三端构建），细则与带语音 helper 的专用安装包流程见

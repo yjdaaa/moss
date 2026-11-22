@@ -11,7 +11,8 @@ use moss_voice_providers::{BoxFuture, ToolSpec};
 use serde_json::{Value, json};
 
 use crate::conversation::{
-    DEFAULT_SYSTEM_PROMPT, IMMUTABLE_SAFETY_RULES, ToolContext, ToolExecutor, ToolOutcome,
+    DEFAULT_SYSTEM_PROMPT, IMMUTABLE_SAFETY_RULES, PLAIN_HEAD, ToolContext, ToolExecutor,
+    ToolOutcome,
 };
 use crate::tools::ToolHostResult;
 
@@ -25,8 +26,6 @@ pub struct BuiltinPersona {
     pub aliases: &'static [&'static str],
     head: &'static str,
 }
-
-const PLAIN_HEAD: &str = "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。";
 
 /// 内置角色（编号与 `moss_voice::settings::BUILTIN_PERSONA_IDS` 一致，桌面端测试核对）。
 /// n75（2026-11-08 用户决定）：7 个减为 4 个——“任务简报”并进 MOSS，“风险评估”改为所有角色可用的开关，

@@ -21,15 +21,19 @@
 ### 方式 B：命令行
 
 ```powershell
-# 桌面热重载开发模式（进程内自带后端 + 前端秒刷新，语音中心可用）
+# Windows：桌面热重载开发模式（进程内自带后端 + 前端秒刷新，语音中心可用）
 powershell -File scripts/dev-desktop.ps1
 
-# 本机快速编译并原地同步正式版主程序（跳过 NSIS 安装包重压）
+# Windows：本机快速编译并原地同步正式版主程序（跳过 NSIS 安装包重压）
 powershell -File scripts/quick-update-desktop.ps1
+```
 
-# 无界面宿主（HTTP + MCP 桥），控制台会打印实际监听地址
-cd apps/moss-host
-cargo run -- serve
+```bash
+# macOS：本机快速编译并原地同步正式版 /Applications/MOSS.app（跳过 DMG 重压）
+bash scripts/quick-update-desktop.sh
+
+# 无界面宿主（HTTP + MCP 桥，跨平台），控制台会打印实际监听地址
+cargo run -p moss-host -- serve
 
 # Android 调试包
 cd apps/desktop/src-tauri

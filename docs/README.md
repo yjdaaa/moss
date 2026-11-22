@@ -4,7 +4,7 @@
 
 ## 用户
 
-- [快速开始](user/quick-start.md)：Windows 上启动桌面端或无界面宿主、`.env` 配置、运行目录、局域网配对、第一次雕刻的安全流程、常见问题。
+- [快速开始](user/quick-start.md)：Windows / macOS 上启动桌面端或无界面宿主、`.env` 配置、运行目录、局域网配对、第一次雕刻的安全流程、常见问题。
 - [FluidNC 烧录后测试清单](user/fluidnc-moss-烧录后测试清单.md)：刷完固件后与 MOSS 联调的逐项检查。
 
 ## 开发者

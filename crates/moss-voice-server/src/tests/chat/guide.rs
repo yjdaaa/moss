@@ -66,6 +66,10 @@ fn laser_tool_guide_is_added_only_when_laser_tools_are_offered() {
     let with = system_prompt_with(vec!["laser_workflow_tool", "laser_safe_action_tool"]);
     assert!(with.contains("激光工具怎么选"), "{with}");
     assert!(with.contains("confirm_send") && with.contains("emergency_stop"));
+    assert!(
+        with.contains("PVC") && with.contains("塑料或软卡") && with.contains("实物材料与厚度"),
+        "{with}"
+    );
     let without = system_prompt_with(vec!["get_weather"]);
     assert!(!without.contains("激光工具怎么选"));
 }
