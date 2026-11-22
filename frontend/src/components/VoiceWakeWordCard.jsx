@@ -185,7 +185,11 @@ export default function VoiceWakeWordCard() {
                 <span className="wakeword-device-name">
                   <strong>{device.name || device.device_id}</strong>
                   <small>
-                    {device.supported ? "支持在线更新唤醒词" : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}
+                    {device.supported
+                      ? "支持在线更新唤醒词"
+                      : device.tools_loading
+                        ? "正在读取设备能力…"
+                        : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}
                     {device.supported && ` · ${screenPackDeviceView(device).text}`}
                   </small>
                 </span>

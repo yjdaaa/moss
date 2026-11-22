@@ -263,13 +263,22 @@ impl BuiltinVoice {
             .filter(|d| d.is_allowed())
             .map(|d| (d.device_id.clone(), d))
             .collect();
-        let sessions = self
-            .server
-            .lock()
-            .map_err(|_| internal("语音服务锁失败"))?
-            .as_ref()
-            .map(|s| s.active_device_sessions())
-            .unwrap_or_default();
+        let sessions = {
+            let guard = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+            if let Some(server) = guard.as_ref() {
+                let current = server.active_device_sessions();
+                if current.iter().any(|r| {
+                    allowed.contains_key(&r.device_id)
+                        && r.device_mcp_enabled
+                        && !r.device_tools_ready
+                }) {
+                    server.sync_device_tools();
+                }
+                current
+            } else {
+                Vec::new()
+            }
+        };
         let settings = moss_voice::settings::load(&self.settings_file());
         let style = moss_voice_server::ScreenCardStyle::from_setting(
             &settings.builtin_local.screen_card_style,
@@ -333,6 +342,7 @@ impl BuiltinVoice {
                     serde_json::json!({
                         "device_id":r.device_id,"name":dev_row.map(|d| &d.name),
                         "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
+                        "tools_loading":r.device_mcp_enabled && !r.device_tools_ready,
                         "screen_pack_size":screen.map(|(w,h)|[w,h]),
                         "screen_pack":installed,
                         "screen_pack_state":screen_pack_state,

@@ -408,6 +408,8 @@ pub(crate) async fn serve_session(
                 active_tool: None,
                 utterance_chars: 0,
                 spoken_sentences: 0,
+                device_mcp_enabled: session.device_mcp.is_some(),
+                device_tools_ready: session.device_mcp.is_none(),
                 device_tools: Vec::new(),
                 screen_monochrome: None,
                 screen_width: None,

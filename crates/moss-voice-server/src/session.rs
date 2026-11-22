@@ -491,16 +491,18 @@ impl DeviceMcp {
         pending: McpPending,
         now: Instant,
     ) -> Value {
-        if matches!(pending, McpPending::ToolsList) {
-            self.pages += 1;
-        }
-        self.prune_pending(now);
+        let _ = self.prune_pending(now);
         while self.pending.len() >= MAX_MCP_PENDING {
             // id 单调递增：最小的就是最早发出的
             let Some(oldest) = self.pending.keys().min().copied() else {
                 break;
             };
-            self.pending.remove(&oldest);
+            if let Some((_, evicted)) = self.pending.remove(&oldest) {
+                let _ = self.on_pending_evicted(&evicted);
+            }
+        }
+        if matches!(pending, McpPending::ToolsList) {
+            self.pages += 1;
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -515,12 +517,42 @@ impl DeviceMcp {
         json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
     }
 
-    /// 移除超过 [`MCP_PENDING_TTL`] 仍未回包的请求，以及等待方已放弃（对话任务结束）的工具调用。
-    fn prune_pending(&mut self, now: Instant) {
-        self.pending.retain(|_, (at, pending)| {
-            now.saturating_duration_since(*at) < MCP_PENDING_TTL
-                && !matches!(pending, McpPending::Call(reply) if reply.is_closed())
-        });
+    fn on_pending_evicted(&mut self, evicted: &McpPending) -> bool {
+        match evicted {
+            McpPending::Initialize if !self.initialized => {
+                self.init_sent = false;
+                true
+            }
+            McpPending::ToolsList if !self.ready => {
+                self.pages = 0;
+                self.tools.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 移除超过 [`MCP_PENDING_TTL`] 仍未回包的请求，以及等待方已放弃（对话任务结束）的工具调用；
+    /// 若在途 `Initialize` 或 `ToolsList` 超时被移除则返回 `true`，供会话层收口加载态并释放延迟请求。
+    fn prune_pending(&mut self, now: Instant) -> bool {
+        let expired_ids: Vec<u64> = self
+            .pending
+            .iter()
+            .filter_map(|(id, (at, pending))| {
+                let keep = now.saturating_duration_since(*at) < MCP_PENDING_TTL
+                    && !matches!(pending, McpPending::Call(reply) if reply.is_closed());
+                (!keep).then_some(*id)
+            })
+            .collect();
+        let mut stalled = false;
+        for id in expired_ids {
+            if let Some((_, evicted)) = self.pending.remove(&id)
+                && self.on_pending_evicted(&evicted)
+            {
+                stalled = true;
+            }
+        }
+        stalled
     }
 
     fn model_tools(&self) -> Vec<Value> {

@@ -19,12 +19,13 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// 对话模式会话开始时向声明了 MCP 的设备发 `initialize`（回声模式按需在首次桌面端请求时握手）。
+    /// 对话模式（或桌面端开启 `eager_device_mcp` 的回声模式）会话开始时向声明了 MCP 的设备发 `initialize`；
+    /// 纯协议回声模式仍按需在首次桌面端请求时握手。
     pub(super) async fn start_device_mcp(
         &mut self,
         socket: &mut crate::link::Link,
     ) -> Result<(), String> {
-        if self.conversation.is_none() {
+        if self.conversation.is_none() && !self.shared.config.eager_device_mcp {
             return Ok(());
         }
         self.send_mcp_initialize(socket).await
@@ -88,7 +89,17 @@ impl<'a> Session<'a> {
             Some(McpPending::Initialize) => {
                 device.initialized = true;
                 let deferred = std::mem::take(&mut device.deferred_requests);
-                let list = self.conversation.is_some().then(|| {
+                let need_tools_list = (self.conversation.is_some()
+                    || self.shared.config.eager_device_mcp
+                    || deferred.iter().any(|req| {
+                        matches!(
+                            req,
+                            crate::DeviceRequest::SyncTools
+                                | crate::DeviceRequest::CapturePhoto { .. }
+                        )
+                    }))
+                    && device.pages == 0;
+                let list = need_tools_list.then(|| {
                     device.request(
                         "tools/list",
                         json!({"withUserTools": true}),
@@ -393,7 +404,14 @@ impl<'a> Session<'a> {
         }
         let should_send_init = match self.device_mcp.as_mut() {
             Some(device) if !device.initialized => {
-                if device.deferred_requests.len() < 16 {
+                if matches!(request, crate::DeviceRequest::SyncTools)
+                    && device
+                        .deferred_requests
+                        .iter()
+                        .any(|r| matches!(r, crate::DeviceRequest::SyncTools))
+                {
+                    // 已有排队中的 SyncTools，保持幂等不挤占延迟队列
+                } else if device.deferred_requests.len() < 16 {
                     device.deferred_requests.push(request);
                 } else if let crate::DeviceRequest::CapturePhoto { ticket } = request {
                     self.shared.camera_preview.record_error(
@@ -478,6 +496,20 @@ impl<'a> Session<'a> {
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         match request {
+            crate::DeviceRequest::SyncTools => {
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                if !device.ready && device.pages == 0 {
+                    let list = device.request(
+                        "tools/list",
+                        json!({"withUserTools": true}),
+                        McpPending::ToolsList,
+                    );
+                    return self.send_mcp(socket, list).await;
+                }
+                Ok(())
+            }
             crate::DeviceRequest::ShowScene { scene, style } => {
                 return self.show_scene_request(socket, scene, style).await;
             }
@@ -544,9 +576,16 @@ impl<'a> Session<'a> {
                     self.shared.camera_preview.clear_device(self.device_id);
                     return Err("设备授权已撤销".into());
                 }
-                if self.conversation.is_some() && self.device_mcp.as_ref().is_some_and(|d| !d.ready)
-                {
+                if self.device_mcp.as_ref().is_some_and(|d| !d.ready) {
+                    let mut list_req = None;
                     if let Some(dev) = self.device_mcp.as_mut() {
+                        if dev.pages == 0 {
+                            list_req = Some(dev.request(
+                                "tools/list",
+                                json!({"withUserTools": true}),
+                                McpPending::ToolsList,
+                            ));
+                        }
                         if dev.deferred_requests.len() < 16 {
                             dev.deferred_requests
                                 .push(crate::DeviceRequest::CapturePhoto { ticket });
@@ -557,6 +596,9 @@ impl<'a> Session<'a> {
                                 "设备工具清单同步繁忙，请稍后再试".into(),
                             );
                         }
+                    }
+                    if let Some(list) = list_req {
+                        self.send_mcp(socket, list).await?;
                     }
                     return Ok(());
                 }

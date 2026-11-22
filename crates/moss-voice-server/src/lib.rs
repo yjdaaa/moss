@@ -227,6 +227,9 @@ pub struct ServerConfig {
     pub full_font_dir: Option<std::path::PathBuf>,
     /// #19 与宿主共享的对话记录代次计数器：关闭/清空会递增它，使在途记录被宿主识别为过期。
     pub debug_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// 回声模式（尚未配置对话模型）下连接建立时是否同样立即执行设备端 MCP `initialize` 与 `tools/list`，
+    /// 以便新装机未填模型密钥时桌面端也能读取 `self.assets.set_download_url` 与屏幕分辨率并推送唤醒词/全屏画风。
+    pub eager_device_mcp: bool,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -271,6 +274,7 @@ impl Default for ServerConfig {
             mqtt: None,
             full_font_dir: None,
             debug_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            eager_device_mcp: false,
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -339,6 +343,8 @@ pub enum DeviceRequest {
         scene: BotPose,
         style: ScreenCardStyle,
     },
+    /// 按需握手并拉取设备自带 MCP 工具清单（幂等，已拉取完成或正在拉取时忽略）。
+    SyncTools,
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -804,6 +810,18 @@ impl VoiceServer {
         self.shared.active_device_sessions()
     }
 
+    /// 向已启用设备端 MCP 但尚未完成 `tools/list` 的在线会话发起一次非阻塞工具清单同步。
+    pub fn sync_device_tools(&self) {
+        if self.runtime.is_none() {
+            return;
+        }
+        for s in self.shared.active_device_sessions() {
+            if s.device_mcp_enabled && !s.device_tools_ready {
+                let _ = self.device_request(&s.device_id, DeviceRequest::SyncTools);
+            }
+        }
+    }
+
     /// n61：暂存唤醒词资源包并让这台在线设备去下载（设备随后重启、自己写入资源分区）。
     ///
     /// 只在设备当前活跃会话上报了 user-only 工具 `self.assets.set_download_url` 时发送；
@@ -882,7 +900,7 @@ impl VoiceServer {
         let online = session.is_some();
         let session_state = session.as_ref().map(|s| s.state.clone());
         let has_camera_tool = session.as_ref().and_then(|s| {
-            if s.device_tools.is_empty() {
+            if s.device_mcp_enabled && !s.device_tools_ready {
                 None
             } else {
                 Some(s.device_tools.iter().any(|t| t == "self.camera.take_photo"))

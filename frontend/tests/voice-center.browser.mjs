@@ -42,6 +42,7 @@ try {
         { device_id: "aa:bb:cc:44:55:66", name: "书房小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "installed", wake_target: "default" },
         { device_id: "aa:bb:cc:77:88:99", name: "客厅小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "style_outdated", screen_pack_style: "goggle_bot", wake_target: "default" },
         { device_id: "aa:bb:cc:aa:bb:cc", name: "工作台小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "assets_outdated", screen_pack_style: "moss_hud", wake_target: "default" },
+        { device_id: "aa:bb:cc:dd:ee:ff", name: "刚连上小智", supported: false, tools_loading: true, screen_pack_size: null, screen_pack: false, screen_pack_state: "none", wake_target: null },
       ],
     },
     mode: "official",
@@ -1212,6 +1213,7 @@ try {
   assert.equal((await wakeGroup.locator('[data-quick-pack="aa:bb:cc:77:88:99"]').innerText()).trim(), "一键重刷全屏画风", "换了画风要重刷");
   await wakeDevices.nth(3).getByText(/底包或字库与设备当前不一致/).waitFor();
   assert.equal((await wakeGroup.locator('[data-quick-pack="aa:bb:cc:aa:bb:cc"]').innerText()).trim(), "一键更新画风字库", "底包或字库指纹变化可一键更新");
+  await wakeDevices.nth(4).getByText("正在读取设备能力…").waitFor();
   await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').click();
   await confirmDialog("确认推送这一台");
   assert.deepEqual(last("voice_wakeword_manage").args.input, { action: "push", device_id: "aa:bb:cc:11:22:33", target: "default", confirmed: true, screen_pack: true }, "没推过自定义唤醒词时沿用“你好小智”");

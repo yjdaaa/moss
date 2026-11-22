@@ -516,3 +516,153 @@ fn mqtt_standby_restores_saved_text_font_snapshot_for_glyph_push_before_wake() {
         "常连开机未唤醒前主动推屏也应携带 glyph_push 点阵: {stt}"
     );
 }
+
+#[test]
+fn echo_mode_with_eager_device_mcp_discovers_tools_and_screen_size_over_mqtt() {
+    let registry = Arc::new(FakeRegistry::default());
+    registry
+        .devices
+        .lock()
+        .unwrap()
+        .insert(DEVICE.into(), (CLIENT.into(), DeviceStatus::Allowed));
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Echo,
+            conversation: None,
+            eager_device_mcp: true,
+            mqtt: Some(MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry,
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("MQTT 已监听");
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    // 未配置对话模型（Echo 模式）且设备仅通过 MQTT 待机在线（未唤醒）：
+    // 仍应立即完成 initialize -> tools/list(withUserTools=true) -> self.screen.get_info，
+    // 使桌面端能直接识别 self.assets.set_download_url 与彩屏分辨率并推送唤醒词/全屏画风。
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    let init = device.read_mcp();
+    assert_eq!(init["method"], "initialize");
+    device.reply_mcp(
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(device.read_mcp()["method"], "notifications/initialized");
+
+    let list = device.read_mcp();
+    assert_eq!(list["method"], "tools/list");
+    assert_eq!(list["params"]["withUserTools"], true);
+    device.reply_mcp(
+        &list["id"],
+        serde_json::json!({"tools": [
+            {"name": "self.assets.set_download_url", "description": "资源包下载", "inputSchema": {"type": "object"}},
+            {"name": "self.screen.get_info", "description": "屏幕信息", "inputSchema": {"type": "object"}},
+            {"name": "self.reboot", "description": "重启", "inputSchema": {"type": "object"}}
+        ]}),
+    );
+
+    let screen_call = device.read_mcp();
+    assert_eq!(screen_call["method"], "tools/call");
+    assert_eq!(screen_call["params"]["name"], "self.screen.get_info");
+    device.reply_mcp(
+        &screen_call["id"],
+        serde_json::json!({"content": [{"type": "text", "text": "{\"width\":320,\"height\":240,\"monochrome\":false}"}]}),
+    );
+
+    wait_until(
+        "回声模式常连设备完成工具与彩屏分辨率发现",
+        || {
+            server.active_device_sessions().iter().any(|s| {
+                s.device_id == DEVICE
+                    && s.device_tools_ready
+                    && s.device_tools
+                        .iter()
+                        .any(|t| t == "self.assets.set_download_url")
+                    && s.screen_width == Some(320)
+                    && s.screen_height == Some(240)
+            })
+        },
+    );
+    assert_eq!(server.screen_pack_size(DEVICE), Some((320, 240)));
+
+    server
+        .install_wake_assets(DEVICE, vec![0xAA; 16])
+        .expect("回声模式下已发现 self.assets.set_download_url 的设备可推送资源包");
+    let set_url = device.read_mcp();
+    assert_eq!(set_url["method"], "tools/call");
+    assert_eq!(set_url["params"]["name"], "self.assets.set_download_url");
+    let reboot = device.read_mcp();
+    assert_eq!(reboot["method"], "tools/call");
+    assert_eq!(reboot["params"]["name"], "self.reboot");
+}
+
+#[test]
+fn sync_tools_deduplicates_before_init_and_hello_without_mcp_clears_loading_state() {
+    let registry = Arc::new(FakeRegistry::default());
+    registry
+        .devices
+        .lock()
+        .unwrap()
+        .insert(DEVICE.into(), (CLIENT.into(), DeviceStatus::Allowed));
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Echo,
+            conversation: None,
+            mqtt: Some(MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry,
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("MQTT 已监听");
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    wait_until("常连会话已建立且处于待同步状态", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.device_mcp_enabled && !s.device_tools_ready)
+    });
+
+    // 连续轮询 20 次 sync_device_tools：不得重复发 initialize，也不得撑满 16 条延迟队列挤掉后续请求
+    for _ in 0..20 {
+        server.sync_device_tools();
+    }
+    server
+        .device_request(DEVICE, crate::DeviceRequest::RefreshInfo)
+        .unwrap();
+    let init = device.read_mcp();
+    assert_eq!(init["method"], "initialize");
+
+    // 若旧版固件不响应 initialize，而是在唤醒 hello 中上报 features.mcp = false，应立即收口加载态
+    device.publish(&serde_json::json!({
+        "type": "hello", "version": 3, "transport": "udp",
+        "features": {"mcp": false},
+        "audio_params": {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
+    }));
+    wait_until("hello 上报无 MCP 后退出加载态", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && !s.device_mcp_enabled && s.device_tools_ready)
+    });
+}

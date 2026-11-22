@@ -112,6 +112,12 @@ pub struct SessionView {
     /// 当前轮次已开始播报的句子数（不保存句子原文）。
     #[serde(default)]
     pub spoken_sentences: u32,
+    /// 当前连接是否声明启用了设备端 MCP（用于区分“工具清单仍在读取”与“固件未启用 MCP”）。
+    #[serde(default)]
+    pub device_mcp_enabled: bool,
+    /// 设备端 `tools/list(withUserTools=true)` 是否已完成（未启用设备端 MCP 时恒为 `true`）。
+    #[serde(default)]
+    pub device_tools_ready: bool,
     /// 当前连接设备通过 `tools/list(withUserTools=true)` 发现的工具名称列表（用于桌面端按能力渲染在线控制条）。
     #[serde(default)]
     pub device_tools: Vec<String>,
@@ -646,6 +652,17 @@ impl LiveState {
             && let Some(view) = sessions.get_mut(session_id)
         {
             view.device_tools = tools;
+            view.device_tools_ready = true;
+        }
+    }
+
+    pub fn disable_device_mcp(&self, session_id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.device_mcp_enabled = false;
+            view.device_tools_ready = true;
+            view.device_tools.clear();
         }
     }
 
@@ -826,6 +843,8 @@ mod tests {
             active_tool: None,
             utterance_chars: 0,
             spoken_sentences: 0,
+            device_mcp_enabled: false,
+            device_tools_ready: true,
             device_tools: Vec::new(),
             screen_monochrome: None,
             screen_width: None,
@@ -872,6 +891,8 @@ mod tests {
             active_tool: None,
             utterance_chars: 0,
             spoken_sentences: 0,
+            device_mcp_enabled: false,
+            device_tools_ready: true,
             device_tools: Vec::new(),
             screen_monochrome: None,
             screen_width: None,

@@ -487,6 +487,7 @@ impl BuiltinVoice {
                     }),
                 full_font_dir: Some(self.full_font_dir()),
                 debug_epoch: self.chat_log_epoch.clone(),
+                eager_device_mcp: true,
                 ..defaults
             };
             let registry = Arc::new(DbRegistry {

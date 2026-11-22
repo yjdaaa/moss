@@ -436,8 +436,26 @@ impl<'a> Session<'a> {
             if *shutdown.borrow() {
                 return "内置语音服务已停止".into();
             }
-            if let Some(device) = self.device_mcp.as_mut() {
-                device.prune_pending(Instant::now());
+            let stalled_deferred = if let Some(device) = self.device_mcp.as_mut()
+                && device.prune_pending(Instant::now())
+            {
+                Some(std::mem::take(&mut device.deferred_requests))
+            } else {
+                None
+            };
+            if let Some(deferred) = stalled_deferred {
+                for req in deferred {
+                    if let crate::DeviceRequest::CapturePhoto { ticket } = req {
+                        self.shared.camera_preview.record_error(
+                            self.device_id,
+                            Some(&ticket),
+                            "设备端 MCP 握手或工具列表同步超时，请稍后再试".into(),
+                        );
+                    }
+                }
+                self.shared
+                    .state
+                    .set_device_tools(self.session_id, Vec::new());
             }
             let deadline = match &self.phase {
                 Phase::Speaking { next, .. } => *next,

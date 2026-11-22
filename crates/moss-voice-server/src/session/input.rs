@@ -439,6 +439,27 @@ impl<'a> Session<'a> {
                     cap.as_ref().map(|f| f.bpp),
                 );
                 self.screen.text_font_cap = cap;
+                if !features.mcp
+                    && self.device_mcp.as_ref().is_some_and(|d| !d.initialized)
+                    && let Some(mut dev) = self.device_mcp.take()
+                {
+                    for req in std::mem::take(&mut dev.deferred_requests) {
+                        if let crate::DeviceRequest::CapturePhoto { ticket } = req {
+                            self.shared.camera_preview.record_error(
+                                self.device_id,
+                                Some(&ticket),
+                                "该设备未启用设备端 MCP，不支持摄像头抓拍".into(),
+                            );
+                        }
+                    }
+                    self.shared.state.disable_device_mcp(self.session_id);
+                    if let Ok(mut map) = self.shared.device_requests.lock()
+                        && let Some(handle) = map.get_mut(self.device_id)
+                        && handle.session_id == self.session_id
+                    {
+                        handle.supports_mcp = false;
+                    }
+                }
             }
             Ok(_) => {}
             Err(error) => self.event(
