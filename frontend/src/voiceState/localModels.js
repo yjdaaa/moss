@@ -128,6 +128,45 @@ export function localModelGroups(models) {
   return LOCAL_KINDS.map((item) => ({ ...item, models: list.filter((model) => model.kind === item.kind) }));
 }
 
+/**
+ * 本地模型页的版面（2026-11-23 n109 用户决定“合并 + 折叠”）：
+ * 命令词抗噪、前端降噪、语义判停都是给本地判停用的增强，不再各自成一张“模型包”表，并入“拾音判停”；
+ * 整链实测（n99 / n101）没有提升的模型——老版 Silero、TEN-VAD、两个降噪、语义判停——收进默认收起的“更多 / 实验”。
+ * 只改展示，清单、设置与已下载文件都不动。
+ */
+export const VAD_EXTRA_MODELS = ["silero_vad", "ten_vad"];
+const VAD_ADDON_KINDS = ["kws"];
+const VAD_EXPERIMENT_KINDS = ["denoise", "turn"];
+const VAD_FAMILY = new Set(["vad", ...VAD_ADDON_KINDS, ...VAD_EXPERIMENT_KINDS]);
+
+/** 这个模型是否放在“更多 / 实验”里（顶部下拉选了它但还没下载时，要先展开再定位）。 */
+export function isFoldedLocalModel(id) {
+  return VAD_EXTRA_MODELS.includes(id);
+}
+
+/**
+ * 把 `localModelGroups` 的结果排成页面版面。`moreOpen`：已开着降噪 / 语义判停、正在用收起的判停模型、
+ * 或收起区里有模型在下载时默认展开，免得开着的东西被藏起来。
+ */
+export function localModelLayout(groups, settings) {
+  const list = Array.isArray(groups) ? groups : [];
+  const value = settings || {};
+  const byKind = Object.fromEntries(list.map((group) => [group.kind, group]));
+  const vad = byKind.vad || { kind: "vad", title: "拾音判停", models: [] };
+  const vadMain = { ...vad, models: vad.models.filter((model) => !isFoldedLocalModel(model.id)) };
+  const vadMore = { ...vad, models: vad.models.filter((model) => isFoldedLocalModel(model.id)) };
+  const addons = VAD_ADDON_KINDS.map((kind) => byKind[kind]).filter(Boolean);
+  const experiments = VAD_EXPERIMENT_KINDS.map((kind) => byKind[kind]).filter(Boolean);
+  const folded = [...vadMore.models, ...experiments.flatMap((group) => group.models)];
+  const moreOpen = Boolean(
+    value.denoise ||
+      value.turn ||
+      (value.vad && isFoldedLocalModel(value.vad_model)) ||
+      folded.some((model) => localModelView(model).canCancel),
+  );
+  return { vadMain, vadMore, addons, experiments, others: list.filter((group) => !VAD_FAMILY.has(group.kind)), moreOpen };
+}
+
 /** 本地模型设置表单（数字以字符串保存，便于输入）。 */
 export function localSettingsForm(settings) {
   const value = settings || {};

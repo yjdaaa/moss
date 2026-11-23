@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 本地模型页把判停相关四张表并成一组，实测无提升的模型默认收起（2026-11-23）
+
+- **现象**：“本地模型（断网可用）”里拾音判停、前端降噪、命令词抗噪、语义判停各占一张“模型包”表，共 7 个模型，其中多数经整链实测没有提升却和常用模型并列，页面冗长；降噪有两个模型但没有选用入口，DPDFNet 下载后用不上。
+- **根因与修复**：新增 `localModelLayout`：命令词抗噪作为“判停增强”并入“拾音判停”组，老版 Silero、TEN-VAD、两个前端降噪与语义判停收进组内默认收起的“更多判停模型与实验功能”，开着或正在用、正在下载时自动展开；顶部判停下拉选了收起区未下载的模型时经 `revealLocalMore` 先展开再定位；降噪表新增“选用”。只改展示，模型清单、设置默认值与契约不变。
+- **验证**：`voiceState.test.mjs` 补版面拆分与自动展开条件断言，`voice-center.browser.mjs` 补并组、收起 / 展开与降噪“选用”；收尾级 `node scripts/verify.mjs --finish` 通过（前端单测 388 项、浏览器测试 18/18），已快更本机桌面程序；未连真实设备实测，模型推理行为未改动。
+- **关联**：`frontend/src/voiceState/localModels.js`（`localModelLayout`、`isFoldedLocalModel`）、`frontend/src/components/voice-builtin/{LocalModelsGroup.jsx,BuiltinModelGroups.jsx,shared.js}`、`frontend/src/styles/09-voice-center.css`、`frontend/tests/{voiceState.test.mjs,voice-center.browser.mjs}`、内置语音技术书 n109。
+
 ### 唤醒词改显示文字时拼音自动跟着更新（2026-11-23）
 
 - **现象**：设备唤醒词卡里改了“显示文字”后，拼音框不变，需要用户自己逐个音节手打，容易漏改或拼错。

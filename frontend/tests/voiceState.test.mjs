@@ -66,6 +66,8 @@ import {
   switchKind,
   formatBytes,
   localModelGroups,
+  localModelLayout,
+  isFoldedLocalModel,
   localModelView,
   layaSetupView,
   localJevRuntimeView,
@@ -367,6 +369,24 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
     ["vision", ["qwen3_vl_2b"]],
   ]);
   assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0, 0, 0, 0], "判停 / 降噪 / 命令词 / 语义判停 / 识别 / 合成 / 视觉理解七组");
+  // n109：页面版面——命令词抗噪并进判停，老版 Silero / TEN-VAD / 降噪 / 语义判停收进“更多 / 实验”
+  const layout = localModelLayout([...groups.slice(0, 1).map((group) => ({ ...group, models: [...group.models, { id: "silero_vad_v6", kind: "vad" }] })), ...groups.slice(1)], {});
+  assert.deepEqual(layout.vadMain.models.map((model) => model.id), ["silero_vad_v6"]);
+  assert.deepEqual(layout.vadMore.models.map((model) => model.id), ["silero_vad", "ten_vad"]);
+  assert.deepEqual(layout.addons.map((group) => group.kind), ["kws"]);
+  assert.deepEqual(layout.experiments.map((group) => group.kind), ["denoise", "turn"]);
+  assert.deepEqual(layout.others.map((group) => group.kind), ["asr", "tts", "vision"]);
+  assert.equal(layout.moreOpen, false, "默认收起");
+  assert.equal(localModelLayout(groups, { denoise: true }).moreOpen, true, "开着降噪时展开");
+  assert.equal(localModelLayout(groups, { turn: true }).moreOpen, true, "开着语义判停时展开");
+  assert.equal(localModelLayout(groups, { vad: true, vad_model: "ten_vad" }).moreOpen, true, "正在用收起的判停模型时展开");
+  assert.equal(localModelLayout(groups, { vad: false, vad_model: "ten_vad" }).moreOpen, false, "没开本地判停不算在用");
+  assert.equal(localModelLayout(groups, { vad: true, vad_model: "silero_vad_v6" }).moreOpen, false);
+  const downloading = groups.map((group) => (group.kind === "denoise" ? { ...group, models: group.models.map((model) => ({ ...model, progress: { state: "downloading", done: 1, total: 2 } })) } : group));
+  assert.equal(localModelLayout(downloading, {}).moreOpen, true, "收起区有模型在下载时展开");
+  assert.equal(isFoldedLocalModel("ten_vad"), true);
+  assert.equal(isFoldedLocalModel("silero_vad_v6"), false);
+  assert.equal(localModelLayout(null, null).vadMain.models.length, 0);
 
   const form = localSettingsForm({ tts: true, tts_speaker: 50 });
   // 识别、判停改选不动音色

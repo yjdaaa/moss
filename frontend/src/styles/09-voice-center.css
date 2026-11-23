@@ -188,6 +188,13 @@
 .voice-size { white-space: nowrap; }
 .voice-status { min-width: 96px; max-width: 200px; }
 .voice-local-group .voice-tbl { max-height: none; }
+/* n109：判停增强与“更多 / 实验”折叠区并在“拾音判停”里 */
+.voice-local-addon { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding-left: 12px; border-left: 2px solid var(--ob-line); }
+.voice-local-more { margin-top: 6px; border: 1px solid var(--ob-line); border-radius: 9px; padding: 8px 10px; background: var(--ob-well); }
+.voice-local-more > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ob-ink-2); }
+.voice-local-more > summary small { display: block; margin-top: 2px; font-weight: 400; font-size: 11.5px; color: var(--ob-ink-3); }
+.voice-local-more[open] > summary { margin-bottom: 6px; }
+.voice-local-more > summary:focus-visible { box-shadow: 0 0 0 2px var(--ob-accent-2); border-radius: 6px; }
 .voice-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--ob-ink-2); cursor: pointer; }
 .voice-check input { margin-top: 2px; }
 .voice-progress { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--ob-line); overflow: hidden; max-width: 160px; }

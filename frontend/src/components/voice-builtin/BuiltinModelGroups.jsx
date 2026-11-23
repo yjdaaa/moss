@@ -11,12 +11,13 @@ import {
   pipelineTestSummary,
   builtinSectionSourceView,
   builtinSourceSwitchPatch,
+  isFoldedLocalModel,
   isLocalJevModel,
   isLocalOneJevModel,
   recommendationState,
   voiceErrorText,
 } from "../../voiceState.js";
-import { JEV_GROUP_TITLE, restartEffect } from "./shared.js";
+import { JEV_GROUP_TITLE, restartEffect, revealLocalMore } from "./shared.js";
 import { BuiltinModelGroup } from "./BuiltinModelGroup.jsx";
 import { BuiltinJevGroup } from "./BuiltinJevGroup.jsx";
 
@@ -350,7 +351,12 @@ export function BuiltinModelGroups({ builtin }) {
     const isDefault = nextValue === "cloud" || nextValue === "energy";
     const cleanLabel = label.replace(/^\d+\.\s*/, "");
     if (!isDefault && pickedOption && !pickedOption.installed) {
-      focusConfigGroup("local-models", `voice-local-group-${section}`);
+      if (section === "vad" && isFoldedLocalModel(pickedOption.id)) {
+        revealLocalMore();
+        focusConfigGroup("local-models", "voice-local-vad-more");
+      } else {
+        focusConfigGroup("local-models", `voice-local-group-${section}`);
+      }
       setMixNote({
         ok: false,
         text: `本地${cleanLabel}模型“${pickedOption.modelLabel || pickedOption.label}”尚未下载：已为你展开下方“本地模型（断网可用）”，点“下载”完成后即可在此下拉选用。`,

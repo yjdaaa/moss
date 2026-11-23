@@ -52,7 +52,7 @@ try {
       ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       ota_ip_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       ota_ip_urls: ["http://192.0.2.10:8003/xiaozhi/ota/", "http://192.0.2.20:8003/xiaozhi/ota/"],
-      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "gtcrn_simple", kind: "denoise", label: "GTCRN 降噪", installed: false }, { id: "dpdfnet_baseline", kind: "denoise", label: "DPDFNet 降噪", installed: true }, { id: "kws_zipformer_zh", kind: "kws", label: "命令词抗噪", installed: false }, { id: "smart_turn_v3", kind: "turn", label: "Smart Turn", installed: false }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
       debug_enabled: true,
       debug_traces: [
         {
@@ -722,6 +722,21 @@ try {
   await openGroup("local-models");
   assert.match(await page.locator("#voice-local-group-font").innerText(), /48,662 字/, "n83：本地模型区展示小智屏幕全量补字库");
   assert.equal(await page.locator("#voice-local-delete-xiaozhi_noto_v1_full").count(), 1, "已装补字库可按需删除");
+  // n109：命令词抗噪并进“拾音判停”；降噪、语义判停与老版判停收进“更多 / 实验”，正在用收起区的模型时自动展开
+  const vadGroup = page.locator("#voice-local-group-vad");
+  await vadGroup.locator("#voice-local-group-kws #voice-local-kws-toggle").waitFor();
+  for (const kind of ["denoise", "turn", "kws"]) assert.equal(await page.locator(`#voice-local-models > #voice-local-group-${kind}`).count(), 0, `${kind} 不再单独成组`);
+  assert.notEqual(await page.locator("#voice-local-vad-more").getAttribute("open"), null, "上面在顶部用过收起区的老版 Silero，自动展开过就保持展开");
+  await page.locator("#voice-local-vad-more > summary").click();
+  await page.waitForFunction(() => document.querySelector("#voice-local-vad-more")?.open === false);
+  assert.equal(await page.locator("#voice-local-pick-dpdfnet_baseline").isVisible(), false, "收起后看不到实验模型");
+  await page.locator("#voice-local-vad-more > summary").click();
+  await page.locator("#voice-local-vad-more #voice-local-group-denoise #voice-local-denoise-toggle").waitFor();
+  await page.locator("#voice-local-vad-more #voice-local-group-turn #voice-local-turn-toggle").waitFor();
+  assert.equal(await page.locator("#voice-local-pick-gtcrn_simple").count(), 0, "没下载的降噪模型不能选用");
+  await page.locator("#voice-local-pick-dpdfnet_baseline").click();
+  await page.locator("#voice-local-group-denoise tr").filter({ hasText: "DPDFNet" }).getByText("已选，开启后使用").waitFor();
+  if (process.env.VOICE_QA_DIR) await page.locator("#voice-local-group-vad").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-local-vad.png") });
   // 按场景推荐的整套模型：每种场景一行；模型没下全时点“用这套”只提示要下载什么，不保存
   await page.locator("#voice-model-pairing-guide > summary").click();
   assert.ok((await page.locator("#voice-model-pairing-guide .voice-combo-row").count()) >= 4, "列出几种场景组合");

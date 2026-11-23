@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { X, Trash2, Download, Volume2 } from "lucide-react";
 import { showAlert, showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
@@ -13,6 +13,7 @@ import {
   isLocalJevModel,
   isRecommendedLocalModel,
   localModelGroups,
+  localModelLayout,
   localModelSettingsError,
   localModelView,
   layaSetupView,
@@ -25,7 +26,7 @@ import {
   selectedVoices,
   voiceErrorText,
 } from "../../voiceState.js";
-import { restartEffect, TONE_CLASS, LAYA_HINT_CLASS, focusJevSwitch } from "./shared.js";
+import { restartEffect, TONE_CLASS, LAYA_HINT_CLASS, focusJevSwitch, LOCAL_MORE_REVEAL_EVENT, consumeLocalMoreReveal } from "./shared.js";
 import { useLocalGroup } from "./useLocalGroup.js";
 import { ColabBridgeSection } from "./ColabBridgeSection.jsx";
 import { ModelPairingGuide } from "./ModelPairingGuide.jsx";
@@ -35,6 +36,16 @@ export function LocalModelsGroup({ builtin }) {
   const { busy } = builtin;
   // 2026-11-07：下载 / 取消 / 删除按模型各自加锁，点一个模型不再让其他模型的按钮变灰，可同时下载多个
   const [pending, setPending] = useState({});
+  // “更多 / 实验”折叠区：用户点开 / 收起后以用户为准；顶部下拉选了收起区里还没下载的模型时自动展开
+  const [moreOverride, setMoreOverride] = useState(() => (consumeLocalMoreReveal() ? true : null));
+  useEffect(() => {
+    const reveal = () => {
+      consumeLocalMoreReveal();
+      setMoreOverride(true);
+    };
+    globalThis.addEventListener?.(LOCAL_MORE_REVEAL_EVENT, reveal);
+    return () => globalThis.removeEventListener?.(LOCAL_MORE_REVEAL_EVENT, reveal);
+  }, []);
   const modelLocked = (id) => Boolean(busy) || Boolean(pending[id]);
   const modelAct = async (id, label, action) => {
     setPending((prev) => ({ ...prev, [id]: label }));
@@ -136,6 +147,145 @@ export function LocalModelsGroup({ builtin }) {
     }
   };
 
+  const layout = localModelLayout(groups, baseline);
+  const moreOpen = moreOverride ?? layout.moreOpen;
+  const isAddon = (kind) => kind === "denoise" || kind === "turn" || kind === "kws";
+  const groupStatus = (item) => {
+    const activeOn = Boolean(form[item.kind]);
+    const selected = item.models.find((model) => model.id === form[`${item.kind}_model`]);
+    if (item.kind === "vision") return "下载后到“视觉理解”卡片的“看图用哪个模型”里选“本地视觉模型”";
+    if (isAddon(item.kind)) {
+      if (activeOn) return selected?.installed ? `已开启：${selected.label}` : `已开启 ${selected?.label || item.title}（未下载，暂不生效）`;
+      if (item.kind === "denoise") return "未开启（实测对识别没有提升；仅作用于本地判停与本地识别）";
+      if (item.kind === "kws") return "未开启（噪声大时“停”“退下”这类短命令容易被听错，可下载并开启；需要先在顶部选本地判停）";
+      return "未开启（实测没有可见差别；说话中间常停顿思考时可试，不延迟急停）";
+    }
+    if (activeOn) return selected?.installed ? `当前在顶部已选用：${selected.label}` : `顶部已选 ${selected?.label || "本地模型"}（未下载，暂不生效）`;
+    if (item.kind === "vad") return "当前在顶部使用：内置能量判停";
+    if (item.kind === "tts" && fallbackTtsModel) return `当前在顶部使用：云端模型（云端异常优先兜底：${fallbackTtsModel.label}）`;
+    return "当前在顶部使用：云端模型";
+  };
+  const renderHead = (item, title, showStatus = true) => (
+    <div className="voice-field-head">
+      <b>{title}</b>
+      {showStatus && item.models.length > 0 && <span className="voice-muted">{groupStatus(item)}</span>}
+    </div>
+  );
+  const renderToggle = (item) => (
+    <label className="voice-check">
+      <input type="checkbox" id={`voice-local-${item.kind}-toggle`} checked={Boolean(form[item.kind])} onChange={(e) => update(item.kind, e.target.checked)} />
+      <span>
+        {item.kind === "denoise"
+          ? "启用本地前端降噪（用下表“已选”的模型，保存后重启内置服务生效）"
+          : item.kind === "kws"
+            ? "启用命令词抗噪（随本地判停运行，保存后重启内置服务生效）"
+            : "启用本地语义判停（Smart Turn v3，保存后重启内置服务生效）"}
+      </span>
+    </label>
+  );
+  const renderTable = (item) => {
+    const selectedId = form[`${item.kind}_model`];
+    const activeOn = Boolean(form[item.kind]);
+    return (
+      <div className="ob-tbl voice-tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>{item.title}模型</th>
+              <th>大小</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {item.models.map((model) => {
+              const view = localModelView(model);
+              const chosen = activeOn && model.id === selectedId;
+              const isFallback = item.kind === "tts" && !activeOn && fallbackTtsModel?.id === model.id;
+              const canSetFallback = item.kind === "tts" && !activeOn && Boolean(model.installed) && fallbackTtsModel?.id !== model.id;
+              // 降噪有两个模型但顶部没有降噪下拉：在表里选用哪一个（2026-11-23 n109，之前 DPDFNet 下载后选不到）
+              const pickedDenoise = item.kind === "denoise" && !activeOn && model.id === selectedId;
+              const canPickDenoise = item.kind === "denoise" && Boolean(model.installed) && model.id !== selectedId;
+              return (
+                <tr key={model.id} className={chosen ? "on" : ""}>
+                  <td className="voice-model-cell">
+                    <div className="voice-model-name">
+                      {item.kind === "tts" ? (
+                        <button
+                          type="button"
+                          className="voice-tts-model-trigger"
+                          onClick={() => setTtsVoicesModalModel(model)}
+                          title="点击查看支持的语言包、全部音色并试听本机缓存语音"
+                          id={`voice-local-tts-open-${model.id}`}
+                        >
+                          <b>{model.label}</b>
+                          <span className="voice-tts-trigger-chip">
+                            <Volume2 size={12} /> 语言包与试听
+                          </span>
+                        </button>
+                      ) : (
+                        <b>{model.label}</b>
+                      )}
+                      {isRecommendedLocalModel(item.kind, model.id) && (
+                        <span className="ob-pill ob-pill--ok voice-tag" id={`voice-local-recommended-${model.id}`}>
+                          推荐
+                        </span>
+                      )}
+                      {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
+                      {pickedDenoise && <span className="ob-pill ob-pill--info voice-tag">已选，开启后使用</span>}
+                      {isFallback && <span className="ob-pill ob-pill--info voice-tag">当前兜底</span>}
+                      {model.streaming && <span className="ob-pill ob-pill--info voice-tag">边说边识别</span>}
+                    </div>
+                    <div className="ob-sub">{model.note}</div>
+                  </td>
+                  <td className="mono voice-size">{formatBytes(model.size)}</td>
+                  <td className="voice-status">
+                    <span className={`ob-pill ${TONE_CLASS[view.tone]}`}>{view.text}</span>
+                    {view.detail && <div className="ob-sub voice-bad">{view.detail}</div>}
+                    {view.percent !== null && (
+                      <div className="voice-progress" aria-hidden="true">
+                        <span style={{ width: `${view.percent}%` }} />
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <span className="voice-actions">
+                      {canSetFallback && (
+                        <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => pickFallbackTts(model)} id={`voice-local-fallback-${model.id}`}>
+                          设为云端兜底
+                        </button>
+                      )}
+                      {canPickDenoise && (
+                        <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => update("denoise_model", model.id)} id={`voice-local-pick-${model.id}`}>
+                          选用
+                        </button>
+                      )}
+                      {view.canDownload && (
+                        <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "下载模型", () => voiceApi.localDownload(model.id))} id={`voice-local-download-${model.id}`}>
+                          <Download size={13} /> 下载
+                        </button>
+                      )}
+                      {view.canCancel && (
+                        <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "取消下载", () => voiceApi.localCancel(model.id))} id={`voice-local-cancel-${model.id}`}>
+                          <X size={13} /> 取消
+                        </button>
+                      )}
+                      {view.canDelete && (
+                        <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)} id={`voice-local-delete-${model.id}`}>
+                          <Trash2 size={13} /> 删除
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
   return (
     <VoiceGroup id="local-models" title="本地模型包、本地合成音色与下载地址" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
       <div id="voice-local-models" className="voice-stack">
@@ -147,159 +297,51 @@ export function LocalModelsGroup({ builtin }) {
         </p>
         <ModelPairingGuide settings={baseline} busy={builtin.busy} onApply={applyCombo} />
         <ColabBridgeSection builtin={builtin} />
-        {groups.map((item) => {
-          const selectedId = form[`${item.kind}_model`];
-          const activeOn = Boolean(form[item.kind]);
-          const selected = item.models.find((model) => model.id === selectedId);
-          return (
-            <div className="voice-local-group" key={item.kind} id={`voice-local-group-${item.kind}`}>
-              <div className="voice-field-head">
-                <b>{item.title}模型包</b>
-                <span className="voice-muted">
-                  {item.kind === "vision"
-                    ? "下载后到“视觉理解”卡片的“看图用哪个模型”里选“本地视觉模型”"
-                    : item.kind === "denoise" || item.kind === "turn" || item.kind === "kws"
-                      ? activeOn
-                        ? selected?.installed
-                          ? `已开启：${selected.label}`
-                          : `已开启 ${selected?.label || item.title}（未下载，暂不生效）`
-                        : item.kind === "denoise"
-                          ? "未开启（风扇/气泵环境噪声大时可下载并开启，仅作用于本地判停与本地识别）"
-                          : item.kind === "kws"
-                            ? "未开启（噪声大时“停”“退下”这类短命令容易被听错，可下载并开启；需要先在顶部选本地判停）"
-                            : "未开启（说话中间常停顿思考时可下载并开启，辅助判断话没说完且不延迟急停）"
-                      : activeOn
-                        ? selected?.installed
-                          ? `当前在顶部已选用：${selected.label}`
-                          : `顶部已选 ${selected?.label || "本地模型"}（未下载，暂不生效）`
-                        : item.kind === "vad"
-                          ? "当前在顶部使用：内置能量判停"
-                          : item.kind === "tts" && fallbackTtsModel
-                            ? `当前在顶部使用：云端模型（云端异常优先兜底：${fallbackTtsModel.label}）`
-                            : "当前在顶部使用：云端模型"}
-                </span>
-              </div>
-              {(item.kind === "denoise" || item.kind === "turn" || item.kind === "kws") && (
-                <label className="voice-check">
-                  <input
-                    type="checkbox"
-                    id={`voice-local-${item.kind}-toggle`}
-                    checked={Boolean(form[item.kind])}
-                    onChange={(e) => update(item.kind, e.target.checked)}
-                  />
-                  <span>
-                    {item.kind === "denoise"
-                      ? "启用本地前端降噪（GTCRN，保存后重启内置服务生效）"
-                      : item.kind === "kws"
-                        ? "启用命令词抗噪（随本地判停运行，保存后重启内置服务生效）"
-                        : "启用本地语义判停（Smart Turn v3，保存后重启内置服务生效）"}
-                  </span>
-                </label>
-              )}
-              {item.kind === "tts" &&
-                (form.tts_model === "qwen3_tts_0_6b" ||
-                  item.models.some((m) => m.id === "qwen3_tts_0_6b" && m.installed)) &&
-                local.speech_env?.summary && (
-                  <div className="voice-hint" id="voice-local-speech-env-hint">
-                    Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}
-                  </div>
-                )}
-              <div className="ob-tbl voice-tbl">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{item.title}模型</th>
-                      <th>大小</th>
-                      <th>状态</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {item.models.map((model) => {
-                      const view = localModelView(model);
-                      const chosen = activeOn && model.id === selectedId;
-                      const isFallback = item.kind === "tts" && !activeOn && fallbackTtsModel?.id === model.id;
-                      const canSetFallback = item.kind === "tts" && !activeOn && Boolean(model.installed) && fallbackTtsModel?.id !== model.id;
-                      return (
-                        <tr key={model.id} className={chosen ? "on" : ""}>
-                          <td className="voice-model-cell">
-                            <div className="voice-model-name">
-                              {item.kind === "tts" ? (
-                                <button
-                                  type="button"
-                                  className="voice-tts-model-trigger"
-                                  onClick={() => setTtsVoicesModalModel(model)}
-                                  title="点击查看支持的语言包、全部音色并试听本机缓存语音"
-                                  id={`voice-local-tts-open-${model.id}`}
-                                >
-                                  <b>{model.label}</b>
-                                  <span className="voice-tts-trigger-chip">
-                                    <Volume2 size={12} /> 语言包与试听
-                                  </span>
-                                </button>
-                              ) : (
-                                <b>{model.label}</b>
-                              )}
-                              {isRecommendedLocalModel(item.kind, model.id) && (
-                                <span className="ob-pill ob-pill--ok voice-tag" id={`voice-local-recommended-${model.id}`}>
-                                  推荐
-                                </span>
-                              )}
-                              {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
-                              {isFallback && <span className="ob-pill ob-pill--info voice-tag">当前兜底</span>}
-                              {model.streaming && <span className="ob-pill ob-pill--info voice-tag">边说边识别</span>}
-                            </div>
-                            <div className="ob-sub">{model.note}</div>
-                          </td>
-                          <td className="mono voice-size">{formatBytes(model.size)}</td>
-                          <td className="voice-status">
-                            <span className={`ob-pill ${TONE_CLASS[view.tone]}`}>{view.text}</span>
-                            {view.detail && <div className="ob-sub voice-bad">{view.detail}</div>}
-                            {view.percent !== null && (
-                              <div className="voice-progress" aria-hidden="true">
-                                <span style={{ width: `${view.percent}%` }} />
-                              </div>
-                            )}
-                          </td>
-                          <td>
-                            <span className="voice-actions">
-                              {canSetFallback && (
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={Boolean(busy)}
-                                  onClick={() => pickFallbackTts(model)}
-                                  id={`voice-local-fallback-${model.id}`}
-                                >
-                                  设为云端兜底
-                                </button>
-                              )}
-                              {view.canDownload && (
-                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "下载模型", () => voiceApi.localDownload(model.id))} id={`voice-local-download-${model.id}`}>
-                                  <Download size={13} /> 下载
-                                </button>
-                              )}
-                              {view.canCancel && (
-                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "取消下载", () => voiceApi.localCancel(model.id))} id={`voice-local-cancel-${model.id}`}>
-                                  <X size={13} /> 取消
-                                </button>
-                              )}
-                              {view.canDelete && (
-                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)} id={`voice-local-delete-${model.id}`}>
-                                  <Trash2 size={13} /> 删除
-                                </button>
-                              )}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+        {/* 2026-11-23 n109：命令词抗噪 / 降噪 / 语义判停并入“拾音判停”，实测没提升的收进“更多 / 实验” */}
+        <div className="voice-local-group" id="voice-local-group-vad">
+          {renderHead(layout.vadMain, "拾音判停模型包")}
+          {renderTable(layout.vadMain)}
+          {layout.addons.map((item) => (
+            <div className="voice-local-addon" key={item.kind} id={`voice-local-group-${item.kind}`}>
+              {renderHead(item, `判停增强 · ${item.title}`)}
+              {renderToggle(item)}
+              {renderTable(item)}
             </div>
-          );
-        })}
+          ))}
+          <details className="voice-local-more" id="voice-local-vad-more" open={moreOpen} onToggle={(e) => setMoreOverride(e.currentTarget.open)}>
+            <summary>
+              更多判停模型与实验功能
+              <small>老版 Silero、TEN-VAD、前端降噪、语义判停：整条链路实测没有明显提升，一般不用开</small>
+            </summary>
+            {layout.vadMore.models.length > 0 && (
+              <div className="voice-local-addon" id="voice-local-group-vad-more">
+                {renderHead(layout.vadMore, "其他判停模型（在顶部“拾音判停”下拉里选用）", false)}
+                {renderTable(layout.vadMore)}
+              </div>
+            )}
+            {layout.experiments.map((item) => (
+              <div className="voice-local-addon" key={item.kind} id={`voice-local-group-${item.kind}`}>
+                {renderHead(item, `实验 · ${item.title}`)}
+                {renderToggle(item)}
+                {renderTable(item)}
+              </div>
+            ))}
+          </details>
+        </div>
+        {layout.others.map((item) => (
+          <div className="voice-local-group" key={item.kind} id={`voice-local-group-${item.kind}`}>
+            {renderHead(item, `${item.title}模型包`)}
+            {item.kind === "tts" &&
+              (form.tts_model === "qwen3_tts_0_6b" ||
+                item.models.some((m) => m.id === "qwen3_tts_0_6b" && m.installed)) &&
+              local.speech_env?.summary && (
+                <div className="voice-hint" id="voice-local-speech-env-hint">
+                  Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}
+                </div>
+              )}
+            {renderTable(item)}
+          </div>
+        ))}
         {models.filter((model) => model.kind === "jev").length > 0 && (
           <div className="voice-local-group" id="voice-local-group-jev">
             <div className="voice-field-head">
