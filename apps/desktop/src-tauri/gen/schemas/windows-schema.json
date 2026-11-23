@@ -561,6 +561,12 @@
           "markdownDescription": "Enables the voice_strict_set command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_usb_provision command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-usb-provision",
+          "markdownDescription": "Enables the voice_usb_provision command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_vision_save command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-vision-save",
@@ -979,6 +985,12 @@
           "type": "string",
           "const": "deny-voice-strict-set",
           "markdownDescription": "Denies the voice_strict_set command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_usb_provision command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-usb-provision",
+          "markdownDescription": "Denies the voice_usb_provision command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_vision_save command without any pre-configured scope.",
