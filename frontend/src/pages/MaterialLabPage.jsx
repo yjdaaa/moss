@@ -543,7 +543,7 @@ export function MaterialLabPage({
           `${resData.test_type === "interval" ? "线距测试" : `${modeInfo.label}矩阵`}已生成（${resData.cell_count || 0} 格${sizeStr}${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；发送实机测试后点选最佳格`,
         );
       } else if (res.ok && res.data?.success) {
-        setMatrixStatus("生成失败: 后端未返回 calibration_id，请更新 moss-host");
+        setMatrixStatus("生成失败：服务端未返回标定编号，请重启或更新 MOSS");
       } else {
         setMatrixStatus(`生成失败: ${res.data?.result || "校验未通过"}`);
       }
@@ -777,16 +777,10 @@ export function MaterialLabPage({
           已连接电脑 MOSS：材料只能查看和用于加工，修改请在电脑上进行。
         </div>
       )}
-      {/* 工具条：页面标题已在顶栏；这里保留存储源与库操作 */}
+      {/* 工具条：页面标题已在顶栏；存储文件路径放悬停提示，不占工具条宽度 */}
       <div className="ob-toolbar">
-        <div className="ob-toolbar-info">
-          {sourcePath ? (
-            <>
-              当前存储源: <span className="mono">{sourcePath}</span>
-            </>
-          ) : (
-            <span>材料库 · 校准矩阵</span>
-          )}
+        <div className="ob-toolbar-info" title={sourcePath ? `材料库文件：${sourcePath}` : undefined}>
+          <span>材料库 · 校准矩阵</span>
         </div>
 
         <div className="lab-row">

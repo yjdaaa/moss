@@ -542,7 +542,12 @@ pub struct AsrStream {
     task: tokio::task::JoinHandle<()>,
     /// 只保留最新中间文字，避免说话期间事件无界积压。
     interim: Option<tokio::sync::watch::Receiver<String>>,
+    /// 本地识别报告的这一路降噪情况（协议 8，完整过程记录用；云端识别为空）
+    denoise: DenoiseSlot,
 }
+
+/// 一路识别的降噪情况（本地模型辅助程序打开识别流时填写）。
+pub type DenoiseSlot = std::sync::Arc<std::sync::Mutex<Option<local::DenoiseReport>>>;
 
 impl AsrStream {
     /// 由实现方构造：后台任务从 `audio` 读音频（发送端关闭即说完），把最终文字送到 `result`。
@@ -556,7 +561,23 @@ impl AsrStream {
             result,
             task,
             interim: None,
+            denoise: DenoiseSlot::default(),
         }
+    }
+
+    pub fn with_denoise(mut self, denoise: DenoiseSlot) -> Self {
+        self.denoise = denoise;
+        self
+    }
+
+    /// 这一路的降噪情况（流打开后由实现方填写；在 [`Self::finish`] 之前取走句柄，结束后读）。
+    pub fn denoise_slot(&self) -> DenoiseSlot {
+        self.denoise.clone()
+    }
+
+    /// 取走这一路的降噪情况（只交一次：会话在第一个中间结果时取走，没取走的由对话任务在识别成功后取）。
+    pub fn take_denoise(&self) -> Option<local::DenoiseReport> {
+        self.denoise.lock().ok().and_then(|mut slot| slot.take())
     }
 
     pub fn with_interim(mut self, interim: tokio::sync::watch::Receiver<String>) -> Self {

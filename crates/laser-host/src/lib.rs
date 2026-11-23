@@ -989,7 +989,7 @@ impl HostApplication {
                 .with_shutdown_flag(coordinator.shutdown_flag()),
         );
         // 技术书 §5.5：重启后所有待批准 / 已批准未执行的审批一律过期（A-32）
-        // 完整过程记录到期与超量清理（不看开关：关掉后旧记录照样按 7 天删除）
+        // 完整过程记录到期清理（不看开关：关掉后旧记录照样按 30 天删除；n110 起不按大小删）
         if let Some(trace) = api_service.process_trace() {
             trace.sweep();
         }

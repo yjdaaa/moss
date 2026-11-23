@@ -514,12 +514,23 @@ export function TwinStage3D({
     const handleResize = () => {
       syncStageViewport();
     };
+    // 原生非 passive 滚轮监听：React 合成 onWheel 在浏览器里默认为 passive，preventDefault 拦不住整页跟着滚
+    const handleNativeWheel = (e) => {
+      e.preventDefault();
+      const orb = orbitRef.current;
+      orb.goal = null;
+      const factor = e.deltaY > 0 ? 1.09 : 0.91;
+      orb.distance = Math.min(1800, Math.max(30, orb.distance * factor));
+      applyCameraOrbit();
+    };
     const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(handleResize) : null;
     resizeObserver?.observe(container);
+    container.addEventListener("wheel", handleNativeWheel, { passive: false });
     window.addEventListener("resize", handleResize);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      container.removeEventListener("wheel", handleNativeWheel);
       resizeObserver?.disconnect();
       if (sceneRef.current?.animId) {
         cancelAnimationFrame(sceneRef.current.animId);
@@ -768,9 +779,10 @@ export function TwinStage3D({
   useEffect(() => {
     sceneRef.current?.requestRender?.();
   });
-  // 鼠标拖拽旋转 / 平移 / 滚轮缩放
+  // 鼠标拖拽旋转 / 平移
   const handlePointerDown = (e) => {
     const orb = orbitRef.current;
+    orb.goal = null;
     orb.dragging = true;
     orb.panMode = e.button === 2 || e.shiftKey;
     orb.lastX = e.clientX;
@@ -798,14 +810,6 @@ export function TwinStage3D({
 
   const handlePointerUp = () => {
     orbitRef.current.dragging = false;
-  };
-
-  const handleWheel = (e) => {
-    e.preventDefault();
-    const orb = orbitRef.current;
-    const factor = e.deltaY > 0 ? 1.09 : 0.91;
-    orb.distance = Math.min(1800, Math.max(30, orb.distance * factor));
-    applyCameraOrbit();
   };
 
   return (
@@ -984,7 +988,7 @@ export function TwinStage3D({
               fill={pose?.laserOn ? "#ff3b5c" : "#34d399"}
             />
           </svg>
-          <div className="twin-fallback-note">当前环境未启用 WebGL，已自动切换为翼宿 V1.0 2D 工程矢量孪生视图</div>
+          <div className="twin-fallback-note">当前环境未启用 WebGL，已自动切换为 2D 矢量孪生视图</div>
         </div>
       ) : (
         <div
@@ -994,7 +998,6 @@ export function TwinStage3D({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerUp}
-          onWheel={handleWheel}
           onContextMenu={(e) => e.preventDefault()}
         />
       )}
@@ -1021,7 +1024,7 @@ export function TwinStage3D({
             </span>
           </div>
           <div className="twin-workspace-tag">
-            <span>翼宿 V1.0 · {xMax}×{yMax} mm</span>
+            <span>{workspace?.hasHardwareLimits ? "实机行程" : "工作区"} · {xMax}×{yMax} mm</span>
             <span>
               {matName} {matWidth}×{matHeight}×{matThick} mm
             </span>

@@ -219,17 +219,31 @@ impl ApiService {
         ctx: &laser_contracts::CallerContext,
         short_job_watch: Option<&std::sync::Arc<ShortJobWatch>>,
     ) -> Vec<u8> {
-        let started_at = laser_runtime::process_trace::now_timestamp();
-        let began = std::time::Instant::now();
-        let response = self.dispatch_authenticated_inner(method, path, body, ctx, short_job_watch);
         let route = path.split('?').next().unwrap_or(path);
-        self.trace_api_call(
+        let began = std::time::Instant::now();
+        if crate::process_trace::must_run_before_trace(route, body) {
+            // 急停、取消这类动作先执行：执行前不读记录开关、不抢记录锁，处理完再补记开始与结束两步
+            let received_at = laser_runtime::process_trace::now_timestamp();
+            let response =
+                self.dispatch_authenticated_inner(method, path, body, ctx, short_job_watch);
+            let elapsed_ms = began.elapsed().as_millis() as u64;
+            let begun = self.trace_api_begin(method, route, body, ctx, Some(received_at));
+            self.trace_api_end(begun, method, route, &response, elapsed_ms);
+            return response;
+        }
+        // 其余请求开始处理时先记一步，处理中触发的生成 / 加工步骤按真实先后排在它后面（n110）
+        let received_at = laser_runtime::process_trace::now_timestamp();
+        let mut begun = self.trace_api_begin(method, route, body, ctx, None);
+        let response = self.dispatch_authenticated_inner(method, path, body, ctx, short_job_watch);
+        if begun.is_none() && route == "/api/settings" {
+            // 这次调用本身打开了过程记录：开始时开关还关着，补记开始这一步并写明收到时刻
+            begun = self.trace_api_begin(method, route, body, ctx, Some(received_at));
+        }
+        self.trace_api_end(
+            begun,
             method,
             route,
-            body,
-            ctx,
             &response,
-            started_at,
             began.elapsed().as_millis() as u64,
         );
         response

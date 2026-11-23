@@ -161,6 +161,7 @@ async fn final_and_interim_fast_stop_never_wait_for_slow_identity() {
         ctx,
         crate::conversation::TurnInput::FastStop {
             text: "停止".into(),
+            source: crate::conversation::FastStopSource::Interim,
         },
         vec![],
         None,

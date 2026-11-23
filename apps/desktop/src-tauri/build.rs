@@ -14,6 +14,9 @@ fn main() {
         "set_export_ask_each_time",
         "open_export_dir",
         "reveal_exported_file",
+        "pick_process_trace_dir",
+        "reset_process_trace_dir",
+        "open_process_trace_dir",
         "minimize_to_tray",
         "exit_application",
         // 应用内更新（2026-11-07）：命令内只认受信任主窗口

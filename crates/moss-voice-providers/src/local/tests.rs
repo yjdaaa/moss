@@ -1387,3 +1387,207 @@ fn turn_helper_soft_timeout_keeps_worker_alive_until_consecutive_cap_and_isolate
     drop(turn);
     let _ = server_thread.join();
 }
+
+/// 协议 8（n110）：打开判停 / 识别流时辅助程序报告这一路降噪情况，客户端原样交给调用方；
+/// 流式识别把它放进 `AsrStream::denoise_slot`，旧回复（`Done`）读作没有报告。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_open_reports_denoise_status_from_helper() {
+    let report = DenoiseReport {
+        applied: false,
+        model: "gtcrn_simple.onnx".into(),
+        engine: "gtcrn".into(),
+        error: Some("降噪器没建起来，这一路改用原始音频".into()),
+    };
+    let reply = report.clone();
+    let helper = fake(move |request, _| match request.op {
+        Op::AsrOpen { .. } | Op::VadOpen { stream: 1 } => Some((
+            Reply::Opened {
+                denoise: reply.clone(),
+            },
+            vec![],
+        )),
+        Op::AsrFinish { .. } => Some((Reply::Text { text: "好".into() }, vec![])),
+        _ => Some((Reply::Done, vec![])),
+    });
+    assert_eq!(helper.vad_open_report(1).unwrap(), Some(report.clone()));
+    assert_eq!(helper.vad_open_report(2).unwrap(), None, "旧回复没有报告");
+    let asr = LocalStreamingAsr { helper };
+    let stream = asr.start();
+    let slot = stream.denoise_slot();
+    stream.feed(&[1; 160]);
+    assert_eq!(stream.finish().await.unwrap(), "好");
+    assert_eq!(slot.lock().unwrap().clone(), Some(report));
+}
+
+#[derive(Default)]
+struct RecordingObserver(Mutex<Vec<String>>);
+
+impl HelperObserver for RecordingObserver {
+    fn started(&self, role: &str, _pid: Option<u32>) {
+        self.0.lock().unwrap().push(format!("{role} 启动"));
+    }
+    fn stderr_line(&self, role: &str, line: &str) {
+        self.0.lock().unwrap().push(format!("{role} 输出 {line}"));
+    }
+    fn exited(&self, role: &str, detail: &str) {
+        self.0.lock().unwrap().push(format!("{role} 退出 {detail}"));
+    }
+}
+
+/// 标准错误逐行交给观察者，超长的一行按 64 KiB 分段、不丢内容；读完（管道关闭）线程自行结束。
+#[test]
+fn helper_stderr_is_drained_line_by_line_without_losing_long_lines() {
+    let observer = Arc::new(RecordingObserver::default());
+    let long = "长".repeat(STDERR_CHUNK); // 每个字 3 字节，远超一段
+    let input = format!("onnxruntime 警告：线程数\r\n\n{long}\n最后一行没有换行");
+    let (tx, rx) = std::sync::mpsc::channel();
+    struct Done<R>(R, std::sync::mpsc::Sender<()>);
+    impl<R: Read> Read for Done<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.read(buf)?;
+            if n == 0 {
+                let _ = self.1.send(());
+            }
+            Ok(n)
+        }
+    }
+    drain_stderr(
+        Done(std::io::Cursor::new(input.into_bytes()), tx),
+        "本地模型程序",
+        observer.clone(),
+    );
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let lines = observer.0.lock().unwrap().clone();
+    assert_eq!(lines[0], "本地模型程序 输出 onnxruntime 警告：线程数");
+    assert!(!lines.iter().any(|l| l.ends_with("输出 ")), "空行不记");
+    let joined: String = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("本地模型程序 输出 "))
+        .collect();
+    assert!(joined.contains(&long.replace('\u{fffd}', "")[..30]));
+    let recovered: usize = joined.chars().filter(|c| *c == '长').count();
+    assert!(
+        recovered + 2 >= STDERR_CHUNK,
+        "长行分段交出、不截断（收到 {recovered} 字）"
+    );
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("本地模型程序 输出 最后一行没有换行")
+    );
+}
+
+/// 辅助程序没按要求就断了：观察者收到“意外退出”；MOSS 主动结束（terminate）不算意外。
+/// 全局观察者只有一个：设置它的测试排队跑，免得互相覆盖。
+static OBSERVER_TESTS: Mutex<()> = Mutex::new(());
+
+#[test]
+fn unexpected_helper_exit_is_reported_to_observer() {
+    let _serial = OBSERVER_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let observer = Arc::new(RecordingObserver::default());
+    set_helper_observer(Some(observer.clone()));
+    let helper = fake(|request, _| match request.op {
+        Op::Transcribe { .. } => std::panic::panic_any("退出"),
+        _ => Some((Reply::Done, vec![])),
+    });
+    let _ = helper.transcribe_blocking(&[0; 10], 16_000);
+    let quiet = fake(|_, _| Some((Reply::Done, vec![])));
+    quiet.terminate();
+    std::thread::sleep(Duration::from_millis(100));
+    set_helper_observer(None);
+    let lines = observer.0.lock().unwrap().clone();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("本地模型程序 退出 意外退出")),
+        "{lines:?}"
+    );
+}
+
+/// n110 复审 9③：语义判停连续超时被 MOSS 结束时只记一次退出（不与读线程看到管道关闭重复）；
+/// 9②：没人主动结束、最后一个句柄放手时也记一次，并带上它最近一次的出错原因。
+#[test]
+fn helper_exit_is_recorded_exactly_once() {
+    let _serial = OBSERVER_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let observer = Arc::new(RecordingObserver::default());
+    set_helper_observer(Some(observer.clone()));
+    // 从不回应判停请求的假语义判停程序（角色名唯一，便于只数它的记录）
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    std::thread::spawn(move || while let Ok(Some(_)) = read_frame::<_, Request>(&mut server) {});
+    let raw = LocalHelper::from_streams_as(
+        Box::new(client.try_clone().unwrap()),
+        Box::new(client),
+        "测试判停程序甲",
+    );
+    let turn = TurnHelper::from_loaded_helper(raw, None);
+    for _ in 0..TURN_CONSECUTIVE_TIMEOUT_CAP {
+        assert!(
+            turn.predict_blocking(16_000, &[0; 320], Duration::from_millis(5))
+                .is_err()
+        );
+    }
+    assert!(!turn.is_alive());
+    drop(turn);
+    // 加载失败后被放弃：最后一个句柄放手时记一次，带上失败原因
+    let failed = LocalHelper::from_streams_as(
+        Box::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap()),
+        Box::new(std::io::sink()),
+        "测试判停程序乙",
+    );
+    drop(failed);
+    let loading = fake(|request, _| match request.op {
+        Op::LoadAsr { .. } => Some((
+            Reply::Error {
+                message: "模型文件不存在：x".into(),
+            },
+            vec![],
+        )),
+        _ => Some((Reply::Done, vec![])),
+    });
+    assert!(
+        loading
+            .load_asr(Path::new("x"), AsrEngine::SenseVoice)
+            .is_err()
+    );
+    drop(loading);
+    std::thread::sleep(Duration::from_millis(150));
+    set_helper_observer(None);
+    let lines = observer.0.lock().unwrap().clone();
+    let exits: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("测试判停程序甲 退出"))
+        .collect();
+    assert_eq!(exits.len(), 1, "{lines:?}");
+    assert!(exits[0].contains("语义判停连续 4 次超时"), "{exits:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("退出 MOSS 不再使用它，已结束（最近一次出错：模型文件不存在：x）")),
+        "{lines:?}"
+    );
+}
+
+/// n110 复审 13：打开判停 / 识别流只认 `Opened`（以及不报告降噪的旧 `Done`），别的回复当出错。
+#[test]
+fn stream_open_rejects_unexpected_replies() {
+    let helper = fake(|request, _| match request.op {
+        Op::VadOpen { .. } | Op::AsrOpen { .. } => Some((
+            Reply::Text {
+                text: "乱回".into(),
+            },
+            vec![],
+        )),
+        _ => Some((Reply::Done, vec![])),
+    });
+    assert_eq!(
+        helper.vad_open_report(1).unwrap_err().message,
+        "本地判停返回了意外的结果"
+    );
+    assert_eq!(
+        helper.asr_open_report(1).unwrap_err().message,
+        "本地流式识别返回了意外的结果"
+    );
+    assert!(helper.vad_open(1).is_err());
+}

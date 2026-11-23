@@ -294,6 +294,7 @@ try {
       return { ...structuredClone(state.builtin), restarted: false };
     },
     voice_local_save: ({ settings }) => {
+      if (settings?.colab_cli) return { ...structuredClone(state.builtin), restarted: false, hot_applied: true };
       state.builtin.local.settings = { ...state.builtin.local.settings, ...structuredClone(settings) };
       if (state.builtin.jev) {
         if (Object.prototype.hasOwnProperty.call(settings, "jev_filter_enabled")) {
@@ -720,6 +721,35 @@ try {
   assert.equal(await page.locator("#voice-panel-features #voice-group-vision").count(), 0, "视觉理解从扩展移到模型标签");
   // 6. 本地模型与对话体验分开保存：保存体验时不带上本地模型未保存的改动
   await openGroup("local-models");
+  // Colab T4 专属联动默认收起，标题栏保留状态胶囊；点击展开 / 收起，接管中点顶部“去配置”会自动展开
+  assert.equal(await page.locator("#voice-local-colab-bridge").evaluate((el) => el.open), false, "Colab T4 专属联动默认收起");
+  assert.match(await page.locator("#voice-colab-state-pill").innerText(), /未开启/);
+  assert.equal(await page.locator("#voice-colab-enabled").isVisible(), false, "收起时不展示 Colab 表单");
+  if (process.env.VOICE_QA_DIR) {
+    await page.locator("#voice-local-colab-bridge").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-local-colab-collapsed.png") });
+  }
+  await page.locator("#voice-local-colab-bridge > summary").click();
+  await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === true);
+  assert.equal(await page.locator("#voice-colab-enabled").isVisible(), true, "展开后显示 Colab 开关与配置");
+  assert.equal(await page.locator("#voice-colab-export-ipynb").isVisible(), true, "展开后显示导出笔记本按钮");
+  if (process.env.VOICE_QA_DIR) {
+    await page.locator("#voice-local-colab-bridge").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-local-colab-expanded.png") });
+  }
+  state.builtin.local.colab = { enabled: true, active: true, url: "https://demo-t4.trycloudflare.com/v1", llm_model: "qwen3-vl-8b", tts_model: "qwen3-tts", tts_voice: "moss", key_configured: true };
+  await page.locator("#voice-colab-cli-refresh").click();
+  await page.locator("#voice-colab-state-pill").filter({ hasText: "已开启 · 接管中" }).waitFor();
+  await page.locator("#voice-local-colab-bridge > summary").click();
+  await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === false);
+  assert.equal(await page.locator("#voice-colab-enabled").isVisible(), false, "手动收起后隐藏 Colab 表单");
+  await page.locator("#voice-builtin-mix-llm .voice-link-btn").click();
+  await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === true);
+  assert.equal(await page.locator("#voice-colab-enabled").isVisible(), true, "接管中点顶部“去配置”时自动展开 Colab 折叠栏");
+  delete state.builtin.local.colab;
+  await page.locator("#voice-colab-cli-refresh").click();
+  await page.locator("#voice-colab-state-pill").filter({ hasText: "未开启" }).waitFor();
+  await page.locator("#voice-local-colab-bridge > summary").click();
+  await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === false);
+  assert.equal(await page.locator("#voice-colab-enabled").isVisible(), false, "再次点击收起 Colab 联动");
   assert.match(await page.locator("#voice-local-group-font").innerText(), /48,662 字/, "n83：本地模型区展示小智屏幕全量补字库");
   assert.equal(await page.locator("#voice-local-delete-xiaozhi_noto_v1_full").count(), 1, "已装补字库可按需删除");
   // n109：命令词抗噪并进“拾音判停”；降噪、语义判停与老版判停收进“更多 / 实验”，正在用收起区的模型时自动展开
@@ -847,6 +877,8 @@ try {
   await ttsModal.waitFor();
   await ttsModal.getByText(/本机试听已全部自动缓存/).waitFor();
   await ttsModal.locator("#voice-local-tts-lang-zh").waitFor();
+  assert.equal(await ttsModal.locator(".tts-speaker-sample").count(), 0, "与语言包一致的试听语不在音色行里逐行重复");
+  assert.equal(await ttsModal.locator(".tts-speaker-row").getByText("本机已缓存").count(), 0, "全部缓存完成后不在每行重复贴“本机已缓存”标签");
   await ttsModal.locator("#voice-local-tts-play-45").click();
   assert.deepEqual(last("voice_builtin_models_test").args, { section: "local_tts", input: { model_id: "kokoro", speaker: 45 } });
   await ttsModal.locator("#voice-local-tts-apply-45").click();

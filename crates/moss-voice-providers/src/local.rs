@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use moss_voice_local_proto::{
-    AsrDecodeOptions, AsrEngine, COMMAND_KEYWORDS, CommandKeyword, TtsEngine, VadEngine,
-    VadEventKind, VadParams, command_keyword_kind, command_keywords_text,
+    AsrDecodeOptions, AsrEngine, COMMAND_KEYWORDS, CommandKeyword, DenoiseReport, TtsEngine,
+    VadEngine, VadEventKind, VadParams, command_keyword_kind, command_keywords_text,
 };
 use moss_voice_local_proto::{
     Op, PROTOCOL_VERSION, Reply, Request, Response, bytes_to_pcm, pcm_to_bytes, read_frame,
@@ -45,6 +45,77 @@ const STREAM_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Pending = Sender<(Reply, Vec<u8>)>;
 
+/// 本地模型程序的旁路观察者（完整过程记录用，n110）：进程启动、标准错误输出的每一行、意外退出或被 MOSS 结束。
+/// 回调在专门的读线程里调用，不阻塞与辅助程序的收发；实现方应只做不阻塞的记录（记录关着时直接返回）。
+pub trait HelperObserver: Send + Sync {
+    /// 进程已启动并握手成功（`role` 如“本地模型程序”“语义判停程序”）
+    fn started(&self, role: &str, pid: Option<u32>);
+    /// 标准错误输出的一行（原样，不截断；过长的一行按 64 KiB 分段交出）
+    fn stderr_line(&self, role: &str, line: &str);
+    /// 进程没按 MOSS 的要求就退出了，或被 MOSS 因超时等原因结束（`detail` 为中文原因 / 退出状态）
+    fn exited(&self, role: &str, detail: &str);
+}
+
+/// 全局观察者（宿主启动时设置；没设置时辅助程序标准错误照旧丢弃，不多建线程）。
+static OBSERVER: Mutex<Option<Arc<dyn HelperObserver>>> = Mutex::new(None);
+
+/// 设置（或用 `None` 清掉）本地模型程序观察者；之后启动的辅助程序生效。
+pub fn set_helper_observer(observer: Option<Arc<dyn HelperObserver>>) {
+    if let Ok(mut slot) = OBSERVER.lock() {
+        *slot = observer;
+    }
+}
+
+pub(crate) fn helper_observer() -> Option<Arc<dyn HelperObserver>> {
+    OBSERVER.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// 标准错误一行最多攒这么多字节就先交出（不丢内容，只分段）。
+pub(crate) const STDERR_CHUNK: usize = 64 * 1024;
+
+/// 持续读走辅助程序的标准错误（无论记录开没开都读，绝不让管道写满卡住辅助程序），按行交给观察者。
+pub(crate) fn drain_stderr(
+    stderr: impl Read + Send + 'static,
+    role: &'static str,
+    observer: Arc<dyn HelperObserver>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("moss-voice-local-stderr".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let mut limited = (&mut reader).take(STDERR_CHUNK as u64);
+                match std::io::BufRead::read_until(&mut limited, b'\n', &mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&line);
+                        let text = text.trim_end_matches(['\r', '\n']);
+                        if !text.trim().is_empty() {
+                            observer.stderr_line(role, text);
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// 进程退出状态的中文说明。
+pub(crate) fn exit_status_text(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("退出码 {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("被信号 {signal} 结束");
+        }
+    }
+    "退出状态未知".to_owned()
+}
+
 struct Inner {
     writer_tx: SyncSender<(Request, Vec<u8>)>,
     pending: Mutex<HashMap<u64, Pending>>,
@@ -55,6 +126,10 @@ struct Inner {
     child: Mutex<Option<Child>>,
     job: Mutex<Option<moss_process::JobHandle>>,
     pacing: Mutex<Pacing>,
+    /// 这个进程的用途（完整过程记录里写“本地模型程序”“语义判停程序”等）
+    role: &'static str,
+    /// 它最近一次回的错误（例如加载模型失败）：最后一个句柄放手、进程随之结束时写进记录说明原因
+    last_error: Mutex<Option<String>>,
 }
 
 /// 本地合成的节奏估计：这台机器合成有多快、已经交出去的语音大概还能播多久。
@@ -129,8 +204,13 @@ impl Pacing {
 }
 
 impl Inner {
-    fn invalidate(&self) {
-        self.alive.store(false, Ordering::SeqCst);
+    /// MOSS 因超时、管道写入失败等原因放弃并结束辅助程序（`reason` 写进完整过程记录）。
+    fn invalidate(&self, reason: &str) {
+        if self.alive.swap(false, Ordering::SeqCst)
+            && let Some(observer) = helper_observer()
+        {
+            observer.exited(self.role, &format!("MOSS 结束了它：{reason}"));
+        }
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
@@ -149,6 +229,16 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        // 没人主动结束、它也没自己退出，最后一个句柄放手时随之结束（常见于启动时加载模型失败后放弃）
+        if *self.alive.get_mut()
+            && let Some(observer) = helper_observer()
+        {
+            let reason = match self.last_error.get_mut().ok().and_then(|e| e.take()) {
+                Some(error) => format!("MOSS 不再使用它，已结束（最近一次出错：{error}）"),
+                None => "MOSS 不再使用它，已结束".to_owned(),
+            };
+            observer.exited(self.role, &reason);
+        }
         if let Ok(mut job) = self.job.lock()
             && let Some(job) = job.take()
         {
@@ -176,7 +266,7 @@ pub struct SpeakerHelper {
 }
 impl SpeakerHelper {
     pub fn spawn(exe: &Path, models_root: &Path) -> Result<Self, ProviderError> {
-        let helper = LocalHelper::spawn(exe)?;
+        let helper = LocalHelper::spawn_as(exe, "声纹程序")?;
         helper.load_speaker(models_root)?;
         Ok(Self { helper })
     }
@@ -207,7 +297,7 @@ pub struct TurnHelper {
 
 impl TurnHelper {
     pub fn spawn(exe: &Path, model_file: Option<&Path>) -> Result<Self, ProviderError> {
-        let helper = LocalHelper::spawn(exe)?;
+        let helper = LocalHelper::spawn_as(exe, "语义判停程序")?;
         helper.load_smart_turn(model_file)?;
         Ok(Self::from_loaded_helper(helper, model_file))
     }
@@ -249,6 +339,10 @@ impl TurnHelper {
             Err(failure) if failure.timed_out => {
                 let streak = self.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1;
                 if streak >= TURN_CONSECUTIVE_TIMEOUT_CAP {
+                    // 与其他放弃路径共用一处：只在它还活着时记一次“被 MOSS 结束”，读线程随后见到管道关闭不再重复记
+                    self.helper
+                        .inner
+                        .invalidate(&format!("语义判停连续 {streak} 次超时"));
                     self.helper.terminate();
                 }
                 Err(failure.error)
@@ -280,6 +374,11 @@ fn dead() -> ProviderError {
 impl LocalHelper {
     /// 启动辅助程序并握手（核对协议版本）。
     pub fn spawn(exe: &Path) -> Result<Self, ProviderError> {
+        Self::spawn_as(exe, "本地模型程序")
+    }
+
+    /// 同 [`spawn`](Self::spawn)，`role` 为完整过程记录里这个进程的称呼。
+    pub fn spawn_as(exe: &Path, role: &'static str) -> Result<Self, ProviderError> {
         if !exe.is_file() {
             return Err(ProviderError::new(format!(
                 "未找到本地模型程序 {}（应与 MOSS 放在同一目录）",
@@ -288,11 +387,17 @@ impl LocalHelper {
                     .unwrap_or_default()
             )));
         }
+        let observer = helper_observer();
         let mut command = Command::new(exe);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            // 设了观察者（宿主接了完整过程记录）才接管标准错误，并且始终有线程读走，不会写满卡住辅助程序
+            .stderr(if observer.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -311,12 +416,16 @@ impl LocalHelper {
             .stdout
             .take()
             .ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输出"))?;
-        let helper = Self::from_streams(Box::new(stdout), Box::new(stdin));
-        if let Ok(mut slot) = helper.inner.job.lock() {
-            *slot = job;
+        let stderr = child.stderr.take();
+        let pid = child.id();
+        // 先记“已启动”，再启动后台读线程与 stderr 转发，杜绝进程秒退时“退出”抢在“启动”之前落盘
+        if let Some(ref observer) = observer {
+            observer.started(role, Some(pid));
         }
-        if let Ok(mut slot) = helper.inner.child.lock() {
-            *slot = Some(child);
+        let helper =
+            Self::from_streams_with(Box::new(stdout), Box::new(stdin), role, Some(child), job);
+        if let (Some(observer), Some(stderr)) = (observer, stderr) {
+            drain_stderr(stderr, role, observer);
         }
         helper.hello()?;
         Ok(helper)
@@ -324,6 +433,24 @@ impl LocalHelper {
 
     /// 用给定的读写流建立连接（测试用假辅助程序时也走这里）。不握手。
     pub fn from_streams(reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>) -> Self {
+        Self::from_streams_as(reader, writer, "本地模型程序")
+    }
+
+    fn from_streams_as(
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        role: &'static str,
+    ) -> Self {
+        Self::from_streams_with(reader, writer, role, None, None)
+    }
+
+    fn from_streams_with(
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        role: &'static str,
+        child: Option<Child>,
+        job: Option<moss_process::JobHandle>,
+    ) -> Self {
         let (writer_tx, writer_rx) = sync_channel::<(Request, Vec<u8>)>(16);
         let inner = Arc::new(Inner {
             writer_tx,
@@ -331,9 +458,11 @@ impl LocalHelper {
             next_id: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
             alive: AtomicBool::new(true),
-            child: Mutex::new(None),
-            job: Mutex::new(None),
+            child: Mutex::new(child),
+            job: Mutex::new(job),
             pacing: Mutex::new(Pacing::default()),
+            role,
+            last_error: Mutex::new(None),
         });
         let weak_writer = Arc::downgrade(&inner);
         let _ = std::thread::Builder::new()
@@ -343,7 +472,7 @@ impl LocalHelper {
                 while let Ok((request, payload)) = writer_rx.recv() {
                     if write_frame(&mut writer, &request, &payload).is_err() {
                         if let Some(inner) = weak_writer.upgrade() {
-                            inner.invalidate();
+                            inner.invalidate("向它写请求失败（管道已断）");
                         }
                         return;
                     }
@@ -372,9 +501,30 @@ impl LocalHelper {
                         }
                         None => {
                             // 辅助程序退出或输出损坏：丢弃全部等待者，它们立即收到错误
-                            inner.alive.store(false, Ordering::SeqCst);
+                            let unexpected = inner.alive.swap(false, Ordering::SeqCst);
                             if let Ok(mut pending) = inner.pending.lock() {
                                 pending.clear();
+                            }
+                            if unexpected && let Some(observer) = helper_observer() {
+                                // MOSS 没要求它退出：如实记下退出状态（崩溃、被系统结束等）
+                                let mut status = None;
+                                for _ in 0..10 {
+                                    let polled = match inner.child.lock() {
+                                        Ok(mut child) => match child.as_mut() {
+                                            Some(child) => child.try_wait().ok(),
+                                            None => break,
+                                        },
+                                        Err(_) => break,
+                                    };
+                                    if let Some(Some(exit)) = polled {
+                                        status = Some(exit_status_text(exit));
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(50));
+                                }
+                                let status =
+                                    status.unwrap_or_else(|| "输出中断，退出状态未知".to_owned());
+                                observer.exited(inner.role, &format!("意外退出（{status}）"));
                             }
                             return;
                         }
@@ -388,9 +538,24 @@ impl LocalHelper {
         self.inner.alive.load(Ordering::SeqCst)
     }
 
-    /// 立即结束辅助程序子进程并等待句柄释放（用于卸载本地模型前释放文件锁）。
+    /// 立即结束辅助程序子进程并等待句柄释放（用于卸载本地模型或 `service_stop` 汇总停止前释放文件锁）。
     pub fn terminate(&self) {
         self.inner.alive.store(false, Ordering::SeqCst);
+        self.terminate_inner();
+    }
+
+    /// 立即结束辅助程序子进程、向过程记录写明结束原因并等待句柄释放（用于音色试听 / 预缓存等独立短期进程）。
+    pub fn terminate_with_reason(&self, reason: &str) {
+        if self.inner.alive.swap(false, Ordering::SeqCst)
+            && self.inner.child.lock().ok().is_some_and(|c| c.is_some())
+            && let Some(observer) = helper_observer()
+        {
+            observer.exited(self.inner.role, reason);
+        }
+        self.terminate_inner();
+    }
+
+    fn terminate_inner(&self) {
         if let Ok(mut pending) = self.inner.pending.lock() {
             pending.clear();
         }
@@ -418,11 +583,11 @@ impl LocalHelper {
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                self.inner.invalidate();
+                self.inner.invalidate("写入队列已满");
                 Err(ProviderError::new("本地模型写入队列已满，辅助程序不可用"))
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.inner.invalidate();
+                self.inner.invalidate("写入线程已退出");
                 Err(dead())
             }
         }
@@ -472,15 +637,20 @@ impl LocalHelper {
         let result =
             receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         match result {
-            Ok((Reply::Error { message }, _)) => Err(CallFailure {
-                error: ProviderError::new(message),
-                timed_out: false,
-            }),
+            Ok((Reply::Error { message }, _)) => {
+                if let Ok(mut last) = self.inner.last_error.lock() {
+                    *last = Some(message.clone());
+                }
+                Err(CallFailure {
+                    error: ProviderError::new(message),
+                    timed_out: false,
+                })
+            }
             Ok(reply) => Ok(reply),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.forget(id);
                 if invalidate_on_timeout {
-                    self.inner.invalidate();
+                    self.inner.invalidate("处理超时");
                 }
                 Err(CallFailure {
                     error: ProviderError::new("本地模型处理或管道写入超时"),
@@ -777,7 +947,7 @@ impl LocalHelper {
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                self.inner.invalidate();
+                self.inner.invalidate("流式合成超时");
                 break Err(ProviderError::new("本地合成处理超时"));
             }
             match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
@@ -832,8 +1002,15 @@ impl LocalHelper {
     }
 
     pub fn asr_open(&self, stream: u64) -> Result<(), ProviderError> {
-        self.call(Op::AsrOpen { stream }, &[], STREAM_TIMEOUT)
-            .map(|_| ())
+        self.asr_open_report(stream).map(|_| ())
+    }
+
+    /// 同 [`asr_open`](Self::asr_open)，另返回辅助程序报告的这一路降噪情况（协议 8；旧回复为 `None`）。
+    pub fn asr_open_report(&self, stream: u64) -> Result<Option<DenoiseReport>, ProviderError> {
+        opened_report(
+            self.call(Op::AsrOpen { stream }, &[], STREAM_TIMEOUT)?.0,
+            "本地流式识别",
+        )
     }
 
     pub fn asr_feed(&self, stream: u64, pcm: &[i16]) -> Result<(), ProviderError> {
@@ -869,8 +1046,15 @@ impl LocalHelper {
     }
 
     pub fn vad_open(&self, stream: u64) -> Result<(), ProviderError> {
-        self.call(Op::VadOpen { stream }, &[], VAD_TIMEOUT)
-            .map(|_| ())
+        self.vad_open_report(stream).map(|_| ())
+    }
+
+    /// 同 [`vad_open`](Self::vad_open)，另返回辅助程序报告的这一路降噪情况（协议 8；旧回复为 `None`）。
+    pub fn vad_open_report(&self, stream: u64) -> Result<Option<DenoiseReport>, ProviderError> {
+        opened_report(
+            self.call(Op::VadOpen { stream }, &[], VAD_TIMEOUT)?.0,
+            "本地判停",
+        )
     }
 
     pub fn vad_feed(&self, stream: u64, pcm: &[i16]) -> Result<Vec<VadEventKind>, ProviderError> {
@@ -917,6 +1101,15 @@ impl LocalHelper {
     pub fn vad_close(&self, stream: u64) {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let _ = self.enqueue(id, Op::VadClose { stream }, &[]);
+    }
+}
+
+/// 打开判停 / 识别流的回复：协议 8 为 `Opened`（带降噪情况），`Done` 只出现在不报告降噪的假辅助程序里；其他一律当出错。
+fn opened_report(reply: Reply, what: &str) -> Result<Option<DenoiseReport>, ProviderError> {
+    match reply {
+        Reply::Opened { denoise } => Ok(Some(denoise)),
+        Reply::Done => Ok(None),
+        _ => Err(ProviderError::new(format!("{what}返回了意外的结果"))),
     }
 }
 
@@ -976,6 +1169,8 @@ impl StreamingAsr for LocalStreamingAsr {
         let (interim_tx, interim) = tokio::sync::watch::channel(String::new());
         let (result_tx, result) = tokio::sync::oneshot::channel();
         let helper = self.helper.clone();
+        let denoise = crate::DenoiseSlot::default();
+        let denoise_out = denoise.clone();
         let task = tokio::spawn(async move {
             let stream = helper.next_stream();
             let mut guard = StreamGuard {
@@ -985,7 +1180,11 @@ impl StreamingAsr for LocalStreamingAsr {
             };
             let outcome = async {
                 let opener = helper.clone();
-                blocking(move || opener.asr_open(stream)).await?;
+                if let Some(report) = blocking(move || opener.asr_open_report(stream)).await?
+                    && let Ok(mut slot) = denoise_out.lock()
+                {
+                    *slot = Some(report);
+                }
                 while let Some(mut pcm) = chunks.recv().await {
                     // 上一段还在解码时到达的音频合并成一次送入
                     while let Ok(more) = chunks.try_recv() {
@@ -1014,7 +1213,9 @@ impl StreamingAsr for LocalStreamingAsr {
             drop(guard);
             let _ = result_tx.send(outcome);
         });
-        AsrStream::new(audio, result, task).with_interim(interim)
+        AsrStream::new(audio, result, task)
+            .with_interim(interim)
+            .with_denoise(denoise)
     }
 }
 

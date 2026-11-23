@@ -488,10 +488,10 @@ function SettingsModalBody({
           {!isRemoteMode() && (<>
           {/* 网络与服务端口设置 */}
           <div className="ob-fold settings-box-3">
-            <FoldHeader variant="section" id="settings-port" icon={Network} title="服务监听端口 (Web Port)" summary={portSummary} defaultOpen={false} />
+            <FoldHeader variant="section" id="settings-port" icon={Network} title="服务端口" summary={portSummary} defaultOpen={false} />
 
             <div className="settings-box-4">
-              上位机 HTTP 服务监听端口，供本桌面端同源访问及手机/局域网连接：
+              本机服务与手机连接使用的端口（默认 9666，修改后重启生效）：
             </div>
 
             <div className="settings-row">
@@ -537,8 +537,8 @@ function SettingsModalBody({
                 {systemInfo.is_fallback ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
                 <span>
                   {systemInfo.is_fallback
-                    ? `首选端口 ${systemInfo.preferred_port} 被占用，当前已自动降级至安全端口: ${systemInfo.actual_port}`
-                    : `当前同源通信正常运行于: ${systemInfo.actual_port} 端口 (默认: 9666)`}
+                    ? `首选端口 ${systemInfo.preferred_port} 被占用，当前已改用端口 ${systemInfo.actual_port}`
+                    : `当前运行端口：${systemInfo.actual_port}`}
                 </span>
               </div>
             )}
@@ -598,7 +598,7 @@ function SettingsModalBody({
               <span>启用 Jev 判断</span>
             </label>
             <div className="settings-box-8">
-              typesafe/jev-1.13
+              模型：typesafe/jev-1.13
             </div>
             <div className="settings-row-4">
               <input
@@ -690,7 +690,7 @@ function SettingsModalBody({
                   checked={checkPrerelease}
                   onChange={(e) => void handleToggleUpdatePref("check_prerelease", e.target.checked)}
                 />
-                <span>检查更新时包含预览版 (Pre-release)</span>
+                <span>检查更新时包含预览版</span>
               </label>
               <div className="settings-row" style={{ marginTop: "10px", flexWrap: "wrap", gap: "10px" }}>
                 <button
@@ -787,7 +787,7 @@ function SettingsModalBody({
             <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" summary={closeSummary} defaultOpen={false} />
 
             <div className="settings-box-4">
-              点击主窗口右上角关闭按钮（[X]）时的默认行为：
+              关闭主窗口时的默认行为：
             </div>
 
             <div className="settings-row-6">
@@ -816,7 +816,7 @@ function SettingsModalBody({
                     每次询问（推荐）
                   </div>
                   <div className="settings-box-10">
-                    点击关闭时弹出对话框，由您临时决定是最小化还是完全退出
+                    关闭时弹窗询问隐藏还是完全退出
                   </div>
                 </div>
               </label>
@@ -876,7 +876,7 @@ function SettingsModalBody({
                     完全退出程序
                   </div>
                   <div className="settings-box-10">
-                    直接安全停止激光并杀死主进程（适合习惯直接关闭窗口的用户）
+                    停止激光任务与语音服务并直接退出程序
                   </div>
                 </div>
               </label>
@@ -886,9 +886,6 @@ function SettingsModalBody({
           {/* 顶栏右上角状态显示 */}
           <div className="ob-fold settings-spacer" id="settings-top-pills-section">
             <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" summary={topPillsSummary} defaultOpen={false} />
-            <div className="settings-box-4">
-              开启后隐藏页面右上角的「硬件」「小智」「审批」三个状态胶囊（未开启时保持原样显示；常驻「急停 0x18」按钮与新审批自动弹窗保持不变）：
-            </div>
             <label className="settings-label">
               <input
                 type="checkbox"
@@ -898,12 +895,15 @@ function SettingsModalBody({
               />
               <span>隐藏右上角状态胶囊（硬件 / 小智 / 审批）</span>
             </label>
+            <div className="settings-box-4" style={{ marginTop: "6px", marginBottom: 0 }}>
+              不影响常驻急停按钮与新审批弹窗。
+            </div>
           </div>
 
           <div className="settings-row-7">
             <ShieldAlert size={16} className="settings-icon-2" />
             <div className="settings-box-11">
-              <strong>安全机制提示</strong>：完全退出程序时，会停止正在下发的任务，并向正在加工的设备发送 0x18 软复位。0x18 只是软件停止请求，发送成功也不代表激光已经熄灭或断电；请以设备实际状态为准，紧急情况使用硬件急停。
+              <strong>安全提示</strong>：完全退出会停止正在下发的任务，并向加工中的设备发送软件停止请求。软件停止不代表激光已熄灭或断电，请以设备实际状态为准，紧急情况立即使用硬件急停。
             </div>
           </div>
         </div>

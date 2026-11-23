@@ -370,6 +370,22 @@ export function colabSettingsForm(colab) {
 }
 
 /**
+ * Colab T4 专属联动折叠栏是否默认展开：开启、接管中、正在拉起 / 运行或有拉起报错时自动展开，未开启时默认收起。
+ */
+export function colabBridgeDefaultOpen(colab) {
+  const c = colab || {};
+  const cli = c.cli || {};
+  const runnerState = cli.runner_state || "idle";
+  return Boolean(
+    c.enabled ||
+      c.active ||
+      runnerState === "starting" ||
+      runnerState === "running" ||
+      cli.runner_error,
+  );
+}
+
+/**
  * 支持把 Colab 单元格 3 打印的整段配置块直接粘贴进地址框，自动拆出隧道地址与 API 密钥。
  */
 export function parseColabPaste(raw) {

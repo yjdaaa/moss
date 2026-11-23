@@ -1153,6 +1153,7 @@ fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
             session_id: "ffff_active".into(),
             supports_mcp: true,
             sender: tx,
+            turn: 0,
         },
     );
 

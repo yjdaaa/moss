@@ -4,7 +4,6 @@ import { showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { SaveBar, VoiceGroup } from "../VoiceLayout.jsx";
 import {
-  DEFAULT_JEV_DECISIONS_URL,
   DEFAULT_JEV_MODEL,
   JEV_PRESET_MODELS,
   builtinJevForm,
@@ -198,11 +197,11 @@ function BuiltinJevGroup({ builtin }) {
     <VoiceGroup id="builtin-model-jev" title={JEV_GROUP_TITLE} summary={builtinJevSummary(status)} dirty={dirty}>
       {localOn && (
         <p className="voice-muted">
-          当前已在上方下拉框选用本地 Jev 决策（{sourceView.selectedLocalModel?.label || activeLocalId}）；这里的 OpenRouter 云端配置与密钥作为备用保留，随时可在上方下拉切回。
+          顶部已选用本地 Jev（{sourceView.selectedLocalModel?.label || activeLocalId}）；这里的云端配置作为备用保留，可随时在顶部切回。
         </p>
       )}
       <p className="voice-muted">
-        在语音链路中位于「语音识别」之后、「大模型」之前：模型下拉选择作用于内置语音前置粗筛（半截话续听防抢话、口语快答分流、6 大工具组/外部 MCP 粗筛与记忆精筛）；OpenRouter 密钥同时可供雕刻加工反馈共用（加工反馈接口按契约固定使用 typesafe/jev-1.13），绝不授权任何设备动作。
+        语音识别后、大模型前的轻量分流（续听半截话、口语快答、按需挂工具与筛选记忆），不授权任何设备动作。
       </p>
       <div className="voice-form-grid">
         <div className="voice-field">
@@ -282,8 +281,8 @@ function BuiltinJevGroup({ builtin }) {
         {/* n69：语音里用不用 Jev（jev_filter_enabled）只在顶部第 3 栏切换，这里只显示状态；细项在“对话体验” */}
         <div className="voice-wide voice-inline" id="voice-builtin-jev-voice-state">
           <span>
-            语音对话里用 Jev 粗筛：<b>{baseline.voice_enabled ? (localOn ? "已开启（用本地模型）" : "已开启（用这里的云端模型）") : "未开启"}</b>
-            <span className="voice-muted">（在本页顶部第 3 栏“Jev 前置粗筛”下拉切换；具体筛哪些在下面“对话体验”里设）</span>
+            语音对话粗筛：<b>{baseline.voice_enabled ? (localOn ? "已开启（用本地模型）" : "已开启（用云端模型）") : "未开启"}</b>
+            <span className="voice-muted">（顶部第 3 栏切换，细项在下方“对话体验”）</span>
           </span>
           <button type="button" className="voice-link-btn" onClick={focusJevSwitch} id="voice-builtin-jev-goto-switch">
             去顶部切换
@@ -296,10 +295,9 @@ function BuiltinJevGroup({ builtin }) {
             onChange={(e) => update("feedback_enabled", e.target.checked)}
             id="voice-builtin-jev-feedback-enabled"
           />
-          <span>加工反馈判断（和语音无关的另一项功能：雕完后用这把 OpenRouter 密钥、固定 typesafe/jev-1.13 判断“太焦、太浅、切不透”并给调参建议；在这里开关、点保存生效）</span>
+          <span>加工反馈判断（用同把密钥与 typesafe/jev-1.13 判断“太焦、太浅、切不透”并给调参建议）</span>
         </label>
       </div>
-      <div className="voice-final mono">最终请求地址：{DEFAULT_JEV_DECISIONS_URL}</div>
       {inputErr && dirty && <div className="voice-hint voice-hint--bad">{inputErr}</div>}
       {test ? (
         <div className={`voice-hint voice-hint--${test.ok ? "ok" : "bad"}`} id="voice-builtin-model-result-jev">

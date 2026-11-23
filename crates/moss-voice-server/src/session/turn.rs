@@ -60,8 +60,13 @@ impl<'a> Session<'a> {
         // 上一轮还没收尾就被这一轮接上：先把它已合成的语音与结果记下
         self.trace_turn_end("replaced");
         self.turn_number += 1;
-        self.trace_turn_input(&input, kind);
-        let trace_tts = self.trace_handle().map(|_| Vec::new());
+        let turn_trace = conversation
+            .process_trace
+            .as_ref()
+            .filter(|t| t.enabled())
+            .map(laser_runtime::ProcessTrace::scoped);
+        self.trace_turn_input(&input, kind, turn_trace.as_ref());
+        let trace_tts = turn_trace.as_ref().map(|_| Vec::new());
         let recording_offset = if kind == TurnKind::Answer {
             self.recording_started.elapsed().as_millis() as u64
         } else {
@@ -152,7 +157,14 @@ impl<'a> Session<'a> {
         let is_report = matches!(input, TurnInput::Report { .. });
         let debug_capture_epoch = self.shared.state.debug_capture_epoch();
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
-        let (handle, events) = spawn_turn_gated(
+        let direct_trace = crate::conversation::TurnTrace {
+            trace: turn_trace
+                .clone()
+                .or_else(|| conversation.process_trace.as_ref().map(|t| t.scoped())),
+            flow: turn_flow(self.device_id, self.turn_number),
+            turn: self.turn_number,
+        };
+        let (handle, events) = crate::conversation::spawn_turn_traced(
             conversation,
             context,
             input,
@@ -160,6 +172,7 @@ impl<'a> Session<'a> {
             device,
             person_hint,
             gate,
+            Some(direct_trace),
         );
         if let Some(mut replaced) = self.turn.replace(ActiveTurn {
             turn_number: self.turn_number,
@@ -184,8 +197,8 @@ impl<'a> Session<'a> {
             debug_corrected_asr: None,
             debug_tools: Vec::new(),
             debug_text_reply: Vec::new(),
+            trace: turn_trace,
             trace_tts,
-            trace_rounds: 0,
             pending_messages: Vec::new(),
             resampler: None,
             audio_started: false,
@@ -205,6 +218,7 @@ impl<'a> Session<'a> {
         }
         self.phase = Phase::Thinking;
         self.set_state("thinking");
+        self.sync_trace_turn();
     }
 
     /// 回声：把这段话重采样到下行采样率后重新编码播回，验证编解码、重采样与播放节奏。
@@ -512,11 +526,12 @@ impl<'a> Session<'a> {
                     turn.smart_turn_prob = Some(prob);
                 }
             }
-            TurnEvent::RawHeard { raw, corrected } => {
-                self.trace_record(
-                    "asr",
-                    serde_json::json!({"raw": raw, "corrected": corrected}),
-                );
+            TurnEvent::RawHeard {
+                raw,
+                homophone: _,
+                corrected,
+                keyword: _,
+            } => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.debug_raw_asr = Some(raw);
                     turn.debug_corrected_asr = Some(corrected);
@@ -555,19 +570,33 @@ impl<'a> Session<'a> {
                     .set_utterance_chars(self.session_id, u32::try_from(chars).unwrap_or(u32::MAX));
                 self.event(format!("识别完成：{chars} 字"));
                 let mut held_ms = None;
+                let mut decision = None;
                 if let Some(turn) = self.turn.as_mut() {
                     turn.user = Some(text.clone());
                     if turn.speculative && turn.hold.is_none() {
                         // 抢跑：任务在静音 BASE_SILENCE_MS 时就开始了；结合句尾词与尾音语义概率决定还要等多久才开口
-                        let wait =
-                            crate::fast::endpoint_wait_ms_with_prosody(&text, turn.smart_turn_prob)
-                                .saturating_sub(BASE_SILENCE_MS);
+                        let total =
+                            crate::fast::endpoint_wait_ms_with_prosody(&text, turn.smart_turn_prob);
+                        let wait = total.saturating_sub(BASE_SILENCE_MS);
+                        let now = Instant::now();
                         let until = turn.started + Duration::from_millis(wait);
-                        if until > Instant::now() {
+                        if until > now {
                             turn.hold = Some((until, until + MAX_HOLD_EXTENSION));
                             held_ms = Some(wait);
                         }
+                        // 两种结论都记下依据（句尾规则、语义判停概率、还要再等多久）
+                        decision = Some(serde_json::json!({
+                            "held": until > now,
+                            "text_wait_ms": crate::fast::endpoint_wait_ms(&text),
+                            "smart_turn_prob": turn.smart_turn_prob,
+                            "total_wait_ms": total,
+                            "base_silence_ms": BASE_SILENCE_MS,
+                            "extra_wait_ms": until.saturating_duration_since(now).as_millis() as u64,
+                        }));
                     }
+                }
+                if let Some(decision) = decision {
+                    self.trace_record("hold_decision", decision);
                 }
                 match held_ms {
                     Some(ms) if ms >= 500 => self.event(format!(
@@ -1126,6 +1155,7 @@ impl<'a> Session<'a> {
         }
         self.phase = Phase::speaking_resumed();
         self.set_state("speaking");
+        self.sync_trace_turn();
         self.event(format!("插话{why}，接着说"));
     }
 

@@ -4,6 +4,7 @@ import { showAlert, showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { SaveBar } from "../VoiceLayout.jsx";
 import {
+  colabBridgeDefaultOpen,
   colabSavePayload,
   colabSettingsError,
   colabSettingsForm,
@@ -40,6 +41,9 @@ function ColabBridgeSection({ builtin }) {
   const [cliBusy, setCliBusy] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [showAuthInput, setShowAuthInput] = useState(false);
+  // 默认收起；已开启、接管中、正在拉起 / 运行或有拉起报错时自动展开，用户手动点开 / 收起后以用户为准
+  const [openOverride, setOpenOverride] = useState(null);
+  const open = openOverride ?? colabBridgeDefaultOpen(colab);
   const refAudioInputRef = useRef(null);
   const refAudioConfigured = Boolean(cli.ref_audio_configured);
   const refAudioName = cli.ref_audio_name || "";
@@ -237,8 +241,13 @@ function ColabBridgeSection({ builtin }) {
         : "未开启（保持原配置）";
 
   return (
-    <div className="voice-local-group" id="voice-local-colab-bridge">
-      <div className="voice-field-head">
+    <details
+      className="voice-fold voice-colab-fold"
+      id="voice-local-colab-bridge"
+      open={open}
+      onToggle={(e) => setOpenOverride(e.currentTarget.open)}
+    >
+      <summary>
         <span className="voice-model-name">
           <b>Colab T4 专属联动（多模态大脑 + 550W 克隆声）</b>
           <span
@@ -247,32 +256,36 @@ function ColabBridgeSection({ builtin }) {
           >
             {statePillText}
           </span>
+          {dirty && <span className="ob-pill ob-pill--warn voice-dirty">未保存</span>}
         </span>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={handleExportNotebook}
-          disabled={Boolean(busy || exporting || cliBusy)}
-          id="voice-colab-export-ipynb"
-        >
-          <Download size={13} /> {exporting ? "导出中…" : "导出 Colab 笔记本（.ipynb）"}
-        </button>
-      </div>
-      <p className="voice-muted">
-        默认关闭，平时不改你现有的云端/本地配置。已登录 Colab CLI 时，直接打开下方开关即可在后台自动分配免费 Colab T4（16GB）、拉起 Qwen3-VL-8B + 550W 克隆声 Qwen3-TTS-0.6B 并回填隧道，临时接管「大模型 + 摄像头看图 + 语音合成」三项，其余设置保持现状；关闭开关立即恢复原三项配置。
-      </p>
+      </summary>
+      <div className="voice-local-group">
+        <div className="voice-field-head voice-colab-lead-row">
+          <p className="voice-muted">
+            借助免费 Google Colab T4 临时接管「大模型 + 摄像头看图 + 550W 克隆声」，不改动现有配置，关闭即恢复。
+          </p>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={handleExportNotebook}
+            disabled={Boolean(busy || exporting || cliBusy)}
+            id="voice-colab-export-ipynb"
+          >
+            <Download size={13} /> {exporting ? "导出中…" : "导出 Colab 笔记本（.ipynb）"}
+          </button>
+        </div>
       <div
         className={`voice-hint voice-hint--${!cliInstalled ? "warn" : cliLoggedIn ? "ok" : "warn"} voice-colab-cli-bar`}
         id="voice-colab-cli-bar"
       >
         <div className="voice-colab-cli-head">
           <span id="voice-colab-cli-status">
-            <b>Colab CLI 状态：</b>
+            <b>Colab CLI：</b>
             {!cliInstalled
-              ? "未安装 / 未登录 Colab CLI（可点右侧一键安装并登录，或点右上角导出笔记本去浏览器手动运行）"
+              ? "未安装（点右侧一键安装，或点右上角导出笔记本到浏览器手动运行）"
               : cliLoggedIn
-                ? `已登录 Colab CLI${cli.account_hint ? `（${cli.account_hint}）` : ""} · 开启联动开关即可自动跑云端 T4`
-                : "未登录 Colab CLI（请先点击右侧「登录 Colab CLI」完成 Google 授权，或手动填写隧道地址）"}
+                ? `已登录${cli.account_hint ? `（${cli.account_hint}）` : ""} · 打开下方开关自动拉起云端 T4`
+                : "未登录（点右侧完成 Google 授权，或下方手动填隧道地址）"}
           </span>
           <div className="voice-colab-cli-actions">
             {!cliInstalled ? (
@@ -399,10 +412,10 @@ function ColabBridgeSection({ builtin }) {
         )}
         <div className="voice-colab-ref-row" id="voice-colab-ref-audio-row">
           <span className="voice-colab-ref-note">
-            <b>550W 原声克隆样本（本机保存，0 显卡负担）：</b>
+            <b>550W 原声克隆样本（本机保存）：</b>
             {refAudioConfigured
-              ? `已选「${refAudioName}」（每次云端 T4 启动自动上传克隆）`
-              : "未选自定义音频（默认使用内置低沉男声基准，建议选 3~8 秒干净 MOSS 原声 .wav）"}
+              ? `已选「${refAudioName}」（启动云端 T4 时自动上传）`
+              : "未选（默认内置低沉男声，建议 3~8 秒干净 .wav）"}
           </span>
           <div className="voice-colab-cli-actions">
             <input
@@ -457,16 +470,16 @@ function ColabBridgeSection({ builtin }) {
             id="voice-colab-enabled"
           />
           <span>
-            启用 Colab T4 专属联动（默认关闭；{cliLoggedIn ? "开启后自动通过 Colab CLI 拉起云端 T4 并接管三项" : "开启才接管大模型、看图与克隆合成"}，关闭恢复原状）
+            启用 Colab T4 专属联动（{cliLoggedIn ? "开启后自动拉起云端 T4 并接管三项" : "开启后接管大模型、看图与克隆声"}）
           </span>
         </label>
         <label className="voice-wide">
-          <span>Colab 隧道地址（Colab CLI 自动拉起后会自动回填；也支持手动整段粘贴配置块）</span>
+          <span>Colab 隧道地址（支持整段粘贴配置块）</span>
           <input
             className="text-input mono"
             value={form.url}
             disabled={Boolean(busy || testing)}
-            placeholder={cliLoggedIn ? "开启开关后由 Colab CLI 自动回填（也可手动粘贴 https://xxx.trycloudflare.com/v1）" : "https://xxx.trycloudflare.com/v1"}
+            placeholder={cliLoggedIn ? "开启开关后自动回填，也可手动粘贴 https://xxx.trycloudflare.com/v1" : "https://xxx.trycloudflare.com/v1"}
             onChange={(e) => handleUrlChange(e.target.value)}
             spellCheck="false"
             autoComplete="off"
@@ -474,7 +487,7 @@ function ColabBridgeSection({ builtin }) {
           />
         </label>
         <label>
-          <span>API 密钥（{keyConfigured ? "已保存，留空沿用" : cliLoggedIn ? "将由 Colab CLI 自动回填" : "未设置"}）</span>
+          <span>API 密钥（{keyConfigured ? "已保存，留空沿用" : "未设置"}）</span>
           <input
             className="text-input mono"
             type="password"
@@ -483,9 +496,9 @@ function ColabBridgeSection({ builtin }) {
             disabled={Boolean(busy || testing)}
             placeholder={
               keyConfigured
-                ? "已保存密钥（重跑 Colab 换新密钥时再填）"
+                ? "已保存（换新密钥时再填）"
                 : cliLoggedIn
-                  ? "开启后由 Colab CLI 自动生成并保存"
+                  ? "开启后自动生成并保存"
                   : "粘贴 Colab 打印的 moss-... 密钥"
             }
             onChange={(e) => updateField("api_key", e.target.value)}
@@ -505,7 +518,7 @@ function ColabBridgeSection({ builtin }) {
         </label>
       </div>
       <details className="voice-fold" id="voice-colab-advanced">
-        <summary>高级：自定义 Colab 模型名与音色标识（默认与导出笔记本一致，无需修改）</summary>
+        <summary>高级：自定义模型名与音色标识（一般无需修改）</summary>
         <div className="voice-form-grid">
           <label>
             <span>多模态大模型名</span>
@@ -573,7 +586,8 @@ function ColabBridgeSection({ builtin }) {
           onSave={() => commitColab(form)}
         />
       </div>
-    </div>
+      </div>
+    </details>
   );
 }
 

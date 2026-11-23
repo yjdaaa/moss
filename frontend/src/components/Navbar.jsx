@@ -131,7 +131,7 @@ export function Navbar({
               className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
               title={
                 mcpPill.key === "unconfigured"
-                  ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点；独立 moss-host 在偏好设置中填写，或设置 MCP_ENDPOINT）"
+                  ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点，独立服务端在偏好设置填写）"
                   : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}`
               }
               id="nav-mcp-status"

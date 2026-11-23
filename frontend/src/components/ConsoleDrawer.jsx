@@ -222,7 +222,7 @@ export function ConsoleDrawer({
                   <span className="drawer-text-2">WebSocket 协议网关</span>
                 </div>
                 <span className={`badge ${isMcpOnline ? "badge-success" : "badge-error"}`}>
-                  {isMcpOnline ? "ONLINE" : "OFFLINE"}
+                  {isMcpOnline ? "已连接" : "未连接"}
                 </span>
               </div>
               <div className="mcp-card-body">
@@ -271,13 +271,13 @@ export function ConsoleDrawer({
                 <div className="mcp-row">
                   <span className="mcp-label">发送门禁（固定规则）</span>
                   <span className="mcp-val drawer-icon-5">
-                    {mcpStatus?.safety_gate || "发送前重新计算 G-code 文件 SHA-256，与确认时的快照比对"}
+                    {mcpStatus?.safety_gate || "发送前校验 G-code 文件完整性，确保与确认时一致"}
                   </span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">急停方式（固定规则）</span>
                   <span className="mcp-val drawer-icon-4">
-                    {mcpStatus?.estop_channel || "0x18 软复位走实时通道、不排队；写出成功不代表已停机"}
+                    {mcpStatus?.estop_channel || "急停走实时通道、不排队；发出指令后仍需现场确认停机"}
                   </span>
                 </div>
               </div>

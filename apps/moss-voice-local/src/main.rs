@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use moss_voice_local_proto::{
-    AsrEngine, Op, PROTOCOL_VERSION, Reply, Request, Response, TtsEngine, VadEngine, VadEventKind,
-    VadParams, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
+    AsrEngine, DenoiseReport, Op, PROTOCOL_VERSION, Reply, Request, Response, TtsEngine, VadEngine,
+    VadEventKind, VadParams, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
 };
 use sherpa_onnx::{
     GenerationConfig, KeywordSpotter, KeywordSpotterConfig, OfflineFireRedAsrCtcModelConfig,
@@ -267,6 +267,24 @@ fn create_offline_denoiser(model_path: &str) -> Option<OfflineSpeechDenoiser> {
     OfflineSpeechDenoiser::create(&OfflineSpeechDenoiserConfig {
         model: denoiser_model_config(model_path),
     })
+}
+
+/// 一路判停 / 识别流打开时的降噪情况（协议 8，n110）：如实说明这一路音频有没有先经降噪。
+/// sherpa-onnx 建降噪器失败时只返回空、不给原因，这里照实写“没有返回原因”。
+fn denoise_report(model_path: Option<&str>, created: bool) -> DenoiseReport {
+    let Some(path) = model_path else {
+        return DenoiseReport::default();
+    };
+    DenoiseReport {
+        applied: created,
+        model: Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        engine: if is_dpdfnet(path) { "dpdfnet" } else { "gtcrn" }.into(),
+        error: (!created)
+            .then(|| "降噪器没建起来（sherpa-onnx 没有返回原因），这一路改用原始音频".to_owned()),
+    }
 }
 
 fn current_denoiser_spec(loaded: &Loaded) -> (u64, Option<String>) {
@@ -583,6 +601,7 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         .as_deref()
                         .and_then(create_online_denoiser)
                         .map(|d| (generation, d));
+                    let denoise = denoise_report(model_path.as_deref(), denoiser.is_some());
                     streams.insert(
                         stream,
                         VadStream {
@@ -592,7 +611,7 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                             kws: None,
                         },
                     );
-                    send(&out, id, Reply::Done, &[]);
+                    send(&out, id, Reply::Opened { denoise }, &[]);
                 }
                 None => error(&out, id, "判停模型未加载"),
             },
@@ -987,8 +1006,9 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     .as_deref()
                     .and_then(create_online_denoiser)
                     .map(|d| (generation, d));
+                let denoise = denoise_report(model_path.as_deref(), denoiser.is_some());
                 insert_asr_stream(&mut streams, stream, ActiveAsrStream { kind, denoiser });
-                send(&out, id, Reply::Done, &[]);
+                send(&out, id, Reply::Opened { denoise }, &[]);
             }
             Op::AsrFeed { stream } => match (recognizer.as_ref(), streams.get_mut(&stream)) {
                 (
@@ -1752,6 +1772,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denoise_report_says_which_model_or_why_raw_audio_was_used() {
+        assert_eq!(denoise_report(None, false), DenoiseReport::default());
+        let applied = denoise_report(Some("<models>/denoise/gtcrn_simple.onnx"), true);
+        assert!(applied.applied);
+        assert_eq!(applied.model, "gtcrn_simple.onnx");
+        assert_eq!(applied.engine, "gtcrn");
+        assert_eq!(applied.error, None);
+        let failed = denoise_report(Some("<models>/dpdfnet_baseline.onnx"), false);
+        assert!(!failed.applied);
+        assert_eq!(failed.engine, "dpdfnet");
+        assert!(failed.error.as_deref().unwrap().contains("原始音频"));
+    }
 
     #[test]
     fn denoiser_engine_follows_model_file_name() {

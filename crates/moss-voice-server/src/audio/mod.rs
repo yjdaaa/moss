@@ -9,7 +9,23 @@ pub(crate) mod worker;
 pub use codec::{OpusDecoder, OpusEncoder, frame_samples, supported_rate};
 pub use pump::{PlaybackPump, PumpStats, PumpTick};
 pub use resample::Resampler;
-pub use vad::{EnergyVad, LocalVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory};
+pub use vad::{
+    ENERGY_VAD_LABEL, EnergyVad, LocalVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory,
+};
+
+/// 一路判停 / 识别流降噪情况在完整过程记录里的细节（`stage` 为“判停”或“识别”，n110）。
+pub(crate) fn denoise_trace(
+    stage: &str,
+    report: &moss_voice_providers::local::DenoiseReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stage": stage,
+        "applied": report.applied,
+        "model": report.model,
+        "engine": report.engine,
+        "error": report.error,
+    })
+}
 
 /// 计算一帧 16-bit PCM 的归一化 RMS 振幅（0..=100），仅用于界面声波与机械眼状态同步，不含音频内容。
 pub fn pcm_rms_level(samples: &[i16]) -> u8 {

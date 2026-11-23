@@ -1,6 +1,7 @@
 //! 内置语音的初始化、随 MOSS 自动启动与服务启停编排。
 
 use super::*;
+use serde_json::json;
 
 /// Tauri 托管状态：后端未启动时为空。
 pub struct BuiltinState(pub Option<Arc<BuiltinVoice>>);
@@ -16,11 +17,70 @@ pub fn record_moss_event(record: EventRecord) {
     }
 }
 
+/// 完整过程记录里“本地模型程序”这条流程的名字。
+const HELPER_FLOW: &str = "语音·本地模型程序";
+/// 完整过程记录里内置语音服务启停这条流程的名字。
+const SERVICE_FLOW: &str = "语音·服务";
+
+/// 把本地模型程序（判停 / 识别 / 合成辅助程序、语义判停程序、声纹程序）的启动、标准错误输出、意外退出写进
+/// 完整过程记录（n110；记录关着时什么都不做）。输出先去掉疑似密钥再写。
+pub(super) struct TraceHelperObserver {
+    pub(super) trace: laser_runtime::ProcessTrace,
+}
+
+impl TraceHelperObserver {
+    fn record(&self, kind: &str, step: String, data: Value) {
+        if self.trace.enabled() {
+            self.trace.record("voice", HELPER_FLOW, kind, &step, data);
+        }
+    }
+}
+
+fn scrub_line(text: &str) -> String {
+    moss_voice_providers::scrub_text_with_options(text, false, 0, false).0
+}
+
+impl moss_voice_providers::local::HelperObserver for TraceHelperObserver {
+    fn started(&self, role: &str, pid: Option<u32>) {
+        self.record(
+            "helper_start",
+            format!("{role}已启动"),
+            json!({"role": role, "pid": pid}),
+        );
+    }
+
+    fn stderr_line(&self, role: &str, line: &str) {
+        if !self.trace.enabled() {
+            return;
+        }
+        let line = scrub_line(line);
+        let shown: String = line.chars().take(200).collect();
+        self.record(
+            "helper_stderr",
+            format!("{role}输出：{shown}"),
+            json!({"role": role, "line": line}),
+        );
+    }
+
+    fn exited(&self, role: &str, detail: &str) {
+        self.record(
+            "helper_exit",
+            format!("{role}停了：{}", scrub_line(detail)),
+            json!({"role": role, "detail": scrub_line(detail)}),
+        );
+    }
+}
+
 pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
     BuiltinState(host.map(|host| {
             let diagnostics = moss_voice_server::DiagnosticsLog::new();
             if let Some(trace) = host.api_service.process_trace() {
                 diagnostics.set_process_trace(trace.clone());
+                moss_voice_providers::local::set_helper_observer(Some(Arc::new(
+                    TraceHelperObserver {
+                        trace: trace.clone(),
+                    },
+                )));
             }
             let _ = HOST_LOG.set(diagnostics.clone());
             // 2026-11-09：激光雕刻机相关事件也写进同一本记录，标为“激光雕刻”（语音中心“记录与诊断”）
@@ -435,6 +495,7 @@ impl BuiltinVoice {
                 Some((h, spec)) => (Some(h), Some(spec)),
                 None => (None, None),
             };
+            let has_local_tts = local.tts.is_some();
             let speech_worker = local.speech_worker.take();
             let turn_worker = local.turn_worker.take();
             let fallback_tts_handle = local.fallback_tts_handle.take();
@@ -451,6 +512,15 @@ impl BuiltinVoice {
                 &settings.builtin_local,
                 colab.as_ref(),
             )?;
+            // n110：对话模式确定后再汇总每类本地模型的实际情况（回声模式下识别/合成/语义判停未挂载，不虚报“已加载”）
+            let local_models = self.local_models_report(
+                &settings.builtin_local,
+                running_spec.as_ref(),
+                &local,
+                has_local_tts,
+                colab.is_some(),
+                conversation.is_some(),
+            );
             // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
             let (music, next_music_warning) =
                 scan_music_for_start(&settings.builtin_music, conversation.is_some());
@@ -460,6 +530,9 @@ impl BuiltinVoice {
                     index.clone(),
                 ));
             }
+            let model_labels = conversation
+                .as_ref()
+                .map(|(chat, _)| chat.settings.model_labels.clone());
             let defaults = ServerConfig::default();
             let playback_start_ms = match &conversation {
                 Some((_, true)) => STREAMING_PLAYBACK_START_MS,
@@ -512,6 +585,7 @@ impl BuiltinVoice {
             });
             let server = VoiceServer::start(config, registry)
                 .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
+            self.trace_service_start(&server, local_models, model_labels);
             server.prewarm_speech_cache();
             {
                 let mut guard = self
@@ -579,11 +653,20 @@ impl BuiltinVoice {
     }
 
     pub(super) fn stop_locked_inner(&self, keep_local_jev: bool) {
+        self.stop_locked_for(keep_local_jev, false);
+    }
+
+    /// 同 [`Self::stop_locked_inner`]；`restarting` 为设置变更触发的重启（停了马上再起，完整过程记录如实写明）。
+    fn stop_locked_for(&self, keep_local_jev: bool, restarting: bool) {
         self.personal.directory_changed();
         let _ = self.speaker.cancel();
-        if let Ok(mut helper) = self.speaker_backend.helper.lock() {
-            *helper = None;
-        }
+        let had_speaker_helper = self
+            .speaker_backend
+            .helper
+            .lock()
+            .ok()
+            .and_then(|mut helper| helper.take())
+            .is_some();
         if let Ok(mut slot) = self.music_warning.lock() {
             *slot = None;
         }
@@ -595,12 +678,17 @@ impl BuiltinVoice {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+        let stopped_server = server.is_some();
         if let Some(server) = server {
             server.stop();
             laser_host::set_voice_device_sessions(&self.host.api_service, None);
             laser_host::set_voice_pulse(&self.host.api_service, None, 0);
         }
-        // 结束辅助程序、判停子进程、本地兜底句柄与 Qwen3-TTS 子进程
+        // 结束辅助程序、判停子进程、声纹、本地兜底句柄与 Qwen3-TTS 子进程（记下这次真正结束了哪些）
+        let mut ended: Vec<&str> = Vec::new();
+        if had_speaker_helper {
+            ended.push("声纹程序");
+        }
         if let Ok(mut slot) = self.running_local.lock() {
             *slot = None;
         }
@@ -608,24 +696,51 @@ impl BuiltinVoice {
             && let Some(fb) = fb.take()
         {
             fb.terminate_all();
+            ended.push("本地兜底合成");
         }
         if let Ok(mut worker) = self.turn_worker.lock()
             && let Some(w) = worker.take()
         {
             w.terminate();
+            ended.push("语义判停程序");
         }
         if let Ok(mut worker) = self.speech_worker.lock()
             && let Some(w) = worker.take()
         {
             w.terminate();
+            ended.push("Qwen3-TTS 合成程序");
         }
         if let Ok(mut helper) = self.helper.lock()
             && let Some(h) = helper.take()
         {
             h.terminate();
+            ended.push("本地模型程序");
         }
         if !keep_local_jev && !self.should_run_local_laya_for_feedback() {
+            let had_laya = self.laya.lock().ok().is_some_and(|st| {
+                st.child.is_some() || st.starting_model.is_some() || st.onejev.is_some()
+            });
             self.stop_laya();
+            if had_laya {
+                ended.push("本地 Jev 服务");
+            }
+        }
+        if stopped_server && let Some(trace) = self.trace_on() {
+            let mut step = if restarting {
+                "内置语音服务停止（设置变了，马上按新设置重启）".to_owned()
+            } else {
+                "内置语音服务停止".to_owned()
+            };
+            if !ended.is_empty() {
+                step.push_str(&format!("，结束了{}", ended.join("、")));
+            }
+            trace.record(
+                "voice",
+                SERVICE_FLOW,
+                "service_stop",
+                &step,
+                json!({"restarting": restarting, "ended": ended}),
+            );
         }
     }
 
@@ -660,7 +775,7 @@ impl BuiltinVoice {
             return Ok(false);
         }
         let keep_local_jev = self.should_run_local_laya();
-        self.stop_locked_inner(keep_local_jev);
+        self.stop_locked_for(keep_local_jev, true);
         if let Err(err) = self.start_locked() {
             if !self.should_run_local_laya_for_feedback() {
                 self.stop_laya();
@@ -668,6 +783,146 @@ impl BuiltinVoice {
             return Err(err);
         }
         Ok(true)
+    }
+
+    /// 完整过程记录打开时返回记录器（关着时为 `None`，调用方什么都不做）。
+    fn trace_on(&self) -> Option<laser_runtime::ProcessTrace> {
+        self.host
+            .api_service
+            .process_trace()
+            .filter(|trace| trace.enabled())
+            .cloned()
+    }
+
+    /// 各类本地模型（判停、降噪、命令词、语义判停、识别、合成）这次启动的实际情况。
+    fn local_models_report(
+        &self,
+        local: &BuiltinLocal,
+        running: Option<&RunningLocalSpec>,
+        parts: &LocalParts,
+        has_local_tts: bool,
+        colab_tts: bool,
+        chat_active: bool,
+    ) -> Vec<Value> {
+        if self.trace_on().is_none() {
+            return Vec::new();
+        }
+        let loaded = running
+            .map(RunningLocalSpec::loaded_ids)
+            .unwrap_or_default();
+        let local_vad = loaded.iter().any(|(kind, _)| *kind == ModelKind::Vad);
+        let local_asr = chat_active && loaded.iter().any(|(kind, _)| *kind == ModelKind::Asr);
+        [
+            (ModelKind::Vad, "判停"),
+            (ModelKind::Denoise, "降噪"),
+            (ModelKind::Kws, "命令词抗噪"),
+            (ModelKind::Turn, "语义判停"),
+            (ModelKind::Asr, "识别"),
+            (ModelKind::Tts, "合成"),
+        ]
+        .into_iter()
+        .map(|(kind, name)| {
+            let selected = local.selected(kind);
+            let installed = selected.map(|spec| self.models.path_if_installed(spec.id).is_some());
+            let chat_only = matches!(kind, ModelKind::Turn | ModelKind::Asr | ModelKind::Tts);
+            let loaded_id = if chat_only && !chat_active {
+                None
+            } else {
+                match kind {
+                    ModelKind::Denoise => parts.denoise_active.filter(|_| local_vad || local_asr),
+                    ModelKind::Kws => parts.kws_active,
+                    ModelKind::Turn => parts.turn_active,
+                    // 本地合成可能走辅助程序，也可能走 speech.cpp（Qwen3-TTS）：挂进了对话就算加载成功
+                    ModelKind::Tts => has_local_tts
+                        .then_some(selected)
+                        .flatten()
+                        .map(|spec| spec.id),
+                    _ => loaded
+                        .iter()
+                        .find(|(loaded_kind, _)| *loaded_kind == kind)
+                        .map(|(_, id)| *id),
+                }
+            };
+            let status = match (selected, installed, loaded_id) {
+                (None, _, _) => match kind {
+                    ModelKind::Vad => "未开启（用能量判停）".to_owned(),
+                    ModelKind::Asr | ModelKind::Tts => "未开启（用云端）".to_owned(),
+                    _ => "未开启".to_owned(),
+                },
+                (Some(_), Some(false), _) => "选了但没安装，这次没用上".to_owned(),
+                (Some(_), _, Some(_)) => "已加载".to_owned(),
+                (Some(_), _, None) => match kind {
+                    _ if chat_only && !chat_active => {
+                        "没用上：未配好对话模型，当前为回声测试模式".to_owned()
+                    }
+                    ModelKind::Denoise if !local_vad && !local_asr => {
+                        "没用上：降噪只作用于本地判停与本地识别，两者都没开".to_owned()
+                    }
+                    ModelKind::Kws if !local_vad => {
+                        "没用上：命令词检测跑在本地判停上，本地判停没开".to_owned()
+                    }
+                    ModelKind::Tts if colab_tts => "没用上：合成由 Colab 接管".to_owned(),
+                    _ => "没用上".to_owned(),
+                },
+            };
+            json!({
+                "kind": name,
+                "model_id": selected.map(|spec| spec.id),
+                "model": selected.map(|spec| spec.label),
+                "installed": installed,
+                "loaded": loaded_id.is_some(),
+                "status": status,
+            })
+        })
+        .collect()
+    }
+
+    /// 服务启动成功：写一步“启动了什么”（端口、对话用的模型、每类本地模型的情况）。
+    fn trace_service_start(
+        &self,
+        server: &VoiceServer,
+        local_models: Vec<Value>,
+        model_labels: Option<Vec<String>>,
+    ) {
+        let Some(trace) = self.trace_on() else {
+            return;
+        };
+        let summary: Vec<String> = local_models
+            .iter()
+            .map(|item| {
+                let kind = item["kind"].as_str().unwrap_or("");
+                match item["model"].as_str() {
+                    Some(model) => {
+                        format!("{kind} {model} {}", item["status"].as_str().unwrap_or(""))
+                    }
+                    None => format!("{kind} {}", item["status"].as_str().unwrap_or("")),
+                }
+            })
+            .collect();
+        let step = format!(
+            "内置语音服务启动：设备连接端口 {}，OTA 端口 {}；{}；本地模型：{}",
+            server.ws_port(),
+            server.http_port(),
+            match &model_labels {
+                Some(labels) => format!("对话模式（{}）", labels.join("、")),
+                None => "回声测试模式（没配好识别 / 大模型 / 合成）".to_owned(),
+            },
+            summary.join("；")
+        );
+        trace.record(
+            "voice",
+            SERVICE_FLOW,
+            "service_start",
+            &step,
+            json!({
+                "ws_port": server.ws_port(),
+                "http_port": server.http_port(),
+                "mqtt": server.mqtt_ports().map(|ports| json!({"port": ports.port, "udp_port": ports.udp_port})),
+                "mode": if model_labels.is_some() { "chat" } else { "echo" },
+                "models": model_labels,
+                "local_models": local_models,
+            }),
+        );
     }
 
     pub(super) fn running(&self) -> bool {

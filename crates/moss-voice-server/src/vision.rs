@@ -785,6 +785,48 @@ async fn explain(
             .ok()
             .unwrap_or(false)
     };
+    // 看图要等视觉模型好几秒：先记“开始看图”，时间线上能看出它与对话的真实先后（属于设备正在进行的那一轮，没有就归设备）
+    let trace_turn = shared
+        .config
+        .conversation
+        .as_ref()
+        .and_then(|conversation| conversation.process_trace.clone())
+        .filter(laser_runtime::ProcessTrace::enabled)
+        .map(|trace| {
+            let trace = trace.scoped();
+            let turn = shared
+                .device_requests
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&permit.device).map(|handle| handle.turn))
+                .unwrap_or(0);
+            let flow = if turn > 0 {
+                crate::session::turn_flow(&permit.device, turn)
+            } else {
+                crate::session::device_flow(&permit.device)
+            };
+            let mut data = json!({
+                "device_id": permit.device,
+                "turn": turn,
+                "question": question,
+                "mime": mime,
+                "width": w,
+                "height": h,
+                "bytes": bytes.len(),
+            });
+            crate::session::scrub_trace_value(&mut data);
+            let step = format!(
+                "设备拍了照片（{w}×{h}），开始请视觉模型看图：「{}」",
+                data["question"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
+            );
+            trace.record("voice", &flow, "vision_start", &step, data);
+            (trace, turn, flow)
+        });
     let result = guarded_explain(
         &snapshot,
         &permit,
@@ -805,21 +847,36 @@ async fn explain(
     ) {
         return fail(StatusCode::FORBIDDEN, "vision_disabled");
     }
-    // 只有设备仍被允许且看图开关未关闭时才允许写入过程记录与照片附件，先脱敏再拼可读 step。
+    // 只有设备仍被允许且看图开关未关闭时才允许写入过程记录与照片附件，先脱敏再拼可读 step；
+    // 同一次看图的开始、照片与结束固定在同一目录，避免中途切换保存位置把它们拆散。
     let record_vision_trace = |answer: Option<String>, error: Option<String>| {
-        let Some(trace) = shared
-            .config
-            .conversation
-            .as_ref()
-            .and_then(|conversation| conversation.process_trace.clone())
-            .filter(laser_runtime::ProcessTrace::enabled)
-        else {
-            return;
+        let (trace, turn, flow) = match trace_turn.clone() {
+            Some(begun) => begun,
+            None => {
+                let Some(trace) = shared
+                    .config
+                    .conversation
+                    .as_ref()
+                    .and_then(|conversation| conversation.process_trace.clone())
+                    .filter(laser_runtime::ProcessTrace::enabled)
+                else {
+                    return;
+                };
+                (
+                    trace.scoped(),
+                    0,
+                    crate::session::device_flow(&permit.device),
+                )
+            }
         };
+        if !trace.enabled() {
+            return;
+        }
         let ext = if mime == "image/png" { "png" } else { "jpg" };
         let file = trace.save_file("voice", "camera-photo", ext, &bytes);
         let mut data = json!({
             "device_id": permit.device,
+            "turn": turn,
             "question": question,
             "mime": mime,
             "width": w,
@@ -846,13 +903,7 @@ async fn explain(
                 err.unwrap_or("未知原因")
             ),
         };
-        trace.record(
-            "voice",
-            &crate::session::device_flow(&permit.device),
-            "vision",
-            &step,
-            data,
-        );
+        trace.record("voice", &flow, "vision", &step, data);
     };
     match result {
         Ok(Ok(text)) if !text.trim().is_empty() => {

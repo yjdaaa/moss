@@ -25,11 +25,35 @@ pub trait Vad: Send {
     fn take_notice(&mut self) -> Option<String> {
         None
     }
+    /// 此刻实际在用的判停方式（完整过程记录写“谁判定的开口 / 说完”，n110）。
+    fn engine(&self) -> String {
+        ENERGY_VAD_LABEL.to_owned()
+    }
+    /// 本地模型辅助程序报告的这一路判停流降噪情况（新开一路判停流后有一次；取走后清空）。
+    fn take_denoise(&mut self) -> Option<moss_voice_providers::local::DenoiseReport> {
+        None
+    }
 }
+
+/// 能量判停在完整过程记录里的称呼。
+pub const ENERGY_VAD_LABEL: &str = "能量判停（按音量）";
 
 /// 为每个会话创建判停器（NV6）。返回 `None` 时会话使用能量判停。
 pub trait VadFactory: Send + Sync {
     fn create(&self, sample_rate: u32, config: &VadConfig) -> Option<Box<dyn Vad>>;
+    /// 同 [`Self::create`]，建不起来时说明原因（会话改用能量判停，并把原因记进完整过程记录，n110）。
+    fn create_explained(
+        &self,
+        sample_rate: u32,
+        config: &VadConfig,
+    ) -> Result<Box<dyn Vad>, String> {
+        self.create(sample_rate, config)
+            .ok_or_else(|| format!("{}没建起来", self.label()))
+    }
+    /// 这个判停模型的称呼（如“本地判停 Silero v6.2”）。
+    fn label(&self) -> String {
+        "本地判停模型".to_owned()
+    }
 }
 
 impl std::fmt::Debug for dyn VadFactory {
@@ -46,6 +70,8 @@ pub struct LocalVad {
     failed: bool,
     in_speech: bool,
     notice: Option<String>,
+    label: String,
+    denoise: Option<moss_voice_providers::local::DenoiseReport>,
 }
 
 static NEXT_STREAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -56,8 +82,18 @@ impl LocalVad {
         helper: moss_voice_providers::local::LocalHelper,
         config: &VadConfig,
     ) -> Result<Self, String> {
+        Self::open_labelled(helper, config, "本地判停模型".to_owned())
+    }
+
+    fn open_labelled(
+        helper: moss_voice_providers::local::LocalHelper,
+        config: &VadConfig,
+        label: String,
+    ) -> Result<Self, String> {
         let stream = NEXT_STREAM.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        helper.vad_open(stream).map_err(|error| error.message)?;
+        let denoise = helper
+            .vad_open_report(stream)
+            .map_err(|error| error.message)?;
         Ok(Self {
             helper,
             stream: Some(stream),
@@ -65,6 +101,8 @@ impl LocalVad {
             failed: false,
             in_speech: false,
             notice: None,
+            label,
+            denoise,
         })
     }
 
@@ -74,6 +112,8 @@ impl LocalVad {
             self.helper.vad_close(stream);
         }
         self.fallback.reset();
+        // 改用能量判停后这一路不再经降噪：之前那份“已降噪”的报告作废，不能再交出去
+        self.denoise = None;
         self.notice = Some(format!("本地判停出错，本会话改用能量判停：{reason}"));
     }
 }
@@ -136,14 +176,29 @@ impl Vad for LocalVad {
             self.helper.vad_close(stream);
         }
         let stream = NEXT_STREAM.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        match self.helper.vad_open(stream) {
-            Ok(()) => self.stream = Some(stream),
+        match self.helper.vad_open_report(stream) {
+            Ok(denoise) => {
+                self.stream = Some(stream);
+                self.denoise = denoise;
+            }
             Err(error) => self.fail(error.message),
         }
     }
 
     fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
+    }
+
+    fn engine(&self) -> String {
+        if self.failed {
+            format!("{ENERGY_VAD_LABEL}，{}出错后改用", self.label)
+        } else {
+            self.label.clone()
+        }
+    }
+
+    fn take_denoise(&mut self) -> Option<moss_voice_providers::local::DenoiseReport> {
+        self.denoise.take()
     }
 }
 
@@ -158,16 +213,42 @@ impl Drop for LocalVad {
 /// 用本地模型辅助程序创建 Silero 判停；非 16 kHz 或打开失败时返回 `None`（使用能量判停）。
 pub struct LocalVadFactory {
     pub helper: moss_voice_providers::local::LocalHelper,
+    /// 完整过程记录里的称呼（如“本地判停 Silero v6.2”）
+    pub label: String,
+}
+
+impl LocalVadFactory {
+    pub fn new(helper: moss_voice_providers::local::LocalHelper, label: impl Into<String>) -> Self {
+        Self {
+            helper,
+            label: label.into(),
+        }
+    }
 }
 
 impl VadFactory for LocalVadFactory {
     fn create(&self, sample_rate: u32, config: &VadConfig) -> Option<Box<dyn Vad>> {
+        self.create_explained(sample_rate, config).ok()
+    }
+
+    fn create_explained(
+        &self,
+        sample_rate: u32,
+        config: &VadConfig,
+    ) -> Result<Box<dyn Vad>, String> {
         if sample_rate != 16_000 {
-            return None;
+            return Err(format!(
+                "设备上行音频是 {sample_rate} Hz，{}只支持 16 kHz",
+                self.label
+            ));
         }
-        LocalVad::open(self.helper.clone(), config)
-            .ok()
+        LocalVad::open_labelled(self.helper.clone(), config, self.label.clone())
             .map(|vad| Box::new(vad) as Box<dyn Vad>)
+            .map_err(|error| format!("{}打不开：{error}", self.label))
+    }
+
+    fn label(&self) -> String {
+        self.label.clone()
     }
 }
 
@@ -436,6 +517,15 @@ mod tests {
                                 keywords: Vec::new(),
                             }
                         }
+                        // 协议 8：打开判停流时报告这一路已降噪
+                        Op::VadOpen { .. } => Reply::Opened {
+                            denoise: moss_voice_local_proto::DenoiseReport {
+                                applied: true,
+                                model: "gtcrn_simple.onnx".into(),
+                                engine: "gtcrn".into(),
+                                error: None,
+                            },
+                        },
                         _ => Reply::Done,
                     };
                     if write_frame(
@@ -467,12 +557,15 @@ mod tests {
                 ],
                 None,
             );
-            let factory = LocalVadFactory { helper };
+            let factory = LocalVadFactory::new(helper, "本地判停");
             assert!(
                 factory.create(24_000, &VadConfig::default()).is_none(),
                 "只支持 16 kHz"
             );
             let mut vad = factory.create(RATE, &VadConfig::default()).unwrap();
+            assert!(vad.take_denoise().is_some_and(|report| report.applied));
+            assert!(vad.take_denoise().is_none(), "每一路只交一次");
+            assert_eq!(vad.engine(), "本地判停");
             let frame = silence(RATE, 60);
             assert!(vad.accept(&frame).is_empty());
             assert_eq!(vad.accept(&frame), vec![VadEvent::SpeechStart]);
@@ -507,7 +600,7 @@ mod tests {
         #[test]
         fn helper_failure_falls_back_to_energy_vad_with_a_notice() {
             let (helper, _) = fake(vec![], Some(2));
-            let mut vad = LocalVadFactory { helper }
+            let mut vad = LocalVadFactory::new(helper, "本地判停")
                 .create(RATE, &VadConfig::default())
                 .unwrap();
             assert!(vad.accept(&silence(RATE, 60)).is_empty());
@@ -521,6 +614,13 @@ mod tests {
             assert_eq!(events, vec![VadEvent::SpeechStart, VadEvent::SpeechEnd]);
             let notice = vad.take_notice().unwrap();
             assert!(notice.contains("改用能量判停"), "{notice}");
+            // n110 复审 5①：改用能量判停后，打开时那份“已降噪”的报告作废，不再交出
+            assert!(vad.take_denoise().is_none());
+            assert!(
+                vad.engine().starts_with(ENERGY_VAD_LABEL),
+                "{}",
+                vad.engine()
+            );
             assert!(vad.take_notice().is_none(), "提示只给一次");
             vad.reset();
             assert!(

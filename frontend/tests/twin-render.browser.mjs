@@ -87,14 +87,16 @@ try {
   await pausePlayback();
   await page.waitForTimeout(300);
 
-  // 2. 滚轮缩放视角时要出帧
+  // 2. 滚轮缩放视角时要出帧，且原生非 passive 监听须拦住整页滚动
   const box = await stage.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const scrollBeforeZoom = await page.evaluate(() => window.scrollY);
   const clearsBeforeZoom = (await gl()).clears;
   await page.mouse.wheel(0, 240);
   await page.waitForFunction(function zoomTriggersRedraw(before) {
     return window.__gl.clears > before;
   }, clearsBeforeZoom, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => window.scrollY), scrollBeforeZoom, "滚轮缩放 3D 视口不得连带滚动整页");
   const zoomed = (await gl()).clears - clearsBeforeZoom;
 
   // 3. 拖动旋转视角时要出帧

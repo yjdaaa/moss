@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pick-process-trace-dir"
+description = "Enables the pick_process_trace_dir command without any pre-configured scope."
+commands.allow = ["pick_process_trace_dir"]
+
+[[permission]]
+identifier = "deny-pick-process-trace-dir"
+description = "Denies the pick_process_trace_dir command without any pre-configured scope."
+commands.deny = ["pick_process_trace_dir"]

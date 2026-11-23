@@ -72,9 +72,10 @@ fn run_local_end_to_end(combo: LocalCombo) {
         http_port: 0,
         mode: ServerMode::Chat,
         conversation: Some(Arc::new(conversation)),
-        vad_factory: Some(Arc::new(crate::LocalVadFactory {
-            helper: helper.clone(),
-        })),
+        vad_factory: Some(Arc::new(crate::LocalVadFactory::new(
+            helper.clone(),
+            "本地判停",
+        ))),
         ..ServerConfig::default()
     };
     let server = VoiceServer::start(config, registry.clone()).unwrap();

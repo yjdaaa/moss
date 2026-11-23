@@ -760,7 +760,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
   return (
     <div className="xiaozhi-usb-card" id="xiaozhi-usb-card" ref={cardRef} tabIndex={-1}>
       <p className="xiaozhi-usb-intro">
-        用 USB 数据线连接小智（若无法自动进下载模式，先按住板子 BOOT 键再点“读取板子配置”），免开手机热点直写闪存 NVS 分区的 Wi-Fi、本机语音地址与设备密钥；原已保存的 Wi-Fi 密码不回显。
+        用 USB 线连上小智（无法自动进下载模式时，按住板子 BOOT 键再点“读取板子配置”），免开热点直接写入 Wi-Fi、本机语音地址与设备密钥；已存 Wi-Fi 密码不回显。
       </p>
 
       {serviceStopped && (
@@ -846,7 +846,7 @@ export function XiaozhiUsbProvisionCard({ serviceStatus, onSetStatus }) {
           <div>
             <h3>选择串口并读取板子</h3>
             <p>
-              自动跳过当前激光端口；写入前先读取原分区，完整保留板子校准参数与已有配置，写后回读校验、失败自动写回原配置。读取和写入都会让板子重启一下。
+              自动跳过激光机串口；写入前先备份原配置并保留校准参数，写完自动回读校验，失败会恢复原样。读取和写入都会让板子重启一下。
             </p>
           </div>
         </div>

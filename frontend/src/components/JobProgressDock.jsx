@@ -172,7 +172,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
 
   const estop = useCallback(async (view) => {
     if (!view.canEstop) {
-      await showAlert("这条任务没有可用的 job_id，请用机器上的实体急停。", { title: "无法急停", tone: "error" });
+      await showAlert("这条任务缺少任务编号，请直接用机器上的实体急停。", { title: "无法急停", tone: "error" });
       return;
     }
     const ok = await showConfirm(
@@ -203,7 +203,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
 
   const download = useCallback(async (view) => {
     if (!view.workflowId) {
-      await showAlert("这条任务缺少 workflow_id，无法定位 G-code。", { title: "无法下载", tone: "warning" });
+      await showAlert("这条任务没有关联的刀路记录，无法下载 G-code。", { title: "无法下载", tone: "warning" });
       return;
     }
     setDownloading(true);

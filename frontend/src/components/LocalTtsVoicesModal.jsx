@@ -217,6 +217,10 @@ function LocalTtsVoicesModalDialog({
 
   const languages = useMemo(() => (Array.isArray(data?.languages) ? data.languages : []), [data]);
   const speakers = useMemo(() => (Array.isArray(data?.speakers) ? data.speakers : []), [data]);
+  const langSampleByCode = useMemo(
+    () => Object.fromEntries(languages.map((lang) => [lang.code, lang.sample_text || ""])),
+    [languages],
+  );
 
   const filteredSpeakers = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -236,6 +240,7 @@ function LocalTtsVoicesModalDialog({
   const installed = Boolean(data?.installed);
   const totalCount = data?.total_count ?? speakers.length;
   const cachedCount = data?.cached_count ?? 0;
+  const allCached = installed && totalCount > 0 && cachedCount >= totalCount;
   const cachePercent = totalCount > 0 ? Math.round((cachedCount / totalCount) * 100) : 0;
   const titleText = data?.label || modelLabel || "语音合成模型音色与语言包";
 
@@ -291,20 +296,20 @@ function LocalTtsVoicesModalDialog({
             <>
               {data?.note && <p className="voice-muted tts-voices-lead">{data.note}</p>}
 
-              <div className={`voice-hint ${installed ? (cachedCount >= totalCount ? "voice-hint--ok" : "") : "voice-hint--warn"}`} id="voice-local-tts-cache-banner">
+              <div className={`voice-hint ${installed ? (allCached ? "voice-hint--ok" : "") : "voice-hint--warn"}`} id="voice-local-tts-cache-banner">
                 {installed ? (
-                  cachedCount >= totalCount ? (
+                  allCached ? (
                     <div className="tts-cache-row">
                       <span>
                         <Sparkles size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
-                        本机试听已全部自动缓存（<b>{cachedCount} / {totalCount}</b>）· 断网秒播，点「选用」即可直接切换声音
+                        本机试听已全部自动缓存（<b>{cachedCount} / {totalCount}</b>）· 断网秒播
                       </span>
                     </div>
                   ) : (
                     <div className="tts-cache-stack">
                       <div className="tts-cache-row">
                         <span>
-                          正在后台自动生成本机试听缓存（<b>{cachedCount} / {totalCount}</b>，优先缓存中文音色；已缓存项可直接秒播，未缓存项点击也会立即合成并缓存）
+                          正在后台缓存试听（<b>{cachedCount} / {totalCount}</b>，优先中文；点任意项可立即试听）
                         </span>
                         <span className="mono">{cachePercent}%</span>
                       </div>
@@ -315,7 +320,7 @@ function LocalTtsVoicesModalDialog({
                   )
                 ) : (
                   <div className="tts-cache-row">
-                    <span>该模型尚未下载；下载完成后会自动把全部音色的试听语音缓存到本机磁盘。</span>
+                    <span>该模型尚未下载，下载后会自动缓存全部试听语音。</span>
                     {onDownloadModel && (
                       <button
                         type="button"
@@ -334,7 +339,7 @@ function LocalTtsVoicesModalDialog({
               </div>
 
               <div className="tts-lang-pack-section">
-                <div className="tts-section-label">支持的语言包（点击可筛选对应音色）</div>
+                <div className="tts-section-label">支持的语言包（点选筛选）</div>
                 <div className="tts-lang-pack-grid" id="voice-local-tts-languages">
                   {languages.map((lang) => {
                     const active = langFilter === lang.code;
@@ -438,7 +443,7 @@ function LocalTtsVoicesModalDialog({
                             <span className={`ob-pill ${sp.recommended_for_zh ? "ob-pill--ok" : "ob-pill--off"}`}>
                               {sp.lang_label}
                             </span>
-                            {sp.cached && (
+                            {!allCached && sp.cached && (
                               <span className="ob-pill ob-pill--ok" title="试听语音已缓存在本机磁盘，点击秒播">
                                 本机已缓存
                               </span>
@@ -449,7 +454,9 @@ function LocalTtsVoicesModalDialog({
                               <span className="ob-pill ob-pill--info">当前本地默认</span>
                             ) : null}
                           </div>
-                          <div className="ob-sub tts-speaker-sample">试听语：“{sp.sample_text}”</div>
+                          {sp.sample_text && sp.sample_text !== langSampleByCode[sp.lang] && (
+                            <div className="ob-sub tts-speaker-sample">试听语：“{sp.sample_text}”</div>
+                          )}
                         </div>
 
                         <div className="tts-speaker-actions">

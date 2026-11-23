@@ -1193,8 +1193,15 @@ fn process_trace_switch_status_and_clear_are_desktop_only() {
     );
     assert_eq!(status["success"], true, "{status}");
     assert_eq!(status["result"]["enabled"], false);
+    assert_eq!(status["result"]["custom_dir"], serde_json::Value::Null);
+    assert_eq!(status["result"]["available"], true);
+    assert_eq!(status["result"]["error"], serde_json::Value::Null);
     assert_eq!(status["result"]["bytes"], 0);
-    assert_eq!(status["result"]["retention_days"], 7);
+    assert_eq!(status["result"]["retention_days"], 30);
+    assert!(
+        status["result"].get("max_bytes").is_none(),
+        "n110 起不按大小限制"
+    );
     assert!(
         status["result"]["dir"]
             .as_str()
@@ -1283,6 +1290,81 @@ fn process_trace_switch_status_and_clear_are_desktop_only() {
     assert_eq!(unknown["success"], false);
 }
 
+#[test]
+fn process_trace_directory_is_reported_but_http_cannot_change_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let selected = tempfile::tempdir().unwrap();
+    let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+    let trace = service.process_trace().unwrap();
+    trace.set_directory(Some(selected.path())).unwrap();
+    let chosen = trace.dir();
+    assert!(chosen.ends_with("moss-process-trace"));
+    assert_eq!(
+        chosen.parent().unwrap().canonicalize().unwrap(),
+        selected.path().canonicalize().unwrap()
+    );
+    let status = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert_eq!(status["result"]["dir"], serde_json::json!(chosen));
+    assert_eq!(status["result"]["custom_dir"], serde_json::json!(chosen));
+    assert_eq!(status["result"]["available"], true);
+    for value in [serde_json::json!(temp.path()), serde_json::Value::Null] {
+        let rejected = post_json(
+            &service,
+            "/api/settings",
+            &serde_json::json!({"process_trace_dir": value, "process_trace_enabled": true}),
+        );
+        assert_eq!(rejected["success"], false, "{rejected}");
+        assert_eq!(
+            rejected["result"],
+            "过程记录保存位置只能通过桌面文件夹选择框修改"
+        );
+        assert_eq!(trace.dir(), chosen);
+        assert!(!trace.enabled(), "拒绝整个请求，不能部分保存其他设置");
+    }
+    let body = serde_json::json!({"process_trace_dir": temp.path()}).to_string();
+    let request = format!(
+        "PATCH /api/settings HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let rejected = parse_json_response(&service.handle_http(request.as_bytes()));
+    assert_eq!(rejected["success"], false, "PATCH 也没有设置路径入口");
+    assert_eq!(trace.dir(), chosen);
+
+    let info = parse_json_response(
+        &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    assert!(info["result"].get("process_trace_dir").is_none());
+    assert!(info["result"].get("custom_dir").is_none());
+    assert!(
+        !info
+            .to_string()
+            .contains(&chosen.to_string_lossy().to_string())
+    );
+
+    let unplugged = chosen.with_file_name("unplugged");
+    std::fs::rename(&chosen, &unplugged).unwrap();
+    let unavailable = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert_eq!(unavailable["result"]["available"], false);
+    assert!(unavailable["result"]["error"].is_string());
+    assert_eq!(unavailable["result"]["dir"], serde_json::json!(chosen));
+    assert!(!chosen.exists(), "状态查询不能重建缺失的自选目录");
+    std::fs::rename(&unplugged, &chosen).unwrap();
+    let restored = post_json(
+        &service,
+        "/api/process-trace",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert_eq!(restored["result"]["available"], true);
+}
+
 /// n105：完整过程记录打开后，改动类接口调用按先后记进时间线（发起方、做什么、结果），密钥隐藏，只读轮询不记。
 #[test]
 fn process_trace_timeline_records_api_calls_in_order_and_hides_secrets() {
@@ -1349,21 +1431,33 @@ fn process_trace_timeline_records_api_calls_in_order_and_hides_secrets() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     let steps: Vec<&str> = lines.iter().filter_map(|l| l["step"].as_str()).collect();
-    // 打开开关这一步本身在开关生效后才写，共 4 条改动类调用（只读轮询全部过滤）
-    assert_eq!(lines.len(), 4, "{steps:?}");
+    // n110：每次改动类调用记开始与结束两步，共 4 次调用 8 条（只读轮询全部过滤）；
+    // 打开开关那次调用开始时开关还关着，处理完补记开始这一步
+    assert_eq!(lines.len(), 8, "{steps:?}");
+    let kinds: Vec<&str> = lines.iter().map(|l| l["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["api_begin", "api_call"].repeat(4), "{steps:?}");
+    for pair in lines.chunks(2) {
+        assert_eq!(pair[0]["call"], pair[1]["call"], "开始与结束编号对得上");
+    }
     assert!(
-        steps[0].contains("修改设置：process_trace_enabled → 成功"),
+        steps[0].contains("修改设置：process_trace_enabled（开始处理"),
         "{steps:?}"
     );
     assert!(
-        steps[1].contains("修改设置：auto_check_update → 成功"),
+        steps[1].contains("修改设置：process_trace_enabled → 成功"),
         "{steps:?}"
     );
-    assert!(steps[2].contains("修改设置：jev_api_key"), "{steps:?}");
-    assert_eq!(lines[2]["request"]["jev_api_key"], "[已隐藏]");
-    assert_eq!(lines[3]["request"]["mcp_endpoint"], "[已隐藏]");
+    assert!(
+        steps[3].contains("修改设置：auto_check_update → 成功"),
+        "{steps:?}"
+    );
+    assert!(steps[4].contains("修改设置：jev_api_key"), "{steps:?}");
+    assert_eq!(lines[4]["request"]["jev_api_key"], "[已隐藏]");
+    assert_eq!(
+        lines[6]["request"]["mcp_endpoint"], "wss://mcp.example.com/ws?TOKEN=[已隐藏]",
+        "只隐藏令牌本身，地址其余部分保留"
+    );
     assert_eq!(lines[0]["flow"], "激光");
-    assert_eq!(lines[0]["kind"], "api_call");
     let seqs: Vec<u64> = lines.iter().map(|l| l["seq"].as_u64().unwrap()).collect();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]), "按先后编号：{seqs:?}");
     assert!(!timeline.contains("\"recent\""), "只读轮询不进时间线");
@@ -1374,14 +1468,14 @@ fn process_trace_timeline_records_api_calls_in_order_and_hides_secrets() {
     );
     let readable =
         std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_TXT)).unwrap();
-    assert_eq!(readable.lines().count(), 4);
+    assert_eq!(readable.lines().count(), 8);
     assert!(
         !readable.contains("secret-ep-token-123")
             && !readable.contains("fake-jev-value-for-trace-test"),
         "可读时间线不得泄露凭据：{readable}"
     );
     assert!(
-        readable.contains("[激光] 本机发起：修改设置：auto_check_update → 成功"),
+        readable.contains("[激光] 本机发起的修改设置：auto_check_update → 成功"),
         "{readable}"
     );
 }

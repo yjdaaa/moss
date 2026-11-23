@@ -7,6 +7,7 @@ use tauri::{Emitter, Manager};
 
 mod app_update;
 mod export;
+mod process_trace;
 mod voice;
 mod voice_builtin;
 mod voice_context;
@@ -303,6 +304,9 @@ pub fn run() {
             export::set_export_ask_each_time,
             export::open_export_dir,
             export::reveal_exported_file,
+            process_trace::pick_process_trace_dir,
+            process_trace::reset_process_trace_dir,
+            process_trace::open_process_trace_dir,
             minimize_to_tray,
             exit_application,
             app_update::app_update_status,
@@ -375,6 +379,11 @@ pub fn run() {
         .manage(BackendOrigin(backend_origin.clone()))
         .manage(DevUiOrigin(dev_ui_origin.clone()))
         .manage(export_state)
+        .manage(process_trace::ProcessTraceState(
+            _host_handle
+                .as_ref()
+                .and_then(|host| host.api_service.process_trace().cloned()),
+        ))
         .manage(DesktopSession(desktop_session))
         .manage(voice_state)
         .manage(builtin_state)
@@ -405,6 +414,7 @@ pub fn run() {
         }
         app.manage(BackendOrigin(backend_origin));
         app.manage(export_state);
+        app.manage(process_trace::ProcessTraceState(None));
         app.manage(DesktopSession(None));
         Ok(())
     });
@@ -554,6 +564,9 @@ mod tests {
             "set_export_ask_each_time",
             "open_export_dir",
             "reveal_exported_file",
+            "pick_process_trace_dir",
+            "reset_process_trace_dir",
+            "open_process_trace_dir",
             "minimize_to_tray",
             "exit_application",
         ]
@@ -847,7 +860,7 @@ mod tests {
                 );
             }
         }
-        // 托盘隐藏、退出与全部 7 个导出命令都必须在入口固定受信任主窗口来源
+        // 托盘、导出与过程记录目录命令都必须在入口固定受信任主窗口来源
         let lib_src = include_str!("lib.rs");
         for (sig, call) in [
             (
@@ -872,30 +885,43 @@ mod tests {
         assert!(
             app_guard_body.contains("app_update::is_trusted_mobile_main(window.label(), &url)")
         );
-        let export_src = include_str!("export.rs");
-        for command in [
-            "get_export_settings",
-            "pick_export_dir",
-            "reset_export_dir",
-            "set_export_ask_each_time",
-            "open_export_dir",
-            "reveal_exported_file",
-            "save_export_file",
+        for (source, commands) in [
+            (
+                include_str!("export.rs"),
+                &[
+                    "get_export_settings",
+                    "pick_export_dir",
+                    "reset_export_dir",
+                    "set_export_ask_each_time",
+                    "open_export_dir",
+                    "reveal_exported_file",
+                    "save_export_file",
+                ][..],
+            ),
+            (
+                include_str!("process_trace.rs"),
+                &[
+                    "pick_process_trace_dir",
+                    "reset_process_trace_dir",
+                    "open_process_trace_dir",
+                ][..],
+            ),
         ] {
-            let start = export_src
-                .find(&format!("pub fn {command}("))
-                .or_else(|| export_src.find(&format!("pub async fn {command}(")))
-                .expect(command);
-            let body =
-                &export_src[start..start + export_src[start..].find("\n}\n").expect(command)];
-            let open_brace = body.find("{\n").expect(command);
-            assert!(
-                body[open_brace..]
-                    .trim_start_matches("{\n")
-                    .trim_start()
-                    .starts_with("crate::require_trusted_app_window(&window,"),
-                "{command} 必须在函数首行固定主窗口来源"
-            );
+            for command in commands {
+                let start = source
+                    .find(&format!("pub fn {command}("))
+                    .or_else(|| source.find(&format!("pub async fn {command}(")))
+                    .expect(command);
+                let body = &source[start..start + source[start..].find("\n}\n").expect(command)];
+                let open_brace = body.find("{\n").expect(command);
+                assert!(
+                    body[open_brace..]
+                        .trim_start_matches("{\n")
+                        .trim_start()
+                        .starts_with("crate::require_trusted_app_window(&window,"),
+                    "{command} 必须在函数首行固定主窗口来源"
+                );
+            }
         }
         // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口（n67 起独立安全窗口已取消）
         let builtin = include_str!("voice_builtin.rs");

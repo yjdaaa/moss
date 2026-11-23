@@ -385,7 +385,7 @@ export default function VoiceHomeCard() {
         <summary>其他管理（备份、只读同步）</summary>
       <details className="voice-private-more" open={recoveryOnly}>
         <summary>备份与迁移</summary>
-        <p>这里只导出已保存的 HTTPS 地址和白名单，不导出令牌、DPAPI 密文、审批或设备授权。不要直接复制原始 SQLite/WAL/SHM 作为可移植凭据备份。</p>
+        <p>这里只导出已保存的 HTTPS 地址和白名单，不导出令牌、本机加密凭据、审批或设备授权；不要直接复制数据库文件当作凭据备份。</p>
         <div className="voice-form-actions">
           <button type="button" disabled={!loaded || busy} onClick={exportPortable}>生成脱敏配置备份</button>
           <button type="button" disabled={busy} onClick={auditHistoricalBackup}>选择历史备份文件并审计（只读）</button>

@@ -409,7 +409,19 @@ impl DiagnosticsLog {
     }
 
     pub fn finish_timing(&self, timing: TurnTiming) {
-        if let Some(trace) = self.trace_on()
+        self.finish_timing_with_trace(timing, None);
+    }
+
+    pub(crate) fn finish_timing_with_trace(
+        &self,
+        timing: TurnTiming,
+        trace_override: Option<&laser_runtime::ProcessTrace>,
+    ) {
+        let trace = trace_override
+            .filter(|t| t.enabled())
+            .cloned()
+            .or_else(|| self.trace_on().cloned());
+        if let Some(trace) = trace
             && let Ok(value) = serde_json::to_value(&timing)
         {
             let step = crate::session::timing_step_text(&value);
@@ -456,8 +468,16 @@ impl LiveState {
             ..Self::default()
         }
     }
+    #[cfg(test)]
     pub fn finish_timing(&self, timing: TurnTiming) {
         self.log.finish_timing(timing);
+    }
+    pub(crate) fn finish_timing_with_trace(
+        &self,
+        timing: TurnTiming,
+        trace_override: Option<&laser_runtime::ProcessTrace>,
+    ) {
+        self.log.finish_timing_with_trace(timing, trace_override);
     }
     pub fn timings(&self) -> Vec<TurnTiming> {
         self.log.timings()

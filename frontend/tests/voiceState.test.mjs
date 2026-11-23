@@ -1787,6 +1787,7 @@ test("换了画风后装的是旧画风：提示重刷并可一键重刷（2026-
 
 test("n80 Colab T4 专属联动：默认关闭不改原配置，开启只接管大模型与合成，支持整段粘贴解析", async () => {
   const {
+    colabBridgeDefaultOpen,
     colabSettingsForm,
     parseColabPaste,
     colabSettingsError,
@@ -1794,6 +1795,18 @@ test("n80 Colab T4 专属联动：默认关闭不改原配置，开启只接管�
     builtinSectionSourceView,
     pipelineTestPlan,
   } = await import("../src/voiceState.js");
+
+  assert.equal(colabBridgeDefaultOpen(), false, "未开启时默认收起");
+  assert.equal(
+    colabBridgeDefaultOpen({ enabled: false, active: false, cli: { installed: true, logged_in: true, runner_state: "idle" } }),
+    false,
+    "仅登录 Colab CLI 但未开启联动时仍默认收起",
+  );
+  assert.equal(colabBridgeDefaultOpen({ enabled: true }), true, "开启联动时自动展开");
+  assert.equal(colabBridgeDefaultOpen({ active: true }), true, "接管中时自动展开");
+  assert.equal(colabBridgeDefaultOpen({ cli: { runner_state: "starting" } }), true, "自动拉起 T4 期间自动展开");
+  assert.equal(colabBridgeDefaultOpen({ cli: { runner_state: "running" } }), true, "云端 T4 运行中自动展开");
+  assert.equal(colabBridgeDefaultOpen({ cli: { runner_error: "T4 配额已满" } }), true, "拉起出错时自动展开");
 
   const def = colabSettingsForm();
   assert.equal(def.enabled, false);

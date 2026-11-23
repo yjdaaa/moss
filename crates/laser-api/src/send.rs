@@ -544,7 +544,7 @@ impl Drop for ProgressTraceGuard {
     }
 }
 
-/// 加工进度每过 10% 记一步（只在完整过程记录打开时起这个线程）。
+/// 加工进度每过 1% 记一步（只在完整过程记录打开时起这个线程；n110 由 10% 改细）。
 fn spawn_progress_trace(params: &SendWorkerParams, total: usize) -> Option<ProgressTraceGuard> {
     let trace = params.process_trace.clone().filter(|t| t.enabled())?;
     spawn_progress_trace_with(
@@ -575,8 +575,8 @@ pub(crate) fn spawn_progress_trace_with(
         .spawn(move || {
             use std::sync::atomic::Ordering;
             let began = std::time::Instant::now();
-            // 续雕任务从已完成的档位起算，只记后续前进的 10% 档位
-            let mut reported = (start_from.min(total) * 10 / total).min(9);
+            // 续雕任务从已完成的档位起算，只记后续前进的档位；每 1% 记一步（n110 由 10% 改细）
+            let mut reported = (start_from.min(total) * 100 / total).min(99);
             let (lock, cvar) = &*stop_worker;
             loop {
                 {
@@ -592,24 +592,23 @@ pub(crate) fn spawn_progress_trace_with(
                     }
                 }
                 // 加工过程中只有 lines_sent 实时增长（lines_completed 在收尾/取消时才写回），
-                // 两者取大值按总行数换算 10%~90% 档位。
+                // 两者取大值按总行数换算 1%~99% 档位（100% 由结束那一步记）。
                 let sent = progress.lines_sent.load(Ordering::Relaxed);
                 let completed = progress.lines_completed.load(Ordering::Relaxed);
                 let current = sent.max(completed).min(total);
-                let decile = (current * 10 / total).min(9);
-                if decile > reported {
-                    reported = decile;
+                let percent = (current * 100 / total).min(99);
+                if percent > reported {
+                    reported = percent;
                     crate::process_trace::trace_job_step(
                         Some(&trace),
                         &workflow_id,
                         "job_progress",
                         &format!(
-                            "加工进度 {}%：已发送 {sent} / {total} 行（用时 {} 秒）",
-                            decile * 10,
+                            "加工进度 {percent}%：已发送 {sent} / {total} 行（用时 {} 秒）",
                             began.elapsed().as_secs()
                         ),
                         serde_json::json!({
-                            "percent": decile * 10,
+                            "percent": percent,
                             "lines_completed": completed,
                             "lines_sent": sent,
                             "total_lines": total,

@@ -37,11 +37,29 @@ import {
   buildTwinConnectionPayload,
   twinEstopContext,
 } from "../twinState.js";
-import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
+import { TERMINAL_STATUSES, normalizeWorkflowStatus } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { connectionSummaryView, readUnifiedConnection } from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
+
+const TWIN_STATUS_LABELS = {
+  collecting: "准备中",
+  preview_ready: "预览就绪",
+  pending: "等待下发",
+  preparing: "准备发送",
+  sending: "下发中",
+  running: "加工中",
+  completed: "已完成",
+  failed: "未完成",
+  cancelled: "已取消",
+  feedback_recorded: "已记录反馈",
+};
+
+function twinStatusLabel(status) {
+  const normalized = normalizeWorkflowStatus(status);
+  return TWIN_STATUS_LABELS[normalized] || String(status || "预览就绪");
+}
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
 const DEMO_GCODE = [
@@ -806,7 +824,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
             onClick={() => setDriveMode("sim")}
           >
             <Play size={14} />
-            <b title="G-CODE SIMULATION">离线刀路推演</b>
+            <b>离线刀路推演</b>
           </button>
 
           <button
@@ -820,7 +838,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
             }}
           >
             <Flame size={14} />
-            <b title="JOB STREAM SYNC">加工下发同步</b>
+            <b>加工下发同步</b>
           </button>
 
           <button
@@ -835,7 +853,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
             }}
           >
             <Activity size={14} />
-            <b title="LIVE TELEMETRY">实机遥测映射</b>
+            <b>实机遥测映射</b>
           </button>
         </div>
 
@@ -938,33 +956,19 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                       <span>{simLoop ? "循环：开启" : "循环：关闭"}</span>
                     </button>
 
-                    <span
-                      id="twin-loop-status-pill"
-                      className={`ob-pill ${simLoop ? "ob-pill--ok" : "ob-pill--off"}`}
-                      style={{ fontSize: "11.5px" }}
-                      title={simLoop ? "推演到达 100% 后将自动从头循环雕刻" : "推演到达 100% 后自动停止，不循环雕刻"}
-                    >
-                      <span
-                        className="twin-laser-dot"
-                        style={{ color: simLoop ? "#34d399" : "#64748b" }}
-                      />
-                      <span>{simLoop ? "已开启循环雕刻" : "单次推演（不循环）"}</span>
-                    </span>
-
                     <div className="twin-speed-group" aria-label="1:1 真实雕刻时长对应">
                       <span
                         className="ob-pill ob-pill--info"
                         style={{ fontFamily: "var(--ob-mono)", fontSize: "11.5px" }}
-                        title="按 G-code 每段进给速度 F 与长度严格 1:1 实时推演，无倍速失真"
+                        title="按 G-code 每段进给速度与长度 1:1 实时推演"
                       >
                         <span>
-                          1:1 真实雕刻耗时 · 已走 {(activePose.elapsedSeconds || 0).toFixed(1)}s / 总计{" "}
-                          {toolpath.estimatedSeconds.toFixed(1)}s（剩余{" "}
+                          1:1 实时推演 · 剩余{" "}
                           {(
                             activePose.remainingSeconds ??
                             Math.max(0, toolpath.estimatedSeconds - (activePose.elapsedSeconds || 0))
                           ).toFixed(1)}
-                          s）
+                          s
                         </span>
                       </span>
                       <button
@@ -1073,7 +1077,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   </option>
                   {recentWorkflows.map((wf) => (
                     <option key={wf.workflow_id} value={wf.workflow_id}>
-                      {wf.workflow_id} · {wf.artifacts?.material || wf.material || "激光任务"} ({wf.status})
+                      {wf.artifacts?.material || wf.material || "激光任务"} · {twinStatusLabel(wf.status)}（{wf.workflow_id}）
                     </option>
                   ))}
                 </select>
@@ -1197,7 +1201,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                       const cy = Math.max(0, Number(((workspace.yTravelMm - spanH) / 2).toFixed(1)));
                       updateMaterialConfig({ offsetX: cx, offsetY: cy });
                     }}
-                    title="将材料、刀路与激光头一起移动到 100×100mm 台面正中央"
+                    title={`将材料、刀路与激光头一起移动到 ${workspace.xTravelMm}×${workspace.yTravelMm} mm 台面正中央`}
                   >
                     <span>一键台面居中</span>
                   </button>
@@ -1465,7 +1469,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
               {driveMode === "job" && (
                 <div className="twin-job-sync-box">
                   <div className="twin-job-sync-head">
-                    <span>实时下发状态：{jobStatus.toUpperCase()}</span>
+                    <span>实时下发状态：{twinStatusLabel(jobStatus)}</span>
                     <b>
                       {jobSendResult?.lines_sent || 0} / {jobSendResult?.total_lines || toolpath.totalLines} 行
                     </b>
@@ -1529,9 +1533,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   className="btn btn-ghost"
                   onClick={() => sampleControllerStatus(false)}
                   id="btn-twin-sample-status"
+                  title="向控制器查询一次当前位置与状态"
                 >
                   <Activity size={13} />
-                  <span>单次采样状态 (?)</span>
+                  <span>刷新状态</span>
                 </button>
 
                 <button
@@ -1541,7 +1546,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   id="btn-twin-toggle-poll"
                 >
                   <Radio size={13} />
-                  <span>{pollingTelemetry ? "停止周期遥测" : "开启 2s 周期遥测"}</span>
+                  <span>{pollingTelemetry ? "停止自动刷新" : "每 2 秒自动刷新"}</span>
                 </button>
               </div>
 
@@ -1549,8 +1554,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
               <div className="twin-pos-table">
                 <div className="twin-pos-row twin-pos-row--head">
                   <span>坐标轴</span>
-                  <span>工作坐标 (WPos)</span>
-                  <span>机械坐标 (MPos)</span>
+                  <span>工作坐标</span>
+                  <span>机械坐标</span>
                 </div>
                 {["x", "y", "z"].map((axis) => (
                   <div key={axis} className="twin-pos-row">
@@ -1561,21 +1566,21 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 ))}
               </div>
 
-              {/* 规划器 Bf 与进给功率 FS */}
+              {/* 运动队列与接收缓冲余量 */}
               <div className="twin-metrics-grid">
-                <div className="twin-metric-box">
-                  <span>规划器空闲块 (Bf)</span>
+                <div className="twin-metric-box" title="控制器规划器空闲缓冲块数 (Bf)">
+                  <span>运动队列余量</span>
                   <b>{telemetry.bf?.plannerFree != null ? `${telemetry.bf.plannerFree} 块` : "—"}</b>
                 </div>
-                <div className="twin-metric-box">
-                  <span>RX 缓冲余量</span>
+                <div className="twin-metric-box" title="控制器串口 / 网络接收缓冲余量 (RX)">
+                  <span>指令接收余量</span>
                   <b>{telemetry.bf?.rxBufferFree != null ? `${telemetry.bf.rxBufferFree} B` : "—"}</b>
                 </div>
               </div>
 
-              {/* 引脚状态指示矩阵 (Pn) */}
+              {/* 限位与安全开关状态 */}
               <div className="twin-pins-box">
-                <span className="twin-field-label">硬件限位与安全引脚 (Pn)</span>
+                <span className="twin-field-label">限位与安全开关</span>
                 {telemetry.pins?.active?.length > 0 ? (
                   <div className="twin-pin-list">
                     {telemetry.pins.active.map((pin) => (
@@ -1591,29 +1596,29 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 ) : (
                   <div className="twin-pin-ok">
                     <CheckCircle2 size={13} />
-                    <span>{telemetry.online ? "无触发引脚 (限位/安全门/急停均正常)" : "待采样控制器报文"}</span>
+                    <span>{telemetry.online ? "限位、安全门与急停均正常" : "尚未读取控制器状态"}</span>
                   </div>
                 )}
               </div>
 
               {telemetry.raw && (
-                <code className="twin-raw-status" title="控制器原始 GRBL 状态报告">
+                <code className="twin-raw-status" title="控制器原始状态报告">
                   {telemetry.raw}
                 </code>
               )}
             </div>
           </section>
 
-          {/* 卡片 3：机台物理包络与安全制动 */}
+          {/* 卡片 3：工作区行程与安全制动 */}
           <section className="hud-card ob-card twin-side-card">
-            <FoldHeader id="twin-envelope" title="翼宿 V1.0 工作区与安全门禁" n={3} />
+            <FoldHeader id="twin-envelope" title="工作区行程与安全" n={3} />
             <div className="twin-card-body">
               <div className="twin-row-actions">
                 <button
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 100 && workspace.yTravelMm === 100 ? "active" : ""}`}
                   onClick={() => updateWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100, from_hardware: false })}
-                  title="翼宿 V1.0 标称满行程 100×100 mm"
+                  title="设为默认 100×100 mm 满行程"
                 >
                   <span>100×100 满行程</span>
                 </button>
@@ -1631,10 +1636,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   onClick={handleSyncMachineCapabilities}
                   disabled={probingDevice}
                   id="btn-twin-sync-limits"
-                  title="从 FluidNC $CD 或 GRBL $$ 读取实机行程配置"
+                  title="从已连接的 FluidNC / GRBL 控制器读取实机行程配置"
                 >
                   <RefreshCw size={13} />
-                  <span>{probingDevice ? "同步中..." : "同步 $CD"}</span>
+                  <span>{probingDevice ? "读取中..." : "读取实机行程"}</span>
                 </button>
               </div>
 
@@ -1674,15 +1679,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 </div>
                 <div className="twin-metric-box">
                   <span>行程来源</span>
-                  <b>{workspace.hasHardwareLimits ? "实机 $CD / GRBL" : "翼宿 V1.0 基线"}</b>
-                </div>
-                <div className="twin-metric-box">
-                  <span>激光头与打印件</span>
-                  <b>{YISU_V1_PROFILE.laserSpec}</b>
-                </div>
-                <div className="twin-metric-box">
-                  <span>导轨与排烟系统</span>
-                  <b>3×MGN9H · 4028 风扇</b>
+                  <b>{workspace.hasHardwareLimits ? "已从实机读取" : "默认配置（100×100）"}</b>
                 </div>
               </div>
               {boundsWarning ? (

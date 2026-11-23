@@ -200,8 +200,7 @@ export default function VoiceAgentCard() {
       summary={loadError ? "读取失败" : !loaded ? "读取中…" : view.summary}
       tone={view.summary === "可用" ? "ok" : undefined} dirty={dirty}>
       <p className="voice-muted">
-        小智说一句话，就让本机的官方 Codex / Claude Code 在你指定的工作目录里干活（可以新建和修改该目录里的文件）。
-        默认关闭；CLI 路径留空即可自动读取本机安装的版本（换电脑或升级版本会自动适配），开启后每次运行都会在电脑上弹审批卡，批准了才启动。
+        让小智调用本机官方 Codex / Claude Code 在指定工作目录里写代码。默认关闭，CLI 路径留空会自动检测，每次运行仍需本机审批。
       </p>
       {!platformCopy.sandboxSupported && (
         <div className="voice-hint voice-hint--warn" role="note">
@@ -209,12 +208,12 @@ export default function VoiceAgentCard() {
         </div>
       )}
       <div className="voice-hint voice-hint--warn">
-        Agent 只在严格模式开启时运行，这样它即使调用本机 MOSS 接口也动不了激光机。严格模式在语音中心顶部的“严格模式”开关里开启。另外提醒：CLI 自己的沙箱挡不住“读取工作目录以外的文件”，所以工作目录请挑一个可以公开给模型看的目录，不要放在 MOSS 数据目录里。
+        仅在开启顶部「严格模式」后才可运行（防止代理触碰激光机）。CLI 仍可能读取目录外文件，请选专用工作目录，切勿指向 MOSS 数据或密钥目录。
       </div>
       {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
       {loaded && saved.enabled && !info.strict_mode && (
         <div className="voice-hint voice-hint--warn" role="alert">
-          严格模式当前未开启，Agent 不会运行：点语音中心顶部的“严格模式”开关开启即可。
+          严格模式当前未开启，Agent 不会运行：请先打开页面顶部的「严格模式」开关。
         </div>
       )}
       <div className="voice-form-grid">
@@ -224,7 +223,7 @@ export default function VoiceAgentCard() {
           <span>允许小智发起本机 Agent 任务（每次运行仍需在电脑批准）</span>
         </label>
         {[
-          ["workspace", "专用工作目录（Agent 只能在这里读写；不要指向 MOSS 数据目录或账号密钥目录）", platformCopy.workspacePlaceholder],
+          ["workspace", "专用工作目录（仅允许在此读写，勿指向 MOSS 数据或密钥目录）", platformCopy.workspacePlaceholder],
           ["codex_executable", platformCopy.codexLabel, platformCopy.codexPlaceholder],
           ["claude_executable", platformCopy.claudeLabel, platformCopy.claudePlaceholder],
         ].map(([name, label, hint]) => {

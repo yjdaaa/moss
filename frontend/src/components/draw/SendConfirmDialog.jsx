@@ -1,5 +1,7 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Send, Wifi, X } from "lucide-react";
+import { isTopmostModalBackdrop } from "../AppDialog.jsx";
 import { OriginBadge, inferOriginKind } from "../OriginBadge.jsx";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
 
@@ -18,20 +20,53 @@ export function SendConfirmDialog({
   movedAcknowledged = false,
   onMovedAckChange,
 }) {
-  // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开 HashFS 时默认脱机直接报错失败
+  // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开脱机文件支持时默认脱机直接报错失败
   const [offlineSdChoice, setOfflineSd] = React.useState(false);
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
   // SD 脱机只能经网口上传；串口只能逐行发送
   const offlineSd = sdAvailable && offlineSdChoice;
   const canConfirm = !requireMovedAck || movedAcknowledged;
-  return (
-    <div className="modal-backdrop" role="presentation">
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        if (busy) return;
+        onCancel?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onCancel]);
+
+  const content = (
+    <div
+      ref={backdropRef}
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !busy) {
+          onCancel?.();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
       <section className="send-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
         <div className="confirm-heading">
           <div>
             <Send size={18} />
             <h2 id="send-confirm-title">确认开始雕刻</h2>
           </div>
-          <button type="button" className="icon-button" onClick={onCancel} aria-label="关闭确认面板">
+          <button type="button" className="icon-button" onClick={onCancel} aria-label="关闭确认面板" disabled={busy}>
             <X size={18} />
           </button>
         </div>
@@ -51,7 +86,7 @@ export function SendConfirmDialog({
               checked={offlineSd}
               onChange={(e) => setOfflineSd(e.target.checked)}
             />
-            改用 SD 卡脱机离线加工（需机器插卡且固件启用 HashFS）
+            改用 SD 卡脱机离线加工（需机器插卡并开启脱机文件支持）
           </label>
         ) : null}
         {requireMovedAck ? (
@@ -81,4 +116,7 @@ export function SendConfirmDialog({
       </section>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(content, document.body)
+    : content;
 }

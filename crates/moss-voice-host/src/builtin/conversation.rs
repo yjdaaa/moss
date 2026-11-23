@@ -16,6 +16,22 @@ pub(super) struct RunningLocalSpec {
     )>,
 }
 
+impl RunningLocalSpec {
+    /// 辅助程序里真正加载成功的本地模型（类别 → 模型编号），供完整过程记录写服务启动情况（n110）。
+    pub(super) fn loaded_ids(&self) -> Vec<(ModelKind, &'static str)> {
+        [
+            (ModelKind::Vad, self.vad.as_ref().map(|v| v.0)),
+            (ModelKind::Kws, self.kws.as_ref().map(|v| v.0)),
+            (ModelKind::Denoise, self.denoise.as_ref().map(|v| v.0)),
+            (ModelKind::Asr, self.asr.as_ref().map(|v| v.0)),
+            (ModelKind::Tts, self.tts.as_ref().map(|v| v.0)),
+        ]
+        .into_iter()
+        .filter_map(|(kind, id)| id.map(|id| (kind, id)))
+        .collect()
+    }
+}
+
 /// 本次启动用到的本地模型。
 #[derive(Default)]
 pub(super) struct LocalParts {
@@ -788,9 +804,10 @@ impl BuiltinVoice {
                 .load_vad(&model, VadParams::for_engine(engine), engine)
                 .map_err(|error| start_error(format!("本地判停（{}）：{}", spec.label, error)))?;
             running_spec.vad = Some((spec.id, model));
-            parts.vad = Some(Arc::new(LocalVadFactory {
-                helper: helper.clone(),
-            }));
+            parts.vad = Some(Arc::new(LocalVadFactory::new(
+                helper.clone(),
+                format!("本地判停 {}（{}）", spec.label, spec.id),
+            )));
             if let Some((spec, dir)) = kws {
                 helper.load_kws(Some(&dir)).map_err(|error| {
                     start_error(format!("命令词抗噪（{}）：{}", spec.label, error))
@@ -976,10 +993,11 @@ impl BuiltinVoice {
                 if let Some((spec, _)) = kws {
                     parts.kws_active = Some(spec.id);
                 }
-                if vad.is_some() {
-                    parts.vad = Some(Arc::new(LocalVadFactory {
-                        helper: helper.clone(),
-                    }));
+                if let Some((spec, _)) = vad {
+                    parts.vad = Some(Arc::new(LocalVadFactory::new(
+                        helper.clone(),
+                        format!("本地判停 {}（{}）", spec.label, spec.id),
+                    )));
                 }
                 if let Some((spec, _)) = asr {
                     parts.asr = Some(LocalAsr {

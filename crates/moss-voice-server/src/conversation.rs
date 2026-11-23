@@ -787,6 +787,9 @@ struct PreparedSentence {
     text: String,
     chunks_rx: tokio::sync::mpsc::UnboundedReceiver<Pcm>,
     handle: AbortOnDrop<Result<(), moss_voice_providers::ProviderError>>,
+    /// 本轮第几句（完整过程记录里“第 N 句开始合成 / 合成出音频 / 合成失败”，n110）
+    index: u32,
+    began: Instant,
 }
 
 /// 设备自带 MCP 工具的一次调用：由对话任务发给会话，会话经 WebSocket 转给设备并把结果文字送回。
@@ -881,10 +884,36 @@ impl DeviceTools {
     }
 }
 
+/// 停止快路径的触发来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastStopSource {
+    /// 边说边识别的中间结果整句命中停止词
+    Interim,
+    /// 思考中命令词模型听到“停”
+    Keyword,
+    /// 思考中判停模型没认出人声的那阵声音，单独识别出停止说法
+    Recheck,
+}
+
+impl FastStopSource {
+    /// 记录里的机器可读键。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Interim => "interim",
+            Self::Keyword => "kws",
+            Self::Recheck => "recheck",
+        }
+    }
+}
+
 /// 一轮对话的输入。
 pub enum TurnInput {
     /// 流式中间结果命中后立即执行；该段识别流由会话丢弃，最终结果不会重复执行。
-    FastStop { text: String },
+    FastStop {
+        text: String,
+        /// 是怎么听出“停”的（完整过程记录如实写明来源，n110）
+        source: FastStopSource,
+    },
     /// 用户说的一段话（PCM 与采样率）；`stream` 为说话期间已在进行的流式识别
     Utterance {
         pcm: Vec<i16>,
@@ -931,10 +960,13 @@ pub enum TurnEvent {
     Heard(String),
     /// 尾音语义判停模型给出的说完概率（`0.0..=1.0`）
     SmartTurnProb(f32),
-    /// 原始识别结果与 0ms 同音纠偏后的文本（供默认关闭的仅内存排障流使用）
+    /// 原始识别结果与最终文本（供默认关闭的仅内存排障流与完整过程记录使用）：`homophone` 为同音纠正后的文字，
+    /// `keyword` 为命令词模型改判时听到的命令类别（n110：同音纠正与命令词改判分开记）
     RawHeard {
         raw: String,
+        homophone: String,
         corrected: String,
+        keyword: Option<moss_voice_providers::local::CommandKeyword>,
     },
     /// 工具调用详情摘要（仅在开启内存排障流时留存脱敏预览）
     ToolDebug {
@@ -971,6 +1003,34 @@ pub enum TurnEvent {
     },
 }
 
+#[derive(Clone)]
+pub(crate) struct TurnTrace {
+    pub trace: Option<laser_runtime::ProcessTrace>,
+    pub flow: String,
+    pub turn: u64,
+}
+
+impl TurnTrace {
+    fn emit(&self, context: &ToolContext, kind: &'static str, data: Value) -> bool {
+        let Some(ref trace) = self.trace else {
+            return false;
+        };
+        if !trace.enabled() {
+            return true;
+        }
+        crate::session::write_voice_trace(
+            trace,
+            &context.session_id,
+            &context.device_id,
+            &self.flow,
+            self.turn,
+            kind,
+            data,
+        );
+        true
+    }
+}
+
 struct Turn {
     started: Instant,
     measured: Mutex<std::collections::HashSet<&'static str>>,
@@ -981,15 +1041,47 @@ struct Turn {
     _session_person_hint: Option<crate::person_context::PersonScope>,
     /// 抢跑闸门；没有闸门（`None`）时不等待。
     gate: Option<TurnGate>,
+    /// 会话注入的轮次直写记录器（存在时在事件发生当刻直接落盘，不经 `events` 通道门禁积压或随打断丢弃）
+    turn_trace: Option<TurnTrace>,
+    /// 本轮已发出的大模型请求数（完整过程记录里的“第 N 轮”）
+    llm_rounds: std::sync::atomic::AtomicU32,
+    /// 本轮已开始合成的句子数（完整过程记录里的“第 N 句”）
+    tts_sentences: std::sync::atomic::AtomicU32,
+    /// 完整过程记录打开时：本轮可用工具的说明（工具名 → 说明），记工具调用时附上它的用途
+    tool_descriptions: Mutex<HashMap<String, String>>,
+}
+
+/// 命令词类别的中文名（完整过程记录用）。
+pub(crate) fn keyword_label(kind: moss_voice_providers::local::CommandKeyword) -> &'static str {
+    match kind {
+        moss_voice_providers::local::CommandKeyword::Stop => "停止",
+        moss_voice_providers::local::CommandKeyword::Exit => "退出",
+    }
 }
 
 impl Turn {
     /// 完整过程记录是否打开（开关每 2 秒最多读一次设置文件）。
     fn trace_on(&self) -> bool {
+        if let Some(ref tt) = self.turn_trace {
+            return tt
+                .trace
+                .as_ref()
+                .is_some_and(laser_runtime::ProcessTrace::enabled);
+        }
         self.conversation
             .process_trace
             .as_ref()
             .is_some_and(laser_runtime::ProcessTrace::enabled)
+    }
+
+    fn emit_trace(&self, kind: &'static str, data: Value) {
+        if let Some(ref tt) = self.turn_trace {
+            let _ = tt.emit(&self.context, kind, data);
+            return;
+        }
+        if self.trace_on() {
+            self.send(TurnEvent::Trace { kind, data });
+        }
     }
 
     async fn wait_release(&self) {
@@ -1020,6 +1112,21 @@ impl Turn {
             name: name.into(),
             ms: began.elapsed().as_millis() as u64,
         });
+        if self.trace_on() {
+            // 快路径直接调用的工具（不经大模型）：与大模型发起的工具调用一样记下参数、完整结果与耗时
+            self.emit_trace(
+                "tool_call",
+                serde_json::json!({
+                    "name": name,
+                    "arguments": arguments,
+                    "success": result.success,
+                    "result_kind": "reply",
+                    "result": result.result,
+                    "elapsed_ms": began.elapsed().as_millis() as u64,
+                    "fast_route": true,
+                }),
+            );
+        }
         self.send(TurnEvent::ToolDebug {
             name: name.into(),
             arguments,
@@ -1237,11 +1344,18 @@ impl Turn {
         let _ = self.events.send(event);
     }
 
+    fn trace_smart_turn(&self, data: Value) {
+        self.emit_trace("smart_turn", data);
+    }
+
     async fn speak_fixed(&self, text: &str) -> bool {
         self.timing("first_synthesis_start");
+        let index = self.next_sentence(text, true, false);
+        let began = Instant::now();
         match self.conversation.cached_speech(text).await {
             Ok(pcm) => {
                 self.timing("first_synthesis_ready");
+                self.trace_tts_ready(index, began);
                 self.send(TurnEvent::Speech {
                     text: text.to_owned(),
                     pcm,
@@ -1250,6 +1364,7 @@ impl Turn {
                 true
             }
             Err(error) => {
+                self.trace_tts_failed(index, text, began, &error, false);
                 self.send(TurnEvent::Failed(error));
                 self.send(TurnEvent::TextReply(text.to_owned()));
                 false
@@ -1257,17 +1372,74 @@ impl Turn {
         }
     }
 
+    /// 新开始合成一句（`fixed` 为固定话术）：返回它在本轮是第几句；记录打开时写“开始合成第 N 句”。
+    fn next_sentence(&self, text: &str, fixed: bool, fallback: bool) -> u32 {
+        let index = self
+            .tts_sentences
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.trace_tts_start(index, text, fixed, fallback);
+        index
+    }
+
+    fn trace_tts_start(&self, index: u32, text: &str, fixed: bool, fallback: bool) {
+        self.emit_trace(
+            "tts_start",
+            serde_json::json!({
+                "index": index, "text": text, "fixed": fixed, "fallback": fallback,
+            }),
+        );
+    }
+
+    fn trace_tts_ready(&self, index: u32, began: Instant) {
+        self.emit_trace(
+            "tts_ready",
+            serde_json::json!({
+                "index": index,
+                "elapsed_ms": began.elapsed().as_millis() as u64,
+            }),
+        );
+    }
+
+    fn trace_tts_failed(
+        &self,
+        index: u32,
+        text: &str,
+        began: Instant,
+        error: &ProviderError,
+        fallback: bool,
+    ) {
+        self.emit_trace(
+            "tts_failed",
+            serde_json::json!({
+                "index": index,
+                "text": text,
+                "error": error.to_string(),
+                "elapsed_ms": began.elapsed().as_millis() as u64,
+                "fallback": fallback,
+            }),
+        );
+    }
+
     /// 合成并送出一句话：第一段音频带文字（会话据此发 `sentence_start`），之后的分段直接追加。
     /// 返回是否送出过音频（中途失败时已送出的部分照常播放）。
+    /// `fallback_of` 为主合成失败后用本地合成重来的那一句的编号（不重计首句耗时，沿用原编号）。
     fn start_sentence_tts_with(
         &self,
         tts: Arc<dyn Tts>,
         text: String,
-        record_timing: bool,
+        fallback_of: Option<u32>,
     ) -> PreparedSentence {
-        if record_timing {
-            self.timing("first_synthesis_start");
-        }
+        let index = match fallback_of {
+            Some(index) => {
+                self.trace_tts_start(index, &text, false, true);
+                index
+            }
+            None => {
+                self.timing("first_synthesis_start");
+                self.next_sentence(&text, false, false)
+            }
+        };
         let (chunks_tx, chunks_rx) = unbounded_channel::<Pcm>();
         let input = text.clone();
         let handle = tokio::spawn(async move { tts.synthesize_stream(&input, chunks_tx).await });
@@ -1275,11 +1447,13 @@ impl Turn {
             text,
             chunks_rx,
             handle: AbortOnDrop::new(handle),
+            index,
+            began: Instant::now(),
         }
     }
 
     fn start_sentence_tts(&self, text: String) -> PreparedSentence {
-        self.start_sentence_tts_with(self.conversation.tts.clone(), text, true)
+        self.start_sentence_tts_with(self.conversation.tts.clone(), text, None)
     }
 
     /// 消费一句已启动的 TTS 音频流（首尾 12ms 线性淡入淡出 + 句尾冗余静音裁剪）；
@@ -1292,6 +1466,8 @@ impl Turn {
         sentence_rx_closed: &mut bool,
         allow_fallback: bool,
     ) -> bool {
+        let (index, began) = (current.index, current.began);
+        let sentence = current.text.clone();
         let mut pending_text = Some(current.text);
         let mut held_tail: Vec<i16> = Vec::new();
         let mut sample_rate: u32 = 0;
@@ -1395,6 +1571,7 @@ impl Turn {
                 match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
+                        self.trace_tts_ready(index, began);
                         self.send(TurnEvent::Speech {
                             text,
                             pcm: emit_pcm,
@@ -1426,6 +1603,7 @@ impl Turn {
                 match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
+                        self.trace_tts_ready(index, began);
                         self.send(TurnEvent::Speech {
                             text,
                             pcm: emit_pcm,
@@ -1481,6 +1659,7 @@ impl Turn {
                 match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
+                        self.trace_tts_ready(index, began);
                         self.send(TurnEvent::Speech {
                             text,
                             pcm: tail_pcm,
@@ -1492,6 +1671,10 @@ impl Turn {
         }
 
         if let Some(Ok(Err(error))) = current.handle.join().await {
+            let will_fallback = allow_fallback
+                && self.conversation.fallback_tts.is_some()
+                && pending_text.is_some();
+            self.trace_tts_failed(index, &sentence, began, &error, will_fallback);
             if allow_fallback
                 && let Some(fallback) = self.conversation.fallback_tts.clone()
                 && let Some(retry_text) = pending_text.take()
@@ -1501,7 +1684,7 @@ impl Turn {
                         .clone()
                         .prefixed("主语音合成失败，本句已自动降级为本地语音合成："),
                 ));
-                let fb_prepared = self.start_sentence_tts_with(fallback, retry_text, false);
+                let fb_prepared = self.start_sentence_tts_with(fallback, retry_text, Some(index));
                 let mut fb_closed = true;
                 return Box::pin(self.drain_prepared_sentence(
                     fb_prepared,
@@ -1536,7 +1719,16 @@ impl Turn {
         stream: Option<AsrStream>,
     ) -> Result<String, ProviderError> {
         if let Some(stream) = stream {
-            match stream.finish().await {
+            let denoise = stream.denoise_slot();
+            let finished = stream.finish().await;
+            // 只在流式识别成功时记（失败改整段识别时这一路的降噪情况与最终文字无关）；会话在中间结果时已取走的不重复记
+            if finished.is_ok()
+                && self.trace_on()
+                && let Some(report) = denoise.lock().ok().and_then(|mut slot| slot.take())
+            {
+                self.emit_trace("denoise", crate::audio::denoise_trace("识别", &report));
+            }
+            match finished {
                 Ok(text) => return Ok(text),
                 Err(error) => self.send(TurnEvent::Warning(
                     error.prefixed("流式识别失败，改用整段识别："),
@@ -1555,8 +1747,48 @@ impl Turn {
     ) -> (Result<moss_voice_providers::LlmReply, ProviderError>, bool) {
         let (delta_tx, mut delta_rx) = unbounded_channel::<String>();
         let llm = self.conversation.llm.clone();
+        let round = self
+            .llm_rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let trace_on = self.trace_on();
+        if trace_on {
+            // 请求发出时就记：发给模型的完整内容（系统提示词、历史、本句、工具定义）
+            self.emit_trace(
+                "llm_request",
+                serde_json::json!({
+                    "round": round,
+                    "message_count": messages.len(),
+                    "tool_count": tools.len(),
+                    "messages": messages,
+                    "tools": tools.iter().map(ToolSpec::to_openai).collect::<Vec<_>>(),
+                }),
+            );
+        }
         let trace_began = Instant::now();
-        let generation = async move { llm.chat(messages, tools, delta_tx).await };
+        // 这一轮大模型吐出第一个字的时刻（毫秒，从请求发出算起）；没吐字为 u64::MAX
+        let first_delta_ms = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let first_delta = &first_delta_ms;
+        let generation = async move {
+            let reply = llm.chat(messages, tools, delta_tx).await;
+            if trace_on {
+                // 回复一完整就记（不等合成播完），耗时只含大模型本身
+                let first = first_delta.load(std::sync::atomic::Ordering::SeqCst);
+                self.emit_trace(
+                    "llm_round",
+                    serde_json::json!({
+                        "round": round,
+                        "first_token_ms": (first != u64::MAX).then_some(first),
+                        "elapsed_ms": trace_began.elapsed().as_millis() as u64,
+                        "message_count": messages.len(),
+                        "reply_text": reply.as_ref().ok().map(|r| r.text.clone()),
+                        "reply_tool_calls": reply.as_ref().ok().map(|r| r.tool_calls.clone()),
+                        "error": reply.as_ref().err().map(ToString::to_string),
+                    }),
+                );
+            }
+            reply
+        };
         let speaking = async {
             let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(4);
             let feeder = async {
@@ -1564,6 +1796,12 @@ impl Turn {
                 let mut segmenter = Segmenter::new();
                 while let Some(delta) = delta_rx.recv().await {
                     self.timing("first_llm_delta");
+                    let _ = first_delta.compare_exchange(
+                        u64::MAX,
+                        trace_began.elapsed().as_millis() as u64,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
                     if !*emotion_sent && let Some(emotion) = emotion_of(&delta) {
                         *emotion_sent = true;
                         self.send(TurnEvent::Emotion(emotion));
@@ -1617,21 +1855,6 @@ impl Turn {
             spoke
         };
         let (reply, spoke) = tokio::join!(generation, speaking);
-        if self.trace_on() {
-            // 发给模型的完整内容（系统提示词、历史、本句、工具定义）与模型原始回复
-            self.send(TurnEvent::Trace {
-                kind: "llm_round",
-                data: serde_json::json!({
-                    "elapsed_ms": trace_began.elapsed().as_millis() as u64,
-                    "messages": messages,
-                    "tools": tools.iter().map(ToolSpec::to_openai).collect::<Vec<_>>(),
-                    "reply_text": reply.as_ref().ok().map(|r| r.text.clone()),
-                    "reply_tool_calls": reply.as_ref().ok().map(|r| r.tool_calls.clone()),
-                    "error": reply.as_ref().err().map(ToString::to_string),
-                    "spoke": spoke,
-                }),
-            });
-        }
         (reply, spoke)
     }
 
@@ -1647,11 +1870,20 @@ impl Turn {
         let mut set = tokio::task::JoinSet::new();
         let trace_on = self.trace_on();
         for (index, call) in calls.iter().cloned().enumerate() {
+            let description = if trace_on {
+                self.tool_descriptions
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(&call.function.name).cloned())
+            } else {
+                None
+            };
             let tools = self.conversation.tools.clone();
             let device = self.device.clone();
             let context = self.context.clone();
             let timeout = self.conversation.settings.tool_timeout;
             let events = self.events.clone();
+            let turn_trace = self.turn_trace.clone();
             set.spawn(async move {
                 let began = Instant::now();
                 let work = async {
@@ -1697,17 +1929,23 @@ impl Turn {
                         ToolOutcome::Speak(s) => ("speak", s.clone()),
                         ToolOutcome::PlayMusic { title, .. } => ("play_music", title.clone()),
                     };
-                    let _ = events.send(TurnEvent::Trace {
-                        kind: "tool_call",
-                        data: serde_json::json!({
-                            "name": call.function.name,
-                            "call_id": call.id,
-                            "arguments": call.function.arguments,
-                            "result_kind": result_kind,
-                            "result": result,
-                            "elapsed_ms": began.elapsed().as_millis() as u64,
-                        }),
+                    let data = serde_json::json!({
+                        "name": call.function.name,
+                        "description": description,
+                        "call_id": call.id,
+                        "arguments": call.function.arguments,
+                        "result_kind": result_kind,
+                        "result": result,
+                        "elapsed_ms": began.elapsed().as_millis() as u64,
                     });
+                    if let Some(ref tt) = turn_trace {
+                        let _ = tt.emit(&context, "tool_call", data);
+                    } else {
+                        let _ = events.send(TurnEvent::Trace {
+                            kind: "tool_call",
+                            data,
+                        });
+                    }
                 }
                 (index, call.id, outcome)
             });
@@ -1735,13 +1973,17 @@ impl Turn {
 
     /// 命令词模型听到了停止 / 退出命令、通用识别却没认出来（噪声里常把“退下”听成“问一下”、“停”听成别的单字）：
     /// 识别结果很短（不超过 4 个字，含没识别出字）时按命令词纠正；长句一律以识别为准，不让命令词模型盖过整句话。
-    async fn fuse_command_hint(&self, text: String) -> String {
+    /// 返回（最终文字，命令词模型改判时听到的命令类别）。
+    async fn fuse_command_hint(
+        &self,
+        text: String,
+    ) -> (String, Option<moss_voice_providers::local::CommandKeyword>) {
         use moss_voice_providers::local::CommandKeyword;
         let Some(gate) = self.gate.as_ref() else {
-            return text;
+            return (text, None);
         };
         if crate::fast::is_stop(&text) || self.conversation.is_exit(&text) {
-            return text;
+            return (text, None);
         }
         let normalized = crate::fast::normalized(&text);
         let read = || gate.command_hint.lock().ok().and_then(|slot| *slot);
@@ -1760,15 +2002,16 @@ impl Turn {
             }
         }
         let Some(kind) = hint else {
-            return text;
+            return (text, None);
         };
         if !command_hint_fits(kind, &normalized) {
-            return text;
+            return (text, None);
         }
-        match kind {
-            CommandKeyword::Stop => "停".into(),
-            CommandKeyword::Exit => "退下".into(),
-        }
+        let fused = match kind {
+            CommandKeyword::Stop => "停",
+            CommandKeyword::Exit => "退下",
+        };
+        (fused.into(), Some(kind))
     }
 
     /// 后台查询结果出来后的主动播报：不给工具，只让大模型把结果说成一两句话。
@@ -1820,8 +2063,11 @@ impl Turn {
         {
             let max_samples = (sample_rate as usize).saturating_mul(8);
             let tail = pcm[pcm.len().saturating_sub(max_samples)..].to_vec();
+            // 推理耗时在任务里量（不含识别与命令词等待），随结果一起交回
             Some(tokio::spawn(async move {
-                predictor.predict_turn_end(&tail, sample_rate).await
+                let began = Instant::now();
+                let prob = predictor.predict_turn_end(&tail, sample_rate).await;
+                (prob, began.elapsed().as_millis() as u64)
             }))
         } else {
             None
@@ -1848,31 +2094,103 @@ impl Turn {
         };
         self.timing("final_asr");
         let raw_text = text;
-        let text = apply_asr_corrections(&raw_text, &settings.asr_corrections);
-        let text = self.fuse_command_hint(text).await;
+        let homophone = apply_asr_corrections(&raw_text, &settings.asr_corrections);
+        let (text, keyword) = self.fuse_command_hint(homophone.clone()).await;
         if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
             if let Some(task) = smart_turn_task.take() {
                 task.abort();
+            }
+            if self.trace_on() {
+                // 被丢掉的识别结果也如实记下原文和原因（不进识别结果那一步，不交给大模型）
+                let reason = if moss_voice_providers::text::speakable(&text) {
+                    "只是语气词或噪声词"
+                } else {
+                    "没有可读的文字"
+                };
+                self.emit_trace(
+                    "asr_ignored",
+                    serde_json::json!({
+                        "raw": raw_text,
+                        "homophone": homophone,
+                        "corrected": text,
+                        "reason": reason,
+                    }),
+                );
             }
             self.send(TurnEvent::Ignored);
             return;
         }
         if crate::fast::is_stop(&text) || self.conversation.is_exit(&text) {
-            if let Some(task) = smart_turn_task.take() {
-                task.abort();
+            let had_task = smart_turn_task.take().inspect(|t| t.abort()).is_some();
+            if had_task || self.conversation.turn_predictor.is_some() {
+                self.trace_smart_turn(serde_json::json!({
+                    "reason": "是停止 / 退出说法，不等语义判停、立即处理",
+                }));
             }
         } else if let Some(mut task) = smart_turn_task.take() {
-            match tokio::time::timeout(Duration::from_millis(250), &mut task).await {
-                Ok(Ok(Some(prob))) if prob.is_finite() => {
+            const SMART_TURN_BUDGET: Duration = Duration::from_millis(250);
+            let waiting = Instant::now();
+            match tokio::time::timeout(SMART_TURN_BUDGET, &mut task).await {
+                Ok(Ok((Some(prob), inference_ms))) if prob.is_finite() => {
+                    let prob = prob.clamp(0.0, 1.0);
                     self.timing("smart_turn");
-                    self.send(TurnEvent::SmartTurnProb(prob.clamp(0.0, 1.0)));
+                    self.trace_smart_turn(serde_json::json!({
+                        "probability": prob,
+                        "elapsed_ms": inference_ms,
+                        "waited_after_asr_ms": waiting.elapsed().as_millis() as u64,
+                    }));
+                    self.send(TurnEvent::SmartTurnProb(prob));
                 }
-                _ => task.abort(),
+                outcome => {
+                    task.abort();
+                    let (reason, inference_ms) = match outcome {
+                        Err(_) => (
+                            format!(
+                                "识别完后再等 {} ms 仍没算完，超出时间预算已放弃",
+                                SMART_TURN_BUDGET.as_millis()
+                            ),
+                            None,
+                        ),
+                        Ok(Ok((Some(_), ms))) => {
+                            ("模型给出的概率不是有效数字".to_owned(), Some(ms))
+                        }
+                        Ok(Ok((None, ms))) => ("模型没给出结果（出错或超时）".to_owned(), Some(ms)),
+                        Ok(Err(_)) => ("判停任务异常结束".to_owned(), None),
+                    };
+                    self.trace_smart_turn(serde_json::json!({
+                        "reason": reason,
+                        "elapsed_ms": inference_ms,
+                        "waited_after_asr_ms": waiting.elapsed().as_millis() as u64,
+                        "budget_ms": SMART_TURN_BUDGET.as_millis() as u64,
+                    }));
+                }
             }
+        } else if self.conversation.turn_predictor.is_some() {
+            let reason = if self.gate.as_ref().is_some_and(|g| g.hold_llm) {
+                "插话待判轮次，不跑尾音语义判停"
+            } else {
+                "非静音判停抢跑（按键说话或设备已结束拾音），不用语义判停"
+            };
+            self.trace_smart_turn(serde_json::json!({"reason": reason}));
+        }
+        if self.trace_on() {
+            // 识别原文 → 同音纠正 → 命令词改判，在发生当刻先于后续 Jev / 大模型请求写入（n110）
+            self.emit_trace(
+                "asr",
+                serde_json::json!({
+                    "raw": &raw_text,
+                    "homophone": &homophone,
+                    "corrected": &text,
+                    "kws_fused": keyword.is_some(),
+                    "kws_keyword": keyword.map(keyword_label),
+                }),
+            );
         }
         self.send(TurnEvent::RawHeard {
             raw: raw_text,
+            homophone,
             corrected: text.clone(),
+            keyword,
         });
         self.send(TurnEvent::Heard(text.clone()));
         if self.fast_answer(&text, &mut identity, &mut history).await {
@@ -2000,9 +2318,9 @@ impl Turn {
             }
             if self.trace_on() {
                 let kept = decision.filter_tools(&tools, &text, &history);
-                self.send(TurnEvent::Trace {
-                    kind: "jev",
-                    data: serde_json::json!({
+                self.emit_trace(
+                    "jev",
+                    serde_json::json!({
                         "applied": decision.applied,
                         "cached": decision.cached,
                         "unfinished": decision.unfinished,
@@ -2014,7 +2332,7 @@ impl Turn {
                         "tools_before": tools.len(),
                         "tools_after": kept.len(),
                     }),
-                });
+                );
             }
             if settings.read_only_shortcuts
                 && let Some(intent) = decision.fast_read
@@ -2073,6 +2391,15 @@ impl Turn {
         tools.push(end_conversation_tool());
         if self.gate.as_ref().is_some_and(|gate| gate.allow_silent) {
             tools.push(stay_silent_tool());
+        }
+        if self.trace_on()
+            && let Ok(mut map) = self.tool_descriptions.lock()
+        {
+            map.extend(
+                tools
+                    .iter()
+                    .map(|spec| (spec.name.clone(), spec.description.clone())),
+            );
         }
         let mut emotion_sent = false;
         let mut spoke_any = false;
@@ -2491,6 +2818,31 @@ pub fn spawn_turn_gated(
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
+    spawn_turn_traced(
+        conversation,
+        context,
+        input,
+        history,
+        device,
+        session_person_hint,
+        gate,
+        None,
+    )
+}
+
+pub(crate) fn spawn_turn_traced(
+    conversation: Arc<Conversation>,
+    context: ToolContext,
+    input: TurnInput,
+    history: Vec<ChatMessage>,
+    device: Option<DeviceTools>,
+    session_person_hint: Option<crate::person_context::PersonScope>,
+    gate: Option<TurnGate>,
+    turn_trace: Option<TurnTrace>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
+) {
     let (events, receiver) = unbounded_channel();
     let turn = Turn {
         conversation,
@@ -2499,19 +2851,25 @@ pub fn spawn_turn_gated(
         device,
         _session_person_hint: session_person_hint,
         gate,
+        turn_trace,
         started: Instant::now(),
         measured: Mutex::default(),
+        llm_rounds: Default::default(),
+        tts_sentences: Default::default(),
+        tool_descriptions: Mutex::default(),
     };
     let handle = tokio::spawn(async move {
         match input {
-            TurnInput::FastStop { text } => {
+            TurnInput::FastStop { text, .. } => {
                 let mut no_identity = None;
                 let mut no_prefix = Vec::new();
                 let corrected =
                     apply_asr_corrections(&text, &turn.conversation.settings.asr_corrections);
                 turn.send(TurnEvent::RawHeard {
                     raw: text,
+                    homophone: corrected.clone(),
                     corrected: corrected.clone(),
+                    keyword: None,
                 });
                 turn.send(TurnEvent::Heard(corrected.clone()));
                 turn.fast_answer(&corrected, &mut no_identity, &mut no_prefix)

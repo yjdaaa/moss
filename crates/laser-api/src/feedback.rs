@@ -315,6 +315,30 @@ fn local_jev_upstream_model(raw: &str) -> Option<&'static str> {
     None
 }
 
+/// 过程记录里反馈类别的中文说法（n110：原先直接写代码值）。
+fn feedback_class_label(class: &str) -> String {
+    match class {
+        "too_dark" => "太深".into(),
+        "too_light" => "太浅".into(),
+        "burnt" => "烧焦".into(),
+        "not_cut_through" => "没切透".into(),
+        "broken_line" => "断线".into(),
+        "rough_edge" => "边缘毛糙".into(),
+        "acceptable" => "效果正常".into(),
+        "unknown" => "说不清是什么问题".into(),
+        other => format!("其他（{other}）"),
+    }
+}
+
+/// 反馈由谁判断的中文说法。
+fn feedback_source_label(source: &str) -> String {
+    match source {
+        "local_jev" => "本地 Jev 模型".into(),
+        "openrouter" => "云端 Jev（OpenRouter）".into(),
+        "local_rules" => "本地关键词规则".into(),
+        other => format!("其他来源（{other}）"),
+    }
+}
 fn local_class(text: &str) -> &'static str {
     let text = text.to_lowercase();
     // Ambiguous negatives must not turn into the opposite physical adjustment.
@@ -678,7 +702,9 @@ impl ApiService {
                     .collect::<String>();
                 let safe_speech = payload["entry"]["speech"].as_str().unwrap_or("");
                 let step = format!(
-                    "加工反馈「{safe_text}」→ 判断为 {class}（来源 {source}），建议：{safe_speech}"
+                    "加工反馈「{safe_text}」→ 判断为{}（{}判断），建议：{safe_speech}",
+                    feedback_class_label(class),
+                    feedback_source_label(source)
                 );
                 trace.record(
                     "laser",

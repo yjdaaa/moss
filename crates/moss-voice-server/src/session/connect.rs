@@ -124,6 +124,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         let _ = socket.send(Message::Close(None)).await;
         return;
     };
+    // 这台设备的连接、握手、授权与断开事件归到它自己的流程（完整过程记录，n110）
+    let flow = super::device_flow(&device_id);
     let client_id = identity.client_id.clone().unwrap_or_default();
     let visit = DeviceVisit {
         device_id: device_id.clone(),
@@ -140,13 +142,14 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     let status = match seen {
         Ok(status) => status,
         Err(error) => {
-            shared.state.event(
+            shared.state.event_in_flow(
                 EventRecord::error(
                     DiagCategory::Internal,
                     format!("登记设备 {device_id} 失败：本机设备记录读写出错"),
                 )
                 .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
                 .detail(&error),
+                flow.clone(),
             );
             let _ = socket.send(Message::Close(None)).await;
             return;
@@ -165,12 +168,13 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     let Some((hello_version, uplink, device_mcp, device_aec, text_font_cap)) =
         wait_hello(&mut socket).await
     else {
-        shared.state.event(
+        shared.state.event_in_flow(
             EventRecord::warn(
                 DiagCategory::Device,
                 format!("设备 {device_id} 连上后 10 秒内没有完成握手（hello），已断开"),
             )
             .hint("多半是设备网络太差或固件版本太旧：靠近路由器、重启设备，或升级小智固件"),
+            flow.clone(),
         );
         return;
     };
@@ -199,12 +203,13 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         "text_font": text_font_cap,
     });
     let Ok(session_id) = random_id() else {
-        shared.state.event(
+        shared.state.event_in_flow(
             EventRecord::error(
                 DiagCategory::Internal,
                 format!("设备 {device_id} 会话建立失败：操作系统安全随机源不可用"),
             )
             .hint("拒绝使用不安全的零会话编号，请重启 MOSS 或操作系统后重试"),
+            flow.clone(),
         );
         return;
     };
@@ -243,7 +248,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             EventRecord::warn(DiagCategory::Device, format!("设备 {device_id}：{log}"))
                 .hint(message)
         };
-        shared.state.event(record);
+        shared.state.event_in_flow(record, flow.clone());
         let alert = ServerMessage::Alert {
             status: status_text.into(),
             message: message.into(),
@@ -280,7 +285,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     let uplink_rate = if uplink.format == "opus" && supported_rate(uplink.sample_rate) {
         uplink.sample_rate
     } else {
-        shared.state.event(
+        shared.state.event_in_flow(
             EventRecord::warn(
                 DiagCategory::Audio,
                 format!(
@@ -289,6 +294,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                 ),
             )
             .hint("如果听不清或识别全错，换用标准小智固件"),
+            flow.clone(),
         );
         16_000
     };
@@ -363,6 +369,8 @@ pub(crate) async fn serve_session(
         text_font_cap,
     } = start;
     let mqtt = socket.is_mqtt();
+    // 这台设备的连接与断开事件归到它自己的流程（完整过程记录，n110）
+    let flow = super::device_flow(&device_id);
     // 已授权的设备先建好会话（音频编解码器）并登记，再回 hello：设备收到 hello 时语音中心已能看到它
     let (mut session, mut requests_rx) = match Session::new(
         &shared,
@@ -393,6 +401,7 @@ pub(crate) async fn serve_session(
                         session_id: session_id.clone(),
                         supports_mcp: session.device_mcp.is_some(),
                         sender: requests_tx,
+                        turn: 0,
                     },
                 );
             }
@@ -419,24 +428,25 @@ pub(crate) async fn serve_session(
                 text_font_size: init_font_size,
                 text_font_bpp: init_font_bpp,
             });
-            shared.state.event(if mqtt {
+            shared.state.event_in_flow(if mqtt {
                 format!("设备 {device_id} 已常连在线（MQTT，唤醒后语音走加密 UDP）")
             } else {
                 format!(
                     "设备 {device_id} 已连接（帧协议 v{version}，上行 {uplink_rate} Hz，下行 {} Hz）",
                     shared.config.downlink_sample_rate
                 )
-            });
+            }, flow.clone());
             (session, requests_rx)
         }
         Err(error) => {
-            shared.state.event(
+            shared.state.event_in_flow(
                 EventRecord::error(
                     DiagCategory::Audio,
                     format!("设备 {device_id} 的音频初始化失败，已断开"),
                 )
                 .hint("设备声明的音频格式 MOSS 处理不了：换用标准小智固件后重试")
                 .detail(&error),
+                flow.clone(),
             );
             let _ = socket.send(Message::Close(None)).await;
             return;
@@ -509,7 +519,9 @@ pub(crate) async fn serve_session(
         .sessions_changed(shared.active_device_sessions().len());
     let (phase, level) = shared.active_aggregate_pulse();
     shared.registry.pulse_changed(phase.as_deref(), level);
-    shared.state.event(disconnect_event(&device_id, &reason));
+    shared
+        .state
+        .event_in_flow(disconnect_event(&device_id, &reason), flow.clone());
     let _ = socket.send(Message::Close(None)).await;
 }
 

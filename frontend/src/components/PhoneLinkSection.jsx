@@ -155,8 +155,7 @@ function ComputerHostPanel() {
     <div className="ob-fold" style={foldStyle}>
       <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="手机连接" summary={hostSummary} defaultOpen={false} />
       <div style={hintStyle}>
-        开启后，同一 WiFi 下的手机 App 可以连接这台电脑，用电脑的数据操作雕刻机（连接、预览、发送、急停）。
-        配对成功后会自动长久记住（MOSS 软件重启或电脑重启后均无需重新配对）。
+        开启后，同一 Wi-Fi 下的手机 App 可连接这台电脑操作雕刻机（连接、预览、发送、急停）。配对成功后长期记住，重启无需重配。
       </div>
       <label className="phone-link-label">
         <input
@@ -165,7 +164,7 @@ function ComputerHostPanel() {
           disabled={busy}
           onChange={(event) => void toggle(event.target.checked)}
         />
-        <span>允许手机连接（保存后重启 MOSS 生效）</span>
+        <span>允许手机连接（重启生效）</span>
       </label>
       {info.restart_required && (
         <div className="phone-link-box">设置已保存，重启 MOSS 后生效。</div>
@@ -180,7 +179,7 @@ function ComputerHostPanel() {
 
           <div className="phone-link-box-2" style={{ marginTop: "10px" }}>
             <div style={{ fontSize: "12px", fontWeight: 600, marginBottom: "6px" }}>
-              自定义固定配对码（6 位数字，长久有效，免去每次手动生成）：
+              固定配对码（6 位数字，长期有效）：
               {info.static_pin_set && (
                 <span style={{ color: "var(--green)", marginLeft: "6px" }}>● 已设置生效</span>
               )}
@@ -246,7 +245,7 @@ function ComputerHostPanel() {
           </div>
           {code && (
             <div className="phone-link-box-3">
-              5 分钟内在手机上输入；配对成功后将长久保持连接（MOSS 重启或电脑重启后无需重新配对）。
+              5 分钟内在手机上输入，配对成功后自动记住。
             </div>
           )}
         </>

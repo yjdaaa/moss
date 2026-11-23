@@ -11,8 +11,8 @@ pub(super) enum PreviewRunner {
 impl PreviewRunner {
     fn terminate(&self) {
         match self {
-            Self::Helper(h) => h.terminate(),
-            Self::SpeechCpp(w) => w.terminate(),
+            Self::Helper(h) => h.terminate_with_reason("MOSS 不再使用它，已结束"),
+            Self::SpeechCpp(w) => w.terminate_with_reason("MOSS 不再使用它，已结束"),
         }
     }
 }
@@ -494,7 +494,9 @@ impl BuiltinVoice {
         };
         let runner_guard = if let Some(speech_exe) = speech_exe {
             let model_file = super::conversation::resolve_model_entry_file(&dir, spec);
-            let Ok(worker) = SpeechCppWorker::spawn(&speech_exe, &model_file) else {
+            let Ok(worker) =
+                SpeechCppWorker::spawn_as(&speech_exe, &model_file, "音色试听缓存程序")
+            else {
                 return;
             };
             let Some(guard) = register_runner(PreviewRunner::SpeechCpp(worker)) else {
@@ -508,7 +510,7 @@ impl BuiltinVoice {
             let Some(engine) = super::conversation::helper_tts_engine(spec.engine) else {
                 return;
             };
-            let Ok(helper) = LocalHelper::spawn(&exe) else {
+            let Ok(helper) = LocalHelper::spawn_as(&exe, "音色试听缓存程序") else {
                 return;
             };
             let Some(guard) = register_runner(PreviewRunner::Helper(helper.clone())) else {
@@ -723,13 +725,15 @@ impl BuiltinVoice {
                             "未找到 Qwen3-TTS 推理引擎 speech，请删除并重新下载 Qwen3-TTS 模型包",
                         )
                     })?;
-                let worker = SpeechCppWorker::spawn(&speech_exe, &model_file).map_err(|e| {
-                    CenterError::new(
-                        "local_tts_load_failed",
-                        500,
-                        format!("加载合成模型失败：{e}"),
-                    )
-                })?;
+                let worker =
+                    SpeechCppWorker::spawn_as(&speech_exe, &model_file, "音色试听缓存程序")
+                        .map_err(|e| {
+                            CenterError::new(
+                                "local_tts_load_failed",
+                                500,
+                                format!("加载合成模型失败：{e}"),
+                            )
+                        })?;
                 preview_guard.attach_helper(PreviewRunner::SpeechCpp(worker.clone()))?;
                 worker
                     .synthesize_blocking(meta.sample_text, voice)
@@ -770,7 +774,7 @@ impl BuiltinVoice {
                             format!("不支持的本地合成引擎：{}", spec.label),
                         )
                     })?;
-                let helper = LocalHelper::spawn(&exe).map_err(|e| {
+                let helper = LocalHelper::spawn_as(&exe, "音色试听缓存程序").map_err(|e| {
                     CenterError::new("local_helper_failed", 500, format!("启动辅助程序失败：{e}"))
                 })?;
                 preview_guard.attach_helper(PreviewRunner::Helper(helper.clone()))?;

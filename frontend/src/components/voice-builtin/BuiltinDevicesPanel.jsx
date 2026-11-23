@@ -88,7 +88,7 @@ export function BuiltinDevicesPanel({ builtin }) {
   return (
     <VoiceGroup id="builtin-devices" title="已连接设备" summary={summary} tone={pending ? "warn" : undefined} defaultOpen>
       <p className="voice-muted" style={{ marginTop: 0, marginBottom: 8 }}>
-        新设备第一次连上来是“待允许”，点“允许”后才能对话。点“控制与信息”展开这台设备的扬声器音量、屏幕亮度、深浅屏、按键拾音和设备信息；调节会记住，设备断电重连后自动恢复。
+        新设备首次连入为“待允许”，允许后才能对话。点“控制与信息”可调音量、亮度、深浅屏与说话方式，设置会记住并在重连后恢复。
       </p>
       <div id="voice-builtin-devices">
         <div className="ob-tbl voice-tbl">
@@ -372,7 +372,7 @@ export function BuiltinDevicesPanel({ builtin }) {
                             </div>
                           )}
                           <p className="voice-muted">
-                            设备信息：版本与芯片来自设备开机上报，协议与音频参数来自连接握手；「刷新信息」只更新实时状态。回声消除不在本面板断言——固件只在启用服务端 AEC 时才上报 `aec` 字段，设备端 AEC 不上报。
+                            版本与芯片来自开机上报，音频参数来自握手，「刷新信息」仅更新实时状态；设备端自带的回声消除不会在这里显示。
                           </p>
                           <table className="voice-table">
                             <tbody>

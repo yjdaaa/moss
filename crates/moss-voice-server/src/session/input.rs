@@ -95,6 +95,10 @@ impl<'a> Session<'a> {
                     }
                     if expired && let Some(probe) = self.listen.follow_probe.take() {
                         self.listen.follow.reset();
+                        self.trace_record(
+                            "follow_probe",
+                            serde_json::json!({"phase": "not_voice"}),
+                        );
                         self.event("思考中听到的声响，判停模型认为不是人声：照常回答".to_owned());
                         self.check_for_stop_word(probe.head);
                     }
@@ -111,6 +115,14 @@ impl<'a> Session<'a> {
                         head: head.clone(),
                         until: Instant::now() + FOLLOW_CONFIRM,
                     });
+                    self.trace_record(
+                        "follow_probe",
+                        serde_json::json!({
+                            "phase": "start",
+                            "head_ms": head.len() as u64 * 1000 / u64::from(self.uplink_rate.max(1)),
+                            "confirm_ms": FOLLOW_CONFIRM.as_millis() as u64,
+                        }),
+                    );
                     return Ok(());
                 }
                 detected
@@ -160,6 +172,7 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
         stop: Option<String>,
+        source: crate::conversation::FastStopSource,
     ) -> Result<(), String> {
         let Some(text) = stop else {
             return Ok(());
@@ -173,7 +186,7 @@ impl<'a> Session<'a> {
         if self.turn.is_some() || self.listen.paused.is_some() {
             self.interrupt(socket, "用户说停").await?;
         }
-        self.start_turn(TurnInput::FastStop { text }, TurnKind::Answer);
+        self.start_turn(TurnInput::FastStop { text, source }, TurnKind::Answer);
         Ok(())
     }
 

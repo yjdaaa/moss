@@ -544,7 +544,7 @@ export function BuiltinModelGroups({ builtin }) {
           </div>
         )}
         <span className="voice-muted voice-mix-foot">
-          按真实语音链路从左到右排列：拾音判停 → 语音识别 → Jev 前置粗筛（识别后·进大模型前） → 大模型 → 语音合成；直接下拉选完立即生效，这里是切换“用哪个模型、开不开 Jev”的唯一位置。下方卡片只用于填密钥、选模型版本和下载本地模型。
+          按执行顺序从左到右排列，下拉切换立即生效；下方卡片只填密钥、选模型与下载本地模型。
         </span>
       </div>
       <h3 className="voice-section-h">云端模型（密钥只存本机）</h3>

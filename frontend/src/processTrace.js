@@ -14,19 +14,25 @@ export function formatTraceBytes(bytes) {
   return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
-/** 状态行：开关、占用、天数与保留规则。 */
+/** 状态行：开关、占用、天数与保留规则（2026-11-23 n110 起不限大小，只按天数到期删除）。 */
 export function processTraceSummary(status) {
   if (!status) return "读取中…";
-  const keep = `只保留最近 ${status.retention_days} 天，最多 ${formatTraceBytes(status.max_bytes)}`;
+  if (status.available === false) {
+    const location = status.custom_dir ? "所选目录" : "保存目录";
+    return status.enabled
+      ? `${location}当前不可用，记录已暂停。目录恢复后继续记录，中断期间的内容不会补回。`
+      : `${location}当前不可用，请接回硬盘或重新选择保存位置。`;
+  }
+  const keep = `只保留最近 ${status.retention_days} 天，不限大小`;
   if (!status.bytes) return `目前没有记录。${keep}。`;
   return `已记录 ${status.days} 天，共 ${formatTraceBytes(status.bytes)}。${keep}。`;
 }
 
 export const PROCESS_TRACE_CONFIRM =
-  "打开后，MOSS 会把下面这些内容保存在这台电脑上，方便事后核对：\n" +
+  "打开后，MOSS 会把下面这些内容保存在当前保存位置，方便事后核对：\n" +
   "· 你对小智说话的录音、模型识别出的文字（原文和纠正后）与设备拍照看图的照片\n" +
   "· 发给大模型的完整内容（系统提示词、上下文、工具清单）和模型的原始回复\n" +
   "· 工具调用的参数与完整结果、MOSS 合成的语音、每一步耗时与诊断事件\n" +
   "· 激光生成的参数、发起方、G-code 与预览图，以及连接、确认发送、急停、审批、加工进度与结果等每一步操作\n\n" +
-  "所有步骤按先后写成一条时间线，每一步都写明在干什么。" +
-  "不保存任何密钥或令牌，也不会上传到任何地方。记录只保留最近 7 天，到期自动删除，也可以随时清空。";
+  "所有步骤按真实先后写成一条时间线，每一步都写明在干什么；本地降噪、判停、命令词、语义判停这些模型每一步怎么判断的也会记下。" +
+  "不保存任何密钥或令牌，也不会主动上传。记录不限大小（长时间使用会占较多硬盘），当前保存位置只保留最近 30 天，到期自动删除，也可以随时清空。更换位置后，旧记录留在原处，需自行清理。";

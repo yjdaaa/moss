@@ -41,7 +41,7 @@ use crate::audio::{
 };
 use crate::conversation::{
     Conversation, DeviceCall, DeviceTools, ToolContext, TurnEvent, TurnGate, TurnInput,
-    append_history, spawn_turn_gated,
+    append_history,
 };
 use crate::music::playback::{MusicController, MusicProgress};
 use crate::state::{DiagCategory, EventLevel, EventRecord, SessionView};
@@ -57,8 +57,11 @@ mod listen;
 mod playback;
 mod screen;
 mod trace;
+#[cfg(test)]
+pub(crate) use trace::voice_step_text;
 pub(crate) use trace::{
     device_flow, event_flow, event_step_text, scrub_trace_value, timing_step_text, turn_flow,
+    write_voice_trace,
 };
 mod turn;
 
@@ -362,10 +365,10 @@ struct ActiveTurn {
     debug_corrected_asr: Option<String>,
     debug_tools: Vec<crate::DebugToolTrace>,
     debug_text_reply: Vec<String>,
+    /// 本轮固定的过程记录句柄（保证同一轮的录音 WAV、大模型步骤、合成 WAV 与耗时落在同一保存目录）
+    trace: Option<laser_runtime::ProcessTrace>,
     /// n105 完整过程记录：这一轮合成语音（下行采样率）；轮次开始时开关打开才为 `Some`
     trace_tts: Option<Vec<i16>>,
-    /// n105 这一轮已记录的大模型轮数（时间线里写“大模型第几轮”）
-    trace_rounds: u32,
     /// 生成完成不等于播放完成；正常播完后才提交完整历史。
     pending_messages: Vec<ChatMessage>,
     /// 当前句子的重采样器（流式合成的后续分段沿用，保证分段之间连续）
@@ -852,6 +855,16 @@ struct Session<'a> {
     decoder: OpusDecoder,
     vad: Box<dyn Vad>,
     vad_worker: Option<crate::audio::worker::VadWorker>,
+    /// 此刻判断用户开口 / 说完用的判停方式（完整过程记录写“由谁判定”，n110）
+    vad_engine: String,
+    /// 本地判停初始化或中途回退到能量判停时的原因（连接中途开启过程记录时随 `vad_engine` 补记）
+    vad_fallback_reason: Option<String>,
+    /// 本地判停线程是否已上报过首轮 `vad_engine`（未上报前等首帧实测结果，已上报则中途开启记录时立即补写）
+    vad_worker_reported: bool,
+    /// 这次连接的自动拾音判停方式是否已实际写进完整过程记录
+    vad_engine_traced: bool,
+    /// 已同步给 `device_requests` 的当前轮次编号（看图等旁路请求据此归到正在进行的那一轮；0 为没有）
+    synced_turn: u64,
     pending_listen_stop: bool,
     music: Option<MusicController>,
     pump: PlaybackPump,

@@ -126,7 +126,7 @@ export default function VoiceVisionCard() {
               : `已开启 · ${saved.model || "未填模型"}`;
   return (
     <VoiceGroup id="vision" title="视觉理解" label="语音视觉模型" summary={summary} tone={colabOverride.active || saved.enabled ? "ok" : undefined} dirty={dirty}>
-      <p className="voice-muted">默认关闭。开启后，已允许的小智设备可以上传图片请模型解释；不会自动打开摄像头，结果也不能控制机器。选云端或对话大模型时图片会发给对应服务商，可能产生费用；选本地视觉模型时图片只在这台电脑上处理。</p>
+      <p className="voice-muted">默认关闭。开启后允许小智拍照请模型解释，不会自动开摄像头，结果也不能控制机器；选云端或对话模型时会上传照片，选本地模型仅在本机处理。</p>
       {colabOverride.active && (
         <div className="voice-hint voice-hint--ok voice-inline" role="status" id="voice-vision-colab-override">
           <span>当前已开启「本地模型 › Colab T4 专属联动」，摄像头看图临时由 Colab 多模态模型（{colabOverride.model || "qwen3-vl-8b"}）接管；关闭该开关后立即恢复下方的视觉设置。</span>
@@ -195,7 +195,7 @@ export default function VoiceVisionCard() {
         )}
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={config.keep_in_history} disabled={busy || testing || !config.enabled} onChange={(e) => update("keep_in_history", e.target.checked)} id="voice-vision-keep-image" />
-          <span>把这张照片留在对话上下文里（多模态；后续追问会重发这张图，费用更高，且要求对话模型支持看图）</span>
+          <span>把照片留在对话上下文里（后续追问会重发此图，需对话模型支持看图{source === "local" ? "" : "，会增加费用"}）</span>
         </label>
         {source === "cloud" && (
           <>

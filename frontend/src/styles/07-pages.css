@@ -306,7 +306,9 @@ input:not([type]):focus {
 .ob-draw-page .primary-button,
 .ob-draw-page .secondary-button,
 .ob-draw-page .ghost-button,
-.ob-draw-page .danger-button {
+.ob-draw-page .danger-button,
+.send-confirm-dialog .secondary-button,
+.send-confirm-dialog .danger-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -321,7 +323,9 @@ input:not([type]):focus {
 .ob-draw-page .primary-button:hover:not(:disabled),
 .ob-draw-page .secondary-button:hover:not(:disabled),
 .ob-draw-page .ghost-button:hover:not(:disabled),
-.ob-draw-page .danger-button:hover:not(:disabled) {
+.ob-draw-page .danger-button:hover:not(:disabled),
+.send-confirm-dialog .secondary-button:hover:not(:disabled),
+.send-confirm-dialog .danger-button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 

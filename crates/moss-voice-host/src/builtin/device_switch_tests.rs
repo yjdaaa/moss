@@ -1028,3 +1028,188 @@ fn n61_wake_word_settings_base_package_and_push_guards() {
         .unwrap();
     assert!(builtin.wakeword_status().unwrap()["base"].is_null());
 }
+
+/// n110：完整过程记录打开时，服务启动写一步“启动了什么”（端口、对话模型、每类本地模型选了什么 / 装没装 /
+/// 加载上没有），停止时写一步；本地模型程序的启动、输出与意外退出由观察者写进“语音·本地模型程序”。
+#[test]
+fn service_start_and_stop_are_traced_with_every_local_model_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let host =
+        Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+    let port = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    {
+        let db = host.db.lock().unwrap();
+        db.set_secret("voice.llm.main", "sk-test-llm", 1.0).unwrap();
+        db.set_secret("voice.asr.main", "sk-test-asr", 1.0).unwrap();
+        db.set_secret("voice.tts.main", "sk-test-tts", 1.0).unwrap();
+    }
+    let cloud = |url: &str, model: &str| BuiltinProvider {
+        kind: ProviderKind::Openai,
+        url: url.into(),
+        model: model.into(),
+        voice: "alloy".into(),
+        speed: 1.0,
+    };
+    let mut voice_settings = moss_voice::VoiceSettings {
+        builtin_ws_port: port(),
+        builtin_http_port: port(),
+        ..Default::default()
+    };
+    voice_settings.builtin_models = BuiltinModels {
+        llm: Some(cloud("https://llm.example.test/v1", "gpt-test")),
+        asr: Some(cloud(
+            "https://asr.example.test/v1/audio/transcriptions",
+            "whisper-1",
+        )),
+        tts: Some(cloud("https://tts.example.test/v1/audio/speech", "tts-1")),
+    };
+    // 选了本地判停但这台电脑没装：如实写“选了但没安装”
+    voice_settings.builtin_local.vad = true;
+    voice_settings.builtin_local.vad_model = "silero_vad_v6".into();
+    moss_voice::settings::save(&temp.path().join("settings.json"), &voice_settings).unwrap();
+    laser_runtime::settings_store::update(
+        &laser_runtime::settings_store::settings_path(temp.path()),
+        |map| {
+            map.insert(
+                laser_runtime::process_trace::SETTING_KEY.into(),
+                serde_json::json!(true),
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let builtin = init(Some(host.clone())).0.unwrap();
+    builtin.start().unwrap();
+    builtin.stop();
+    let trace = host.api_service.process_trace().unwrap().clone();
+    trace.flush();
+    let mut lines = Vec::new();
+    for day in std::fs::read_dir(trace.dir()).unwrap().flatten() {
+        let text = std::fs::read_to_string(
+            day.path()
+                .join(laser_runtime::process_trace::TIMELINE_JSONL),
+        )
+        .unwrap_or_default();
+        lines.extend(
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok()),
+        );
+    }
+    let start = lines
+        .iter()
+        .find(|line| line["kind"] == "service_start")
+        .expect("服务启动写进记录");
+    assert_eq!(start["flow"], "语音·服务");
+    assert_eq!(start["mode"], "chat");
+    assert_eq!(
+        start["ws_port"].as_u64(),
+        Some(u64::from(voice_settings.builtin_ws_port))
+    );
+    let kinds: Vec<&str> = start["local_models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["kind"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["判停", "降噪", "命令词抗噪", "语义判停", "识别", "合成"]
+    );
+    let vad = &start["local_models"][0];
+    assert_eq!(vad["model_id"], "silero_vad_v6");
+    assert_eq!(vad["installed"], false);
+    assert_eq!(vad["loaded"], false);
+    assert_eq!(vad["status"], "选了但没安装，这次没用上");
+    let step = start["step"].as_str().unwrap();
+    assert!(
+        step.starts_with("内置语音服务启动：设备连接端口 "),
+        "{step}"
+    );
+    assert!(step.contains("LLM:gpt-test"), "{step}");
+    assert!(step.contains("判停 "), "{step}");
+    assert!(
+        !start.to_string().contains("sk-test"),
+        "记录里不出现密钥：{start}"
+    );
+    // 降噪、命令词、语义判停没开：写“未开启”，不冒充云端（n110 复审 7）
+    for item in &start["local_models"].as_array().unwrap()[1..4] {
+        assert_eq!(item["status"], "未开启", "{item}");
+    }
+    assert_eq!(start["local_models"][4]["status"], "未开启（用云端）");
+    let stop = lines
+        .iter()
+        .find(|line| line["kind"] == "service_stop")
+        .expect("服务停止写进记录");
+    assert!(stop["seq"].as_u64() > start["seq"].as_u64());
+    // 纯云端：没有本地模型程序，不说“结束了本地模型程序”；手动停止不是重启
+    assert_eq!(stop["step"], "内置语音服务停止");
+    assert_eq!(stop["restarting"], false);
+    assert_eq!(stop["ended"], serde_json::json!([]));
+}
+
+/// 本地模型程序的输出与意外退出写进“语音·本地模型程序”，写之前去掉疑似密钥；记录关着时什么都不写。
+#[test]
+fn helper_observer_traces_output_and_exit_with_secrets_scrubbed() {
+    use moss_voice_providers::local::HelperObserver;
+    let temp = tempfile::tempdir().unwrap();
+    let trace = laser_runtime::ProcessTrace::new(temp.path());
+    let observer = TraceHelperObserver {
+        trace: trace.clone(),
+    };
+    observer.stderr_line("本地模型程序", "关着时不写");
+    trace.flush();
+    assert!(!trace.dir().exists(), "开关关着不建记录目录");
+    laser_runtime::settings_store::update(
+        &laser_runtime::settings_store::settings_path(temp.path()),
+        |map| {
+            map.insert(
+                laser_runtime::process_trace::SETTING_KEY.into(),
+                serde_json::json!(true),
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    // 开关每 2 秒最多读一次设置文件：换一个新记录器，免得测试干等缓存过期
+    let trace = laser_runtime::ProcessTrace::new(temp.path());
+    let observer = TraceHelperObserver {
+        trace: trace.clone(),
+    };
+    observer.started("本地模型程序", Some(42));
+    observer.stderr_line(
+        "本地模型程序",
+        "onnxruntime warning token=sk-abcdefghijklmnopqrstuv",
+    );
+    observer.exited("语义判停程序", "意外退出（退出码 3）");
+    trace.flush();
+    let day = std::fs::read_dir(trace.dir())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL)).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let kinds: Vec<&str> = lines.iter().filter_map(|l| l["kind"].as_str()).collect();
+    assert_eq!(kinds, vec!["helper_start", "helper_stderr", "helper_exit"]);
+    assert!(lines.iter().all(|l| l["flow"] == "语音·本地模型程序"));
+    assert!(!text.contains("sk-abcdefghijklmnopqrstuv"), "{text}");
+    assert!(
+        lines[1]["step"]
+            .as_str()
+            .unwrap()
+            .starts_with("本地模型程序输出：onnxruntime warning")
+    );
+    assert_eq!(lines[2]["step"], "语义判停程序停了：意外退出（退出码 3）");
+}

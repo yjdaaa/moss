@@ -930,7 +930,7 @@ fn send_job_start_and_end_are_traced_when_enabled() {
     assert!(start["seq"].as_u64() < end["seq"].as_u64());
 }
 
-/// n106：加工进度线程按 `lines_sent` 每过 10% 记一步（不重复、续雕不回记旧档位），并在 drop 后保证不晚于 `job_end`。
+/// n106 / n110：加工进度线程按 `lines_sent` 每过 1% 记一步（不重复、续雕不回记旧档位），并在 drop 后保证不晚于 `job_end`。
 #[test]
 fn send_job_progress_trace_emits_deciles_from_lines_sent_and_stops_before_job_end() {
     use std::sync::atomic::Ordering;
@@ -948,7 +948,7 @@ fn send_job_progress_trace_emits_deciles_from_lines_sent_and_stops_before_job_en
     .unwrap();
     let trace = laser_runtime::ProcessTrace::new(runtime.path());
     let progress = std::sync::Arc::new(laser_device::JobProgress::default());
-    // 模拟从第 20 行续雕（总 100 行，起始档位 20%），仅应记录后续 30%、60%
+    // 模拟从第 20 行续雕（总 100 行，起始档位 20%），只记后续前进到的 35%、62%
     progress.lines_sent.store(20, Ordering::Relaxed);
     let guard = crate::send::spawn_progress_trace_with(
         trace.clone(),
@@ -993,7 +993,7 @@ fn send_job_progress_trace_emits_deciles_from_lines_sent_and_stops_before_job_en
         .filter(|l| l["kind"] == "job_progress")
         .map(|l| l["percent"].as_u64().unwrap())
         .collect();
-    assert_eq!(percents, [30, 60], "只记前进的 10% 档位：{lines:?}");
+    assert_eq!(percents, [35, 62], "只记前进的 1% 档位：{lines:?}");
     let last_progress_seq = lines
         .iter()
         .filter(|l| l["kind"] == "job_progress")

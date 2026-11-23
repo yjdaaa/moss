@@ -55,7 +55,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
           // 手机连接电脑：配对前各页面的数据请求都被拒绝了，刷新一次重新加载
           if (isRemoteMode()) window.location.reload();
         } else {
-          setError("服务端未返回有效授权 Token");
+          setError("服务端未返回有效配对凭据");
         }
       } else {
         setError(res.data?.result || res.data?.detail || "配对失败：配对码无效或已过期");
@@ -103,7 +103,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
 
         <div className="mat-modal-body">
           <p className="auth-note">
-            手机或局域网设备首次访问电脑 MOSS 时需要配对：输入电脑“偏好设置 → 手机连接”中设置的 6 位固定配对码（或生成的临时配对码）。配对成功后将长久保持连接，软件或电脑重启后无需重配。
+            手机或局域网设备首次访问本机 MOSS 时需要配对：输入电脑「偏好设置 → 手机连接」里的 6 位配对码即可。
           </p>
 
           <div className="mat-field">
@@ -135,13 +135,13 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
 
           {currentToken && (
             <div className="auth-row">
-              <span>当前会话已持有有效 Token</span>
+              <span>当前设备已配对</span>
               <button
                 type="button"
                 onClick={handleClearToken}
                 className="auth-btn"
               >
-                撤销清除
+                清除配对
               </button>
             </div>
           )}

@@ -128,10 +128,22 @@ pub(crate) fn write_export_settings(
     })
 }
 
-/// 导出目录校验：绝对路径、目录存在、可写（创建并删除一个探测文件）。
+/// 导出目录校验：本机绝对路径（拒绝 UNC 网络路径与相对段）、目录存在、可写（创建并删除一个探测文件）。
 pub(crate) fn validate_export_dir(dir: &Path) -> Result<PathBuf, String> {
+    let raw = dir.to_string_lossy();
+    if raw.starts_with(r"\\") || raw.starts_with("//") {
+        return Err("不支持网络共享路径，请选择本机硬盘文件夹".into());
+    }
     if !dir.is_absolute() {
         return Err("导出目录必须是绝对路径".into());
+    }
+    if dir.components().any(|comp| {
+        matches!(
+            comp,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err("导出目录不能包含相对路径段".into());
     }
     if !dir.is_dir() {
         return Err("导出目录不存在".into());
@@ -352,7 +364,7 @@ pub fn reveal_exported_file(window: tauri::WebviewWindow, path: String) -> Resul
 }
 
 #[cfg(windows)]
-fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
+pub(crate) fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new("explorer.exe");
     cmd.creation_flags(0x0800_0000);
@@ -368,7 +380,7 @@ fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
-fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
+pub(crate) fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     let mut cmd = std::process::Command::new("open");
     if select {
         cmd.arg("-R");
@@ -380,7 +392,7 @@ fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
 }
 
 #[cfg(all(desktop, not(windows), not(target_os = "macos")))]
-fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
+pub(crate) fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     let dir = if select {
         path.parent().unwrap_or(path)
     } else {
@@ -394,7 +406,7 @@ fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
 }
 
 #[cfg(not(desktop))]
-fn open_in_file_manager(_path: &Path, _select: bool) -> Result<(), String> {
+pub(crate) fn open_in_file_manager(_path: &Path, _select: bool) -> Result<(), String> {
     Err("当前平台不支持打开文件夹".into())
 }
 

@@ -354,6 +354,8 @@ pub(crate) struct DeviceRequestHandle {
     pub session_id: String,
     pub supports_mcp: bool,
     pub sender: tokio::sync::mpsc::UnboundedSender<DeviceRequest>,
+    /// 这个会话最近开始的对话轮次编号（0 为还没有；完整过程记录把看图等旁路请求归到这一轮，n110）
+    pub turn: u64,
 }
 
 pub(crate) struct Shared {

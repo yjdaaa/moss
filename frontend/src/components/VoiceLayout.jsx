@@ -32,8 +32,15 @@ export function gotoVoiceGroup(tab, group, target = "") {
   globalThis.dispatchEvent?.(new CustomEvent(VOICE_GOTO_EVENT, { detail: { tab, group, target } }));
 }
 
+function revealDetails(element) {
+  for (let cur = element; cur; cur = cur.parentElement) {
+    if (cur.tagName === "DETAILS" && !cur.open) cur.open = true;
+  }
+}
+
 function scrollAndFocusTarget(element, shouldFocus) {
   if (!element) return;
+  revealDetails(element);
   if (typeof element.scrollIntoView === "function") element.scrollIntoView({ behavior: "smooth", block: "center" });
   if (!shouldFocus) return;
   if (!element.disabled && typeof element.focus === "function") {

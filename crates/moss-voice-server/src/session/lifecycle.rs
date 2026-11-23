@@ -17,7 +17,9 @@ impl<'a> Session<'a> {
             timing.outcome = outcome.into();
             timing.at_ms = at_ms;
             let turn_no = timing.turn;
-            self.shared.state.finish_timing(timing);
+            self.shared
+                .state
+                .finish_timing_with_trace(timing, turn.trace.as_ref());
             if turn.kind == TurnKind::Answer
                 && self.shared.state.debug_enabled()
                 && let Some(captured_epoch) = turn.debug_capture_epoch
@@ -85,6 +87,10 @@ impl<'a> Session<'a> {
         permission: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, String> {
         let downlink = shared.config.downlink_sample_rate;
+        let vad_engine = match shared.config.vad_factory.as_ref() {
+            Some(factory) => factory.label(),
+            None => crate::audio::ENERGY_VAD_LABEL.to_owned(),
+        };
         Ok(Self {
             recording_started: Instant::now(),
             permission: permission.clone(),
@@ -111,6 +117,11 @@ impl<'a> Session<'a> {
                     )
                 })
                 .transpose()?,
+            vad_engine,
+            vad_fallback_reason: None,
+            vad_worker_reported: false,
+            vad_engine_traced: false,
+            synced_turn: 0,
             pending_listen_stop: false,
             music: shared
                 .config
@@ -485,7 +496,7 @@ impl<'a> Session<'a> {
                     Some(Err(_)) => return "连接出错".into(),
                 },
                 (paused_at, held) = next_listening_hold_check(&mut self.listen.hold_check) => self.on_hold_check_done(socket, paused_at, held).await,
-                stop = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop).await,
+                stop = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop, crate::conversation::FastStopSource::Recheck).await,
                 call = next_device_call(&mut self.device_mcp) => self.forward_device_call(socket, call).await,
                 request = async {
                     if requests_closed {
@@ -552,6 +563,7 @@ impl<'a> Session<'a> {
             if let Err(reason) = result {
                 return reason;
             }
+            self.sync_trace_turn();
             self.deliver_background(socket);
             // n71 常连模式：这一轮对话该结束了（再见说完、用户说退出、空闲到期）
             if let Some(reason) = self.pending_goodbye.take()

@@ -55,6 +55,7 @@ impl ApiService {
         let Some(trace) = self.process_trace() else {
             return http_json(503, failure("没有运行目录，无法使用完整过程记录", None));
         };
+        let trace = trace.scoped();
         match object.get("action").and_then(|v| v.as_str()) {
             Some("status") => {}
             Some("clear") => {
@@ -65,15 +66,18 @@ impl ApiService {
             _ => return http_json(400, failure("action 只能是 status 或 clear", None)),
         }
         let usage = trace.usage();
+        let directory = trace.directory_status();
         http_json(
             200,
             success(serde_json::json!({
                 "enabled": trace.enabled(),
-                "dir": trace.dir().to_string_lossy(),
+                "dir": directory.dir,
+                "custom_dir": directory.custom_dir,
+                "available": directory.available,
+                "error": directory.error,
                 "bytes": usage.bytes,
                 "days": usage.days,
                 "retention_days": laser_runtime::process_trace::RETENTION_DAYS,
-                "max_bytes": laser_runtime::process_trace::MAX_TOTAL_BYTES,
             })),
         )
     }
@@ -395,6 +399,12 @@ impl ApiService {
             Ok(value) => value,
             Err(error) => return http_json(400, failure(error, None)),
         };
+        if object.contains_key("process_trace_dir") {
+            return http_json(
+                400,
+                failure("过程记录保存位置只能通过桌面文件夹选择框修改", None),
+            );
+        }
         if let Some(endpoint) = object.get("jev_endpoint")
             && !endpoint
                 .as_str()

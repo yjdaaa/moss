@@ -556,8 +556,13 @@ try {
   await page.locator("#draw-dock-send-btn").click();
   const sendDialog = page.getByRole("dialog", { name: "确认开始雕刻" });
   await sendDialog.waitFor({ timeout: 5_000 });
+  assert.equal(await page.locator("body > .modal-backdrop > .send-confirm-dialog").count(), 1, "画板发送确认框须经 Portal 挂到 body 顶层");
   assert.equal(await sendDialog.locator('#draw-confirm-origin svg.origin-badge[data-origin="lower_left"]').count(), 1, "画板发送确认框显示左下角起点图示");
   assert.equal(apiCalls.confirmSend, 0, "点击吸底条确认发送只能弹出确认框，绝不得绕过确认直接发送");
+  await page.keyboard.press("Escape");
+  await sendDialog.waitFor({ state: "detached", timeout: 5_000 });
+  await page.locator("#draw-dock-send-btn").click();
+  await sendDialog.waitFor({ timeout: 5_000 });
   await sendDialog.getByRole("button", { name: "取消" }).click();
   await sendDialog.waitFor({ state: "detached", timeout: 5_000 });
 

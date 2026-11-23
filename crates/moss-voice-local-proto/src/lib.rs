@@ -14,6 +14,8 @@
 //! 协议 6（n93）：新增 `AsrEngine::Qwen3Asr` / `AsrEngine::FireRedAsr2Ctc`、`TtsEngine::ZipVoice`、
 //! `GTCRN` 前端语音降噪（`Op::LoadDenoiser`）及 `SmartTurn v3` 尾音语义判停（`Op::LoadSmartTurn` / `Op::SmartTurnPredict`）。
 //! 协议 7（n101）：流式合成可选 `short_opener`（快机器上短开场白先合成）；判停流可附带关键词检测（`Op::LoadKws`、`Reply::VadEvents::keywords`）。
+//! 协议 8（n110）：打开判停流 / 流式识别流回 [`Reply::Opened`]，如实说明这一路音频有没有先经前端降噪
+//! （[`DenoiseReport`]：用的哪个模型，或降噪器没建起来、改用原始音频的原因），供完整过程记录。
 //! 辅助程序与桌面程序须一起升级，旧协议在握手时拒绝。
 
 use std::io::{self, Read, Write};
@@ -21,7 +23,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// 协议版本：辅助程序与 MOSS 不一致时拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// NV16 fixed official CampPlus ONNX, acquired and hashed on 2026-10-11.
 /// ModelScope iic/speech_campplus_sv_zh-cn_16k-common v1.0.0: Apache-2.0.
@@ -325,6 +327,22 @@ pub struct Request {
     pub op: Op,
 }
 
+/// 一路判停 / 识别流的前端降噪情况（协议 8，n110）：只描述事实，不含目录（模型只写文件名）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DenoiseReport {
+    /// 这一路音频是否先经降噪再送判停 / 识别
+    pub applied: bool,
+    /// 降噪模型文件名（没配降噪时为空）
+    #[serde(default)]
+    pub model: String,
+    /// 降噪引擎：`gtcrn` / `dpdfnet`（没配降噪时为空）
+    #[serde(default)]
+    pub engine: String,
+    /// 配了降噪、但这一路降噪器没建起来的原因（这一路用原始音频）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VadEventKind {
@@ -369,6 +387,10 @@ pub enum Reply {
         complete: bool,
     },
     Done,
+    /// 判停流 / 流式识别流已打开（协议 8）：这一路音频的前端降噪情况
+    Opened {
+        denoise: DenoiseReport,
+    },
     VadEvents {
         events: Vec<VadEventKind>,
         /// 这段音频里检测到的命令词（显示文字，协议 7）
@@ -698,6 +720,40 @@ mod tests {
         assert_eq!(command_keyword_kind("急停"), Some(CommandKeyword::Stop));
         assert_eq!(command_keyword_kind("再见"), Some(CommandKeyword::Exit));
         assert_eq!(command_keyword_kind("问一下"), None);
+        // 协议 8：打开判停 / 识别流时说明降噪情况；没出错时不带 error 字段
+        let opened = serde_json::to_value(Response {
+            id: 4,
+            reply: Reply::Opened {
+                denoise: DenoiseReport {
+                    applied: true,
+                    model: "gtcrn_simple.onnx".into(),
+                    engine: "gtcrn".into(),
+                    error: None,
+                },
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            opened,
+            serde_json::json!({"id": 4, "kind": "opened", "denoise":
+                {"applied": true, "model": "gtcrn_simple.onnx", "engine": "gtcrn"}})
+        );
+        let failed: Response = serde_json::from_value(serde_json::json!(
+            {"id": 5, "kind": "opened", "denoise": {"applied": false, "model": "gtcrn_simple.onnx",
+                "engine": "gtcrn", "error": "降噪器没建起来"}}
+        ))
+        .unwrap();
+        assert_eq!(
+            failed.reply,
+            Reply::Opened {
+                denoise: DenoiseReport {
+                    applied: false,
+                    model: "gtcrn_simple.onnx".into(),
+                    engine: "gtcrn".into(),
+                    error: Some("降噪器没建起来".into()),
+                }
+            }
+        );
         let value = serde_json::to_value(Request {
             id: 2,
             op: Op::LoadAsr {
@@ -741,8 +797,8 @@ mod tests {
             VadParams::default()
         );
         assert_eq!(VadParams::for_engine(VadEngine::Ten).min_speech_ms, 100);
-        // 协议 6 新增变体往返验证（协议 7 起仍兼容这些请求）
-        assert_eq!(PROTOCOL_VERSION, 7);
+        // 协议 6 新增变体往返验证（协议 7、8 起仍兼容这些请求）
+        assert_eq!(PROTOCOL_VERSION, 8);
         let qwen_asr: Request = serde_json::from_value(serde_json::json!({
             "id": 5,
             "op": "load_asr",

@@ -153,17 +153,17 @@ export function LocalModelsGroup({ builtin }) {
   const groupStatus = (item) => {
     const activeOn = Boolean(form[item.kind]);
     const selected = item.models.find((model) => model.id === form[`${item.kind}_model`]);
-    if (item.kind === "vision") return "下载后到“视觉理解”卡片的“看图用哪个模型”里选“本地视觉模型”";
+    if (item.kind === "vision") return "下载后在上方「视觉理解」卡片选用";
     if (isAddon(item.kind)) {
       if (activeOn) return selected?.installed ? `已开启：${selected.label}` : `已开启 ${selected?.label || item.title}（未下载，暂不生效）`;
-      if (item.kind === "denoise") return "未开启（实测对识别没有提升；仅作用于本地判停与本地识别）";
-      if (item.kind === "kws") return "未开启（噪声大时“停”“退下”这类短命令容易被听错，可下载并开启；需要先在顶部选本地判停）";
-      return "未开启（实测没有可见差别；说话中间常停顿思考时可试，不延迟急停）";
+      if (item.kind === "denoise") return "未开启（实测对识别无提升）";
+      if (item.kind === "kws") return "未开启（需在顶部启用本地判停）";
+      return "未开启（实测差别不大）";
     }
-    if (activeOn) return selected?.installed ? `当前在顶部已选用：${selected.label}` : `顶部已选 ${selected?.label || "本地模型"}（未下载，暂不生效）`;
-    if (item.kind === "vad") return "当前在顶部使用：内置能量判停";
-    if (item.kind === "tts" && fallbackTtsModel) return `当前在顶部使用：云端模型（云端异常优先兜底：${fallbackTtsModel.label}）`;
-    return "当前在顶部使用：云端模型";
+    if (activeOn) return selected?.installed ? `当前选用：${selected.label}` : `顶部已选 ${selected?.label || "本地模型"}（未下载）`;
+    if (item.kind === "vad") return "顶部使用：内置能量判停";
+    if (item.kind === "tts" && fallbackTtsModel) return `顶部使用：云端（异常兜底：${fallbackTtsModel.label}）`;
+    return "顶部使用：云端模型";
   };
   const renderHead = (item, title, showStatus = true) => (
     <div className="voice-field-head">
@@ -176,10 +176,10 @@ export function LocalModelsGroup({ builtin }) {
       <input type="checkbox" id={`voice-local-${item.kind}-toggle`} checked={Boolean(form[item.kind])} onChange={(e) => update(item.kind, e.target.checked)} />
       <span>
         {item.kind === "denoise"
-          ? "启用本地前端降噪（用下表“已选”的模型，保存后重启内置服务生效）"
+          ? "启用前端降噪（保存后重启生效）"
           : item.kind === "kws"
-            ? "启用命令词抗噪（随本地判停运行，保存后重启内置服务生效）"
-            : "启用本地语义判停（Smart Turn v3，保存后重启内置服务生效）"}
+            ? "启用命令词抗噪（随本地判停运行，保存后重启生效）"
+            : "启用语义判停（保存后重启生效）"}
       </span>
     </label>
   );
@@ -287,13 +287,13 @@ export function LocalModelsGroup({ builtin }) {
   };
 
   return (
-    <VoiceGroup id="local-models" title="本地模型包、本地合成音色与下载地址" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
+    <VoiceGroup id="local-models" title="本地模型与音色" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
       <div id="voice-local-models" className="voice-stack">
         {!local.helper_found && (
           <div className="voice-hint voice-hint--warn">没有找到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录）。可以先下载模型，但打开本地开关后内置服务将无法启动。</div>
         )}
         <p className="voice-muted">
-          在这里下载或管理断网可用的本地模型包（随 MOSS 自定义安装目录存放{local.models_dir ? `：${local.models_dir}` : ""}），以及调整本地合成音色与语速；当前启用哪个模型请直接在上方顶部下拉框切换。
+          断网可用的本地模型在这里下载和管理，启用哪个模型请在上方「当前语音链路」下拉框切换。
         </p>
         <ModelPairingGuide settings={baseline} busy={builtin.busy} onApply={applyCombo} />
         <ColabBridgeSection builtin={builtin} />
@@ -311,7 +311,7 @@ export function LocalModelsGroup({ builtin }) {
           <details className="voice-local-more" id="voice-local-vad-more" open={moreOpen} onToggle={(e) => setMoreOverride(e.currentTarget.open)}>
             <summary>
               更多判停模型与实验功能
-              <small>老版 Silero、TEN-VAD、前端降噪、语义判停：整条链路实测没有明显提升，一般不用开</small>
+              <small>旧版判停、前端降噪、语义判停：实测无明显提升，一般不用开</small>
             </summary>
             {layout.vadMore.models.length > 0 && (
               <div className="voice-local-addon" id="voice-local-group-vad-more">
@@ -345,13 +345,13 @@ export function LocalModelsGroup({ builtin }) {
         {models.filter((model) => model.kind === "jev").length > 0 && (
           <div className="voice-local-group" id="voice-local-group-jev">
             <div className="voice-field-head">
-              <b>Jev 前置粗筛模型包（本地 System 1 决策：OneJev 1.6 / Laya）</b>
+              <b>Jev 前置粗筛模型包（OneJev / Laya）</b>
               <span className="voice-muted">
                 {form.jev_filter_enabled && isLocalJevModel(form.jev_model)
-                  ? `当前在顶部已选用：${models.find((m) => m.id === canonicalLocalJevModel(form.jev_model))?.label || form.jev_model}`
+                  ? `当前选用：${models.find((m) => m.id === canonicalLocalJevModel(form.jev_model))?.label || form.jev_model}`
                   : form.jev_filter_enabled
-                    ? `当前在顶部使用：云端 Jev（${form.jev_model}）`
-                    : "当前在顶部未启用（已下载的模型在顶部第 3 栏下拉里选用）"}
+                    ? `顶部使用：云端 Jev（${form.jev_model}）`
+                    : "顶部未启用（下载后在顶部第 3 栏选用）"}
               </span>
             </div>
             {local.onejev_env?.summary && (
@@ -458,9 +458,7 @@ export function LocalModelsGroup({ builtin }) {
                               <b>{model.label}</b>
                               {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
                               <span className="ob-pill ob-pill--info voice-tag">
-                                {isOneJevRow
-                                  ? `免密钥 · 免 Python · ${local.onejev_env?.accelerator_label || "GPU/CPU 自动加速"}`
-                                  : `免密钥 · Python laya[serve]${local.laya_env?.accelerator === "mps" ? " · Apple Metal MPS" : local.laya_env?.cuda_found ? " · CUDA 显卡加速" : ""}`}
+                                {isOneJevRow ? "免 Python" : "需 Python 环境"}
                               </span>
                             </div>
                             <div className="ob-sub">{model.note}</div>
@@ -532,7 +530,7 @@ export function LocalModelsGroup({ builtin }) {
             <div className="voice-local-group" key={model.id}>
               <b>{model.label}</b>
               <p className="voice-muted">
-                {model.note} 下载不会开启声纹采集或身份识别。{formatBytes(model.size)} · {view.text}
+                {model.note} {formatBytes(model.size)} · {view.text}
                 {view.detail ? ` · ${view.detail}` : ""}
               </p>
               <span className="voice-actions">
@@ -641,8 +639,9 @@ export function LocalModelsGroup({ builtin }) {
             )}
           </label>
           <label className="voice-wide">
-            <span>模型下载地址（留空为官方地址；可填镜像，下载后一律校验 SHA-256）</span>
+            <span>模型下载地址（留空用官方地址，支持镜像，下载均校验 SHA-256）</span>
             <input className="text-input mono" value={form.mirror} placeholder={local.default_mirror || ""} onChange={(e) => update("mirror", e.target.value)} spellCheck="false" autoComplete="off" />
+            {local.models_dir && <small className="voice-muted mono">本地模型存放目录：{local.models_dir}</small>}
           </label>
         </div>
         {dirty && error && <div className="voice-hint voice-hint--bad">{error}</div>}

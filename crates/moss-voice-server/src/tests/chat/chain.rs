@@ -445,9 +445,8 @@ fn run_combo(
             mode: ServerMode::Chat,
             conversation: Some(Arc::new(conversation)),
             vad_factory: combo.vad.map(|_| {
-                Arc::new(crate::LocalVadFactory {
-                    helper: helper.clone(),
-                }) as Arc<dyn crate::VadFactory>
+                Arc::new(crate::LocalVadFactory::new(helper.clone(), "本地判停"))
+                    as Arc<dyn crate::VadFactory>
             }),
             ..ServerConfig::default()
         },

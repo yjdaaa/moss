@@ -35,6 +35,7 @@ struct WorkerIo {
 
 struct WorkerInner {
     model_path: PathBuf,
+    role: &'static str,
     alive: AtomicBool,
     next_id: AtomicU64,
     io: Mutex<Option<WorkerIo>>,
@@ -44,8 +45,22 @@ struct WorkerInner {
 }
 
 impl WorkerInner {
-    fn kill_child(&self) {
+    fn kill_child_quiet(&self) {
         self.alive.store(false, Ordering::SeqCst);
+        self.reap_child();
+    }
+
+    fn kill_child_with_reason(&self, reason: &str) {
+        if self.alive.swap(false, Ordering::SeqCst)
+            && self.child.lock().ok().is_some_and(|c| c.is_some())
+            && let Some(observer) = crate::local::helper_observer()
+        {
+            observer.exited(self.role, reason);
+        }
+        self.reap_child();
+    }
+
+    fn reap_child(&self) {
         if let Ok(mut job) = self.job.lock()
             && let Some(job) = job.take()
         {
@@ -75,7 +90,7 @@ impl WorkerInner {
 
 impl Drop for WorkerInner {
     fn drop(&mut self) {
-        self.kill_child();
+        self.kill_child_with_reason("MOSS 不再使用它，已结束");
     }
 }
 
@@ -150,6 +165,15 @@ enum ChunkSink<'a> {
 impl SpeechCppWorker {
     /// 启动 `speech worker <model_path>` 并等待 `"ready"` 握手完成。
     pub fn spawn(exe: &Path, model_path: &Path) -> Result<Self, ProviderError> {
+        Self::spawn_as(exe, model_path, "Qwen3-TTS 合成程序")
+    }
+
+    /// 同 [`Self::spawn`]，指定在完整过程记录里的角色名称。
+    pub fn spawn_as(
+        exe: &Path,
+        model_path: &Path,
+        role: &'static str,
+    ) -> Result<Self, ProviderError> {
         if !exe.is_file() {
             return Err(model_err(
                 "未找到 speech.cpp 推理程序，请先下载 Qwen3-TTS 模型",
@@ -158,6 +182,7 @@ impl SpeechCppWorker {
         if !model_path.is_file() {
             return Err(model_err("Qwen3-TTS 模型文件缺失，请重新下载"));
         }
+        let observer = crate::local::helper_observer();
         let mut cmd = Command::new(exe);
         cmd.arg("worker")
             .arg(model_path)
@@ -173,6 +198,10 @@ impl SpeechCppWorker {
         let mut child = cmd
             .spawn()
             .map_err(|err| model_err(format!("启动 Qwen3-TTS 推理进程失败：{err}")))?;
+        let pid = child.id();
+        if let Some(ref obs) = observer {
+            obs.started(role, Some(pid));
+        }
         let job = JobHandle::for_child(&child);
         let stdin = child
             .stdin
@@ -188,22 +217,30 @@ impl SpeechCppWorker {
             std::thread::Builder::new()
                 .name("speech-cpp-stderr".into())
                 .spawn(move || {
+                    use std::io::Read as _;
                     let mut reader = BufReader::new(stderr);
-                    let mut line = String::new();
-                    while let Ok(read) = reader.read_line(&mut line) {
-                        if read == 0 {
-                            break;
-                        }
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty()
-                            && let Ok(mut buf) = tail.lock()
-                        {
-                            if buf.len() >= STDERR_TAIL_LIMIT {
-                                buf.pop_front();
+                    let mut chunk = Vec::new();
+                    loop {
+                        chunk.clear();
+                        let mut limited = (&mut reader).take(crate::local::STDERR_CHUNK as u64);
+                        match limited.read_until(b'\n', &mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let text = String::from_utf8_lossy(&chunk);
+                                let text = text.trim_end_matches(['\r', '\n']);
+                                if !text.trim().is_empty() {
+                                    if let Some(ref obs) = observer {
+                                        obs.stderr_line(role, text);
+                                    }
+                                    if let Ok(mut buf) = tail.lock() {
+                                        if buf.len() >= STDERR_TAIL_LIMIT {
+                                            buf.pop_front();
+                                        }
+                                        buf.push_back(text.trim().to_owned());
+                                    }
+                                }
                             }
-                            buf.push_back(trimmed.to_owned());
                         }
-                        line.clear();
                     }
                 })
                 .ok();
@@ -212,6 +249,7 @@ impl SpeechCppWorker {
             Box::new(stdout),
             Box::new(stdin),
             model_path.to_path_buf(),
+            role,
             Some(child),
             job,
             stderr_tail,
@@ -229,6 +267,7 @@ impl SpeechCppWorker {
             reader,
             writer,
             model_path,
+            "Qwen3-TTS 合成程序",
             None,
             None,
             Arc::new(Mutex::new(VecDeque::new())),
@@ -239,11 +278,23 @@ impl SpeechCppWorker {
         reader: Box<dyn std::io::Read + Send>,
         writer: Box<dyn Write + Send>,
         model_path: PathBuf,
+        role: &'static str,
         child: Option<Child>,
         job: Option<JobHandle>,
         stderr_tail: Arc<Mutex<VecDeque<String>>>,
     ) -> Result<Self, ProviderError> {
         let (tx, rx) = channel::<Result<Value, String>>();
+        let inner = Arc::new(WorkerInner {
+            model_path,
+            role,
+            alive: AtomicBool::new(true),
+            next_id: AtomicU64::new(1),
+            io: Mutex::new(None),
+            child: Mutex::new(child),
+            stderr_tail,
+            job: Mutex::new(job),
+        });
+        let weak = Arc::downgrade(&inner);
         std::thread::Builder::new()
             .name("speech-cpp-stdout".into())
             .spawn(move || {
@@ -253,6 +304,20 @@ impl SpeechCppWorker {
                     line.clear();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
+                            if let Some(inner) = weak.upgrade()
+                                && inner.alive.swap(false, Ordering::SeqCst)
+                                && inner.child.lock().ok().is_some_and(|c| c.is_some())
+                                && let Some(obs) = crate::local::helper_observer()
+                            {
+                                let status = inner
+                                    .child
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut c| c.as_mut()?.try_wait().ok().flatten())
+                                    .map(crate::local::exit_status_text)
+                                    .unwrap_or_else(|| "标准输出关闭".into());
+                                obs.exited(inner.role, &format!("意外退出（{status}）"));
+                            }
                             let _ = tx.send(Err("Qwen3-TTS 推理进程已退出".to_owned()));
                             return;
                         }
@@ -283,37 +348,28 @@ impl SpeechCppWorker {
             .map_err(|err| model_err(format!("创建 Qwen3-TTS 读线程失败：{err}")))?;
 
         let ready = rx.recv_timeout(READY_TIMEOUT);
-        let worker = Self {
-            inner: Arc::new(WorkerInner {
-                model_path,
-                alive: AtomicBool::new(true),
-                next_id: AtomicU64::new(1),
-                io: Mutex::new(Some(WorkerIo { writer, rx })),
-                child: Mutex::new(child),
-                stderr_tail,
-                job: Mutex::new(job),
-            }),
-        };
+        if let Ok(mut io_slot) = inner.io.lock() {
+            *io_slot = Some(WorkerIo { writer, rx });
+        }
+        let worker = Self { inner };
 
         match ready {
             Ok(Ok(msg)) => match msg.get("type").and_then(Value::as_str) {
                 Some("ready") => Ok(worker),
                 Some("fatal") => {
                     let detail = extract_worker_error(&msg, "模型加载失败");
-                    worker.terminate();
+                    worker.terminate_with_reason(&format!("启动失败：{detail}"));
                     Err(model_err(format!("Qwen3-TTS 启动失败：{detail}")))
                 }
                 other => {
-                    worker.terminate();
-                    Err(model_err(format!(
-                        "Qwen3-TTS 握手响应异常（{}）",
-                        other.unwrap_or("unknown")
-                    )))
+                    let kind = other.unwrap_or("unknown");
+                    worker.terminate_with_reason(&format!("握手响应异常（{kind}）"));
+                    Err(model_err(format!("Qwen3-TTS 握手响应异常（{kind}）")))
                 }
             },
             Ok(Err(reason)) => {
                 let hint = worker.inner.stderr_hint();
-                worker.terminate();
+                worker.terminate_with_reason(&reason);
                 Err(if hint.is_empty() {
                     model_err(reason)
                 } else {
@@ -322,7 +378,7 @@ impl SpeechCppWorker {
             }
             Err(RecvTimeoutError::Timeout) => {
                 let hint = worker.inner.stderr_hint();
-                worker.terminate();
+                worker.terminate_with_reason("模型加载超时，MOSS 结束了它");
                 let err = model_err("Qwen3-TTS 模型加载超时，请确认显存/内存充足后重试");
                 Err(if hint.is_empty() {
                     err
@@ -332,7 +388,7 @@ impl SpeechCppWorker {
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let hint = worker.inner.stderr_hint();
-                worker.terminate();
+                worker.terminate_with_reason("启动时提前退出");
                 let err = model_err("Qwen3-TTS 推理进程启动时提前退出");
                 Err(if hint.is_empty() {
                     err
@@ -352,7 +408,14 @@ impl SpeechCppWorker {
     }
 
     pub fn terminate(&self) {
-        self.inner.kill_child();
+        self.inner.kill_child_quiet();
+        if let Ok(mut slot) = self.inner.io.lock() {
+            *slot = None;
+        }
+    }
+
+    pub fn terminate_with_reason(&self, reason: &str) {
+        self.inner.kill_child_with_reason(reason);
         if let Ok(mut slot) = self.inner.io.lock() {
             *slot = None;
         }
@@ -417,7 +480,7 @@ impl SpeechCppWorker {
             .write_all(line.as_bytes())
             .and_then(|()| io.writer.flush())
         {
-            Self::drop_io_and_kill(io_guard, &self.inner);
+            Self::drop_io_and_kill(io_guard, &self.inner, &format!("发送请求失败：{err}"));
             return Err(model_err(format!("向 Qwen3-TTS 发送请求失败：{err}")));
         }
 
@@ -427,14 +490,18 @@ impl SpeechCppWorker {
                 && tx.is_closed()
             {
                 if Self::send_cancel_and_drain(io, &id).is_err() {
-                    Self::drop_io_and_kill(io_guard, &self.inner);
+                    Self::drop_io_and_kill(
+                        io_guard,
+                        &self.inner,
+                        "取消合成排空超时，MOSS 重启回收",
+                    );
                 }
                 return Ok(());
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                Self::drop_io_and_kill(io_guard, &self.inner);
+                Self::drop_io_and_kill(io_guard, &self.inner, "合成超时，MOSS 结束了它");
                 return Err(model_err("Qwen3-TTS 合成超时"));
             }
             match io
@@ -454,7 +521,7 @@ impl SpeechCppWorker {
                             } else {
                                 "Qwen3-TTS 返回了缺少请求编号的协议消息".to_owned()
                             };
-                            Self::drop_io_and_kill(io_guard, &self.inner);
+                            Self::drop_io_and_kill(io_guard, &self.inner, &reason);
                             return Err(model_err(reason));
                         }
                     }
@@ -468,7 +535,7 @@ impl SpeechCppWorker {
                             let pcm = match decoded {
                                 Ok(pcm) => pcm,
                                 Err(err) => {
-                                    Self::drop_io_and_kill(io_guard, &self.inner);
+                                    Self::drop_io_and_kill(io_guard, &self.inner, &err.to_string());
                                     return Err(err);
                                 }
                             };
@@ -477,7 +544,11 @@ impl SpeechCppWorker {
                                 ChunkSink::Stream(tx) => {
                                     if tx.send(pcm).is_err() {
                                         if Self::send_cancel_and_drain(io, &id).is_err() {
-                                            Self::drop_io_and_kill(io_guard, &self.inner);
+                                            Self::drop_io_and_kill(
+                                                io_guard,
+                                                &self.inner,
+                                                "取消合成排空超时，MOSS 重启回收",
+                                            );
                                         }
                                         return Ok(());
                                     }
@@ -492,17 +563,21 @@ impl SpeechCppWorker {
                             break Err(model_err(reason));
                         }
                         other => {
-                            Self::drop_io_and_kill(io_guard, &self.inner);
+                            let kind = other.unwrap_or("unknown");
+                            Self::drop_io_and_kill(
+                                io_guard,
+                                &self.inner,
+                                &format!("返回了意外的协议消息（{kind}）"),
+                            );
                             return Err(model_err(format!(
-                                "Qwen3-TTS 返回了意外的协议消息（{}）",
-                                other.unwrap_or("unknown")
+                                "Qwen3-TTS 返回了意外的协议消息（{kind}）"
                             )));
                         }
                     }
                 }
                 Ok(Err(reason)) => {
                     let hint = self.inner.stderr_hint();
-                    Self::drop_io_and_kill(io_guard, &self.inner);
+                    Self::drop_io_and_kill(io_guard, &self.inner, &reason);
                     let err = model_err(reason);
                     return Err(if hint.is_empty() {
                         err
@@ -512,7 +587,7 @@ impl SpeechCppWorker {
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
-                    Self::drop_io_and_kill(io_guard, &self.inner);
+                    Self::drop_io_and_kill(io_guard, &self.inner, "推理进程已退出");
                     return Err(model_err("Qwen3-TTS 推理进程已退出"));
                 }
             }
@@ -522,10 +597,11 @@ impl SpeechCppWorker {
     fn drop_io_and_kill(
         mut io_guard: std::sync::MutexGuard<'_, Option<WorkerIo>>,
         inner: &WorkerInner,
+        reason: &str,
     ) {
         *io_guard = None;
         drop(io_guard);
-        inner.kill_child();
+        inner.kill_child_with_reason(reason);
     }
 
     fn send_cancel_and_drain(io: &mut WorkerIo, id: &str) -> Result<(), ()> {

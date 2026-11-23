@@ -29,6 +29,24 @@ impl<'a> Session<'a> {
         self.listen.utterance_keyword = None;
         self.listen.kws_tail_until = None;
         self.listen.listen_manual = manual;
+        // 自动拾音（非按键说话）且本次连接尚未写入过 `vad_engine`（纯能量判停，或本地判停已上报后中途刚开启过程记录）：补写一次实际判停方式
+        if !manual
+            && !self.vad_engine_traced
+            && (self.vad_worker.is_none() || self.vad_worker_reported)
+            && self.trace_handle().is_some()
+        {
+            self.vad_engine_traced = true;
+            let engine = if self.vad_worker.is_some() {
+                self.vad_engine.clone()
+            } else {
+                self.vad.engine()
+            };
+            let mut payload = serde_json::json!({"engine": engine});
+            if let Some(reason) = &self.vad_fallback_reason {
+                payload["fallback_reason"] = serde_json::json!(reason);
+            }
+            self.trace_record("vad_engine", payload);
+        }
         // 手动模式按住即说：马上建立识别连接；自动模式等 VAD 确认开始说话（避免为环境声建连接）
         let stream = if manual { self.open_stream() } else { None };
         self.phase = Phase::Listening(Listening {
@@ -63,6 +81,9 @@ impl<'a> Session<'a> {
         };
         let mut ended = false;
         let mut began = false;
+        let mut resumed = false;
+        let mut runtime_notice = None;
+        let mut heard_keywords = Vec::new();
         if listening.manual {
             listening.utterance.extend_from_slice(pcm);
             listening.voiced_samples = listening.utterance.len();
@@ -77,12 +98,8 @@ impl<'a> Session<'a> {
                     (events, self.vad.take_notice())
                 }
             };
-            if let Some(notice) = notice {
-                self.shared.state.event(
-                    EventRecord::warn(DiagCategory::Audio, notice)
-                        .hint("本地判停模型出了问题，这次连接先用音量判断你是否说完；重启内置服务会重新尝试本地模型"),
-                );
-            }
+            // 判停出了问题的提示：属于这台设备这一轮，记进它的流程（下面借用结束后再写）
+            runtime_notice = notice;
             for event in events {
                 match event {
                     VadEvent::SpeechStart => {
@@ -100,10 +117,7 @@ impl<'a> Session<'a> {
                     }
                     VadEvent::Keyword(kind) => {
                         self.listen.utterance_keyword = Some(kind);
-                        self.shared.state.event(EventRecord::info(
-                            DiagCategory::Audio,
-                            format!("命令词模型听到{}命令", keyword_label(kind)),
-                        ));
+                        heard_keywords.push(kind);
                     }
                 }
             }
@@ -142,6 +156,7 @@ impl<'a> Session<'a> {
                     listening.utterance.extend_from_slice(&bridge);
                     listening.utterance.extend_from_slice(pcm);
                     listening.feed(pcm);
+                    resumed = true;
                 }
                 self.last_activity = Instant::now();
             } else if listening.speaking {
@@ -155,8 +170,28 @@ impl<'a> Session<'a> {
                 listening.preroll.drain(..excess);
             }
         }
+        if let Some(notice) = runtime_notice {
+            self.event(
+                EventRecord::warn(DiagCategory::Audio, notice)
+                    .hint("本地判停模型出了问题，这次连接先用音量判断你是否说完；重启内置服务会重新尝试本地模型"),
+            );
+        }
+        for kind in heard_keywords {
+            self.event(EventRecord::info(
+                DiagCategory::Audio,
+                format!("命令词模型听到{}命令", keyword_label(kind)),
+            ));
+        }
+        if began || resumed {
+            self.trace_record(
+                "speech_began",
+                serde_json::json!({"engine": self.vad_engine, "resumed": resumed}),
+            );
+        }
+        if ended {
+            self.trace_record("speech_end", serde_json::json!({"engine": self.vad_engine}));
+        }
         if began {
-            self.trace_record("speech_began", serde_json::json!({}));
             self.screen.preview_hold = None;
             // VAD 刚确认开始说话：建立流式识别，先补送保留的开头与这一帧
             let stream = self.open_stream();
@@ -201,6 +236,25 @@ impl<'a> Session<'a> {
             &interim,
             &conversation.settings.asr_corrections,
         );
+        if self.trace_handle().is_some() {
+            // 识别流的降噪情况（辅助程序打开流时报告）在第一个中间结果时记下，按真实先后排在中间文字之前
+            let denoise = match &self.phase {
+                Phase::Listening(listening) => listening
+                    .stream
+                    .as_ref()
+                    .and_then(|(stream, _)| stream.take_denoise()),
+                _ => None,
+            };
+            if let Some(report) = denoise {
+                self.trace_record("denoise", crate::audio::denoise_trace("识别", &report));
+            }
+            if !interim.trim().is_empty() {
+                self.trace_record(
+                    "interim",
+                    serde_json::json!({"text": interim, "corrected": corrected}),
+                );
+            }
+        }
         if crate::fast::is_stop(&corrected) {
             self.pending_listen_stop = false;
             self.listen.hold_check = None;
@@ -214,7 +268,13 @@ impl<'a> Session<'a> {
                 "流式中间结果整句命中急停词（{}）：立即请求急停",
                 crate::fast::normalized(&corrected)
             ));
-            self.start_turn(TurnInput::FastStop { text: interim }, TurnKind::Answer);
+            self.start_turn(
+                TurnInput::FastStop {
+                    text: interim,
+                    source: crate::conversation::FastStopSource::Interim,
+                },
+                TurnKind::Answer,
+            );
             return Ok(());
         }
         let device_specs: Vec<_> = self
@@ -362,6 +422,7 @@ impl<'a> Session<'a> {
                 listening.last_interim = latest.clone();
                 if !latest.is_empty() {
                     let paused_at = Instant::now();
+                    let checking = latest.clone();
                     let history = Self::jev_prewarm_history(
                         &self.shared.vision_photos,
                         self.device_id,
@@ -386,6 +447,7 @@ impl<'a> Session<'a> {
                         }),
                     });
                     self.set_level(0);
+                    self.trace_record("jev_hold_check", serde_json::json!({"text": checking}));
                     return Ok(());
                 }
             }
@@ -403,17 +465,34 @@ impl<'a> Session<'a> {
             return self.finish_listen_stop(socket).await;
         }
         let deadline = paused_at + UNFINISHED_HOLD_WINDOW;
+        let in_time = Instant::now() < deadline;
         if held
-            && Instant::now() < deadline
+            && in_time
             && let Phase::Listening(listening) = &mut self.phase
         {
             listening.hold_used = true;
             listening.hold_deadline = Some(deadline);
             listening.finalize_after_vad_seq = None;
             self.set_level(0);
+            self.trace_record(
+                "jev_hold",
+                serde_json::json!({
+                    "decision": "extend",
+                    "waited_ms": paused_at.elapsed().as_millis() as u64,
+                    "window_ms": UNFINISHED_HOLD_WINDOW.as_millis() as u64,
+                }),
+            );
             self.event("检测到语句尚未说完，延长拾音等待续说");
             return Ok(());
         }
+        self.trace_record(
+            "jev_hold",
+            serde_json::json!({
+                "decision": if held && !in_time { "late" } else { "finished" },
+                "held": held,
+                "waited_ms": paused_at.elapsed().as_millis() as u64,
+            }),
+        );
         self.finalize_held_utterance(socket).await
     }
 
@@ -425,6 +504,7 @@ impl<'a> Session<'a> {
         if !active {
             return Ok(());
         }
+        self.trace_record("jev_hold", serde_json::json!({"decision": "expired"}));
         self.finalize_held_utterance(socket).await
     }
 
@@ -550,7 +630,34 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         frame: Result<crate::audio::worker::VadFrame, String>,
     ) -> Result<(), String> {
-        let frame = frame?;
+        let mut frame = frame?;
+        // 判停线程交来的事实（判停方式、跳过的帧、降噪情况）与出错提示：不论此刻处于哪个阶段都如实记下
+        let notes = std::mem::take(&mut frame.trace);
+        if !notes.is_empty() {
+            self.trace_vad_notes(notes);
+        }
+        if let Some(notice) = frame.notice.take() {
+            self.event(
+                EventRecord::warn(DiagCategory::Audio, notice)
+                    .hint("本地判停模型出了问题，这次连接先用音量判断你是否说完；重启内置服务会重新尝试本地模型"),
+            );
+        }
+        // 命令词模型的每一次命中都记下（后面各分支决定怎么用它，用法另有事件说明）
+        if self.trace_handle().is_some() {
+            let when = match (&self.phase, frame.prime) {
+                (Phase::Listening(_), false) => "用户说话中",
+                (Phase::Listening(_), true) => "补送的开头里",
+                (Phase::Thinking, false) => "刚说完那句的尾音里",
+                (Phase::Thinking, true) => "思考中听到的新声音里",
+                (Phase::Speaking { .. }, _) => "播放回答时",
+                (Phase::Idle, _) => "空闲时",
+            };
+            for event in &frame.events {
+                if let VadEvent::Keyword(kind) = event {
+                    self.trace_keyword(*kind, when);
+                }
+            }
+        }
         // 思考中命令词模型听到了“停”（不论是刚说完的尾音里还是新的一阵声音里）：不用等识别，
         // 直接打断、执行停止（n101；停止说法绝不吞掉）
         if matches!(self.phase, Phase::Thinking)
@@ -561,7 +668,13 @@ impl<'a> Session<'a> {
             self.listen.follow_probe = None;
             self.listen.follow.reset();
             self.event("思考中命令词模型听到“停”");
-            return self.on_stop_check_done(socket, Some("停".into())).await;
+            return self
+                .on_stop_check_done(
+                    socket,
+                    Some("停".into()),
+                    crate::conversation::FastStopSource::Keyword,
+                )
+                .await;
         }
         // 这段话的判停结果晚到（这一轮已经开始，甚至是抢跑开始的）：里面的命令词补写给这一轮
         // （思考中补送的确认窗口是新的一阵声音，不属于这段话，不算）
@@ -579,10 +692,13 @@ impl<'a> Session<'a> {
                     && let Ok(mut hint) = slot.lock()
                 {
                     *hint = Some(*kind);
-                    self.shared.state.event(EventRecord::info(
-                        DiagCategory::Audio,
-                        format!("命令词模型听到{}命令（说完后补到）", keyword_label(*kind)),
-                    ));
+                    self.shared.state.event_in_flow(
+                        EventRecord::info(
+                            DiagCategory::Audio,
+                            format!("命令词模型听到{}命令（说完后补到）", keyword_label(*kind)),
+                        ),
+                        self.trace_flow(),
+                    );
                 }
             }
         }
@@ -602,6 +718,7 @@ impl<'a> Session<'a> {
                 && let Some(probe) = self.listen.follow_probe.take()
             {
                 self.listen.follow.reset();
+                self.trace_record("follow_probe", serde_json::json!({"phase": "confirmed"}));
                 return self.take_over(socket, probe.head, true).await;
             }
             return Ok(());
@@ -623,7 +740,7 @@ impl<'a> Session<'a> {
         if !frame.prime
             && matches!(self.phase, Phase::Listening(_))
             && !self.listen.listen_manual
-            && let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, frame.notice)))
+            && let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, None)))
         {
             self.finish_or_hold_utterance(socket, pcm, end).await?;
         }

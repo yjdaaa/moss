@@ -4,6 +4,48 @@
 
 ## [Unreleased]
 
+### 优化数字孪生、创作画板确认框及全站提示文案（2026-11-23）
+
+- **现象**：① 数字孪生 3D 视口把滚轮缩放挂在 React 合成 `onWheel`（passive 监听），缩放时会连带滚动整页；历史任务与实时下发状态直接裸打英文（`preview_ready`、`SENDING`），底部推演栏重复展示循环与时长，右侧卡片堆满 `?` / `Bf` / `RX` / `Pn` / `$CD` 黑话并写死翼宿 V1.0 硬件规格；② 创作画板「确认开始雕刻」弹窗缺少 `Esc` / 遮罩关闭与 Portal 顶层挂载；③ 任务进度浮层、材料实验室、配对弹窗、顶栏提示、底部控制台与语音中心扩展卡仍残留 `job_id` / `workflow_id` / `calibration_id` / `Token` / `HashFS` / `moss-host` / `ONLINE` / 顶栏本地路径等研发词与重复长段。
+- **根因与修复**：① `TwinStage3D` 改用原生 `addEventListener("wheel", ..., { passive: false })` 并在拖拽与缩放时清掉视角过渡目标，去掉写死机型标识；`TwinPage` 复用 `normalizeWorkflowStatus` 做中文状态映射，删除重复的 `#twin-loop-status-pill` 与冗余时长，卡片 2/3 去黑话并移除固定翼宿硬件格；② `SendConfirmDialog` 改为 `createPortal(..., document.body)` 挂载并补齐 `Escape`（经 `isTopmostModalBackdrop` 判顶层、忙态锁定）与防拖拽误触遮罩关闭，`07-pages.css` 同步按钮样式并去掉 `HashFS`；③ 清理 `JobProgressDock`、`MaterialLabPage`（路径移入悬停提示）、`AuthModal`、`Navbar`、`ConsoleDrawer`、`VoiceAgentCard`、`VoiceMcpCard` 里的内部字段名与冗长说明。不改任何接口契约、安全门禁与创作画板后端 100 mm 默认幅面护栏。
+- **验证**：前端 ESLint、单测 389/389、生产构建、`check-crate-layers`、`check-repo-hygiene`、浏览器测试 18/18（`twin-render.browser.mjs` 新增滚轮缩放不滚页断言，`usability-layout.browser.mjs` 新增确认框 Portal 与 `Esc` 关闭断言）、回环 E2E 41/41 及 `scripts/quick-update-desktop.sh` 快更全部通过；未连真实硬件实测。
+- **关联**：`frontend/src/components/TwinStage3D.jsx`、`frontend/src/pages/{TwinPage,MaterialLabPage}.jsx`、`frontend/src/components/draw/SendConfirmDialog.jsx`、`frontend/src/components/{JobProgressDock,AuthModal,Navbar,ConsoleDrawer,VoiceAgentCard,VoiceMcpCard}.jsx`、`frontend/src/styles/07-pages.css`、`frontend/tests/{twin-render,usability-layout}.browser.mjs`。
+
+### 修复连接弹窗改完即关丢输入的同步竞态，并精简语音中心其余卡片文案（2026-11-23）
+
+- **现象**：① 在统一连接弹窗填完设备 IP 后紧接着按 `Esc` 关闭，AI 预览窗偶发仍显示未配置（`ai-preview.browser.mjs` L218 复现）；② 语音中心“当前语音链路”脚注、云端 Jev、视觉理解、声纹、已连接设备、家居备份与 USB 配网仍残留长段重复说明及过时 / 底层词（“协议 6”“`aec` 字段”“DPAPI / SQLite/WAL/SHM”“NVS 分区”）。
+- **根因与修复**：① `useDeviceConnection` 原先在异步 `useEffect` 里落盘并广播 `moss:device-connection`，弹窗在 `Esc` 同步卸载时可能跳过副作用导致丢改动；改为在各字段 setter 内同步更新 `persistedRef`、写入存储并广播事件，挂载时仍不回写旧值；② 同步精简 `BuiltinModelGroups`、`BuiltinJevGroup`（去掉不可改的固定地址行）、`VoiceVisionCard`（本地视觉不提示云端费用）、`VoiceSpeakerCard`（去掉过时的“协议 6”）、`BuiltinDevicesPanel`、`VoiceHomeCard` 与 `XiaozhiUsbProvisionCard` 文案。不改任何设置键、安全门禁与接口契约。
+- **验证**：前端 ESLint、单测 389/389、生产构建、`check-crate-layers`、`check-repo-hygiene`、浏览器测试 18/18（`ai-preview.browser.mjs` 首次即过，`twin-render` 复跑通过）、回环 E2E 41/41（含 `[UI-07]` 统一连接跨页同步）及 `scripts/quick-update-desktop.sh` 快更全部通过；未连真实硬件实测。
+- **关联**：`frontend/src/useDeviceConnection.js`、`frontend/src/components/{VoiceVisionCard,VoiceSpeakerCard,VoiceHomeCard}.jsx`、`frontend/src/components/voice-builtin/{BuiltinModelGroups,BuiltinJevGroup,BuiltinDevicesPanel,XiaozhiUsbProvisionCard}.jsx`。
+
+### 精简本地模型页与偏好设置的文案说明，修正与推荐结论冲突的识别模型描述（2026-11-23）
+
+- **现象**：“本地模型（断网可用）”的模型名称与说明里重复写体积、堆砌开源协议与量化/引擎术语、硬件加速和默认关闭来回说三四遍，且 `Qwen3-ASR` / `FireRedASR2-CTC` 仍写“高于 SenseVoice”与顶部推荐矛盾；偏好设置里“完整过程记录”正文和确认弹窗大段重复、“顶栏状态胶囊”与复选框互相复述、端口与退出含“上位机 / 同源通信 / 杀死主进程”黑话，且关闭提示在 macOS 仍写“右上角”。
+- **根因与修复**：① 精简 `moss-voice::local_models::CATALOG` 全部 27 条模型的 `label` / `note`（去掉与大小列重复的体积和无关协议/量化词，保留 `ZipVoice` 仅限非商用与 `TEN-VAD` 竞品限制，按实测重述 `Qwen3-ASR` / `FireRedASR2-CTC`），收短 `LocalModelsGroup`、`ColabBridgeSection` 的重复提示与胶囊、将存放目录移至底部下载地址下，并精简 `LocalTtsVoicesModal` 音色列表（与语言包相同的试听语不再逐行重复，全部缓存后隐藏逐行“本机已缓存”标签）；② 精简 `ProcessTraceSection`（明细只留开启确认框）、`SettingsModal`（端口改大白话、关闭说明适配 macOS/Win、去顶栏重复段、Jev 补“模型：”标签、保留底部安全底线）与 `PhoneLinkSection`。不改任何设置键、确认弹窗内容与后端契约。
+- **验证**：`rustfmt`（仅 `local_models.rs`）、`cargo clippy/test -p moss-voice`（99 通过）、前端 ESLint、单测 388/388、生产构建、`check-crate-layers`、`check-repo-hygiene` 及 `scripts/quick-update-desktop.sh` 快更全部通过；浏览器测试 `voice-center` / `app-update` / `usability-layout` / `shell-chrome` 等 17/18 通过（`ai-preview.browser.mjs` L218 在本次未改动的文件上出现既有同步竞态）。未连真实设备实测。
+- **关联**：`crates/moss-voice/src/local_models.rs`、`frontend/src/components/voice-builtin/{LocalModelsGroup,ColabBridgeSection}.jsx`、`frontend/src/components/{LocalTtsVoicesModal,SettingsModal,ProcessTraceSection,PhoneLinkSection}.jsx`、`frontend/tests/voice-center.browser.mjs`。
+
+### 本地模型页的“Colab T4 专属联动”改为默认收起的折叠栏（2026-11-23）
+
+- **现象**：“本地模型（断网可用）”里“Colab T4 专属联动”默认整块展开，未开启时仍占约半屏高度，压低下方本地模型包的可见区域。
+- **根因与修复**：`ColabBridgeSection`（`#voice-local-colab-bridge`）改为 `<details class="voice-fold">` 折叠栏，标题栏保留状态胶囊 `#voice-colab-state-pill` 与未保存标记，导出笔记本按钮移至展开区顶部右侧；新增 `colabBridgeDefaultOpen`，未开启时默认收起，开启、接管中、正在拉起 / 运行或有拉起报错时自动展开（手动点开 / 收起后以用户为准）；`VoiceLayout::focusVoiceGroup` 补齐自动展开目标 `<details>`，从视觉理解或顶部链路栏点“去联动开关 / 去配置”可直达展开态。只改展示，配置、开关默认值与后端契约不变。
+- **验证**：`voiceState.test.mjs` 补 `colabBridgeDefaultOpen` 各状态断言，`voice-center.browser.mjs` 补默认收起、手动展开 / 收起及接管中点顶部“去配置”自动展开；通过 `check-crate-layers`、`check-repo-hygiene`、脚本单测 71/71、前端 ESLint、单测 388/388、生产构建、浏览器测试 18/18 及 `scripts/quick-update-desktop.sh` 快更（未改 Rust 代码且为避开并行会话的未提交 `.rs` 文件，未跑 `verify.mjs --finish` 的整仓 `rustfmt`/Rust/E2E）；未连真实 Colab T4 实测。
+- **关联**：`frontend/src/voiceState/localModels.js`（`colabBridgeDefaultOpen`）、`frontend/src/components/voice-builtin/ColabBridgeSection.jsx`、`frontend/src/components/VoiceLayout.jsx`、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/{voiceState.test.mjs,voice-center.browser.mjs}`、`docs/developer/frontend-behavior.md`。
+
+### 完整过程记录支持选择保存位置、恢复默认与打开文件夹（2026-11-23）
+
+- **现象**：过程记录只能写到运行目录，录音与照片占用较多空间时用户无法改存其他磁盘，也不能直接从设置打开记录文件夹。
+- **根因与修复**：桌面主窗口新增三个原生命令并同步全平台 Tauri 权限清单，选择后使用带归属标记的 `moss-process-trace` 子目录（兼容 `.DS_Store`、剥离 Windows `\\?\` 前缀，并在元数据访问前拦截 UNC 共享路径、软链祖先与 `..` 段以防 SMB 阻塞），`process_trace_dir` 仅原生入口保存、HTTP 拒绝路径写入。新记录即时切换，接口起止、对话轮次（`ActiveTurn.trace` 固定句柄）、视觉看图与后台模型调用的附件和时间线均留在同一目录；旧历史不迁移且不再自动清理。清空、到期清理与占用统计只处理 MOSS 记录，目录失联暂停、接回实时恢复且不静默回退。默认关闭、默认路径、30 天保留期及移动端行为不变。
+- **验证**：覆盖 `laser-runtime` 自定义目录单测（防嵌套、非空未标记同名目录拒绝、UNC 与 `..` 入口拒绝、跨目录切换附件一致性与旧目录免清理、无关内容与软链保护且清空归零、拔盘暂停与接回恢复）、`laser-api` HTTP 拒绝路径写入、`moss-voice-server` 轮次中途换目录归档单测及 `app-update.browser.mjs` 交互用例；通过 `node scripts/verify.mjs --finish` 全工作区检查、浏览器测试 18/18、回环 E2E 41/41 并快更本机 `/Applications/MOSS.app`；真实外接盘插拔与 Windows 原生选择框未实测（`unverified`）。
+- **关联**：`crates/laser-runtime/src/process_trace.rs` 与目录模块、`crates/laser-api/src/{process_trace.rs,routes/system.rs}`、`crates/moss-voice-server/src/{session/*,conversation.rs,state.rs,vision.rs}`、`apps/desktop/src-tauri/{src/process_trace.rs,src/export.rs,gen/schemas/*}`、`frontend/src/components/ProcessTraceSection.jsx`；融合技术书 r62。
+
+### 完整过程记录补齐全流程、按真实先后、不限硬盘大小，脱敏只换凭据本身（2026-11-23）
+
+- **现象**：完整过程记录未覆盖本地模型阶段（降噪、判停方式与起止、命令词改判、语义判停概率、中间识别与忽略原因），大模型回复在抢跑等待期被冻结或随打断丢失、激光接口仅在结束后补记；另有 2 GB / 7 天上限、512 条队列满即丢、4000 字截断，以及过度脱敏与凭据转义漏网。
+- **根因与修复**：写入核心改为无界队列、取时刻与入队同锁、只按日期保留 30 天，附件失败或内存待写超 1 GiB 写明原因；**辅助程序协议 7→8（`Opened{denoise}`），须与桌面程序同步升级**；对话任务经 `TurnTrace` 在发生当刻直写 `asr` / `llm_request` / `llm_round` / `tool_call` / `tts_*`（不被 `turn.hold` 冻结或打断丢弃），`VadWorker` 首帧前 `reset` 不重复开流双记降噪，按键说话不虚报 `vad_engine`、非抢跑记明跳过语义判停原因，补齐 `SpeechCppWorker` 与音色试听缓存进程的 `helper_*` 起止记录并修正回声模式 `service_start` 挂载状态；激光拆 `api_begin` / `api_call`（急停先执行后补记、画板自动同步只记摘要、大报文单次解析脱敏另存）；脱敏修正 `Authorization: Bearer` 漏遮、转义引号、`wss://` 全查询串与 `sk-` 快速路径。
+- **验证**：覆盖写入核心（无界队列、内存高水位、附件失败）、激光（急停先执行后补记、大报文单次脱敏另存、`Bearer` / 转义引号 / `wss://` 脱敏样例）、语音（首轮单次降噪、抢跑 `hold` 实时落盘与打断保留、中途开启记录补写判停、语义判停跳过原因、辅助程序启停）与协议 8 往返单测；通过 `node scripts/verify.mjs --finish` 全工作区检查、浏览器测试 18/18、回环 E2E 41/41 并快更本机桌面程序（含协议 8 辅助程序与 `moss-host`）；未连接真实小智硬件实测（`unverified`）。
+- **关联**：`crates/laser-runtime/src/process_trace.rs`、`crates/laser-api/src/{process_trace.rs,routes.rs,send.rs,feedback.rs}`、`crates/moss-voice-server/src/{session/*,conversation.rs,audio/*}`、`crates/moss-voice-providers/src/{local.rs,speech_cpp.rs}`、`crates/moss-voice-local-proto`、`apps/moss-voice-local/src/main.rs`、`crates/moss-voice-host/src/builtin/{conversation,lifecycle,tts_preview}.rs`、`frontend/src/{processTrace.js,components/ProcessTraceSection.jsx}`；内置语音技术书 n110、融合技术书 r61。
+
 ### 本地模型页把判停相关四张表并成一组，实测无提升的模型默认收起（2026-11-23）
 
 - **现象**：“本地模型（断网可用）”里拾音判停、前端降噪、命令词抗噪、语义判停各占一张“模型包”表，共 7 个模型，其中多数经整链实测没有提升却和常用模型并列，页面冗长；降噪有两个模型但没有选用入口，DPDFNet 下载后用不上。

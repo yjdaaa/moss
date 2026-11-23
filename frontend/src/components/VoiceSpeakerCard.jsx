@@ -50,8 +50,8 @@ export default function VoiceSpeakerCard() {
       if(enabled&&!await showConfirm("开启后只按当前句识别到的人读取或总结个人记忆；未知身份不回退到共享设备摘要。总结会使用当前大模型，云模型会收到筛选后的对话文字。声纹不能代替任何设备审批。",{title:"开启按人记忆？",confirmText:"开启"}))return;
       await act({action:"personal_mode",enabled,confirmed:true});
     }}/><span>按人使用对话记忆（完成下方简易标定后可开启）</span></label>
-    <p>声纹仅是个人记忆的候选身份提示，不能授权加工或家居动作。个人摘要可在本机维护；完成简易标定并明确开启前不会用于对话，当前沿用既有设备记忆开关。</p>
-    <p>请先在语音中心下载 CampPlus 模型，准备协议 6 辅助程序，并启动对话模式。每人说三段不同句子，避开多人同时说话、噪声和削波。删除声纹会同时删除其个人摘要。</p>
+    <p>声纹仅用于区分个人记忆，不能授权加工或家居动作；完成下方标定并开启前不会生效。</p>
+    <p>请先在“模型 → 本地模型”下载 CampPlus 声纹模型并启动内置语音服务。每人说三段不同句子，避开多人同时说话与明显噪声；删除声纹会一并删除其个人摘要。</p>
     {data?.warning&&<p className="voice-hint voice-hint--warn" role="status">{data.warning}</p>}
     {error&&<p role="alert">{error}</p>}
     {pollError&&<p role="alert">状态刷新失败：{pollError}</p>}
@@ -67,7 +67,7 @@ export default function VoiceSpeakerCard() {
     <div className="voice-form-group" id="voice-speaker-calibration">
       <h3>简易标定（开启身份识别前必须完成）</h3>
       <p role="status">{calibration.status}</p>
-      <p>步骤：至少登记两个人 → 选上面的采集设备，给每个人点“录测试音”各说三段新句子 → 点“计算阈值并自检”。只拿已登记的人互相比，测不到陌生人，所以阈值设了下限；增删或重新登记任何人后都要重新标定。</p>
+      <p>步骤：至少登记 2 人 → 选上方设备，为每人点“录测试音”各说三段新句子 → 点“计算阈值并自检”。增删或重新登记后需重新标定。</p>
       <button type="button" className="btn btn-ghost" disabled={busy||!calibration.ready||data?.enrollment?.active} onClick={calibrate} title={calibration.blocked||"计算阈值并自检"}>计算阈值并自检</button>
       {calibration.blocked&&<span className="voice-muted"> {calibration.blocked}</span>}
       {calibration.state!=="none"&&<button type="button" className="btn btn-ghost" disabled={busy} onClick={async()=>{

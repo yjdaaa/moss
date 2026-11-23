@@ -23,7 +23,10 @@ try {
   });
 
   async function runScenario(platform) {
-    const context = await browser.newContext({ serviceWorkers: "block", viewport: { width: 1360, height: 900 } });
+    const context = await browser.newContext({
+      serviceWorkers: "block", viewport: { width: 1360, height: 900 },
+      ...(platform === "android" ? { userAgent: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36" } : {}),
+    });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -70,6 +73,9 @@ try {
             if (cmd === "get_export_settings") {
               return { directory: "", default_directory: "/tmp/moss-exports", ask_each_time: false, supported: initialProgress.platform !== "android" };
             }
+            if (["pick_process_trace_dir", "reset_process_trace_dir", "open_process_trace_dir"].includes(cmd)) {
+              return window.__MOCK_TRACE_DIRECTORY__(cmd);
+            }
             throw new Error(`Unexpected Tauri command: ${cmd}`);
           },
         },
@@ -77,14 +83,32 @@ try {
     }, { initialProgress: progressState, loopbackOrigin: local.replace(/\/$/, "") });
 
     // n105 完整过程记录：设置页开关、确认框、占用显示与清空
-    const traceState = { enabled: false, bytes: 0, days: 0, settings: [], cleared: 0 };
+    const defaultTraceDir = "/tmp/moss-runtime/logs/process-trace";
+    const traceState = {
+      enabled: false, bytes: 0, days: 0, settings: [], cleared: 0,
+      dir: defaultTraceDir, custom_dir: null, available: true, error: null,
+      picked: null, directoryError: null, directoryCalls: [], statusCalls: 0,
+    };
     const traceResult = () => ({
       enabled: traceState.enabled,
-      dir: "/tmp/moss-runtime/logs/process-trace",
+      dir: traceState.dir,
+      custom_dir: traceState.custom_dir,
+      available: traceState.available,
+      error: traceState.error,
       bytes: traceState.bytes,
       days: traceState.days,
-      retention_days: 7,
-      max_bytes: 2 * 1024 * 1024 * 1024,
+      retention_days: 30,
+    });
+    await page.exposeFunction("__MOCK_TRACE_DIRECTORY__", (command) => {
+      traceState.directoryCalls.push(command);
+      if (traceState.directoryError) throw new Error(traceState.directoryError);
+      if (command === "open_process_trace_dir") return;
+      if (command === "pick_process_trace_dir" && !traceState.picked) return null;
+      traceState.custom_dir = command === "reset_process_trace_dir" ? null : traceState.picked;
+      traceState.dir = traceState.custom_dir || defaultTraceDir;
+      traceState.available = true;
+      traceState.error = null;
+      return traceResult();
     });
     await page.route("**/*", async (route) => {
       const req = route.request();
@@ -110,6 +134,7 @@ try {
         });
       }
       if (url.pathname === "/api/process-trace") {
+        traceState.statusCalls += 1;
         const body = JSON.parse(req.postData() || "{}");
         if (body.action === "clear") {
           traceState.cleared += 1;
@@ -300,7 +325,7 @@ try {
       const traceBox = page.locator("#settings-process-trace");
       await traceBox.waitFor({ state: "visible" });
       assert.equal(await traceBox.isChecked(), false, "完整过程记录默认关闭");
-      await page.locator("#settings-process-trace-status").getByText(/目前没有记录。只保留最近 7 天，最多 2\.0 GB/).waitFor();
+      await page.locator("#settings-process-trace-status").getByText(/目前没有记录。只保留最近 30 天，不限大小/).waitFor();
       assert.equal(await page.locator("#settings-process-trace-clear").isDisabled(), true, "没有记录时不能清空");
       await traceBox.click();
       const traceDialog = page.locator('[data-testid="app-dialog"]');
@@ -315,6 +340,8 @@ try {
       await page.waitForFunction(() => document.querySelector("#settings-process-trace")?.checked === true);
       assert.deepEqual(traceState.settings, [true]);
       await page.locator("#settings-process-trace-status").getByText(/已记录 1 天，共 5\.0 MB/).waitFor();
+      // n110 审查：折叠头摘要跟随后端保留天数，不再写死 7 天
+      await page.locator("#settings-process-trace-section").getByText("已开启 · 保留 30 天").waitFor();
       await page.locator("#settings-process-trace-status").getByText("/tmp/moss-runtime/logs/process-trace").waitFor();
       // 清空要再确认；关闭开关不弹确认
       await page.locator("#settings-process-trace-clear").click();
@@ -322,9 +349,81 @@ try {
       await traceDialog.locator('[data-dialog-action="confirm"]').click();
       await page.locator("#settings-process-trace-status").getByText(/目前没有记录/).waitFor();
       assert.equal(traceState.cleared, 1);
+
+      const pickDir = page.locator("#settings-process-trace-pick");
+      const resetDir = page.locator("#settings-process-trace-reset");
+      const openDir = page.locator("#settings-process-trace-open");
+      assert.equal(await resetDir.isDisabled(), true, "默认位置不能重复恢复默认");
+      const callsBeforeCancel = traceState.statusCalls;
+      await pickDir.click();
+      await page.waitForFunction(() => !document.querySelector("#settings-process-trace-pick")?.disabled);
+      assert.equal(traceState.statusCalls, callsBeforeCancel, "取消文件夹选择不刷新或修改位置");
+      assert.equal(traceState.dir, defaultTraceDir);
+
+      traceState.picked = "/tmp/moss-custom/moss-process-trace";
+      await pickDir.click();
+      await page.locator("#settings-process-trace-status").getByText(traceState.picked).waitFor();
+      assert.equal(await resetDir.isDisabled(), false);
+      await page.locator("#settings-process-trace-section").getByText(/旧记录留在原处，需自行清理/).waitFor();
+      await openDir.click();
+      await page.waitForFunction(() => !document.querySelector("#settings-process-trace-open")?.disabled);
+      assert.deepEqual(traceState.directoryCalls, ["pick_process_trace_dir", "pick_process_trace_dir", "open_process_trace_dir"]);
+
+      traceState.available = false;
+      traceState.error = "所选硬盘已断开";
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.locator("#settings-process-trace-status").getByText(/所选目录当前不可用，记录已暂停/).waitFor();
+      assert.equal(await openDir.isDisabled(), true);
+      assert.equal(await resetDir.isDisabled(), false, "目录失联仍能恢复默认");
+      assert.equal(await page.locator("#settings-process-trace-clear").isDisabled(), true);
+      traceState.available = true;
+      traceState.error = null;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.waitForFunction(() => !document.querySelector("#settings-process-trace-open")?.disabled);
+      assert.doesNotMatch(await page.locator("#settings-process-trace-status").textContent(), /记录已暂停/);
+
+      traceState.directoryError = "所选目录不可写";
+      await pickDir.click();
+      await traceDialog.getByText("所选目录不可写").waitFor();
+      await traceDialog.locator('[data-dialog-action="confirm"]').click();
+      assert.equal(traceState.dir, traceState.picked, "失败保留原保存位置");
+      traceState.directoryError = null;
+      await resetDir.click();
+      await page.locator("#settings-process-trace-status").getByText(defaultTraceDir).waitFor();
+      assert.equal(await resetDir.isDisabled(), true);
+
       await traceBox.click();
       await page.waitForFunction(() => document.querySelector("#settings-process-trace")?.checked === false);
       assert.deepEqual(traceState.settings, [true, false]);
+
+      // 普通浏览器没有原生目录按钮，原有开关与状态仍可使用。
+      await page.evaluate(() => {
+        window.__SAVED_TAURI__ = window.__TAURI__;
+        delete window.__TAURI__;
+        window.dispatchEvent(new Event("focus"));
+      });
+      await pickDir.waitFor({ state: "detached" });
+      assert.equal(await traceBox.isVisible(), true);
+      await page.evaluate(() => { window.__TAURI__ = window.__SAVED_TAURI__; });
+
+      // 手机连电脑时整个分区不挂载，也不会发起记录目录请求。
+      await page.evaluate(async () => {
+        const { initializeBackendOrigin } = await import("/src/authSession.js");
+        await initializeBackendOrigin({ readRemote: () => "http://moss-test.invalid:9666", probe: async () => {} });
+        const [{ default: { createRoot } }, { default: React }, { ProcessTraceSection }] = await Promise.all([
+          import("/node_modules/.vite/deps/react-dom_client.js"),
+          import("/node_modules/.vite/deps/react.js"),
+          import("/src/components/ProcessTraceSection.jsx"),
+        ]);
+        const mount = document.createElement("div");
+        mount.id = "remote-process-trace-test";
+        document.body.appendChild(mount);
+        createRoot(mount).render(React.createElement(ProcessTraceSection));
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      });
+      assert.equal(await page.locator("#remote-process-trace-test #settings-process-trace-section").count(), 0);
+    } else {
+      assert.equal(await page.locator("#settings-process-trace-pick").count(), 0, "Android 不提供桌面目录命令");
     }
 
     if (installCalls.length === 0) {
