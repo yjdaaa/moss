@@ -1523,6 +1523,33 @@ test("n61 wake word drafts are checked before saving", async () => {
   assert.match(wakeWordDraftError({ text: "MOSS", command: "mo si", threshold: 1 }), /阈值/);
 });
 
+test("2026-11-23 唤醒词显示文字转拼音：按词组判断多音字，MOSS 读莫斯", async () => {
+  const { wakeTextToPinyin } = await import("../src/wakePinyin.js");
+  const { WAKE_WORD_PRESETS } = await import("../src/voiceState.js");
+  for (const preset of WAKE_WORD_PRESETS) assert.equal(wakeTextToPinyin(preset.text), preset.command, preset.text);
+  assert.equal(wakeTextToPinyin("你好小智"), "ni hao xiao zhi");
+  assert.equal(wakeTextToPinyin("银行行长"), "yin hang hang zhang", "多音字按词组判断");
+  assert.equal(wakeTextToPinyin("小乐小乐"), "xiao le xiao le");
+  assert.equal(wakeTextToPinyin("女侠"), "nv xia", "ü 写作 v，与模型词表一致");
+  assert.equal(wakeTextToPinyin("嗨 MOSS"), "hai mo si");
+  assert.equal(wakeTextToPinyin("MOSS2号"), "mo si er hao", "数字按中文读");
+  assert.equal(wakeTextToPinyin("Hey小智"), "hey xiao zhi", "认不出的英文原样保留，交给用户改");
+  assert.equal(wakeTextToPinyin(""), "");
+});
+
+test("2026-11-23 改显示文字时拼音自动跟随，手动改过的拼音不覆盖", async () => {
+  const { applyWakeText, normalizeWakeCommand } = await import("../src/voiceState.js");
+  const { wakeTextToPinyin } = await import("../src/wakePinyin.js");
+  const base = { text: "你好小智", command: "ni hao xiao zhi", threshold: 0.2 };
+  assert.deepEqual(applyWakeText(base, "你好小乐", wakeTextToPinyin), { ...base, text: "你好小乐", command: "ni hao xiao le" });
+  assert.equal(applyWakeText({ ...base, command: " Ni  hao xiao ZHI " }, "嘿小智", wakeTextToPinyin).command, "hei xiao zhi", "大小写与空格不同也算自动生成的");
+  assert.equal(applyWakeText({ ...base, command: "" }, "嘿小智", wakeTextToPinyin).command, "hei xiao zhi", "拼音为空时补上");
+  const manual = { ...base, text: "小乐", command: "xiao yue" };
+  assert.equal(applyWakeText(manual, "小乐小乐", wakeTextToPinyin).command, "xiao yue", "手动改过的不覆盖");
+  assert.deepEqual(applyWakeText(base, "你好小乐", null), { ...base, text: "你好小乐" }, "词库没加载好时只改文字");
+  assert.equal(normalizeWakeCommand("  Mo   SI "), "mo si");
+});
+
 test("本地 Jev 运行状态：失败带原因、加载中说明会跳过、9B / CPU 提示随状态带出", () => {
   assert.equal(localJevRuntimeView(null), null);
   assert.equal(localJevRuntimeView({ state: "cloud" }), null);

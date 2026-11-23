@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
-import { WAKE_WORD_PRESETS, screenPackDeviceView, wakeWordDraftError } from "../voiceState.js";
+import { WAKE_WORD_PRESETS, applyWakeText, normalizeWakeCommand, screenPackDeviceView, wakeWordDraftError } from "../voiceState.js";
 
 // n61 设备唤醒词（2026-11-06 用户决定：唤醒词改为 MOSS，并能在设置里修改）。
 // 唤醒词由小智设备自己识别；MOSS 生成资源包，逐台确认后让设备重启、自己下载写入资源分区。
@@ -13,6 +13,8 @@ export default function VoiceWakeWordCard() {
   const [busy, setBusy] = useState(false);
   // n70 推送时默认一并刷入 MOSS 全屏画风（只对报了彩屏分辨率的设备生效）
   const [withScreen, setWithScreen] = useState(true);
+  // 2026-11-23 显示文字 → 拼音（按词组判断多音字），词库按需加载
+  const [toPinyin, setToPinyin] = useState(null);
   const mountedRef = useRef(true);
   const pollSeqRef = useRef(0);
   const inFlightRef = useRef(false);
@@ -31,6 +33,11 @@ export default function VoiceWakeWordCard() {
     } finally {
       if (seq === pollSeqRef.current) inFlightRef.current = false;
     }
+  }, []);
+  useEffect(() => {
+    let live = true;
+    import("../wakePinyin.js").then((mod) => { if (live) setToPinyin(() => mod.wakeTextToPinyin); }).catch(() => {});
+    return () => { live = false; };
   }, []);
   useEffect(() => {
     mountedRef.current = true;
@@ -61,7 +68,7 @@ export default function VoiceWakeWordCard() {
     }
   };
   const saved = data?.word;
-  const dirty = Boolean(draft && saved) && (draft.text !== saved.text || draft.command.trim().toLowerCase().split(/\s+/).join(" ") !== saved.command || Number(draft.threshold) !== saved.threshold);
+  const dirty = Boolean(draft && saved) && (draft.text !== saved.text || normalizeWakeCommand(draft.command) !== saved.command || Number(draft.threshold) !== saved.threshold);
   const draftError = draft ? wakeWordDraftError(draft) : "";
   const save = async () => {
     const next = await run(() => voiceApi.wakewordManage({ action: "save", text: draft.text, command: draft.command, threshold: Number(draft.threshold) }), "已保存唤醒词；还需要推送到设备才会生效");
@@ -103,7 +110,9 @@ export default function VoiceWakeWordCard() {
   };
   const devices = Array.isArray(data?.devices) ? data.devices : [];
   const base = data?.base;
-  const presetActive = (preset) => draft && draft.command.trim().toLowerCase().split(/\s+/).join(" ") === preset.command;
+  const presetActive = (preset) => draft && normalizeWakeCommand(draft.command) === preset.command;
+  const suggested = draft && toPinyin ? toPinyin(draft.text) : "";
+  const canRegenerate = Boolean(suggested) && suggested !== normalizeWakeCommand(draft?.command);
   return (
     <section className="voice-card wakeword-card" id="voice-wakeword-card">
       <p className="wakeword-intro">
@@ -137,14 +146,22 @@ export default function VoiceWakeWordCard() {
               <label className="wakeword-field">
                 <span>显示文字</span>
                 <input className="text-input" id="voice-wakeword-text" maxLength={16} value={draft.text}
-                  onChange={(event) => setDraft((old) => ({ ...old, text: event.target.value }))} />
+                  onChange={(event) => { const text = event.target.value; setDraft((old) => applyWakeText(old, text, toPinyin)); }} />
                 <small>设备屏幕上显示的文字</small>
               </label>
               <label className="wakeword-field">
                 <span>拼音</span>
                 <input className="text-input mono" id="voice-wakeword-command" value={draft.command} placeholder="ni hao mo si"
                   onChange={(event) => setDraft((old) => ({ ...old, command: event.target.value }))} />
-                <small>设备按这个发音识别；音节用空格隔开，不带声调</small>
+                <small>
+                  按显示文字自动生成，读错了直接改；音节用空格隔开，不带声调
+                  {canRegenerate && (
+                    <button className="wakeword-regenerate" type="button" id="voice-wakeword-regenerate" disabled={busy}
+                      onClick={() => setDraft((old) => ({ ...old, command: suggested }))}>
+                      按文字重新生成（<span className="mono">{suggested}</span>）
+                    </button>
+                  )}
+                </small>
               </label>
             </div>
             <label className="wakeword-field wakeword-threshold">

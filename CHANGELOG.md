@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 唤醒词改显示文字时拼音自动跟着更新（2026-11-23）
+
+- **现象**：设备唤醒词卡里改了“显示文字”后，拼音框不变，需要用户自己逐个音节手打，容易漏改或拼错。
+- **根因与修复**：新增按需加载的 `wakePinyin.js`（`pinyin-pro` 词组词库判断多音字，MOSS 读 mo si、数字按中文读、ü 写 v），`applyWakeText` 在拼音为空或仍是旧文字自动结果时跟随更新，手动改过的不覆盖，并提供“按文字重新生成”按钮；保存契约与后端音节校验不变，新增前端依赖 `pinyin-pro` 3.29.5（MIT，单独分包）。
+- **验证**：`voiceState.test.mjs` 新增转拼音（多音字、MOSS、ü、数字）与跟随 / 不覆盖两项，`voice-center.browser.mjs` 补自动跟随、手动不覆盖、按文字重新生成；收尾级 `node scripts/verify.mjs --finish` 通过（前端单测 388 项、浏览器测试 18/18、生产构建拼音词库单独分包约 304 KB），已快更本机桌面程序；未在真机上实测新唤醒词识别效果。
+- **关联**：`frontend/src/{wakePinyin.js,voiceState/devices.js,components/VoiceWakeWordCard.jsx}`、`frontend/src/styles/13-voice-devices.css`、`frontend/tests/{voiceState.test.mjs,voice-center.browser.mjs}`、内置语音技术书 n108。
+
 ### 工作台新增“现场移头与对刀原点”折叠面板，数字孪生遥测卡补齐连接摘要（2026-11-23）
 
 - **现象**：机器上电锁轴后无法手推微调对刀，而界面原先只在已生成预览后的「两点对位」里藏有点动，常规摆料缺少独立的移头与设原点入口；数字孪生「控制器实时遥测」卡不显示当前目标 IP/串口，也无修改连接入口。

@@ -1229,6 +1229,17 @@ try {
   await wakeDevices.nth(0).getByText(/已推送，等设备下载全屏画风/).waitFor();
   assert.equal(await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').count(), 0, "等下载时不重复推送");
   await shot("voice-devices");
+  // 2026-11-23 改显示文字拼音自动跟随；手动改过不覆盖，可按文字重新生成
+  const wakeText = wakeGroup.locator("#voice-wakeword-text");
+  const wakeCommand = wakeGroup.locator("#voice-wakeword-command");
+  await wakeText.fill("你好小乐");
+  await page.waitForFunction(() => document.querySelector("#voice-wakeword-command")?.value === "ni hao xiao le");
+  assert.equal(await wakeGroup.locator("#voice-wakeword-regenerate").count(), 0, "自动生成时不显示重新生成");
+  await wakeCommand.fill("ni hao xiao yue");
+  await wakeText.fill("你好小乐乐");
+  assert.equal(await wakeCommand.inputValue(), "ni hao xiao yue", "手动改过的拼音不被覆盖");
+  await wakeGroup.locator("#voice-wakeword-regenerate").click();
+  assert.equal(await wakeCommand.inputValue(), "ni hao xiao le le");
   // 8e. 记住的旧标签 "wake" 重新打开时落到“设备”
   await page.evaluate(() => localStorage.setItem("moss_voice_tab", "wake"));
   await page.reload({ waitUntil: "domcontentloaded" });

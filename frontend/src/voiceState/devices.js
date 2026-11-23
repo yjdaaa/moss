@@ -282,6 +282,23 @@ export const WAKE_WORD_PRESETS = [
   { text: "嘿 MOSS", command: "hei mo si" },
 ];
 
+/** 拼音命令词的比较形式：小写、去首尾空白、音节间单个空格。 */
+export function normalizeWakeCommand(command) {
+  return String(command ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+
+/**
+ * 改显示文字（2026-11-23 用户决定）：拼音为空或仍是旧文字自动生成的结果时跟着更新；
+ * 用户手动改过拼音就不覆盖。`toPinyin` 未加载好时只改文字。
+ */
+export function applyWakeText(draft, text, toPinyin) {
+  const next = { ...draft, text };
+  if (typeof toPinyin !== "function") return next;
+  const current = normalizeWakeCommand(draft?.command);
+  if (!current || current === toPinyin(draft?.text ?? "")) next.command = toPinyin(text);
+  return next;
+}
+
 export function wakeWordDraftError(draft) {
   const text = String(draft?.text ?? "").trim();
   if (!text) return "请填写唤醒词";
