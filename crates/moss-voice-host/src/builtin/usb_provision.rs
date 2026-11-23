@@ -34,18 +34,22 @@ fn active_laser_serial_port(host: &laser_host::HostApplication) -> Option<String
 
 impl BuiltinVoice {
     pub fn usb_provision(&self, input: &Value) -> Result<Value, CenterError> {
-        // 读本机 Wi-Fi 不碰串口，不占配网锁：读板子或写入进行中也能扫描
+        // 读本机 Wi-Fi 与枚举串口列表都不打开串口，不占配网锁：避免窗口聚焦自动刷新串口与读/写板子互相撞锁
         let req = moss_usb_provision::parse_usb_provision_request(input)?;
         if let Some(result) = moss_usb_provision::wifi_query(&req) {
             return result;
         }
-        let _guard = self.usb_provision_lock.try_lock().map_err(|_| {
-            CenterError::new(
-                "usb_provision_busy",
-                409,
-                "正在读写小智板子 Flash，请等当前操作完成后再试",
-            )
-        })?;
+        let _guard = if matches!(req, moss_usb_provision::UsbProvisionRequest::Ports {}) {
+            None
+        } else {
+            Some(self.usb_provision_lock.try_lock().map_err(|_| {
+                CenterError::new(
+                    "usb_provision_busy",
+                    409,
+                    "正在读写小智板子 Flash，请等当前操作完成后再试",
+                )
+            })?)
+        };
         let laser_port = active_laser_serial_port(&self.host);
         let laser_busy = self.host.api_service.device_work_in_progress();
         let temp_dir = self.host.runtime_root.path.join("usb-nvs-tmp");
@@ -90,5 +94,32 @@ impl BuiltinVoice {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usb_provision_ports_does_not_contend_with_flash_lock_while_inspect_returns_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = Arc::new(
+            laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+        );
+        let builtin = init(Some(host)).0.unwrap();
+
+        let _held = builtin.usb_provision_lock.lock().unwrap();
+
+        let ports_res = builtin
+            .usb_provision(&serde_json::json!({ "action": "ports" }))
+            .expect("持有配网锁时枚举串口列表仍应成功，不应报 usb_provision_busy");
+        assert!(ports_res["ports"].is_array(), "{ports_res}");
+
+        let inspect_err = builtin
+            .usb_provision(&serde_json::json!({ "action": "inspect", "port": "COM3" }))
+            .expect_err("持有配网锁时读取板子仍须返回 usb_provision_busy");
+        assert_eq!(inspect_err.code, "usb_provision_busy");
+        assert_eq!(inspect_err.status, 409);
     }
 }

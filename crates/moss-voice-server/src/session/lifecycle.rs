@@ -436,27 +436,8 @@ impl<'a> Session<'a> {
             if *shutdown.borrow() {
                 return "内置语音服务已停止".into();
             }
-            let stalled_deferred = if let Some(device) = self.device_mcp.as_mut()
-                && device.prune_pending(Instant::now())
-            {
-                Some(std::mem::take(&mut device.deferred_requests))
-            } else {
-                None
-            };
-            if let Some(deferred) = stalled_deferred {
-                for req in deferred {
-                    if let crate::DeviceRequest::CapturePhoto { ticket } = req {
-                        self.shared.camera_preview.record_error(
-                            self.device_id,
-                            Some(&ticket),
-                            "设备端 MCP 握手或工具列表同步超时，请稍后再试".into(),
-                        );
-                    }
-                }
-                self.shared
-                    .state
-                    .set_device_tools(self.session_id, Vec::new());
-            }
+            self.prune_stalled_device_mcp();
+            let mcp_pending_deadline = self.device_mcp.as_ref().and_then(DeviceMcp::next_expiry);
             let deadline = match &self.phase {
                 Phase::Speaking { next, .. } => *next,
                 // 对话任务有自己的超时（识别 / 合成 30 秒，大模型 120 秒），等待期间不算空闲
@@ -548,6 +529,15 @@ impl<'a> Session<'a> {
                     }
                 }
                 _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs(socket).await,
+                _ = async {
+                    match mcp_pending_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.prune_stalled_device_mcp();
+                    Ok(())
+                },
                 _ = async {
                     match report_deadline {
                         Some(at) => tokio::time::sleep_until(at).await,

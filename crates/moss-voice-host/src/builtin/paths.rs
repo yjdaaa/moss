@@ -28,8 +28,9 @@ fn path_starts_with_norm(path: &std::path::Path, prefix: &std::path::Path) -> bo
     !pre.is_empty() && (p == pre || p.starts_with(&format!("{pre}\\")))
 }
 
-/// 排除 Cargo `target/`、macOS `.app/Contents/MacOS`、Unix `bin`/`sbin` 与系统临时目录后的主程序所在目录。
-pub(super) fn standalone_exe_dir_from(
+/// 回退候选用的主程序所在目录：只排除 Cargo `target/`、macOS `.app/Contents/MacOS` 与系统临时目录，
+/// 保留 `...\bin` 等目录，兼容旧版解压在 `bin\` 下且已有 `bin\models` 的存量模型。
+fn fallback_exe_dir_from(
     exe: &std::path::Path,
     temp_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
@@ -43,10 +44,25 @@ pub(super) fn standalone_exe_dir_from(
         || norm.ends_with("\\target\\debug")
         || norm.contains("\\target\\")
         || norm.contains(".app\\contents\\macos")
-        || norm.ends_with("\\bin")
-        || norm.ends_with("\\sbin")
         || path_starts_with_norm(&exe_dir, temp_dir)
     {
+        return None;
+    }
+    Some(exe_dir)
+}
+
+/// 排除 Cargo `target/`、macOS `.app/Contents/MacOS`、Unix `bin`/`sbin` 与系统临时目录后的主程序所在目录。
+pub(super) fn standalone_exe_dir_from(
+    exe: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let exe_dir = fallback_exe_dir_from(exe, temp_dir)?;
+    let norm = exe_dir
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    if norm.ends_with("\\bin") || norm.ends_with("\\sbin") {
         return None;
     }
     Some(exe_dir)
@@ -141,7 +157,7 @@ pub(super) fn resolve_model_roots_from(
     let mut fallbacks = Vec::new();
     let candidates = [
         Some(runtime_models),
-        exe.and_then(|e| standalone_exe_dir_from(e, temp_dir))
+        exe.and_then(|e| fallback_exe_dir_from(e, temp_dir))
             .map(|dir| dir.join("models")),
         parse_abs_env_path(local_appdata).map(|la| la.join("MOSS").join("models")),
     ];
@@ -489,6 +505,20 @@ mod tests {
         for non_portable in [&dev_exe, &app_exe, &bin_exe, &temp_exe] {
             assert!(writable_portable_dir_from(non_portable, &sys_temp).is_none());
         }
+
+        // 4. 旧版解压在 ...\bin\ 下且已有 ...\bin\models 时：新下载仍走 runtime_dir/models，但 bin\models 加入只读回退
+        let bin_install_dir = tmp.path().join("LegacyUnpacked").join("bin");
+        let bin_install_exe = bin_install_dir.join("moss-desktop.exe");
+        let bin_legacy_models = bin_install_dir.join("models");
+        std::fs::create_dir_all(&bin_legacy_models).unwrap();
+        std::fs::write(&bin_install_exe, b"exe").unwrap();
+        let clean_runtime = tmp.path().join("FreshRoaming").join("moss");
+        std::fs::create_dir_all(&clean_runtime).unwrap();
+
+        let (bin_primary, bin_fallbacks) =
+            resolve_model_roots_from(&clean_runtime, Some(&bin_install_exe), &sys_temp, None);
+        assert_eq!(bin_primary, clean_runtime.join("models"));
+        assert_eq!(bin_fallbacks, vec![bin_legacy_models]);
     }
 
     #[test]

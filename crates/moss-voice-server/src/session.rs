@@ -401,9 +401,10 @@ impl Drop for ActiveTurn {
 /// 设备自带 MCP（内置语音技术书 §5.3，NV4）：握手、分页取工具清单、转发工具调用。
 struct DeviceMcp {
     next_id: u64,
-    /// 等设备回包的请求（发出时刻、种类）。2026-11-05：有界并按 [`MCP_PENDING_TTL`] 过期，
+    /// 等设备回包的请求（发出时刻、种类）。2026-11-05：有界并按 `pending_ttl` 过期，
     /// 不回包的请求不再一直留到会话结束。
     pending: HashMap<u64, (Instant, McpPending)>,
+    pending_ttl: Duration,
     tools: Vec<Value>,
     /// 已请求的 tools/list 页数
     pages: usize,
@@ -438,7 +439,7 @@ enum McpPending {
 /// 设备工具清单最多取多少页（防止设备返回循环的游标）
 const MAX_TOOL_PAGES: usize = 20;
 /// 等设备 MCP 回包的最长时间：超时的请求从 `pending` 移除；工具调用的等待方随之收到“设备没有返回结果”。
-const MCP_PENDING_TTL: Duration = Duration::from_secs(60);
+pub(crate) const MCP_PENDING_TTL: Duration = Duration::from_secs(60);
 /// 同时等回包的设备 MCP 请求上限；超出时丢弃最早的一条。
 const MAX_MCP_PENDING: usize = 64;
 /// 交给模型的设备工具结果最长字符数
@@ -460,11 +461,17 @@ fn is_user_only_device_tool(name: &str) -> bool {
 }
 
 impl DeviceMcp {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_ttl(MCP_PENDING_TTL)
+    }
+
+    fn with_ttl(pending_ttl: Duration) -> Self {
         let (calls_tx, calls_rx) = unbounded_channel();
         Self {
             next_id: 1,
             pending: HashMap::new(),
+            pending_ttl,
             tools: Vec::new(),
             pages: 0,
             init_sent: false,
@@ -535,11 +542,12 @@ impl DeviceMcp {
     /// 移除超过 [`MCP_PENDING_TTL`] 仍未回包的请求，以及等待方已放弃（对话任务结束）的工具调用；
     /// 若在途 `Initialize` 或 `ToolsList` 超时被移除则返回 `true`，供会话层收口加载态并释放延迟请求。
     fn prune_pending(&mut self, now: Instant) -> bool {
+        let ttl = self.pending_ttl;
         let expired_ids: Vec<u64> = self
             .pending
             .iter()
             .filter_map(|(id, (at, pending))| {
-                let keep = now.saturating_duration_since(*at) < MCP_PENDING_TTL
+                let keep = now.saturating_duration_since(*at) < ttl
                     && !matches!(pending, McpPending::Call(reply) if reply.is_closed());
                 (!keep).then_some(*id)
             })
@@ -553,6 +561,11 @@ impl DeviceMcp {
             }
         }
         stalled
+    }
+
+    fn next_expiry(&self) -> Option<Instant> {
+        let ttl = self.pending_ttl;
+        self.pending.values().map(|(at, _)| *at + ttl).min()
     }
 
     fn model_tools(&self) -> Vec<Value> {

@@ -230,6 +230,8 @@ pub struct ServerConfig {
     /// 回声模式（尚未配置对话模型）下连接建立时是否同样立即执行设备端 MCP `initialize` 与 `tools/list`，
     /// 以便新装机未填模型密钥时桌面端也能读取 `self.assets.set_download_url` 与屏幕分辨率并推送唤醒词/全屏画风。
     pub eager_device_mcp: bool,
+    /// 等设备端 MCP 请求回包的最长时间（默认 60 秒；测试可设短值加速验证超时重试）。
+    pub mcp_pending_ttl: Duration,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -275,6 +277,7 @@ impl Default for ServerConfig {
             full_font_dir: None,
             debug_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             eager_device_mcp: false,
+            mcp_pending_ttl: session::MCP_PENDING_TTL,
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }

@@ -119,8 +119,10 @@ fn sort_lan_candidates(
     default_route: Option<Ipv4Addr>,
 ) -> Vec<Ipv4Addr> {
     candidates.sort_by_key(|(name, ip)| {
-        let route_rank = u8::from(default_route != Some(*ip));
-        (route_rank, interface_priority(name, *ip), ip.octets())
+        let priority = interface_priority(name, *ip);
+        // 只有可识别物理网卡（name_rank 为 0..=2）才享受默认出网口加分，避免未命中关键字的全隧道 VPN 抢排第一
+        let route_rank = u8::from(!(priority.0 <= 2 && default_route == Some(*ip)));
+        (route_rank, priority, ip.octets())
     });
     let mut result = Vec::with_capacity(candidates.len());
     for (_, ip) in candidates {
@@ -500,6 +502,15 @@ mod tests {
             Some(mac_usb_eth),
         );
         assert_eq!(sorted_route, vec![mac_usb_eth, wifi]);
+
+        // 全隧道 VPN（名字不在 VIRTUAL_KEYWORDS 里，如 NordLynx）接管默认路由时，不得压过物理无线/有线网卡
+        let vpn = Ipv4Addr::new(10, 5, 0, 2);
+        let wlan_ip = Ipv4Addr::new(192, 168, 1, 23);
+        let sorted_vpn = sort_lan_candidates(
+            vec![("NordLynx".into(), vpn), ("WLAN".into(), wlan_ip)],
+            Some(vpn),
+        );
+        assert_eq!(sorted_vpn, vec![wlan_ip, vpn]);
 
         // 同 IP 去重保持排序
         let deduped = sort_lan_candidates(

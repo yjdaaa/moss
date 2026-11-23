@@ -379,7 +379,7 @@ pub(crate) async fn serve_session(
             let init_font_bpp = text_font_cap.as_ref().map(|f| f.bpp);
             session.screen.text_font_cap = text_font_cap;
             if device_mcp {
-                session.device_mcp = Some(DeviceMcp::new());
+                session.device_mcp = Some(DeviceMcp::with_ttl(shared.config.mcp_pending_ttl));
                 session.vision_host = vision_host;
                 if session.conversation.is_some() {
                     session.vision_token = vision_token;

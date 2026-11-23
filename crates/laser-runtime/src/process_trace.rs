@@ -19,8 +19,21 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{Local, NaiveDate};
+use chrono::{DateTime, Local, NaiveDate};
 use serde_json::{Map, Value};
+
+/// 过程记录时间戳类型（调用方可在请求开始时采样，与记录本身的 `at` 格式完全一致）。
+pub type TraceTimestamp = DateTime<Local>;
+
+/// 采样当前本地时间，供请求入口等延迟写入的步骤记录开始时刻。
+pub fn now_timestamp() -> TraceTimestamp {
+    Local::now()
+}
+
+/// 将本地时间戳格式化为与 `timeline.jsonl` `at` 字段一致的毫秒级带时区字符串。
+pub fn format_timestamp(at: TraceTimestamp) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
+}
 
 /// `settings.json` 顶层开关键（默认关）。
 pub const SETTING_KEY: &str = "process_trace_enabled";
@@ -38,6 +51,8 @@ pub const TIMELINE_JSONL: &str = "timeline.jsonl";
 pub const TIMELINE_TXT: &str = "timeline.txt";
 /// 单个附件上限（超过的不保存，只在事件里注明）。
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// 后台队列中尚未落盘的附件总字节上限（防止队列积压撑高内存）。
+pub const MAX_INFLIGHT_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 const SETTING_CACHE: Duration = Duration::from_secs(2);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -51,19 +66,33 @@ pub struct TraceUsage {
     pub days: u64,
 }
 
+struct InflightGuard {
+    counter: Arc<AtomicU64>,
+    bytes: u64,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
 enum WriteOp {
     Record {
+        at: DateTime<Local>,
         domain: String,
         flow: String,
         kind: String,
         step: String,
         fields: Value,
+        dropped_before: u64,
     },
     SaveFile {
         day: String,
         folder: String,
         name: String,
         bytes: Vec<u8>,
+        _inflight: InflightGuard,
     },
     Sweep {
         today: NaiveDate,
@@ -76,6 +105,11 @@ enum WriteOp {
     Flush {
         ack: SyncSender<()>,
     },
+    #[cfg(test)]
+    PauseForTest {
+        ready: SyncSender<()>,
+        resume: mpsc::Receiver<()>,
+    },
 }
 
 struct Inner {
@@ -84,8 +118,11 @@ struct Inner {
     /// 后台单写线程通道（懒启动，关着时不建线程）；不反向持有 `Inner`，避免循环引用。
     writer: Mutex<Option<SyncSender<WriteOp>>>,
     over_cap: Arc<AtomicBool>,
+    dropped: Arc<AtomicU64>,
+    inflight_file_bytes: Arc<AtomicU64>,
     seq: AtomicU64,
     run_id: i64,
+    max_inflight_file_bytes: u64,
 }
 
 /// 完整过程记录器；克隆共享同一份状态。
@@ -104,16 +141,40 @@ impl std::fmt::Debug for ProcessTrace {
 
 impl ProcessTrace {
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
+        Self::new_with_inflight_cap(runtime_dir, MAX_INFLIGHT_FILE_BYTES)
+    }
+
+    fn new_with_inflight_cap(
+        runtime_dir: impl Into<PathBuf>,
+        max_inflight_file_bytes: u64,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 runtime_dir: runtime_dir.into(),
                 cached: Mutex::new(None),
                 writer: Mutex::new(None),
                 over_cap: Arc::new(AtomicBool::new(false)),
+                dropped: Arc::new(AtomicU64::new(0)),
+                inflight_file_bytes: Arc::new(AtomicU64::new(0)),
                 seq: AtomicU64::new(0),
                 run_id: Local::now().timestamp_millis(),
+                max_inflight_file_bytes,
             }),
         }
+    }
+
+    #[cfg(test)]
+    fn pause_writer_for_test(&self) -> SyncSender<()> {
+        let tx = self.writer_tx().expect("writer thread");
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        tx.send(WriteOp::PauseForTest {
+            ready: ready_tx,
+            resume: resume_rx,
+        })
+        .unwrap();
+        ready_rx.recv().unwrap();
+        resume_tx
     }
 
     /// 记录目录 `<运行目录>/logs/process-trace`。
@@ -148,9 +209,10 @@ impl ProcessTrace {
         let dir = self.dir();
         let run_id = self.inner.run_id;
         let over_cap = self.inner.over_cap.clone();
+        let dropped = self.inner.dropped.clone();
         std::thread::Builder::new()
             .name("moss-process-trace".into())
-            .spawn(move || writer_loop(rx, dir, run_id, over_cap))
+            .spawn(move || writer_loop(rx, dir, run_id, over_cap, dropped))
             .ok()?;
         *slot = Some(tx.clone());
         Some(tx)
@@ -180,29 +242,83 @@ impl ProcessTrace {
         if !self.enabled() {
             return;
         }
+        self.record_at(Local::now(), domain, flow, kind, step, fields);
+    }
+
+    fn record_at(
+        &self,
+        at: DateTime<Local>,
+        domain: &str,
+        flow: &str,
+        kind: &str,
+        step: &str,
+        fields: Value,
+    ) {
+        if !self.enabled() {
+            return;
+        }
         let Some(tx) = self.writer_tx() else {
+            self.inner.dropped.fetch_add(1, Ordering::AcqRel);
             return;
         };
+        let dropped_before = self.inner.dropped.swap(0, Ordering::AcqRel);
         // 非阻塞入队，防止慢盘或清理阻塞急停 0x18 或异步语音线程
-        let _ = tx.try_send(WriteOp::Record {
-            domain: domain.to_owned(),
-            flow: flow.to_owned(),
-            kind: kind.to_owned(),
-            step: step.to_owned(),
-            fields,
-        });
+        if tx
+            .try_send(WriteOp::Record {
+                at,
+                domain: domain.to_owned(),
+                flow: flow.to_owned(),
+                kind: kind.to_owned(),
+                step: step.to_owned(),
+                fields,
+                dropped_before,
+            })
+            .is_err()
+        {
+            self.inner
+                .dropped
+                .fetch_add(dropped_before.saturating_add(1), Ordering::AcqRel);
+        }
     }
 
     /// 保存一个附件（录音、合成语音、预览图等），返回相对 `logs/process-trace/` 的路径。
-    /// 开关关着、超过单文件上限、记录总量已满或写入队列满时返回 `None`（绝不阻塞调用方）。
+    /// 开关关着、超过单文件上限、记录总量已满、在途附件超出字节预算或写入队列满时返回 `None`（绝不阻塞调用方）。
     pub fn save_file(&self, domain: &str, stem: &str, ext: &str, bytes: &[u8]) -> Option<String> {
+        let file_bytes = bytes.len() as u64;
         if !self.enabled()
-            || bytes.len() as u64 > MAX_FILE_BYTES
+            || file_bytes > MAX_FILE_BYTES
             || self.inner.over_cap.load(Ordering::Relaxed)
         {
             return None;
         }
-        let tx = self.writer_tx()?;
+        let max_inflight = self.inner.max_inflight_file_bytes;
+        let mut cur = self.inner.inflight_file_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = cur
+                .checked_add(file_bytes)
+                .filter(|&next| next <= max_inflight)
+            else {
+                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            match self.inner.inflight_file_bytes.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+        let inflight = InflightGuard {
+            counter: self.inner.inflight_file_bytes.clone(),
+            bytes: file_bytes,
+        };
+        let Some(tx) = self.writer_tx() else {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         let now = Local::now();
         let day = now.format("%Y-%m-%d").to_string();
         let folder = format!("{}-files", safe_name(domain));
@@ -214,13 +330,19 @@ impl ProcessTrace {
             safe_name(ext)
         );
         let rel = format!("{day}/{folder}/{name}");
-        tx.try_send(WriteOp::SaveFile {
-            day,
-            folder,
-            name,
-            bytes: bytes.to_vec(),
-        })
-        .ok()?;
+        if tx
+            .try_send(WriteOp::SaveFile {
+                day,
+                folder,
+                name,
+                bytes: bytes.to_vec(),
+                _inflight: inflight,
+            })
+            .is_err()
+        {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         Some(rel)
     }
 
@@ -261,7 +383,11 @@ impl ProcessTrace {
                 Some(tx.clone())
             } else {
                 // 尚未启动后台写线程时持锁直接清理，避免并发首写插入
-                return clear_dir(&self.dir(), &self.inner.over_cap);
+                let res = clear_dir(&self.dir(), &self.inner.over_cap);
+                if res.is_ok() {
+                    self.inner.dropped.store(0, Ordering::Relaxed);
+                }
+                return res;
             }
         };
         if let Some(tx) = tx {
@@ -272,7 +398,11 @@ impl ProcessTrace {
                 return res;
             }
         }
-        clear_dir(&self.dir(), &self.inner.over_cap)
+        let res = clear_dir(&self.dir(), &self.inner.over_cap);
+        if res.is_ok() {
+            self.inner.dropped.store(0, Ordering::Relaxed);
+        }
+        res
     }
 
     /// 到期与超量清理（不看开关）：删掉早于保留期的日期目录，再从最旧的删起直到不超过总量上限。
@@ -308,8 +438,15 @@ impl ProcessTrace {
     }
 }
 
-fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap: Arc<AtomicBool>) {
+fn writer_loop(
+    rx: mpsc::Receiver<WriteOp>,
+    root: PathBuf,
+    run_id: i64,
+    over_cap: Arc<AtomicBool>,
+    dropped: Arc<AtomicU64>,
+) {
     let mut step_seq = 0u64;
+    let mut writer_dropped = 0u64;
     let mut last_sweep: Option<Instant> = None;
     let mut last_sweep_date: Option<NaiveDate> = None;
     let mut approx_bytes = 0u64;
@@ -331,11 +468,13 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
     while let Ok(op) = rx.recv() {
         match op {
             WriteOp::Record {
+                at,
                 domain,
                 flow,
                 kind,
                 step,
                 fields,
+                dropped_before,
             } => {
                 // 先检查到期/跨日清理，确保跨天后超限旧目录可被回收而不永久锁死
                 maybe_sweep(&mut last_sweep, &mut last_sweep_date, &mut approx_bytes);
@@ -343,23 +482,27 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
                 if over_cap.load(Ordering::Relaxed)
                     && approx_bytes >= MAX_TOTAL_BYTES.saturating_add(MAX_TIMELINE_OVERFLOW_BYTES)
                 {
+                    writer_dropped = writer_dropped
+                        .saturating_add(dropped_before)
+                        .saturating_add(1);
                     continue;
                 }
-                let now = Local::now();
+                let dropped_before =
+                    dropped_before.saturating_add(std::mem::take(&mut writer_dropped));
                 step_seq += 1;
                 let seq = step_seq;
                 let mut line = Map::new();
                 line.insert("seq".into(), Value::from(seq));
                 line.insert("run".into(), Value::from(run_id));
-                line.insert(
-                    "at".into(),
-                    Value::String(now.format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()),
-                );
-                line.insert("at_ms".into(), Value::from(now.timestamp_millis()));
+                line.insert("at".into(), Value::String(format_timestamp(at)));
+                line.insert("at_ms".into(), Value::from(at.timestamp_millis()));
                 line.insert("domain".into(), Value::String(domain));
                 line.insert("flow".into(), Value::String(flow.clone()));
                 line.insert("kind".into(), Value::String(kind));
                 line.insert("step".into(), Value::String(step.clone()));
+                if dropped_before > 0 {
+                    line.insert("dropped_before".into(), Value::from(dropped_before));
+                }
                 match fields {
                     Value::Object(map) => {
                         for (key, value) in map {
@@ -372,16 +515,23 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
                     }
                 }
                 let Ok(mut json) = serde_json::to_string(&Value::Object(line)) else {
+                    writer_dropped = writer_dropped.saturating_add(dropped_before);
                     continue;
                 };
                 json.push('\n');
+                let drop_note = if dropped_before > 0 {
+                    format!("（此前有 {dropped_before} 条记录因写入繁忙被丢弃）")
+                } else {
+                    String::new()
+                };
                 let readable = format!(
-                    "{} #{seq:06} [{}] {}\n",
-                    now.format("%H:%M:%S%.3f"),
+                    "{} #{seq:06} [{}] {}{drop_note}\n",
+                    at.format("%H:%M:%S%.3f"),
                     flow.replace(['\r', '\n'], " "),
                     step.replace(['\r', '\n'], " ")
                 );
-                let day_dir = root.join(now.format("%Y-%m-%d").to_string());
+                let day_dir = root.join(at.format("%Y-%m-%d").to_string());
+                let mut wrote_any = false;
                 if fs::create_dir_all(&day_dir).is_ok() {
                     for (name, text) in [(TIMELINE_JSONL, &json), (TIMELINE_TXT, &readable)] {
                         if let Ok(mut file) = OpenOptions::new()
@@ -390,9 +540,13 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
                             .open(day_dir.join(name))
                             && file.write_all(text.as_bytes()).is_ok()
                         {
+                            wrote_any = true;
                             approx_bytes = approx_bytes.saturating_add(text.len() as u64);
                         }
                     }
+                }
+                if !wrote_any && dropped_before > 0 {
+                    writer_dropped = writer_dropped.saturating_add(dropped_before);
                 }
                 maybe_sweep(&mut last_sweep, &mut last_sweep_date, &mut approx_bytes);
             }
@@ -401,6 +555,7 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
                 folder,
                 name,
                 bytes,
+                _inflight,
             } => {
                 maybe_sweep(&mut last_sweep, &mut last_sweep_date, &mut approx_bytes);
                 if over_cap.load(Ordering::Relaxed) {
@@ -428,13 +583,20 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>, root: PathBuf, run_id: i64, over_cap
                 let res = clear_dir(&root, &over_cap);
                 if res.is_ok() {
                     approx_bytes = 0;
+                    writer_dropped = 0;
                     last_sweep = None;
                     last_sweep_date = None;
+                    dropped.store(0, Ordering::Relaxed);
                 }
                 let _ = ack.send(res);
             }
             WriteOp::Flush { ack } => {
                 let _ = ack.send(());
+            }
+            #[cfg(test)]
+            WriteOp::PauseForTest { ready, resume } => {
+                let _ = ready.send(());
+                let _ = resume.recv();
             }
         }
     }
@@ -739,6 +901,138 @@ mod tests {
             readable.lines().count(),
             40,
             "flow 含换行时 timeline.txt 仍保持一行一步"
+        );
+    }
+
+    #[test]
+    fn record_uses_enqueue_timestamp_instead_of_delayed_flush_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        enable(tmp.path(), true);
+        let trace = ProcessTrace::new(tmp.path());
+        let resume = trace.pause_writer_for_test();
+
+        trace.record("laser", "激光·wf-9", "job_start", "开始加工", Value::Null);
+        let after_enqueue_ms = Local::now().timestamp_millis();
+        std::thread::sleep(Duration::from_millis(60));
+        let _ = resume.send(());
+        trace.flush();
+
+        let days = day_files(&trace);
+        let jsonl = fs::read_to_string(days[0].join(TIMELINE_JSONL)).unwrap();
+        let row: Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let recorded_ms = row["at_ms"].as_i64().unwrap();
+        assert!(
+            recorded_ms <= after_enqueue_ms,
+            "记录时间戳应取入队时刻而非延后的写盘时刻：recorded={recorded_ms}, after_enqueue={after_enqueue_ms}"
+        );
+
+        // 23:59:59 入队但跨日后才落盘的事件应写进其入队当天的目录
+        let yesterday = Local::now().date_naive() - chrono::Days::new(1);
+        let late_night = yesterday
+            .and_hms_milli_opt(23, 59, 59, 500)
+            .unwrap()
+            .and_local_timezone(Local)
+            .earliest()
+            .unwrap();
+        trace.record_at(
+            late_night,
+            "laser",
+            "激光·wf-10",
+            "job_end",
+            "跨日前完成",
+            Value::Null,
+        );
+        trace.flush();
+        let y_dir = trace.dir().join(yesterday.format("%Y-%m-%d").to_string());
+        let y_jsonl = fs::read_to_string(y_dir.join(TIMELINE_JSONL)).unwrap();
+        let y_row: Value = serde_json::from_str(y_jsonl.lines().next().unwrap()).unwrap();
+        assert_eq!(y_row["at_ms"], late_night.timestamp_millis());
+        assert_eq!(y_row["seq"], 2, "seq 仍由写线程按落盘顺序递增");
+    }
+
+    #[test]
+    fn queue_overflow_reports_dropped_before_in_next_record_and_readable_timeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        enable(tmp.path(), true);
+        let trace = ProcessTrace::new(tmp.path());
+        let resume = trace.pause_writer_for_test();
+
+        for i in 0..(WRITER_QUEUE_CAP + 3) {
+            trace.record(
+                "voice",
+                "语音·s1·第1轮",
+                "asr",
+                &format!("步骤-{i}"),
+                Value::Null,
+            );
+        }
+        let _ = resume.send(());
+        trace.flush();
+
+        trace.record(
+            "voice",
+            "语音·s1·第1轮",
+            "turn_end",
+            "本轮结束",
+            Value::Null,
+        );
+        trace.record("voice", "语音·s1·第1轮", "timing", "耗时汇总", Value::Null);
+        trace.flush();
+
+        let days = day_files(&trace);
+        let jsonl = fs::read_to_string(days[0].join(TIMELINE_JSONL)).unwrap();
+        let lines: Vec<Value> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let after_drop = lines
+            .iter()
+            .find(|v| v["kind"] == "turn_end")
+            .expect("应写入恢复后的第一条记录");
+        assert_eq!(after_drop["dropped_before"], 3, "{after_drop}");
+        let following = lines
+            .iter()
+            .find(|v| v["kind"] == "timing")
+            .expect("后续记录");
+        assert!(
+            following.get("dropped_before").is_none(),
+            "丢弃计数报告一次后即清零：{following}"
+        );
+
+        let readable = fs::read_to_string(days[0].join(TIMELINE_TXT)).unwrap();
+        assert!(
+            readable.contains("本轮结束（此前有 3 条记录因写入繁忙被丢弃）"),
+            "timeline.txt 应提示丢弃条数：\n{readable}"
+        );
+    }
+
+    #[test]
+    fn inflight_file_byte_budget_rejects_excess_attachments_and_counts_drops() {
+        assert_eq!(MAX_INFLIGHT_FILE_BYTES, 256 * 1024 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        enable(tmp.path(), true);
+        let trace = ProcessTrace::new_with_inflight_cap(tmp.path(), 1024);
+        let resume = trace.pause_writer_for_test();
+
+        let first = trace.save_file("voice", "a", "wav", &[1u8; 600]);
+        assert!(first.is_some(), "预算内的附件应入队成功");
+        let second = trace.save_file("voice", "b", "wav", &[2u8; 600]);
+        assert_eq!(second, None, "超出在途附件字节预算时应返回 None");
+
+        let _ = resume.send(());
+        trace.flush();
+
+        let third = trace.save_file("voice", "c", "wav", &[3u8; 600]);
+        assert!(third.is_some(), "后台写线程落盘释放预算后新附件应恢复可存");
+        trace.record("voice", "语音·s1", "user_audio", "保存录音", Value::Null);
+        trace.flush();
+
+        let days = day_files(&trace);
+        let jsonl = fs::read_to_string(days[0].join(TIMELINE_JSONL)).unwrap();
+        let row: Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row["dropped_before"], 1,
+            "超出在途字节预算丢弃的附件应计入 dropped_before：{row}"
         );
     }
 }

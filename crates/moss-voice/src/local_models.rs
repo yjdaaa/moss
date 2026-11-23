@@ -1298,8 +1298,10 @@ impl ModelManager {
         }
     }
 
-    /// 删除已安装的模型（下载中时先取消）。
+    /// 删除当前正在使用的模型副本（下载中时先取消）。
     ///
+    /// 按候选目录顺序只删除第一个已安装的副本（与 [`path_if_installed`](Self::path_if_installed) 一致），
+    /// 其余只读回退目录里的同名副本保持不动。
     /// 先把模型整体改名到 `.trash-*` 再删：文件被占用时改名失败、模型原样保留，不会留下删了一半的目录；
     /// 改名后删不掉的残留在下次启动时由 [`clean_leftovers`](Self::clean_leftovers) 清掉。
     /// 删掉同目录最后一档 OneJev 时，一并删除 MOSS 自动下载的推理引擎（2026-11-07）。
@@ -1311,8 +1313,7 @@ impl ModelManager {
             .into_iter()
             .map(Path::to_path_buf)
             .collect();
-        let mut touched = Vec::new();
-        {
+        let removed_root = {
             let _guard = self
                 .install_lock
                 .lock()
@@ -1320,26 +1321,29 @@ impl ModelManager {
             if let Ok(mut tasks) = self.tasks.lock() {
                 tasks.remove(spec.id);
             }
-            for root in &cands {
-                if fs::symlink_metadata(install_path(root, spec)).is_ok() {
-                    remove_installed(root, spec)?;
-                    touched.push(root.clone());
-                }
+            let target = cands
+                .iter()
+                .find(|root| installed(root, spec))
+                .or_else(|| {
+                    cands
+                        .iter()
+                        .find(|root| fs::symlink_metadata(install_path(root, spec)).is_ok())
+                })
+                .cloned();
+            if let Some(ref root) = target {
+                remove_installed(root, spec)?;
             }
+            target
+        };
+        let root = removed_root.unwrap_or_else(|| self.write_root_for(spec.id).to_path_buf());
+        if spec.kind == ModelKind::Tts {
+            crate::tts_voices::remove_model_previews(&root, spec.id);
         }
-        if touched.is_empty() {
-            touched.push(self.write_root_for(spec.id).to_path_buf());
+        if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(&root) {
+            crate::onejev::remove_managed_runtime(&root)?;
         }
-        for root in &touched {
-            if spec.kind == ModelKind::Tts {
-                crate::tts_voices::remove_model_previews(root, spec.id);
-            }
-            if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(root) {
-                crate::onejev::remove_managed_runtime(root)?;
-            }
-            if spec.engine.uses_speech_runtime() && !self.speech_still_needed(root) {
-                crate::speech_cpp::remove_managed_runtime(root)?;
-            }
+        if spec.engine.uses_speech_runtime() && !self.speech_still_needed(&root) {
+            crate::speech_cpp::remove_managed_runtime(&root)?;
         }
         Ok(())
     }
@@ -2607,6 +2611,39 @@ mod tests {
         );
         manager.delete("kokoro").unwrap();
         assert!(manager.path_if_installed("kokoro").is_none());
+    }
+
+    #[test]
+    fn delete_removes_only_active_copy_when_both_primary_and_fallback_have_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("appdata").join("models");
+        let fallback = dir.path().join("install").join("models");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&fallback).unwrap();
+
+        let kokoro = super::spec("kokoro").unwrap();
+        fake_install(&primary, kokoro);
+        fake_install(&fallback, kokoro);
+
+        let manager = ModelManager::new(primary.clone()).with_fallback_root(fallback.clone());
+        assert_eq!(
+            manager.path_if_installed("kokoro"),
+            Some(install_path(&primary, kokoro))
+        );
+
+        manager.delete("kokoro").unwrap();
+        assert!(
+            !install_path(&primary, kokoro).exists(),
+            "主目录当前使用中的模型副本应被删除"
+        );
+        assert!(
+            install_path(&fallback, kokoro).exists(),
+            "只读回退目录里的同名模型副本不得被一并删除"
+        );
+        assert_eq!(
+            manager.path_if_installed("kokoro"),
+            Some(install_path(&fallback, kokoro))
+        );
     }
 }
 

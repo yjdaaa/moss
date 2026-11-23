@@ -146,7 +146,7 @@
 | 4. 删除数据（仅勾选时） | 删除 `%APPDATA%\moss`（含 `moss.sqlite`、`settings.json`、`.env`、`models/`、`uploads/`、`previews/`、`generated_assets/`、`logs/`、迁移报告）；钩子只删除固定路径 `$APPDATA\moss`，`APPDATA` 为空时跳过，不拼接其他来源的路径，避免误删 |
 | 5. 不删除 | 用户自备的 `xiaozhi-server`、`mcp-endpoint-server` 目录；用户导出的材料库 JSON；`LASER_MATERIAL_PARAMS_FILE` 指向的外部文件；小智设备与激光机上的任何配置 |
 
-说明：Tauri 卸载器自带的“删除应用数据”选项针对的是以 `identifier`（`com.moss.laser`）命名的目录，**覆盖不到 MOSS 实际使用的 `%APPDATA%\moss`**，因此数据删除必须在 `installer/hooks.nsh` 的卸载钩子中显式实现（实施时以实际 Tauri 版本的卸载器行为为准再核对一次）。NSIS 安装版（程序目录含 `uninstall.exe`）与 macOS `.app` 的本地语音模型统一存放在运行数据目录 `models/`（Windows 为 `%APPDATA%\moss\models`），卸载保留数据再换目录重装不会丢失模型，勾选删除数据时一并清理；仅无 `uninstall.exe` 的独立免安装便携版默认存放在程序同目录 `models/`，且新旧目录（含历史 `<安装目录>\models` 与 `%LOCALAPPDATA%\MOSS\models`）自动双向只读回退识别。
+说明：Tauri 卸载器自带的“删除应用数据”选项针对的是以 `identifier`（`com.moss.laser`）命名的目录，**覆盖不到 MOSS 实际使用的 `%APPDATA%\moss`**，因此数据删除必须在 `installer/hooks.nsh` 的卸载钩子中显式实现（实施时以实际 Tauri 版本的卸载器行为为准再核对一次）。NSIS 安装版（程序目录含 `uninstall.exe`）与 macOS `.app` 的本地语音模型统一存放在运行数据目录 `models/`（Windows 为 `%APPDATA%\moss\models`），卸载保留数据再换目录重装不会丢失模型，勾选删除数据时一并清理；仅无 `uninstall.exe` 的独立免安装便携版默认存放在程序同目录 `models/`，且新旧目录（含历史 `<安装目录>\models`、旧版 `...\bin\models` 与 `%LOCALAPPDATA%\MOSS\models`）自动双向只读回退识别（删除模型时只删当前生效的那一份副本，不动回退目录里的副本）。
 
 ### 3.6 升级与本机快速同步
 

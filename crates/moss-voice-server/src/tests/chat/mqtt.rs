@@ -652,9 +652,60 @@ fn sync_tools_deduplicates_before_init_and_hello_without_mcp_clears_loading_stat
         .unwrap();
     let init = device.read_mcp();
     assert_eq!(init["method"], "initialize");
+    device.reply_mcp(
+        &init["id"],
+        serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": { "name": "board", "version": "2.5.0" }
+        }),
+    );
+    let initialized_notif = device.read_mcp();
+    assert_eq!(initialized_notif["method"], "notifications/initialized");
+    let mut saw_tools_list = None;
+    let mut saw_status_call = false;
+    for _ in 0..2 {
+        let msg = device.read_mcp();
+        assert_ne!(
+            msg["method"], "initialize",
+            "不得发出第二个 initialize：{msg}"
+        );
+        if msg["method"] == "tools/list" {
+            assert!(
+                saw_tools_list.replace(msg["id"].clone()).is_none(),
+                "不得发出第二个 tools/list"
+            );
+        } else if msg["method"] == "tools/call" && msg["params"]["name"] == "self.get_device_status"
+        {
+            saw_status_call = true;
+        } else {
+            panic!("收到意外的 MCP 请求：{msg}");
+        }
+    }
+    let list_id = saw_tools_list.expect("应发出恰好一个 tools/list");
+    assert!(saw_status_call, "RefreshInfo 不应被 SyncTools 挤出延迟队列");
+    device.reply_mcp(&list_id, serde_json::json!({ "tools": [] }));
+    wait_until("空工具列表应答后就绪", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.device_tools_ready)
+    });
 
-    // 若旧版固件不响应 initialize，而是在唤醒 hello 中上报 features.mcp = false，应立即收口加载态
-    device.publish(&serde_json::json!({
+    // 重连一台旧固件设备：若旧版固件不响应 initialize，而是在唤醒 hello 中上报 features.mcp = false，应立即收口加载态
+    drop(device);
+    let (mut legacy_device, accepted2) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted2, 0);
+    wait_until("重连后处于待同步状态", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.device_mcp_enabled && !s.device_tools_ready)
+    });
+    server.sync_device_tools();
+    let init2 = legacy_device.read_mcp();
+    assert_eq!(init2["method"], "initialize");
+    legacy_device.publish(&serde_json::json!({
         "type": "hello", "version": 3, "transport": "udp",
         "features": {"mcp": false},
         "audio_params": {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
@@ -665,4 +716,100 @@ fn sync_tools_deduplicates_before_init_and_hello_without_mcp_clears_loading_stat
             .iter()
             .any(|s| s.device_id == DEVICE && !s.device_mcp_enabled && s.device_tools_ready)
     });
+}
+
+#[test]
+fn device_mcp_timeout_keeps_tools_unready_and_retries_on_sync_tools() {
+    let registry = Arc::new(FakeRegistry::default());
+    registry
+        .devices
+        .lock()
+        .unwrap()
+        .insert(DEVICE.into(), (CLIENT.into(), DeviceStatus::Allowed));
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Echo,
+            conversation: None,
+            eager_device_mcp: true,
+            mcp_pending_ttl: Duration::from_millis(80),
+            job_poll_interval: Duration::from_millis(40),
+            mqtt: Some(MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry,
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("MQTT 已监听");
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+
+    // 初次握手发出 initialize，设备暂不应答使其超时
+    let first_init = device.read_mcp();
+    assert_eq!(first_init["method"], "initialize");
+    std::thread::sleep(Duration::from_millis(160));
+
+    let sessions = server.active_device_sessions();
+    let view = sessions
+        .iter()
+        .find(|s| s.device_id == DEVICE)
+        .expect("设备仍在线");
+    assert!(
+        !view.device_tools_ready,
+        "握手超时后不得把 device_tools_ready 标为 true 误报固件不支持"
+    );
+    assert_eq!(
+        server.camera_frame_view(DEVICE, None)["has_camera_tool"],
+        serde_json::Value::Null
+    );
+
+    // 再次触发 SyncTools 应重新发出 initialize（同一时刻最多一轮在途），设备应答后工具列表正常就绪
+    server.sync_device_tools();
+    server.sync_device_tools();
+    let retry_init = device.read_mcp();
+    assert_eq!(retry_init["method"], "initialize");
+    assert_ne!(retry_init["id"], first_init["id"]);
+    device.reply_mcp(
+        &retry_init["id"],
+        serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": { "name": "board", "version": "2.5.0" }
+        }),
+    );
+    let notif = device.read_mcp();
+    assert_eq!(notif["method"], "notifications/initialized");
+    let list_req = device.read_mcp();
+    assert_eq!(list_req["method"], "tools/list");
+    device.reply_mcp(
+        &list_req["id"],
+        serde_json::json!({
+            "tools": [
+                { "name": "self.assets.set_download_url", "description": "ota assets", "inputSchema": {"type": "object"} },
+                { "name": "self.camera.take_photo", "description": "camera", "inputSchema": {"type": "object"} }
+            ]
+        }),
+    );
+
+    wait_until("超时重试后设备工具清单同步就绪", || {
+        server.active_device_sessions().iter().any(|s| {
+            s.device_id == DEVICE
+                && s.device_tools_ready
+                && s.device_tools
+                    .iter()
+                    .any(|t| t == "self.assets.set_download_url")
+        })
+    });
+    assert_eq!(
+        server.camera_frame_view(DEVICE, None)["has_camera_tool"],
+        serde_json::json!(true)
+    );
 }

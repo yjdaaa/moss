@@ -219,6 +219,7 @@ impl ApiService {
         ctx: &laser_contracts::CallerContext,
         short_job_watch: Option<&std::sync::Arc<ShortJobWatch>>,
     ) -> Vec<u8> {
+        let started_at = laser_runtime::process_trace::now_timestamp();
         let began = std::time::Instant::now();
         let response = self.dispatch_authenticated_inner(method, path, body, ctx, short_job_watch);
         let route = path.split('?').next().unwrap_or(path);
@@ -228,6 +229,7 @@ impl ApiService {
             body,
             ctx,
             &response,
+            started_at,
             began.elapsed().as_millis() as u64,
         );
         response

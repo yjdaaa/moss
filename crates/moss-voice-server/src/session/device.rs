@@ -388,12 +388,37 @@ impl<'a> Session<'a> {
             .schedule_device_snapshot(self.device_id, crate::SNAPSHOT_LISTEN, snapshot);
     }
 
+    /// 清理超过 `pending_ttl` 仍未应答的设备端 MCP 请求。
+    /// `Initialize` / `ToolsList` 超时只重置在途状态并释放滞留抓拍请求，不把 `device_tools_ready` 标为完成，
+    /// 以便后续 `SyncTools` 重试而不会把暂时无响应误报为“固件不支持”。
+    pub(super) fn prune_stalled_device_mcp(&mut self) {
+        let stalled_deferred = if let Some(device) = self.device_mcp.as_mut()
+            && device.prune_pending(Instant::now())
+        {
+            Some(std::mem::take(&mut device.deferred_requests))
+        } else {
+            None
+        };
+        if let Some(deferred) = stalled_deferred {
+            for req in deferred {
+                if let crate::DeviceRequest::CapturePhoto { ticket } = req {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "设备端 MCP 握手或工具列表同步超时，请稍后再试".into(),
+                    );
+                }
+            }
+        }
+    }
+
     /// 桌面端请求（2026-11-02）：刷新设备信息 / 重启设备。设备自带 MCP 未就绪时只记事件。
     pub(super) async fn on_device_request(
         &mut self,
         socket: &mut crate::link::Link,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
+        self.prune_stalled_device_mcp();
         if let crate::DeviceRequest::ShowScene { scene, style } = request {
             return self.show_scene_request(socket, scene, style).await;
         }

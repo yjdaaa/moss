@@ -350,6 +350,7 @@ impl ApiService {
         body: &[u8],
         ctx: &laser_contracts::CallerContext,
         response: &[u8],
+        started_at: laser_runtime::process_trace::TraceTimestamp,
         elapsed_ms: u64,
     ) {
         let Some(trace) = self.trace_on() else {
@@ -412,6 +413,7 @@ impl ApiService {
                 "method": method,
                 "route": route,
                 "origin": ctx.label(),
+                "started_at": laser_runtime::process_trace::format_timestamp(started_at),
                 "request": request,
                 "status": status,
                 "response": reply,
@@ -754,6 +756,7 @@ mod tests {
             br#"{"lan_static_pin":654321}"#,
             &laser_contracts::CallerContext::Loopback,
             &bad_reply,
+            laser_runtime::process_trace::now_timestamp(),
             12,
         );
         service.trace_generation_failed(
@@ -782,5 +785,76 @@ mod tests {
                 "{name} 不得泄露凭据：\n{content}"
             );
         }
+    }
+
+    #[test]
+    fn api_call_records_started_at_timestamp_when_request_begins() {
+        let tmp = tempfile::tempdir().unwrap();
+        laser_runtime::settings_store::update(
+            &laser_runtime::settings_store::settings_path(tmp.path()),
+            |map| {
+                map.insert(
+                    laser_runtime::process_trace::SETTING_KEY.into(),
+                    serde_json::json!(true),
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        let gen_dir = tmp.path().join("gen");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        let service = ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 8766,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+        .with_runtime_path(tmp.path().to_path_buf())
+        .with_generated_root(gen_dir.clone())
+        .with_preview_roots(vec![gen_dir]);
+
+        let (status, _) = service.dispatch_json(
+            "POST",
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "AB",
+                "font_path": concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf"),
+                "material": "椴木",
+                "thickness_mm": 3,
+                "font_size_mm": 10,
+                "text_fill": "fill",
+            }),
+            laser_contracts::CallerContext::Desktop,
+        );
+        assert_eq!(status, 200);
+        service.process_trace().unwrap().flush();
+
+        let day = std::fs::read_dir(tmp.path().join(laser_runtime::process_trace::TRACE_DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL))
+            .unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let gen_row = rows.iter().find(|r| r["kind"] == "generate").unwrap();
+        let api_row = rows.iter().find(|r| r["kind"] == "api_call").unwrap();
+        let started_at = api_row["started_at"]
+            .as_str()
+            .expect("api_call 应带请求开始时刻 started_at");
+        let gen_at = gen_row["at"].as_str().unwrap();
+        let end_at = api_row["at"].as_str().unwrap();
+        assert!(
+            started_at.contains('T') && started_at <= gen_at && gen_at <= end_at,
+            "started_at({started_at}) 应不晚于 generate.at({gen_at}) 与 api_call.at({end_at})"
+        );
     }
 }
