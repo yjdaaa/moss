@@ -42,4 +42,6 @@
 - [本机 Agent Docker 隔离](integration/agent-sandbox-docker-security.md)：NV13 隔离测试证据与模型 API 代理方案。
 - [声纹登记](integration/speaker-enrollment.md)：NV16 本地声纹模型、协议与验收边界。
 - [可信下载协议候选](integration/authenticated-download-contract.md)：NV17 小智设备固件下载签名协议（尚无生产路由）。
+- [修订记录与日志归档](integration/revisions/)：两本技术书的修订记录（用户确认的设计决定按日期追加在这里）与 2026-10 实施进度日志。
+- [已发布版本更新记录](changelog/)：`CHANGELOG.md` 只保留未发布改动，已发布版本由 `node scripts/archive-changelog.mjs` 归档到这里。
 - [提示词归档](integration/xiaozhi-prompts/README.md)：控制台提示词与知识库文本的唯一维护处；`latest.md` 为当前版本，`history/` 为日期快照。

@@ -12,6 +12,10 @@ import { fileURLToPath } from "node:url";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const PROMPT_DOC_PATH = "docs/integration/xiaozhi-prompts/latest.md";
+export const CHANGELOG_PATH = "CHANGELOG.md";
+// CHANGELOG 每项“一两句”：按 Unicode 码点计，600 约为三四句中文，留出文件名与符号的余量
+export const CHANGELOG_ITEM_LIMIT = 600;
+const CHANGELOG_LABELS = ["现象", "根因与修复", "验证", "关联"];
 export const CONSOLE_PROMPT_LIMIT = 2000;
 export const KB_PROMPT_LIMIT = 200;
 
@@ -220,6 +224,73 @@ export function checkPromptBudget(text, relPath = PROMPT_DOC_PATH) {
   return violations;
 }
 
+/** 取 CHANGELOG [Unreleased] 段内的条目：[{ heading, line, items: [{ label, length, line }] }]。 */
+export function parseUnreleasedEntries(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^## \[Unreleased\]/.test(l));
+  if (start < 0) return [];
+  const entries = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^## /.test(line)) break;
+    if (line.startsWith("### ")) {
+      entries.push({ heading: line, line: i + 1, items: [] });
+    } else if (entries.length > 0 && line.startsWith("- **")) {
+      const label = line.slice(4).split("**")[0];
+      entries.at(-1).items.push({ label, length: [...line].length, line: i + 1 });
+    }
+  }
+  return entries;
+}
+
+/** 校验 CHANGELOG 新条目的四项格式与每项长度；knownHeadings 为已提交版本里的标题，这些旧条目不再检查。 */
+export function checkChangelogEntries(text, { knownHeadings = new Set(), relPath = CHANGELOG_PATH } = {}) {
+  const violations = [];
+  // 发版提交里刚改名的版本段允许留一个；更早的应归档，避免根文件无限变长
+  const released = text.split(/\r?\n/).filter((l) => /^## \[\d+\.\d+\.\d+/.test(l));
+  if (released.length > 1) {
+    violations.push({
+      file: relPath,
+      reason: `CHANGELOG.md 里有 ${released.length} 个已发布版本段，运行 node scripts/archive-changelog.mjs 归档到 docs/changelog/`,
+    });
+  }
+  for (const entry of parseUnreleasedEntries(text)) {
+    if (knownHeadings.has(entry.heading)) continue;
+    const labels = entry.items.map((it) => it.label);
+    if (labels.join("|") !== CHANGELOG_LABELS.join("|")) {
+      violations.push({
+        file: relPath,
+        line: entry.line,
+        reason: `CHANGELOG 条目正文须依次为 ${CHANGELOG_LABELS.map((l) => `**${l}**`).join("、")} 四项，当前为 ${labels.join("、") || "空"}`,
+      });
+    }
+    for (const it of entry.items) {
+      if (it.length > CHANGELOG_ITEM_LIMIT) {
+        violations.push({
+          file: relPath,
+          line: it.line,
+          reason: `CHANGELOG “${it.label}”一项 ${it.length} 字符，超过 ${CHANGELOG_ITEM_LIMIT}；只写结论，细节放文档或提交说明`,
+        });
+      }
+    }
+  }
+  return violations;
+}
+
+function committedChangelogHeadings(root) {
+  try {
+    const head = execFileSync("git", ["show", `HEAD:${CHANGELOG_PATH}`], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return new Set(head.split(/\r?\n/).filter((l) => l.startsWith("### ")));
+  } catch {
+    return new Set();
+  }
+}
+
 /** 校验提交标题格式：<类型>: <中文结论>。合规返回 null，否则返回原因字符串。 */
 export function checkCommitMessage(rawText) {
   const lines = rawText
@@ -294,6 +365,9 @@ export function checkRepoHygiene({ root = REPO_ROOT, files = null, stagedOnly = 
     if (relPath === PROMPT_DOC_PATH) {
       violations.push(...checkPromptBudget(text, relPath));
       checkedPrompt = true;
+    }
+    if (relPath === CHANGELOG_PATH) {
+      violations.push(...checkChangelogEntries(text, { knownHeadings: committedChangelogHeadings(root) }));
     }
   }
 

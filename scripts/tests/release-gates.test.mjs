@@ -618,11 +618,15 @@ test("release.yml 的发布说明生成器对超长 CHANGELOG 自动按行截断
   assert.ok(pyMatch, "应能提取 release.yml 的发布说明生成 Python 脚本");
   const pyCode = pyMatch[1];
 
-  const runNotes = (changelogText, { ver = "0.3.12", tag = "v0.3.12", sidecarReady = "false", repo = "yjdaaa/moss" } = {}) => {
+  const runNotes = (changelogText, { ver = "0.3.12", tag = "v0.3.12", sidecarReady = "false", repo = "yjdaaa/moss", archived = null } = {}) => {
     const work = mkdtempSync(join(tmpdir(), "moss-notes-"));
     try {
       mkdirSync(join(work, "dist"), { recursive: true });
       writeFileSync(join(work, "CHANGELOG.md"), changelogText);
+      if (archived) {
+        mkdirSync(join(work, "docs", "changelog"), { recursive: true });
+        writeFileSync(join(work, "docs", "changelog", "0.3.md"), archived);
+      }
       writeFileSync(join(work, "dist", "SHA256SUMS.txt"), "deadbeef  MOSS_0.3.12_x64-lite-setup.exe\n");
       return spawnSync("python3", ["-", ver, tag, sidecarReady, repo], {
         cwd: work,
@@ -649,6 +653,14 @@ test("release.yml 的发布说明生成器对超长 CHANGELOG 自动按行截断
   assert.equal(shortRes.status, 0, shortRes.stderr);
   assert.match(shortRes.stdout, /- 精简改动/);
   assert.doesNotMatch(shortRes.stdout, /完整更新记录见/);
+
+  // 版本段已被 archive-changelog.mjs 移到 docs/changelog/<主.次>.md 时从归档读取
+  const archivedRes = runNotes(`# Changelog\n\n## [Unreleased]\n\n- 未发布\n`, {
+    archived: `# 归档\n\n## [0.3.12] - 2026-11-19\n\n- 归档里的改动\n\n## [0.3.11] - 2026-11-07\n\n- 更旧\n`,
+  });
+  assert.equal(archivedRes.status, 0, archivedRes.stderr);
+  assert.match(archivedRes.stdout, /- 归档里的改动/);
+  assert.doesNotMatch(archivedRes.stdout, /更旧|未发布/);
 
   // 已存在 Release 重跑覆盖上传资产时，必须同步更新正文 release-notes.md（含最新 SHA-256 校验表）
   assert.match(

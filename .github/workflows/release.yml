@@ -543,6 +543,12 @@ jobs:
           changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
           pattern = re.compile(rf"^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=^## \[|\Z)", re.M | re.S)
           m = pattern.search(changelog)
+          if not m:
+              # 已发布版本可能已被 scripts/archive-changelog.mjs 移到 docs/changelog/<主.次>.md
+              series = ".".join(ver.split(".")[:2])
+              archived = pathlib.Path("docs/changelog") / f"{series}.md"
+              if archived.exists():
+                  m = pattern.search(archived.read_text(encoding="utf-8"))
           body = m.group(1).strip() if m else ""
           if not body:
               prev = subprocess.run(

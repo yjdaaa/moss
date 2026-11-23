@@ -32,7 +32,7 @@
 | `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端 |
 | `tests/golden/` | 黄金样本；`mcp_tools.json` 被 `laser-mcp` 编译期嵌入 |
 | `tests/fixtures/` | 字体（编译期嵌入）与示例图片 |
-| `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成等开发工具 |
+| `scripts/` | 根目录放日常入口：统一验证 `verify.mjs`、CHANGELOG 归档 `archive-changelog.mjs`、crate 分层 `check-crate-layers.mjs`、仓库规范 `check-repo-hygiene.mjs`、启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版；另有图标与架构图生成、合成音频夹具生成等开发工具 |
 | `scripts/voice-helper/` | 带语音 helper 的专用安装包构建、包内容核查、原生依赖许可审计与源码收集（NV18） |
 | `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
 | `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |
@@ -77,4 +77,4 @@
 - [ ] 工具增删已同步 `ToolCatalog`、分发分支、`tool_risk`、`mcp_tools.json` 与 `jev.rs` 粗筛归组（不按单工具平铺 `noul`）。
 - [ ] 外部效果使用 mock / `FakeGrbl`，未连接真实设备。
 - [ ] 会经过 `laser-runtime` 家居令牌封存的测试只在 `[dev-dependencies]` 开启 `test-memory-secret-store`（macOS 上改用进程内主密钥，不碰登录钥匙串）。
-- [ ] `node scripts/verify.mjs`（涵盖分层、规范、格式化、clippy、eslint 与受影响测试）及必要桌面快更/E2E 已通过，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。
+- [ ] 收尾级 `node scripts/verify.mjs --finish`（分层、规范、格式化、clippy、eslint、受影响测试，按改动自动追加浏览器测试 / E2E 与桌面快更）已通过，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。

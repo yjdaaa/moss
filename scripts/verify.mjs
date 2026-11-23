@@ -3,6 +3,8 @@
 // 用法：
 //   node scripts/verify.mjs              # 按当前改动范围执行对应检查与测试
 //   node scripts/verify.mjs --quick      # 只跑静态门禁、格式检查与 clippy / eslint
+//   node scripts/verify.mjs --affected   # 迭代级：Rust 只对改动所在 crate 跑 clippy / test，前端跳过生产构建
+//   node scripts/verify.mjs --finish     # 收尾级：默认检查 + 按改动路径自动追加浏览器测试 / E2E，通过后快更桌面程序
 //   node scripts/verify.mjs --full       # 全量检查根工作区、moss-voice-local 与前端
 //   node scripts/verify.mjs --browser    # 追加全部前端 Playwright 浏览器交互测试
 //   node scripts/verify.mjs --e2e        # 追加前端 build、浏览器交互测试、release moss-host 与 E2E 测试
@@ -11,7 +13,7 @@
 //   node scripts/verify.mjs --dry-run    # 只打印执行计划
 //   node scripts/verify.mjs --force      # 忽略并发构建进程检查
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,9 +35,71 @@ function isHelperPath(p) {
   return HELPER_TRIGGER_PREFIXES.some((prefix) => p.startsWith(prefix));
 }
 
+// 收尾级自动追加规则：命中即必跑，模型仍可手动再加 --browser / --e2e。
+const BROWSER_TRIGGER_RE = /^(frontend\/src\/|frontend\/index\.html$|frontend\/tests\/[^/]+\.browser\.mjs$|scripts\/test-frontend-browser\.mjs$)/;
+// 发送链路、设备层、HTTP 宿主与前端调后端 / 急停 / 发送相关模块（对应 safety.md §2 高风险类别）
+const E2E_TRIGGER_RE = /^(crates\/laser-[^/]+\/src\/|apps\/moss-host\/src\/|frontend\/src\/api\/|frontend\/tests\/e2e\/|scripts\/test_e2e\.mjs$|frontend\/src\/[^/]*(estop|deviceConnection|drawConnection|engraveRoute|repeatSend|approval|jobProgress|registration|safeAction)[^/]*$)/i;
+const DESKTOP_RUNTIME_RE = /^(crates\/[^/]+\/(src|build\.rs|Cargo\.toml)|apps\/desktop\/src-tauri\/(src|build\.rs|Cargo\.toml|tauri\.conf\.json|Info\.plist|capabilities)|apps\/moss-host\/src\/|apps\/moss-voice-local\/src\/|frontend\/(src\/|index\.html$|package\.json$|vite\.config)|Cargo\.(toml|lock)$)/;
+
+/** 收尾级：按改动路径判断要追加的浏览器测试 / E2E 与快更参数（纯函数）。 */
+export function planFinish(changedFiles) {
+  const files = changedFiles.map(normalizeRelPath);
+  return {
+    browser: files.some((p) => BROWSER_TRIGGER_RE.test(p)),
+    e2e: files.some((p) => E2E_TRIGGER_RE.test(p)),
+    quickUpdate: files.some((p) => DESKTOP_RUNTIME_RE.test(p)),
+    withVoiceHelper: files.some(isHelperPath),
+    withHost: files.some((p) => p.startsWith("apps/moss-host/") || p.startsWith("crates/laser-")),
+  };
+}
+
+/** 快更命令：macOS 用 .sh，Windows 用 .ps1，其他平台不支持时返回 null。 */
+export function quickUpdateStep(finish, platform = process.platform) {
+  if (!finish.quickUpdate) return null;
+  if (platform === "darwin") {
+    const args = ["scripts/quick-update-desktop.sh"];
+    if (finish.withVoiceHelper) args.push("--with-voice-helper");
+    if (finish.withHost) args.push("--with-host");
+    return { id: "quick-update", label: "快更本机正式版桌面程序", cmd: "bash", args, cwd: ".", locksBuild: true };
+  }
+  if (platform === "win32") {
+    const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/quick-update-desktop.ps1"];
+    if (finish.withVoiceHelper) args.push("-WithVoiceHelper");
+    if (finish.withHost) args.push("-WithHost");
+    return { id: "quick-update", label: "快更本机正式版桌面程序", cmd: "powershell.exe", args, cwd: ".", locksBuild: true };
+  }
+  return null;
+}
+
+/** 读取根工作区成员目录与包名，返回 [{ dir, name }]（按目录长度降序，便于最长前缀匹配）。 */
+export function loadWorkspaceCrates(root = REPO_ROOT, readFile = (p) => readFileSync(p, "utf8")) {
+  const manifest = readFile(join(root, "Cargo.toml"));
+  const block = manifest.match(/^members\s*=\s*\[([\s\S]*?)\]/m);
+  if (!block) return [];
+  const dirs = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => normalizeRelPath(m[1]).replace(/\/$/, ""));
+  const crates = [];
+  for (const dir of dirs) {
+    const member = readFile(join(root, dir, "Cargo.toml"));
+    const name = member.match(/^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m);
+    if (name) crates.push({ dir, name: name[1] });
+  }
+  return crates.sort((a, b) => b.dir.length - a.dir.length);
+}
+
+/** 把改动路径映射到所属根工作区 crate；有任一根工作区 Rust 改动无法归属（如根 Cargo.toml）时返回 null 表示需全量。 */
+export function affectedCrates(files, crates) {
+  const names = new Set();
+  for (const p of files.filter(isRootRustPath)) {
+    const hit = crates.find((c) => p.startsWith(`${c.dir}/`));
+    if (!hit) return null;
+    names.add(hit.name);
+  }
+  return [...names].sort();
+}
+
 /** 解析命令行参数。 */
 export function parseArgs(argv) {
-  const known = new Set(["--quick", "--full", "--browser", "--e2e", "--fmt-write", "--install-hooks", "--dry-run", "--force", "--help", "-h"]);
+  const known = new Set(["--quick", "--affected", "--finish", "--no-update", "--full", "--browser", "--e2e", "--fmt-write", "--install-hooks", "--dry-run", "--force", "--help", "-h"]);
   for (const arg of argv) {
     if (!known.has(arg)) {
       throw new Error(`未知参数: ${arg}`);
@@ -43,6 +107,9 @@ export function parseArgs(argv) {
   }
   return {
     quick: argv.includes("--quick"),
+    affected: argv.includes("--affected"),
+    finish: argv.includes("--finish"),
+    noUpdate: argv.includes("--no-update"),
     full: argv.includes("--full"),
     browser: argv.includes("--browser"),
     e2e: argv.includes("--e2e"),
@@ -56,7 +123,7 @@ export function parseArgs(argv) {
 
 /** 按改动路径列表与运行选项生成验证步骤计划（纯函数）。 */
 export function planVerification(changedFiles, options = {}) {
-  const { quick = false, full = false, browser = false, e2e = false, fmtWrite = false } = options;
+  const { quick = false, affected = false, full = false, browser = false, e2e = false, fmtWrite = false, crates = [] } = options;
   const files = [...new Set(changedFiles.map(normalizeRelPath).filter(Boolean))];
   const steps = [
     { id: "check-crate-layers", label: "crate 分层与清单检查", cmd: process.execPath, args: ["scripts/check-crate-layers.mjs"], cwd: ".", locksBuild: false },
@@ -70,6 +137,10 @@ export function planVerification(changedFiles, options = {}) {
   const touchHelper = full || files.some(isHelperPath);
   const touchFrontend = full || e2e || files.some((p) => p.startsWith("frontend/"));
   const fallbackQuickRoot = !full && files.length === 0;
+  // --affected：只对改动所在 crate 跑 clippy / test；无法归属时退回全量工作区
+  const scopedCrates = affected && !full ? affectedCrates(files, crates) : null;
+  const cargoScope = scopedCrates && scopedCrates.length > 0 ? scopedCrates.flatMap((name) => ["-p", name]) : ["--workspace"];
+  const scopeLabel = cargoScope[0] === "--workspace" ? "根工作区" : `改动 crate（${scopedCrates.join("、")}）`;
 
   if (fmtWrite) {
     const rsFiles = files.filter((p) => p.endsWith(".rs") && !p.startsWith("apps/desktop/src-tauri/gen/"));
@@ -84,9 +155,9 @@ export function planVerification(changedFiles, options = {}) {
     } else {
       steps.push({ id: "root-fmt", label: "根工作区 rustfmt 检查", cmd: "cargo", args: ["fmt", "--all", "--", "--check"], cwd: ".", locksBuild: false });
     }
-    steps.push({ id: "root-clippy", label: "根工作区 clippy 检查", cmd: "cargo", args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], cwd: ".", locksBuild: true });
+    steps.push({ id: "root-clippy", label: `${scopeLabel} clippy 检查`, cmd: "cargo", args: ["clippy", ...cargoScope, "--all-targets", "--", "-D", "warnings"], cwd: ".", locksBuild: true });
     if (!quick && touchRootRust) {
-      steps.push({ id: "root-test", label: "根工作区 Rust 测试", cmd: "cargo", args: ["test", "--workspace"], cwd: ".", locksBuild: true });
+      steps.push({ id: "root-test", label: `${scopeLabel} Rust 测试`, cmd: "cargo", args: ["test", ...cargoScope], cwd: ".", locksBuild: true });
     }
   }
 
@@ -108,7 +179,9 @@ export function planVerification(changedFiles, options = {}) {
     steps.push({ id: "frontend-lint", label: "前端 ESLint 检查", cmd: npmCmd, args: ["--prefix", "frontend", "run", "lint"], cwd: ".", locksBuild: false });
     if (!quick && touchFrontend) {
       steps.push({ id: "frontend-test", label: "前端单元测试", cmd: npmCmd, args: ["--prefix", "frontend", "test"], cwd: ".", locksBuild: false });
-      steps.push({ id: "frontend-build", label: "前端生产构建", cmd: npmCmd, args: ["--prefix", "frontend", "run", "build"], cwd: ".", locksBuild: true });
+      if (!affected || full) {
+        steps.push({ id: "frontend-build", label: "前端生产构建", cmd: npmCmd, args: ["--prefix", "frontend", "run", "build"], cwd: ".", locksBuild: true });
+      }
     }
   }
 
@@ -255,7 +328,7 @@ function main() {
   }
 
   if (opts.help) {
-    console.log("用法：node scripts/verify.mjs [--quick|--full|--browser|--e2e|--fmt-write|--install-hooks|--dry-run|--force]");
+    console.log("用法：node scripts/verify.mjs [--quick|--affected|--finish [--no-update]|--full|--browser|--e2e|--fmt-write|--install-hooks|--dry-run|--force]");
     return;
   }
   if (opts.installHooks) {
@@ -263,11 +336,27 @@ function main() {
     return;
   }
 
-  const changedFiles = opts.full ? [] : readChangedFiles(REPO_ROOT);
-  const steps = planVerification(changedFiles, opts).map((s) => resolveStep(s, REPO_ROOT)).filter(Boolean);
+  const gitChanged = readChangedFiles(REPO_ROOT);
+  const changedFiles = opts.full ? [] : gitChanged;
+  const crates = opts.affected && !opts.full ? loadWorkspaceCrates(REPO_ROOT) : [];
+  let planOpts = { ...opts, crates };
+  let finish = null;
+  if (opts.finish) {
+    finish = planFinish(gitChanged);
+    planOpts = { ...planOpts, affected: false, quick: false, fmtWrite: true, browser: opts.browser || finish.browser, e2e: opts.e2e || finish.e2e };
+  }
+  const steps = planVerification(changedFiles, planOpts).map((s) => resolveStep(s, REPO_ROOT)).filter(Boolean);
+  if (finish && !opts.noUpdate) {
+    const update = quickUpdateStep(finish);
+    if (update) steps.push(update);
+    else if (finish.quickUpdate) console.log("当前平台没有快更脚本，跳过快更");
+  }
 
   if (opts.dryRun) {
     console.log(`改动文件数：${changedFiles.length}`);
+    if (finish) {
+      console.log(`收尾级自动追加：浏览器测试=${planOpts.browser ? "是" : "否"}，E2E=${planOpts.e2e ? "是" : "否"}，快更=${finish.quickUpdate && !opts.noUpdate ? "是" : "否"}`);
+    }
     for (const step of steps) {
       console.log(`- [${step.cwd}] ${step.cmd} ${step.args.join(" ")}  # ${step.label}`);
     }
@@ -287,6 +376,7 @@ function main() {
     }
   }
 
+  const passed = [];
   for (const step of steps) {
     const spec = buildSpawnSpec(step.cmd, step.args);
     console.log(`\n==> ${step.label}`);
@@ -300,11 +390,14 @@ function main() {
       return;
     }
     if (res.status !== 0) {
+      console.error(`\n✗ 失败：${step.label}${passed.length ? `（此前已通过：${passed.join("、")}）` : ""}`);
       process.exitCode = res.status ?? 1;
       return;
     }
+    passed.push(step.label);
   }
-  console.log("\n验证全部通过");
+  // 摘要可直接用于 CHANGELOG “验证”一项
+  console.log(`\n验证全部通过：${passed.join("、")}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

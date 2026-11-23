@@ -1,66 +1,53 @@
 # Project Instructions
 
-仓库级唯一规则源，供 Antigravity (agy)、Codex、Claude Code、Cursor 等工具共用。增删改 MCP 工具、Tauri 命令、数据库迁移或前端弹窗前必读
-[`docs/developer/standards.md`](docs/developer/standards.md)；改动命中 `laser-device`、`laser-api`（发送门禁/审批/CORS）、`laser-host`、`moss-voice-server`、`moss-mcp-client` 或 `apps/desktop/src-tauri` 前必读
-[`docs/developer/safety.md`](docs/developer/safety.md)。其他文档只引用本文件，不复制规则。
+仓库级唯一规则源，供 Antigravity (agy)、Codex、Claude Code、Cursor 等工具共用，其他文档只引用本文件。这里只写从代码里看不出来的约定；能由脚本保证的规则交给脚本（`scripts/verify.mjs`、`scripts/check-*.mjs`、`.githooks/`、CI），不在这里重复。
+
+- 增删改 MCP 工具、Tauri 命令、数据库迁移或前端弹窗前，先读 [`standards.md`](docs/developer/standards.md)。
+- 改 `laser-device`、`laser-api`（发送门禁 / 审批 / CORS）、`laser-host`、`moss-voice-server`、`moss-mcp-client` 或 `apps/desktop/src-tauri` 前，先读 [`safety.md`](docs/developer/safety.md)。这些代码直接驱动激光机，出错会伤人或损坏设备。
 
 ## 项目
 
-MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版），面向 FluidNC/GRBL 与 ESP32 下位机。
-
-- 激光主链路：`crates/laser-*`（contracts、core、device、runtime、tools、mcp、api、host）。
-- 内置语音：`crates/moss-voice*`（含 `moss-voice-host`、`moss-voice-server`、`moss-voice-providers`、`moss-voice-local-proto`）、`moss-xiaozhi-proto`、`moss-xiaozhi-display`、`moss-process`、`moss-mcp-client`、`moss-usb-provision`（USB 配网）；跨域扩展 `moss-agent`（本机 Agent）、`moss-home`（家居）由桌面壳组装；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
-- 宿主：`apps/desktop`（Tauri 2 桌面/Android）、`apps/moss-host`（HTTP/WS）；前端 `frontend/`（React + Vite）。
-- 文档入口 [`docs/README.md`](docs/README.md)；实施进度只看 [实施 TODO](docs/integration/moss-fusion-implementation-todo.md)。结构以代码为准。
+MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust），面向 FluidNC/GRBL 与 ESP32 下位机。激光主链路在 `crates/laser-*`，内置语音在 `crates/moss-voice*` 等，宿主是 `apps/desktop`（Tauri 2）与 `apps/moss-host`，前端在 `frontend/`（React + Vite）。`apps/moss-voice-local` 是 GPL 独立工作区，根工作区命令不覆盖它。文档入口 [`docs/README.md`](docs/README.md)，实施进度看 [实施 TODO](docs/integration/moss-fusion-implementation-todo.md)，结构以代码为准。
 
 ## 工作方式
 
-- 先读待改文件、直接依赖、相关测试和对应文档；不扫描无关目录。
-- 复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
-- 未经明确授权，不提交、推送、重置或覆盖他人改动。
-- **多会话并行避让**：开工与写共享文件前查 `git status --short` 及运行中的 `cargo` / `node` 进程。存在其他会话未提交改动时：① 避开对方正在改的业务文件，范围重叠先向用户确认；② 写 `CHANGELOG.md`、`frontend/src/styles.css` 及 `frontend/src/styles/` 分片、`docs/developer/*.md` 等共享汇合文件前，当场重读目标邻近行并只做最小局部编辑，不用整文件覆写；③ 并行期间只对本会话改过的 `.rs` 跑 `rustfmt`（不跑 `cargo fmt --all` 以免改乱对方未完代码）；④ 跑 `npm run build`、`npm run test:e2e`（占 `frontend/dist` 与 9666 端口）、`quick-update-desktop.ps1` 或缓存清理前，先确认无其他会话的构建/测试进程占锁，有则等待锁空后再执行。
-- 提交信息格式 `<类型>: <中文结论>`，类型取 `feat`、`fix`、`refactor`、`docs`、`test`、`build`、`chore`；破坏性变更在类型后加 `!`。
-- 不写入真实设备地址、凭据、令牌、串口号或本机绝对路径；文档用 `<device-ip>`、`<token>`、`<path>` 占位。
+- 先读待改文件、直接依赖、相关测试和对应文档，不扫描无关目录；复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
+- 不推送、重置或覆盖他人改动。一组改动通过收尾级验证后可以本地提交（2026-11-23 用户授权），只 `git add` 本会话改过的文件；推送仍需用户明确同意。提交信息格式由 `commit-msg` 钩子检查（`<类型>: <中文结论>`）。
+- 多会话并行：开工前看 `git status --short`。别的会话有未提交改动时，避开对方正在改的业务文件，范围重叠先问用户；写 `CHANGELOG.md`、`frontend/src/styles/` 分片、`docs/developer/*.md` 等共享文件前当场重读邻近行、只做局部编辑；只对本会话改过的 `.rs` 跑 `rustfmt`（`--fmt-write` 已是这样）。`verify.mjs` 会自动检测并发的构建 / 测试进程并拒绝开跑，等对方结束再试，不要用 `--force` 硬闯。
+- 文档与代码里不写真实设备地址、凭据、令牌、串口号或本机绝对路径，用 `<device-ip>`、`<token>`、`<path>` 占位（`check-repo-hygiene.mjs` 会扫）。
 
 ## 安全边界
 
-- 运动、出光、发送或执行 G-code 文件、急停实测、删除、格式化、重启、固件刷写/OTA、上传、网络重配置、部署服务、填写真实密钥：每次先获得用户明确同意。
-- 生成和预览不得向硬件发送数据；前端只能调用后端路由。
-- 测试中的硬件、网络、GUI、子进程、文件系统副作用一律用 mock、`FakeGrbl` 或临时目录。
-- 急停 `0x18` 走实时通道，不得排在 G-code 队列之后；刀路门禁对物理 G-code 文件重新计算 SHA-256。
-- 不为全绿放宽断言、伪造预期数据或添加虚假桩代码。
-- 语音对话任务可能在用户话还没说完时就抢跑（2026-11-13 n86）：新增任何由大模型触发、有副作用的执行路径，都必须排在 `TurnGate` 闸门（`Turn::wait_release`）之后；只有整句停止这类必须立即执行的快路径可以不过闸门。
-- 外部控制与隐私能力（家居、本机 Agent 执行、声纹、固件与唤醒词推送、联网插件）默认关闭，须由用户在经来源校验的桌面主窗口显式开启；家居动作与严格模式下的本机 Agent 每次运行均须在桌面审批卡逐次批准，声纹仅作候选身份提示绝不授权任何动作，固件与唤醒词按台确认推送（各模块门禁与“副屏全屏画风”自动推送唯一例外见 [`safety.md`](docs/developer/safety.md) §4）。mock 结果不能充当实机验收。
+这些需要判断，脚本替代不了，所以写在这里：
+
+- 运动、出光、发送或执行 G-code 文件、急停实测、删除、格式化、重启、固件刷写 / OTA、上传、网络重配置、部署服务、填写真实密钥：每次先获得用户同意，上一次的同意不延续到下一次。
+- 生成和预览不向硬件发送数据；前端只调用后端路由。
+- 测试里的硬件、网络、GUI、子进程、文件系统副作用用 mock、`FakeGrbl` 或临时目录。
+- 急停 `0x18` 走实时通道，不排在 G-code 队列之后；刀路门禁对物理 G-code 文件重新计算 SHA-256。
+- 不为全绿放宽断言、伪造预期数据或添加虚假桩代码。mock 结果不能充当实机验收。
+- 语音对话可能在用户话没说完时就抢跑（2026-11-13 n86），所以新增由大模型触发、有副作用的执行路径要排在 `TurnGate`（`Turn::wait_release`）之后；只有整句停止这类必须立即执行的快路径例外。
+- 外部控制与隐私能力（家居、本机 Agent 执行、声纹、固件与唤醒词推送、联网插件）默认关闭，由用户在经来源校验的桌面主窗口开启；家居动作与严格模式下的本机 Agent 每次运行都要桌面审批卡逐次批准；声纹只作候选身份提示，不授权任何动作；固件与唤醒词按台确认推送。各模块门禁与唯一的自动推送例外见 [`safety.md`](docs/developer/safety.md) §4。
 
 ## 开发约束
 
 - 激光 MCP 工具在 `laser_tools::ToolCatalog` 登记，由 `laser_mcp::dispatch_tool_call_with` 分发；启动编排在 `laser-host`。
-- crate 依赖只向下、激光域与语音域互不依赖（分层表见 [`architecture.md`](docs/developer/architecture.md) §2），由 `scripts/check-crate-layers.mjs` 把关；新增 crate 先在该脚本登记并保持 `[lints] workspace = true`；脚本与文档按用途命名，任务代号只写正文。
-- `.ps1` ASCII、禁整文件 `#![allow(clippy::...)]`、本机路径/凭据扫描、`.env` 防误提、提示词字数上限与提交信息格式由 `scripts/check-repo-hygiene.mjs` 检查；可通过 `node scripts/verify.mjs --install-hooks` 启用 `.githooks/` 在本地提交前拦截。
-- 改变契约、默认值、工具注册、提示词或用户可见行为时，同一次改动内同步实现、测试和 `docs/`。
-- 用户在对话中确认的设计决定，写入对应技术书的修订记录并注明日期，后续以此为准。
+- crate 依赖只向下，激光域与语音域互不依赖（[`architecture.md`](docs/developer/architecture.md) §2）；新增 crate 先在 `scripts/check-crate-layers.mjs` 登记。脚本与文档按用途命名，任务代号只写正文。
+- 改契约、默认值、工具注册、提示词或用户可见行为时，同一次改动里同步实现、测试和 `docs/`。
+- 用户在对话中确认的设计决定，写入对应技术书的修订记录（[`docs/integration/revisions/`](docs/integration/revisions/)）并注明日期，后续以此为准。
 
 ## 验证
 
-日常本地验证统一运行 `node scripts/verify.mjs`（默认按当前改动自动覆盖受影响工作区、并发进程检查与 `apps/moss-voice-local`；常用选项：`--quick` 仅静态/格式/lint、`--full` 全量工作区与前端、`--browser` 追加 Playwright 浏览器交互测试、`--e2e` 追加浏览器交互测试与 E2E、`--fmt-write` 仅格式化改动 `.rs`）。各命令也可从仓库根目录独立执行：
+统一入口 `node scripts/verify.mjs`，按 git 改动自动决定跑什么。分三级，重的检查只在收尾跑一次（2026-11-23 用户确认）：
 
-| 时机 | 必须执行 |
-| --- | --- |
-| 每次代码改动（修复或新增功能） | `node scripts/verify.mjs --fmt-write`（仅格式化改动 `.rs`，无并行会话时可跑 `cargo fmt --all`），`cargo clippy --workspace --all-targets -- -D warnings` 零警告，改前端加 `cd frontend; npm run lint` 零 error；受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（macOS 执行 `bash scripts/quick-update-desktop.sh`；改 `apps/moss-voice-local` 加 `-WithVoiceHelper` / `--with-voice-helper`，改 `moss-host` 加 `-WithHost` / `--with-host`），把最新正式版桌面程序原地同步到本机安装目录**（跳过安装包重压，MOSS 运行时不强杀，用户关掉重开即生效） |
-| 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（API 链路 + 工作台界面，使用回环 GRBL 模拟器；`moss-host` 编译时内嵌 `frontend/dist`，须先 `npm run build` 再构建 release `moss-host`；界面用例在 Windows 上用本机 Edge，其他系统用 Playwright 自带 Chromium，可用 `PLAYWRIGHT_CHANNEL` 指定） |
-| 改前端交互、浏览器测试或其调度脚本 | `cd frontend; npm run test:browser`（Playwright 浏览器交互测试） |
-| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper` / `--with-voice-helper`；根工作区测试不覆盖它 |
-| 阶段收尾、交付 | 以上全部，加全平台 release 安装包构建（见下） |
+| 级别 | 时机 | 命令 |
+| --- | --- | --- |
+| 迭代 | 任务中途每改完一处 | `node scripts/verify.mjs --affected --fmt-write`：静态门禁、格式化改动 `.rs`、改动 crate 的 clippy 与单测、前端 lint 与单测。要更快用 `--quick --fmt-write`（不跑测试） |
+| 收尾 | 一组改动全部完成、报告完成前，跑一次 | `node scripts/verify.mjs --finish`：全工作区 clippy / test、前端 lint / test / build，按改动路径自动追加浏览器测试与 E2E，通过后自动快更本机桌面程序 |
+| 交付 | 阶段收尾、发版 | `node scripts/verify.mjs --full --e2e`，本机构建 macOS 安装包；Windows / Android 安装包以 CI（`ci.yml` / `release.yml`）结果为准。命令与产物见 [`packaging-install.md`](docs/developer/packaging-install.md) §0 |
 
-全平台 release 安装包构建：
-
-- 前端：`cd frontend; npm run build`
-- Windows：`cd apps/desktop/src-tauri; cargo tauri build`，产物 `target/release/moss-desktop.exe` 与 `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe`
-- macOS：`bash scripts/build-macos-installer.sh --without-voice-sidecar`，产物 `target/<triple>/release/bundle/dmg/MOSS_<版本>_<arch>.dmg`
-- Android：`cd apps/desktop/src-tauri; cargo tauri android build --target aarch64 --apk`，产物在 `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/`
-
-`--debug` 构建只用于临时调试（桌面热重载 `scripts/dev-desktop.ps1`），不算验证证据。日常本机快速同步正式版主程序用 `scripts/quick-update-desktop.ps1`（`cargo tauri build --no-bundle`，跳过 NSIS 压包；阶段收尾仍须跑完整三端构建），细则与带语音 helper 的专用安装包流程见
-[`packaging-install.md`](docs/developer/packaging-install.md)。
+- `--finish` 的自动规则在 `planFinish`（`scripts/verify.mjs`）：改 `frontend/src` 追加浏览器测试；改 `crates/laser-*`、`apps/moss-host`、前端 API / 急停 / 发送相关模块追加 E2E；改运行时代码才快更（文档、测试、脚本不快更），按路径自动带 `--with-host` / `--with-voice-helper`。你判断还需要更多时，手动加 `--browser` / `--e2e`。
+- 收尾某项失败、修好后，只重跑失败项（直接跑对应命令）和 `--affected`；修复本身改到了新的触发路径时再跑 `--finish`。
+- 只想验证不想更新本机程序时加 `--no-update`。`--debug` 构建只用于临时调试，不算验证证据。
 
 ## 结果状态
 
@@ -70,25 +57,24 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 | `partial` | 部分检查通过；有构建失败、环境阻塞或未执行项（写明原因） |
 | `unverified` | 软件检查通过，但未连接硬件、未实机出光、未用真实账号或设备 |
 
-不得用旧产物充当本次结果。构建成功不等于实机通过；安装、发布、设备操作另需授权。
+不用旧产物充当本次结果。构建成功不等于实机通过；安装、发布、设备操作另需授权。
 
 ## 变更记录
 
-每个代码修复或功能变更在 `CHANGELOG.md` 的 `[Unreleased]` 下加一条（文档-only、测试-only 不需要）。标题直接写结论，正文四项，各一两句：
+代码修复或功能变更在 `CHANGELOG.md` 的 `[Unreleased]` 顶部加一条（文档-only、测试-only 不需要）。标题直接写结论，正文四项、各一两句；格式与长度由 `check-repo-hygiene.mjs` 检查：
 
 - **现象**：触发条件与影响。
 - **根因与修复**：原因、关键改动；行为变更另写默认值、契约、安全门禁、跨端影响，破坏性变更显式标注。
-- **验证**：测试名或数量、未验证项。
+- **验证**：检查项与测试数量、关键测试名、未验证项（可直接用 `verify.mjs` 结尾打印的摘要）。
 - **关联**：主要文件与符号。
 
-交付构建的时间、大小、SHA-256 写入 [`docs/developer/build-receipts.md`](docs/developer/build-receipts.md)，不写进 CHANGELOG。
+已发布版本的记录归档在 [`docs/changelog/`](docs/changelog/)。交付构建的时间、大小、SHA-256 写入 [`build-receipts.md`](docs/developer/build-receipts.md)。
 
 ## 完成标准
 
-- 代码修复或功能变更：CHANGELOG 已更新、对应验证已通过、**正式版桌面主程序已通过 `scripts/quick-update-desktop.ps1`（macOS 用 `scripts/quick-update-desktop.sh`）同步到最新代码**、文档已同步，才能报告完成；阶段收尾还要求三端 release 构建成功。
+- 代码修复或功能变更：CHANGELOG 已更新、文档已同步、`--finish` 已通过（含自动快更），才能报告完成；阶段收尾还要求交付级验证通过。
 - 报告实际运行的检查、跳过项及原因、未验证风险。
 
-## 构建缓存清理
+## 构建缓存
 
-- **3 天自动清理历史编译缓存（必须）**：每次构建／验证收尾或日常维护时，必须执行 `cargo sweep --time 3` 或运行 `powershell -File scripts/clean-build-cache.ps1`（macOS / Linux 运行 `bash scripts/clean-build-cache.sh`，均可加 `-WhatIf` / `--dry-run` 预览），自动清理超过 3 天未使用的历史编译缓存。`Cargo.toml` 的 `[profile.dev]` 保持 `debug = "line-tables-only"` 以精简 `.pdb` 体积。
-- `scripts/clean-build-cache.ps1` 会一并清理超过 3 天的编译产物、`incremental`、`target/tmp`、`codex-*`、子目录误生成的 `target/`，以及 `deps` 里本仓库 crate 的旧哈希产物；保留近 3 天活跃的第三方依赖、交付产物、`node_modules`、源码和 `.runtime/`。
+快更脚本结尾自动执行 `cargo sweep --time 3`。磁盘紧张时运行 `bash scripts/clean-build-cache.sh`（Windows `scripts/clean-build-cache.ps1`，可先加 `--dry-run` / `-WhatIf` 预览），它还会清理 `incremental`、`target/tmp` 与本仓库 crate 的旧哈希产物。`Cargo.toml` 的 `[profile.dev] debug = "line-tables-only"` 是为了控制调试符号体积，不要改回。

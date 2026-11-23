@@ -2,6 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CHANGELOG_ITEM_LIMIT,
+  checkChangelogEntries,
   checkCommitMessage,
   checkPromptBudget,
   checkPs1Ascii,
@@ -117,4 +119,37 @@ test("校验提交信息格式", () => {
   assert.match(checkCommitMessage(""), /不能为空/);
   assert.match(checkCommitMessage("update docs"), /<类型>: <中文结论>/);
   assert.match(checkCommitMessage("feat: add new feature"), /中文结论/);
+});
+
+const changelog = (entries) => `# Changelog\n\n## [Unreleased]\n\n${entries}\n## [0.1.0] - 2026-01-01\n\n### 旧版本条目\n\n- **现象**：${"长".repeat(CHANGELOG_ITEM_LIMIT + 50)}\n`;
+const entry = (title, items) => `### ${title}\n\n${items.map(([label, body]) => `- **${label}**：${body}`).join("\n")}\n\n`;
+const FOUR = [["现象", "a"], ["根因与修复", "b"], ["验证", "c"], ["关联", "d"]];
+
+test("CHANGELOG 新条目须依次为现象、根因与修复、验证、关联四项", () => {
+  assert.deepEqual(checkChangelogEntries(changelog(entry("合规", FOUR))), []);
+  const missing = checkChangelogEntries(changelog(entry("缺项", FOUR.slice(0, 3))));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].reason, /四项/);
+  const reordered = checkChangelogEntries(changelog(entry("乱序", [FOUR[1], FOUR[0], FOUR[2], FOUR[3]])));
+  assert.equal(reordered.length, 1);
+});
+
+test("CHANGELOG 新条目每项超过长度上限时报出行号，已发布段与已提交条目不检查", () => {
+  const long = [["现象", "长".repeat(CHANGELOG_ITEM_LIMIT)], ...FOUR.slice(1)];
+  const text = changelog(entry("超长", long));
+  const violations = checkChangelogEntries(text);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].reason, /现象/);
+  assert.equal(text.split("\n")[violations[0].line - 1].startsWith("- **现象**"), true);
+  // 已提交（HEAD 里已有同名标题）的旧条目不再追溯
+  assert.deepEqual(checkChangelogEntries(text, { knownHeadings: new Set(["### 超长"]) }), []);
+});
+
+test("CHANGELOG 根文件留有多个已发布版本段时提示运行归档脚本", () => {
+  const one = changelog(entry("合规", FOUR));
+  assert.deepEqual(checkChangelogEntries(one), []);
+  const two = `${one}\n## [0.0.9] - 2025-12-01\n\n### 更旧\n`;
+  const violations = checkChangelogEntries(two);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].reason, /archive-changelog\.mjs/);
 });

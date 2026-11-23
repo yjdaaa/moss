@@ -1,7 +1,7 @@
 // verify.mjs 计划生成与并发构建进程识别测试。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSpawnSpec, detectActiveBuildProcesses, planVerification, resolveStep } from "../verify.mjs";
+import { affectedCrates, buildSpawnSpec, detectActiveBuildProcesses, loadWorkspaceCrates, planFinish, planVerification, quickUpdateStep, resolveStep } from "../verify.mjs";
 
 test("仅改动前端时只跑静态门禁与前端检查测试构建", () => {
   const ids = planVerification(["frontend/src/pages/HomePage.jsx"]).map((s) => s.id);
@@ -109,4 +109,93 @@ test("已删除 .rs 文件在 resolveStep 中不向 rustfmt 传空列表，fmt-w
   const checkStep = resolveStep(steps.find((s) => s.id === "root-fmt"), "/repo", () => false);
   assert.equal(checkStep.cmd, "cargo");
   assert.deepEqual(checkStep.args, ["fmt", "--all", "--", "--check"]);
+});
+
+const CRATES = [
+  { dir: "apps/desktop/src-tauri", name: "moss-desktop" },
+  { dir: "crates/laser-core", name: "laser-core" },
+  { dir: "crates/laser-api", name: "laser-api" },
+];
+
+test("--affected 只对改动所在 crate 跑 clippy 与 test，前端跳过生产构建", () => {
+  const steps = planVerification(
+    ["crates/laser-core/src/lib.rs", "crates/laser-api/Cargo.toml", "crates/laser-core/src/cut/mod.rs", "frontend/src/main.jsx"],
+    { affected: true, crates: CRATES },
+  );
+  const byId = Object.fromEntries(steps.map((s) => [s.id, s]));
+  assert.deepEqual(byId["root-clippy"].args, ["clippy", "-p", "laser-api", "-p", "laser-core", "--all-targets", "--", "-D", "warnings"]);
+  assert.deepEqual(byId["root-test"].args, ["test", "-p", "laser-api", "-p", "laser-core"]);
+  assert.ok(byId["frontend-lint"]);
+  assert.ok(byId["frontend-test"]);
+  assert.ok(!byId["frontend-build"]);
+});
+
+test("--affected 遇到无法归属 crate 的根工作区改动时退回全量工作区", () => {
+  const steps = planVerification(["Cargo.lock", "crates/laser-core/src/lib.rs"], { affected: true, crates: CRATES });
+  assert.deepEqual(steps.find((s) => s.id === "root-test").args, ["test", "--workspace"]);
+  assert.deepEqual(affectedCrates(["Cargo.toml"], CRATES), null);
+  assert.deepEqual(affectedCrates(["frontend/src/main.jsx"], CRATES), []);
+});
+
+test("--affected 与 --full 或 --e2e 同用时不削减全量检查与 E2E 所需构建", () => {
+  const fullSteps = planVerification([], { affected: true, full: true, crates: CRATES });
+  assert.deepEqual(fullSteps.find((s) => s.id === "root-test").args, ["test", "--workspace"]);
+  assert.ok(fullSteps.some((s) => s.id === "frontend-build"));
+
+  const e2eIds = planVerification(["frontend/src/main.jsx"], { affected: true, e2e: true, crates: CRATES }).map((s) => s.id);
+  assert.ok(e2eIds.includes("frontend-build"));
+  assert.ok(e2eIds.includes("e2e"));
+});
+
+test("loadWorkspaceCrates 读取成员目录与 [package] 包名并按目录长度降序", () => {
+  const files = {
+    "/repo/Cargo.toml": '[workspace]\nmembers = [\n    "crates/laser-core",\n    "apps/desktop/src-tauri",\n]\n',
+    "/repo/crates/laser-core/Cargo.toml": '[package]\nname = "laser-core"\n\n[[bench]]\nname = "raster_2000"\n',
+    "/repo/apps/desktop/src-tauri/Cargo.toml": '[package]\nname = "moss-desktop"\n\n[lib]\nname = "moss_desktop_lib"\n',
+  };
+  const crates = loadWorkspaceCrates("/repo", (p) => files[p.replace(/\\/g, "/")]);
+  assert.deepEqual(crates, [
+    { dir: "apps/desktop/src-tauri", name: "moss-desktop" },
+    { dir: "crates/laser-core", name: "laser-core" },
+  ]);
+});
+
+test("真实根工作区每个成员都能解析出包名", () => {
+  const crates = loadWorkspaceCrates();
+  assert.ok(crates.length >= 20);
+  assert.ok(crates.some((c) => c.dir === "apps/desktop/src-tauri" && c.name === "moss-desktop"));
+  assert.ok(crates.every((c) => /^[a-z0-9_-]+$/.test(c.name)));
+});
+
+test("--finish 按改动路径决定浏览器测试、E2E 与快更", () => {
+  assert.deepEqual(planFinish(["docs/user/quick-start.md", "CHANGELOG.md"]), {
+    browser: false, e2e: false, quickUpdate: false, withVoiceHelper: false, withHost: false,
+  });
+  assert.deepEqual(planFinish(["frontend/src/styles/06-shell.css"]), {
+    browser: true, e2e: false, quickUpdate: true, withVoiceHelper: false, withHost: false,
+  });
+  // 前端发送 / 急停相关模块与后端发送链路必跑 E2E
+  assert.equal(planFinish(["frontend/src/globalEstop.js"]).e2e, true);
+  assert.equal(planFinish(["frontend/src/deviceConnection.js"]).e2e, true);
+  assert.equal(planFinish(["frontend/src/api/client.js"]).e2e, true);
+  const laser = planFinish(["crates/laser-device/src/worker.rs"]);
+  assert.equal(laser.e2e, true);
+  assert.equal(laser.withHost, true);
+  assert.equal(laser.browser, false);
+  // 只改测试不快更
+  assert.equal(planFinish(["frontend/tests/workbenchParams.test.mjs", "crates/laser-core/tests/gcode.rs"]).quickUpdate, false);
+  const helper = planFinish(["apps/moss-voice-local/src/main.rs"]);
+  assert.equal(helper.withVoiceHelper, true);
+  assert.equal(helper.quickUpdate, true);
+  assert.equal(planFinish(["crates/moss-voice-server/src/lib.rs"]).e2e, false);
+});
+
+test("快更命令按平台与参数生成，无需快更或不支持的平台返回 null", () => {
+  const finish = { quickUpdate: true, withVoiceHelper: true, withHost: true };
+  assert.deepEqual(quickUpdateStep(finish, "darwin").args, ["scripts/quick-update-desktop.sh", "--with-voice-helper", "--with-host"]);
+  const win = quickUpdateStep(finish, "win32");
+  assert.equal(win.cmd, "powershell.exe");
+  assert.deepEqual(win.args.slice(-3), ["scripts/quick-update-desktop.ps1", "-WithVoiceHelper", "-WithHost"]);
+  assert.equal(quickUpdateStep(finish, "linux"), null);
+  assert.equal(quickUpdateStep({ ...finish, quickUpdate: false }, "darwin"), null);
 });
