@@ -75,9 +75,11 @@ function ProcessTracePanel() {
     }
   };
 
+  const traceSummary = !status ? "读取中…" : status.enabled ? "已开启 · 保留 7 天" : "已关闭";
+
   return (
     <div className="ob-fold settings-spacer" id="settings-process-trace-section">
-      <FoldHeader variant="section" id="settings-process-trace" icon={History} title="完整过程记录" defaultOpen={false} />
+      <FoldHeader variant="section" id="settings-process-trace" icon={History} title="完整过程记录" summary={traceSummary} defaultOpen={false} />
       <div className="settings-box-4">
         打开后按先后把每一步写成一条时间线：语音对话（含你的录音、设备拍照看图的照片和 MOSS 合成的语音）、发给大模型的完整内容与原始回复、工具调用，以及激光生成、确认发送、急停、加工进度与结果等操作，每一步都写明在干什么，方便事后核对。默认关闭，不打开时 MOSS 的行为不变。
       </div>

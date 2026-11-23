@@ -505,3 +505,534 @@ button.conn-pill:hover {
 /* 2026-11-18 画板工具栏“清空画布 / 撤销清空”：警示色，一眼能找到（.btn-ghost 的配色带 !important，这里同样要 !important） */
 .btn-ghost.draw-clear-btn { color: #fca5a5 !important; border-color: rgba(248, 113, 113, 0.55) !important; background: rgba(248, 113, 113, 0.12) !important; }
 .btn-ghost.draw-clear-btn:hover:not(:disabled) { color: #fee2e2 !important; border-color: rgba(248, 113, 113, 0.85) !important; background: rgba(248, 113, 113, 0.22) !important; }
+
+/* ============================================================
+   2026-11-23（r58）易用性改版：主按钮常驻可见、统一连接面板、向导收起与细节整理
+   ============================================================ */
+
+/* 1. 统一设备连接模态框（层级 126：高于 AI 预览窗 125 以便就地配连接，低于严格模式审批卡 128 与确认框 150） */
+.device-conn-backdrop { z-index: 126; }
+.device-conn-modal { width: min(500px, calc(100vw - 32px)); }
+.ai-preview-target-dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.ai-preview-missing-conn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.ai-preview-conn-btn {
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  white-space: nowrap;
+}
+.device-conn-body { display: flex; flex-direction: column; gap: 14px; }
+.device-conn-lead { margin: 0; font-size: 12px; line-height: 1.5; color: var(--ob-ink-2); }
+.device-conn-net-grid { display: grid; grid-template-columns: minmax(0, 1.85fr) minmax(96px, 0.85fr); gap: 10px; }
+.device-conn-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.device-conn-inline > select { width: 100%; min-width: 0; }
+.device-conn-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  border: 1px solid var(--ob-line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ob-ink-2);
+}
+.device-conn-status.is-ok { color: var(--ob-green); background: var(--ob-green-bg); border-color: rgba(52, 211, 153, 0.3); }
+.device-conn-status.is-warn { color: var(--ob-amber); background: var(--ob-amber-bg); border-color: var(--ob-amber-bd); }
+.device-conn-status.is-bad { color: var(--ob-red-2); background: var(--ob-red-bg); border-color: rgba(255, 59, 92, 0.35); }
+
+/* 工作台与创作画板共用的紧凑连接摘要卡 */
+.conn-summary-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: var(--ob-well);
+  border: 1px solid var(--ob-line);
+  min-width: 0;
+}
+.conn-summary-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+  min-width: 0;
+  flex: 1 1 170px;
+  font-size: 12.5px;
+  color: var(--ob-ink);
+}
+.conn-summary-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: #64748b;
+}
+.conn-summary-dot.is-ok { background: #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.7); }
+.conn-summary-dot.is-bad { background: #ff3b5c; box-shadow: 0 0 8px rgba(255, 59, 92, 0.65); }
+.conn-summary-mode { font-weight: 600; color: var(--ob-ink-2); white-space: nowrap; }
+.conn-summary-sep { color: var(--ob-ink-3); }
+.conn-summary-target { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.conn-summary-target.is-empty { color: var(--ob-ink-3); font-family: inherit; }
+.conn-summary-status { font-size: 12px; color: var(--ob-ink-2); }
+.conn-summary-status.is-ok { color: var(--ob-green); font-weight: 600; }
+.conn-summary-status.is-bad { color: var(--ob-red-2); }
+.conn-summary-btn.wb-btn.wb-btn {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* 2. 雕刻工作台：空态弹性撑满消除中部空洞、矮屏自动压至 96px，监视舱主操作与急停条吸底常驻（展开两点对位时暂停吸底防遮挡） */
+.ob-canvas > .hud-card.ob-monitor:not([data-wb-collapsed="true"]),
+.ob-canvas > .hud-card.ob-monitor:not([data-wb-collapsed="true"]) > .wb-card-body {
+  overflow: visible;
+  min-width: 0;
+  max-width: 100%;
+}
+.ob-canvas > .hud-card.ob-monitor:not([data-wb-collapsed="true"]) > .wb-card-body {
+  display: flex;
+  flex-direction: column;
+}
+.ob-monitor:not([data-wb-collapsed="true"]) > .wb-card-body > .wb-card-content {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 100%;
+}
+.ob-monitor .chamber-viewport.is-empty {
+  flex: 1 1 96px;
+  min-height: 96px;
+  padding: 10px 14px;
+}
+.ob-monitor .chamber-viewport.is-empty .wb-grid-4 {
+  width: 40px;
+  height: 40px;
+  margin-bottom: 6px;
+}
+.ob-monitor .chamber-viewport.is-empty .wb-box-10 { font-size: 13px; }
+.ob-monitor .chamber-viewport.is-empty .wb-box-11 { font-size: 11.5px; margin-top: 2px; }
+.ob-monitor .chamber-viewport.has-preview {
+  flex: 1 1 220px;
+  min-height: 200px;
+}
+.ob-monitor .job-dispatch-card {
+  position: sticky;
+  bottom: 10px;
+  z-index: 6;
+  margin-top: auto;
+  padding: 11px 14px;
+  background: rgba(12, 12, 18, 0.92);
+  border-color: rgba(139, 123, 255, 0.28);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.ob-monitor:has(.registration-panel[open]) .job-dispatch-card {
+  position: static;
+  box-shadow: none;
+}
+.ob-monitor .job-dispatch-card .toolpath-capsule {
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+.ob-monitor .job-dispatch-card .btn-estop-large {
+  padding: 9px 14px;
+  margin-bottom: 10px;
+}
+
+/* 3. 创作画板：画布卡首屏上下分栏，底部快捷操作条不叠压画布内缩放/撤销按钮 */
+.ob-draw-page .ob-board-stage {
+  flex: 1 1 0;
+  min-height: 160px;
+  min-width: 0;
+  contain: layout paint inline-size;
+}
+.draw-board-action-bar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(14, 14, 22, 0.92);
+  border: 1px solid rgba(139, 123, 255, 0.3);
+}
+.draw-dock-chip {
+  min-width: 0;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+  gap: 6px !important;
+  max-width: 100%;
+}
+.draw-dock-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.draw-dock-summary {
+  border-color: rgba(52, 211, 153, 0.35) !important;
+  color: var(--ob-green, #34d399) !important;
+  background: rgba(16, 185, 129, 0.08) !important;
+}
+.draw-dock-summary.is-stale {
+  border-color: var(--ob-amber-bd, rgba(245, 158, 11, 0.42)) !important;
+  color: var(--ob-amber, #fbbf24) !important;
+  background: var(--ob-amber-bg, rgba(245, 158, 11, 0.12)) !important;
+}
+.draw-dock-spacer { flex: 1 1 auto; }
+.draw-dock-btn {
+  padding: 7px 14px !important;
+  font-size: 13px !important;
+  gap: 6px !important;
+  white-space: nowrap;
+}
+
+/* 4. 右上角紧凑“布局”下拉菜单（省去工作台与画板原本占满整行的布局提示条） */
+.wb-layout-menu-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.wb-layout-trigger {
+  padding: 6px 11px !important;
+  font-size: 12.5px !important;
+  border-radius: 999px !important;
+  gap: 6px !important;
+}
+.wb-layout-trigger.is-locked {
+  border-color: rgba(139, 123, 255, 0.4) !important;
+  color: var(--ob-accent-2, #a78bfa) !important;
+}
+.wb-layout-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 95;
+  width: 248px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(15, 15, 23, 0.96);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid var(--ob-line-2, rgba(255, 255, 255, 0.14));
+  box-shadow: 0 20px 44px -12px rgba(0, 0, 0, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wb-layout-popover-hint {
+  margin: 0 0 2px;
+  padding: 4px 6px 8px;
+  border-bottom: 1px solid var(--ob-line);
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ob-ink-3);
+}
+.wb-layout-popover-hint svg { flex: none; margin-top: 2px; }
+.wb-layout-popover-btn {
+  width: 100%;
+  justify-content: flex-start !important;
+  gap: 8px !important;
+  padding: 7px 10px !important;
+  font-size: 12.5px !important;
+}
+
+/* 5. 矢量文字三列参数列宽微调：1280px 宽度下“对刀起点 · 木牌中心”不截断关键字 */
+.wb-params-grid.wb-text-params-grid {
+  grid-template-columns: minmax(64px, 0.72fr) minmax(0, 1.16fr) minmax(0, 1.12fr);
+}
+.wb-params-grid.wb-text-params-grid .wb-compact-select {
+  padding: 7px 22px 7px 8px !important;
+}
+
+/* 6. 材料实验室首次标定向导：并排合法双按钮头部（展开按钮 + 独立稍后/收起按钮），步骤三按钮同行排列 */
+.lab-wizard-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.lab-wizard-toggle {
+  appearance: none;
+  flex: 1 1 240px;
+  min-width: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lab-wizard-toggle:focus-visible {
+  outline: 2px solid var(--ob-accent-2, #8b7bff);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.lab-wizard-continue {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ob-accent-2, #a78bfa);
+}
+.lab-wizard-defer {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 3px 10px !important;
+  font-size: 11.5px !important;
+}
+.lab-wizard-actions { align-items: center; }
+.lab-conn-summary { margin: 8px 0 4px; }
+
+/* 7. 语音中心顶部独立可关闭提示条 */
+.voice-hints-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.voice-hint--dismissible {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+}
+.voice-hint-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.voice-hint-action {
+  flex: none;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  white-space: nowrap;
+}
+.voice-hint-close {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+}
+.voice-hint-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ============================================================
+   2026-11-23（r59）B1/B2/B4–B8：内置语音三步清单、反馈症状胶囊、折叠标题对齐与对刀起点小图示
+   ============================================================ */
+
+/* 折叠成标题行的工作台卡片：标题行垂直居中，满足紧凑高度与无空白间隙 */
+.ob-card[data-wb-collapsed="true"] .ob-card-h {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+}
+
+/* B5：内置语音未就绪时的三步配通清单（三步全绿自动隐藏） */
+.voice-setup-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: rgba(139, 123, 255, 0.08);
+  border: 1px solid rgba(139, 123, 255, 0.26);
+}
+.voice-setup-arrow {
+  color: var(--ob-ink-3);
+  font-size: 12px;
+  user-select: none;
+}
+.voice-setup-step {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--ob-line-2);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ob-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+.voice-setup-step:hover {
+  border-color: rgba(139, 123, 255, 0.55);
+  background: rgba(139, 123, 255, 0.16);
+}
+.voice-setup-step.is-done {
+  border-color: rgba(52, 211, 153, 0.42);
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--ob-green, #34d399);
+}
+.voice-setup-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* B7：加工反馈输入框上方的常见症状快捷胶囊 */
+.feedback-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.feedback-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* B8：对刀起点 20×20 纯展示 SVG 图示（木牌中心红点 vs 左下角红点） */
+.origin-badge {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: inline-block;
+  vertical-align: middle;
+}
+.origin-badge-board {
+  fill: rgba(255, 255, 255, 0.04);
+  stroke: rgba(148, 163, 184, 0.62);
+  stroke-width: 1.25;
+}
+.origin-badge-guide {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.45);
+  stroke-width: 1;
+  stroke-dasharray: 2 1.6;
+}
+.origin-badge-ref {
+  fill: #94a3b8;
+}
+.origin-badge-halo {
+  fill: rgba(255, 59, 92, 0.26);
+}
+.origin-badge-dot {
+  fill: #ff3b5c;
+}
+.wb-origin-label-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.wb-origin-inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.draw-dock-origin {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ob-line);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+  color: var(--ob-ink-2);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   2026-11-23（r60）B3：工作台“现场移头与对刀原点”紧凑折叠栏与数字孪生连接摘要
+   ============================================================ */
+.ob-monitor .wb-jog-panel {
+  margin-top: 0;
+  padding: 5px 10px;
+}
+.wb-jog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 7px;
+}
+.wb-jog-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+.wb-jog-step-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--ob-ink-2);
+  white-space: nowrap;
+}
+.wb-jog-step-label select {
+  width: auto !important;
+  min-width: 72px;
+  padding: 5px 24px 5px 8px !important;
+  font-size: 12px !important;
+}
+.wb-jog-dirs,
+.wb-jog-origin-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.wb-jog-btn {
+  padding: 5px 9px !important;
+  font-size: 12px !important;
+}
+.wb-jog-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.wb-jog-note.is-disabled-reason {
+  color: var(--ob-amber, #fbbf24);
+}
+.ob-monitor:has(.wb-jog-panel[open]) .chamber-viewport.has-preview {
+  flex-basis: 148px;
+  min-height: 148px;
+}
+
+

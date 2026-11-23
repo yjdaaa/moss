@@ -47,9 +47,13 @@ function ExportSettingsPanel() {
     }
   };
 
+  const exportSummary = !view
+    ? "读取中…"
+    : `${view.dir ? view.effective_dir : "默认下载文件夹"}${view.ask_each_time ? " · 每次询问" : ""}`;
+
   return (
     <div className="ob-fold export-settings-box">
-      <FoldHeader variant="section" id="settings-export" icon={FolderOpen} title="导出" defaultOpen={false} />
+      <FoldHeader variant="section" id="settings-export" icon={FolderOpen} title="导出" summary={exportSummary} defaultOpen={false} />
       <div className="export-settings-box-2">
         画板 PNG、场景 JSON、G-code 下载、材料库导出都会保存到这里。不影响运行数据目录。
       </div>

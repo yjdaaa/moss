@@ -190,6 +190,34 @@ try {
   await page.locator("#send-overlay.show").waitFor({ timeout: 10_000 });
   assert.equal(await page.locator("#ai-preview-card").count(), 0);
   assert.equal(posts.filter((item) => item.body.action === "confirm_send").length, 1, "口头确认路径不由桌面再发一次");
+  setStatus("wf-ai-4", "completed");
+  await page.locator("#send-overlay.show").waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
+  const closeOverlay = page.locator("#send-overlay.show button", { hasText: "关闭" });
+  if (await closeOverlay.count()) await closeOverlay.first().click();
+
+  // 6. 未配置设备地址时，AI 预览窗就地提供「配置设备连接」入口且 DeviceConnectionModal (z-index 126) 浮在预览窗 (125) 之上
+  await page.evaluate(() => {
+    localStorage.setItem("laser-forge-host", "");
+    window.dispatchEvent(new Event("storage"));
+  });
+  state.workflows = [aiRecord("wf-ai-5", { origin: "voice", created_at: now + 4 }), ...state.workflows];
+  await page.locator("#ai-preview-card").filter({ hasText: "还没有配置设备地址" }).waitFor({ timeout: 10_000 });
+  await page.locator("#ai-preview-alert-open-conn").click();
+  const connModal = page.locator("#device-connection-modal");
+  await connModal.waitFor({ timeout: 5_000 });
+  const modalBox = await connModal.boundingBox();
+  const topHit = await page.evaluate(([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest("#device-connection-modal")), [
+    modalBox.x + modalBox.width / 2,
+    modalBox.y + modalBox.height / 2,
+  ]);
+  assert.equal(topHit, true, "连接配置弹窗层级必须高于 AI 预览窗，不被预览窗遮住");
+  await connModal.locator("#conn-network-host").fill("192.0.2.55");
+  await page.keyboard.press("Escape");
+  await connModal.waitFor({ state: "detached", timeout: 5_000 });
+  assert.equal(await page.locator("#ai-preview-card").count(), 1, "按 Escape 只关闭栈顶连接弹窗，AI 预览窗保持打开");
+  assert.equal(await page.locator("#ai-preview-target").innerText(), "192.0.2.55:23", "配置完成后 AI 预览窗目标设备即时同步");
+  await page.locator("#ai-preview-discard").click();
+  await page.locator("#ai-preview-card").waitFor({ state: "detached", timeout: 10_000 });
 
   assert.deepEqual(errors, [], "页面运行期无异常");
   console.log(`AI_PREVIEW_BROWSER_TEST=PASS posts=${posts.length}`);

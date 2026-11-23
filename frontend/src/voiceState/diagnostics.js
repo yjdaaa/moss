@@ -1,4 +1,71 @@
-// 运行诊断：设备连接提示、错误码大白话、事件流、审批记录、日志遮挡与耗时报告。
+// 运行诊断：设备连接提示、内置配通清单、错误码大白话、事件流、审批记录、日志遮挡与耗时报告。
+
+import { builtinSectionSourceView } from "./modelSources.js";
+
+function isBuiltinModelSectionReady(section, builtinStatus) {
+  const view = builtinSectionSourceView(section, builtinStatus);
+  if (view.source === "colab") return true;
+  if (section === "llm") return Boolean(view.cloudConfigured);
+  return view.localOn ? Boolean(view.localReady) : Boolean(view.cloudConfigured);
+}
+
+/**
+ * 内置语音链路三步配通清单（2026-11-23 r59）：
+ * 只读现有 builtinStatus，不发额外请求；
+ * ① 启动内置服务 → ② 配好识别/对话/合成模型 → ③ USB 配网并允许设备；
+ * 三步全绿时返回 `{ visible: false, allDone: true, steps }` 自动隐藏。
+ */
+export function builtinSetupChecklist(mode, builtinStatus) {
+  if (mode !== "builtin" || !builtinStatus || builtinStatus.error) return null;
+  const serviceDone = Boolean(builtinStatus.running);
+  const hasModelSnapshot = Boolean(builtinStatus.models || builtinStatus.local);
+  const modelsDone = hasModelSnapshot
+    ? (
+        isBuiltinModelSectionReady("asr", builtinStatus)
+        && isBuiltinModelSectionReady("llm", builtinStatus)
+        && isBuiltinModelSectionReady("tts", builtinStatus)
+      )
+    : builtinStatus.mode === "chat";
+  const devices = Array.isArray(builtinStatus.devices) ? builtinStatus.devices : [];
+  const hasAllowedDevice = devices.some((d) => d?.status === "allowed");
+  const hasPendingDevice = devices.some((d) => (d?.status || "pending") === "pending");
+
+  const steps = [
+    {
+      key: "service",
+      num: "①",
+      label: "启动内置服务",
+      done: serviceDone,
+      tab: "service",
+      group: "builtin-service",
+      target: serviceDone ? "voice-builtin-card" : "voice-builtin-start",
+    },
+    {
+      key: "models",
+      num: "②",
+      label: "配好识别/对话/合成模型",
+      done: modelsDone,
+      tab: "models",
+      group: "",
+      target: "voice-builtin-mix-bar",
+    },
+    {
+      key: "device",
+      num: "③",
+      label: "USB 配网并允许设备",
+      done: hasAllowedDevice,
+      tab: "devices",
+      group: hasPendingDevice || hasAllowedDevice ? "builtin-devices" : "device-usb-provision",
+      target: hasPendingDevice || hasAllowedDevice ? "voice-builtin-devices" : "",
+    },
+  ];
+  const allDone = steps.every((s) => s.done);
+  return {
+    visible: !allDone,
+    allDone,
+    steps,
+  };
+}
 
 /** 设备连接与 OTA 提示（§9.4.2 规则 2：无法判断时显示“未知”，不猜）。2026-11-17 起只有官方与内置两条链路。 */
 export function deviceView(mode) {
@@ -14,6 +81,75 @@ export function deviceView(mode) {
     tone: "off",
     hint: "官方链路下 MOSS 无法得知设备连接。若之前改过设备 OTA 地址，请改回官方服务器。",
   };
+}
+
+export const VOICE_DISMISSED_HINTS_KEY = "moss_voice_dismissed_hints";
+
+/** 读取已单独关闭的语音中心顶部提示键列表（读写均 try/catch）。 */
+export function readDismissedVoiceHints(storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem?.(VOICE_DISMISSED_HINTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 记住某条已关闭的顶部提示，返回去重后的新列表。 */
+export function dismissVoiceHint(currentKeys, key, storage = globalThis.localStorage) {
+  const base = Array.isArray(currentKeys) ? currentKeys.filter((item) => typeof item === "string" && item) : [];
+  const next = base.includes(key) ? base : [...base, key];
+  try {
+    storage?.setItem?.(VOICE_DISMISSED_HINTS_KEY, JSON.stringify(next));
+  } catch {
+    // 存储受限时仅当次会话生效
+  }
+  return next;
+}
+
+/** 从已关闭列表中移除某条提示键（例如开启严格模式后重置 strict_off，使之后再次关闭严格模式时重新弹出提示）。 */
+export function restoreVoiceHint(currentKeys, key, storage = globalThis.localStorage) {
+  const base = Array.isArray(currentKeys) ? currentKeys.filter((item) => typeof item === "string" && item) : [];
+  if (!base.includes(key)) return base;
+  const next = base.filter((item) => item !== key);
+  try {
+    storage?.setItem?.(VOICE_DISMISSED_HINTS_KEY, JSON.stringify(next));
+  } catch {
+    // 存储受限时仅当次会话生效
+  }
+  return next;
+}
+
+/**
+ * 语音中心顶部独立提示条列表（2026-11-23 r58）：
+ * 设备连接说明与严格模式未开启提示拆成两条独立提示，每条可单独关闭，严格模式条在官方与内置两条链路均显示并保留开启入口。
+ */
+export function visibleVoiceHints({ mode, strictEnabled, dismissed = [] }) {
+  const hidden = new Set(Array.isArray(dismissed) ? dismissed : []);
+  const device = deviceView(mode);
+  const items = [];
+  const otaKey = `ota_${mode === "builtin" ? "builtin" : "official"}`;
+  if (device.hint && !hidden.has(otaKey)) {
+    items.push({
+      key: otaKey,
+      id: "voice-ota-hint",
+      tone: device.tone,
+      text: device.hint,
+      actionLabel: "",
+    });
+  }
+  if (!strictEnabled && !hidden.has("strict_off")) {
+    items.push({
+      key: "strict_off",
+      id: "voice-strict-hint",
+      tone: "warn",
+      text: "严格模式未开启：大模型可以自行确认加工任务。",
+      actionLabel: "开启严格模式",
+    });
+  }
+  return items;
 }
 
 /**

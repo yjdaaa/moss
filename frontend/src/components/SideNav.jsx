@@ -6,12 +6,12 @@ import { MossEye } from "./MossEye.jsx";
 // 左侧竖向导航（技术书 §9.5.5 B）。窄屏（≤900px）由 CSS 折叠为顶部横排。
 // 语音中心与摄像头只在 MOSS 桌面端显示（技术书 §9.4.7 / §9.5.1，A-69）。
 export const NAV_ITEMS = [
-  { path: "/", label: "雕刻工作台", icon: Cpu, tag: "HOST" },
-  { path: "/draw", label: "创作画板", icon: PenTool, tag: "CAD" },
-  { path: "/material-lab", label: "材料实验室", icon: Layers, tag: "LAB" },
-  { path: "/twin", label: "数字孪生", icon: Box, tag: "TWIN" },
-  { path: "/camera", label: "摄像头", icon: Camera, tag: "CAM", desktopOnly: true },
-  { path: "/voice", label: "语音中心", icon: AudioLines, tag: "VOICE", desktopOnly: true },
+  { path: "/", label: "雕刻工作台", icon: Cpu },
+  { path: "/draw", label: "创作画板", icon: PenTool },
+  { path: "/material-lab", label: "材料实验室", icon: Layers },
+  { path: "/twin", label: "数字孪生", icon: Box },
+  { path: "/camera", label: "摄像头", icon: Camera, desktopOnly: true },
+  { path: "/voice", label: "语音中心", icon: AudioLines, desktopOnly: true },
 ];
 
 /** 当前环境可见的导航项。 */
@@ -158,7 +158,6 @@ export function SideNav({
             >
               <Icon size={18} aria-hidden="true" />
               <span>{item.label}</span>
-              <span className="ob-nav-tag">{item.tag}</span>
             </button>
           );
         })}

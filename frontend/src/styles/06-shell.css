@@ -9,7 +9,6 @@
 }
 .ob-main {
   position: relative;
-  z-index: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -270,51 +269,72 @@
   align-items: center;
   gap: 10px;
 }
-/* 收起顶栏：化为右上角半透明悬浮岛，释放顶部全宽高度；状态图标合并进紧凑底座，急停按钮保持完整 */
-.ob-top.ob-top--compact {
-  position: fixed;
-  top: 10px;
-  right: 20px;
-  z-index: 35;
-  width: max-content;
-  max-width: calc(100vw - 24px);
-  padding: 5px 8px;
-  gap: 8px;
-  border-radius: 999px;
-  background: rgba(10, 10, 16, 0.48);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+.ob-top-page-actions {
+  display: inline-flex;
+  align-items: center;
 }
-.ob-top.ob-top--compact .ob-title,
-.ob-top.ob-top--compact .ob-top-spacer {
+.ob-top-page-actions:empty {
   display: none;
 }
-.ob-top.ob-top--compact .ob-top-status-cluster {
-  gap: 4px;
-  padding: 2px 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-}
-.ob-top.ob-top--compact .ob-pill {
-  padding: 5px 7px;
-  min-width: 26px;
-  height: 26px;
-  justify-content: center;
-}
-.ob-top.ob-top--compact .conn-pill > span,
-.ob-top.ob-top--compact .approval-pill > span:not(.approval-count) {
-  display: none;
-}
-.ob-top.ob-top--compact .ob-estop {
-  padding: 6px 12px;
-  border-radius: 999px;
-}
-.ob-top.ob-top--compact .ob-top-toggle {
-  border-radius: 999px;
-}
-/* 顶栏收起为右上角悬浮胶囊时，按实测胶囊宽度（--ob-compact-top-w）给各页首行右侧控件与语音吸顶标签栏让位，防止遮挡 */
+/* 宽屏（> 900px）收起顶栏：化为右上角半透明悬浮岛，释放顶部全宽高度；状态图标合并进紧凑底座，急停按钮保持完整。
+   ≤ 900px 窄屏自动退回常规顶栏，防止悬浮顶栏与顶部横排导航重叠遮挡急停按钮。 */
 @media (min-width: 901px) {
+  .ob-top.ob-top--compact {
+    position: fixed;
+    top: 10px;
+    right: 20px;
+    z-index: 35;
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    padding: 5px 8px;
+    gap: 8px;
+    border-radius: 999px;
+    background: rgba(10, 10, 16, 0.48);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+  .ob-top.ob-top--compact .ob-title,
+  .ob-top.ob-top--compact .ob-top-spacer {
+    display: none;
+  }
+  .ob-top.ob-top--compact .ob-top-status-cluster {
+    gap: 4px;
+    padding: 2px 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .ob-top.ob-top--compact .wb-layout-trigger {
+    padding: 5px 7px !important;
+    min-width: 26px;
+    height: 26px;
+    border-radius: 999px;
+  }
+  .ob-top.ob-top--compact .wb-layout-trigger > span {
+    display: none;
+  }
+  .ob-top.ob-top--compact .ob-pill {
+    padding: 5px 7px;
+    min-width: 26px;
+    height: 26px;
+    justify-content: center;
+  }
+  .ob-top.ob-top--compact .conn-pill > span,
+  .ob-top.ob-top--compact .approval-pill > span:not(.approval-count) {
+    display: none;
+  }
+  .ob-top.ob-top--compact .ob-estop {
+    padding: 6px 12px;
+    border-radius: 999px;
+  }
+  .ob-top.ob-top--compact .ob-top-toggle {
+    border-radius: 999px;
+  }
+  /* 顶栏收起为右上角悬浮胶囊时，按实测胶囊宽度（--ob-compact-top-w）给各页首行右侧控件与语音吸顶标签栏让位，防止遮挡 */
+  .ob-main:has(> .ob-top--compact) .home-page {
+    padding-top: 38px !important;
+    transition: padding-top 0.2s var(--ob-ease);
+  }
   .ob-main:has(> .ob-top--compact) .ob-canvas-tools,
   .ob-main:has(> .ob-top--compact) .ob-toolbar,
   .ob-main:has(> .ob-top--compact) .twin-header-bar,
@@ -352,7 +372,8 @@
   }
 }
 @media (max-width: 900px) {
-  .ob-side-toggle {
+  .ob-side-toggle,
+  .ob-top-toggle {
     display: none !important;
   }
 }
@@ -467,9 +488,17 @@ button.ob-pill {
     border: 0;
     padding: 0;
   }
-  .ob-top:not(.ob-top--compact) {
+  .ob-top {
     padding: 12px 16px;
   }
+}
+@media (max-width: 760px) {
+  .ob-top > .ob-title { order: 1; }
+  .ob-top > .ob-top-spacer { order: 2; }
+  .ob-top > .ob-estop { order: 3; }
+  .ob-top > .app-update-banner { order: 4; flex-basis: 100%; }
+  .ob-top > .ob-top-status-cluster { order: 5; flex-wrap: wrap; }
+  .ob-top > .ob-top-page-actions { order: 6; margin-left: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {

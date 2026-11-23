@@ -83,7 +83,7 @@ export default function RegistrationPanel({
 
   const requireTarget = () => {
     if (target) return true;
-    showAlert("请先在左上角「通信链路」填写控制器 IP 或选择串口", { title: "尚未指定雕刻机", tone: "warning" });
+    showAlert("请先点击顶栏硬件状态或「修改连接」填写控制器 IP 或选择串口", { title: "尚未指定雕刻机", tone: "warning" });
     return false;
   };
 

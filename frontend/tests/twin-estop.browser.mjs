@@ -100,6 +100,19 @@ try {
   state.hangLookup = false;
   state.releaseLookup?.();
 
+  // 2b. B3（2026-11-23 r60）：控制器实时遥测卡顶部展示与工作台一致的连接摘要，「修改连接」打开统一 DeviceConnectionModal
+  const twinConnSummary = page.locator("#twin-conn-summary");
+  await twinConnSummary.waitFor({ timeout: 5_000 });
+  assert.match(await twinConnSummary.innerText(), /网络[\s\S]*127\.0\.0\.1:2302/);
+  await page.locator("#twin-open-connection").focus();
+  await page.locator("#twin-open-connection").click();
+  const connModal = page.locator("#device-connection-modal");
+  await connModal.waitFor({ timeout: 5_000 });
+  assert.equal(await connModal.locator("#conn-network-host").inputValue(), "127.0.0.1");
+  await page.keyboard.press("Escape");
+  await connModal.waitFor({ state: "detached", timeout: 5_000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.id || ""), "twin-open-connection");
+
   // 3. 拖动板材起点与雕刻位置滑块：只平移对象，不报错
   for (const label of ["拖动调节 X0 坐标", "拖动调节 Y0 坐标"]) {
     const slider = page.getByLabel(label);

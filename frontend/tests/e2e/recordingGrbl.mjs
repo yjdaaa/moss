@@ -6,6 +6,7 @@ import net from "node:net";
  */
 export function startRecordingGrbl({ ackDelayMs = 3 } = {}) {
   const events = [];
+  const lines = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -32,6 +33,7 @@ export function startRecordingGrbl({ ackDelayMs = 3 } = {}) {
         else if (line === "$CD") socket.write("name: \"E2E Rec\"\r\nok\r\n");
         else if (/^(?:[GMTS]\d+)(?:\s|$)/i.test(line) || line.startsWith("$")) {
           if (/^[GMTS]\d+/i.test(line)) events.push("line");
+          lines.push(line);
           setTimeout(() => { if (!socket.destroyed) socket.write("ok\r\n"); }, ackDelayMs);
         } else if (line.length > 0) socket.write("error:3\r\n");
       }
@@ -45,6 +47,6 @@ export function startRecordingGrbl({ ackDelayMs = 3 } = {}) {
       for (const socket of sockets) socket.destroy();
       server.close();
     };
-    server.listen(0, "127.0.0.1", () => resolve({ close, events, port: server.address().port }));
+    server.listen(0, "127.0.0.1", () => resolve({ close, events, lines, port: server.address().port }));
   });
 }

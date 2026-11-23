@@ -248,13 +248,18 @@ test("断点续雕二次确认文案、异步 showPrompt 输入弹窗与前端�
 
   const homeSrc = readPageSource("pages/HomePage.jsx");
   const drawSrc = readPageSource("pages/DrawPage.jsx");
+  const connModalSrc = readFileSync(new URL("../src/components/DeviceConnectionModal.jsx", import.meta.url), "utf8");
+  const labConnSrc = readFileSync(new URL("../src/components/material-lab/LabConnectionBar.jsx", import.meta.url), "utf8");
   const appDialogSrc = readFileSync(new URL("../src/components/AppDialog.jsx", import.meta.url), "utf8");
   // Colab 联动栏实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
   const voiceBuiltinSrc = readFileSync(new URL("../src/components/voice-builtin/ColabBridgeSection.jsx", import.meta.url), "utf8");
   assert.doesNotMatch(homeSrc, /window\.prompt\b/, "工作台不得使用阻塞式 window.prompt");
   assert.doesNotMatch(drawSrc, /window\.prompt\b/, "创作画板不得使用阻塞式 window.prompt");
-  assert.match(homeSrc, /selectEl\.value = serialPort \|\| ""/, "取消手动输入串口后原生 select 必须立即回退避免卡在 __custom__");
-  assert.match(drawSrc, /selectEl\.value = form\.port \|\| ""/, "画板取消手动输入串口后原生 select 必须立即回退避免卡在 __custom__");
+  assert.doesNotMatch(connModalSrc, /window\.prompt\b/, "统一设备连接面板不得使用阻塞式 window.prompt");
+  assert.match(connModalSrc, /selectEl\.value = serialPort \|\| ""/, "统一连接面板取消手动输入串口后原生 select 必须立即回退避免卡在 __custom__");
+  assert.match(connModalSrc, /SERIAL_BAUDRATES\.map\(/, "统一连接面板波特率下拉须复用共享常量 SERIAL_BAUDRATES");
+  assert.match(labConnSrc, /connectionSummaryView\(/, "材料实验室连接条须收口为共享紧凑连接摘要");
+  assert.doesNotMatch(labConnSrc, /<select\b/, "材料实验室连接条不得再维护分叉串口或残缺波特率下拉");
   assert.match(appDialogSrc, /e\.isComposing/, "AppDialog 输入框必须忽略中文输入法组合键回车");
   assert.match(appDialogSrc, /action === "cancel"/, "AppDialog 聚焦取消按钮按回车不得误判为确认");
   assert.match(homeSrc, /workbenchResumeSendPrompt\(/, "断点续雕必须先经二次确认");

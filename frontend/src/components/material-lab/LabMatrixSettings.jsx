@@ -1,5 +1,6 @@
 import React from "react";
 import { MATRIX_MODE_OPTIONS, TEST_TYPE_OPTIONS, axisOptionsForMode, thicknessChipLabel } from "../../materialLabState.js";
+import { PowerPercentInput } from "./PowerPercentInput.jsx";
 
 /** 材料实验室 ③ 校准矩阵 · 标定条件：标题与模式、状态行、功率 / 速度区间、行列、测试类型与轴参数。原样搬自 pages/MaterialLabPage.jsx（2026-11-16 按职责拆分） */
 export function LabMatrixSettings({
@@ -64,25 +65,25 @@ export function LabMatrixSettings({
       {/* Matrix Parameters */}
       <div className="lab-grid-2">
         <div>
-          <label className="lab-label-3">功率区间 (Min-Max)</label>
+          <label className="lab-label-3">功率区间 (0–100%)</label>
           <div className="lab-row-10">
-            <input
-              type="number"
-              min={0}
-              max={1000}
-              value={matrixPowerMin}
-              onChange={(e) => setMatrixPowerMin(Number(e.target.value))}
+            <PowerPercentInput
+              sValue={matrixPowerMin}
+              onChangeSValue={setMatrixPowerMin}
               className="text-input lab-field-4"
+              ariaLabel="最小功率百分比"
             />
-            <input
-              type="number"
-              min={0}
-              max={1000}
-              value={matrixPowerMax}
-              onChange={(e) => setMatrixPowerMax(Number(e.target.value))}
+            <PowerPercentInput
+              sValue={matrixPowerMax}
+              onChangeSValue={setMatrixPowerMax}
               className="text-input lab-field-4"
+              ariaLabel="最大功率百分比"
             />
           </div>
+          <small className="lab-s-hint" id="lab-matrix-power-s">
+            对应 S{Number.isFinite(Number(matrixPowerMin)) ? Math.round(Number(matrixPowerMin)) : "—"}~S
+            {Number.isFinite(Number(matrixPowerMax)) ? Math.round(Number(matrixPowerMax)) : "—"}
+          </small>
         </div>
 
         <div>
@@ -131,9 +132,10 @@ export function LabMatrixSettings({
       {/* 测试类型与轴参数（2026-11-16 对齐 LightBurn Material Test / Interval Test）。
           放在 .lab-grid-2 之外，保持上面区间与行列输入框的顺序不变 */}
       <div className="lab-test-axes">
-        <label className="lab-label-3">
-          测试类型
+        <div className="lab-axis-field">
+          <label className="lab-label-3" htmlFor="lab-test-type">测试类型</label>
           <select
+            id="lab-test-type"
             value={matrixTestType}
             onChange={(e) => setMatrixTestType(e.target.value)}
             className="select-input lab-axis-select"
@@ -143,12 +145,12 @@ export function LabMatrixSettings({
               <option key={t.id} value={t.id}>{t.label}</option>
             ))}
           </select>
-        </label>
+        </div>
         {matrixTestType === "interval" ? (
           <>
-            <label className="lab-label-3">
-              线距起止 (mm)
-              <span className="lab-row-10">
+            <div className="lab-axis-field">
+              <label className="lab-label-3">线距起止 (mm)</label>
+              <div className="lab-row-10">
                 <input
                   type="number"
                   step="0.01"
@@ -167,11 +169,12 @@ export function LabMatrixSettings({
                   className="text-input lab-field-4"
                   aria-label="结束线距"
                 />
-              </span>
-            </label>
-            <label className="lab-label-3">
-              方块数
+              </div>
+            </div>
+            <div className="lab-axis-field">
+              <label className="lab-label-3" htmlFor="lab-interval-count">方块数</label>
               <input
+                id="lab-interval-count"
                 type="number"
                 min={2}
                 max={20}
@@ -180,13 +183,14 @@ export function LabMatrixSettings({
                 className="text-input lab-field-4"
                 aria-label="线距测试方块数"
               />
-            </label>
+            </div>
           </>
         ) : (
           <>
-            <label className="lab-label-3">
-              列参数
+            <div className="lab-axis-field">
+              <label className="lab-label-3" htmlFor="lab-x-axis">列参数</label>
               <select
+                id="lab-x-axis"
                 value={matrixXAxis}
                 onChange={(e) => setMatrixXAxis(e.target.value)}
                 className="select-input lab-axis-select"
@@ -196,10 +200,11 @@ export function LabMatrixSettings({
                   <option key={a.id} value={a.id}>{a.label}</option>
                 ))}
               </select>
-            </label>
-            <label className="lab-label-3">
-              行参数
+            </div>
+            <div className="lab-axis-field">
+              <label className="lab-label-3" htmlFor="lab-y-axis">行参数</label>
               <select
+                id="lab-y-axis"
                 value={matrixYAxis}
                 onChange={(e) => setMatrixYAxis(e.target.value)}
                 className="select-input lab-axis-select"
@@ -209,11 +214,11 @@ export function LabMatrixSettings({
                   <option key={a.id} value={a.id}>{a.label}</option>
                 ))}
               </select>
-            </label>
+            </div>
             {(matrixXAxis === "interval" || matrixYAxis === "interval") && (
-              <label className="lab-label-3">
-                线距区间 (mm)
-                <span className="lab-row-10">
+              <div className="lab-axis-field">
+                <label className="lab-label-3">线距区间 (mm)</label>
+                <div className="lab-row-10">
                   <input
                     type="number"
                     step="0.01"
@@ -232,13 +237,13 @@ export function LabMatrixSettings({
                     className="text-input lab-field-4"
                     aria-label="线距上限"
                   />
-                </span>
-              </label>
+                </div>
+              </div>
             )}
             {(matrixXAxis === "passes" || matrixYAxis === "passes") && (
-              <label className="lab-label-3">
-                遍数区间
-                <span className="lab-row-10">
+              <div className="lab-axis-field">
+                <label className="lab-label-3">遍数区间</label>
+                <div className="lab-row-10">
                   <input
                     type="number"
                     min={1}
@@ -257,8 +262,8 @@ export function LabMatrixSettings({
                     className="text-input lab-field-4"
                     aria-label="遍数上限"
                   />
-                </span>
-              </label>
+                </div>
+              </div>
             )}
           </>
         )}

@@ -1046,7 +1046,7 @@ test("顶部切换 Jev 开关后编辑并保存语音体验，不会把未手改
 });
 
 test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪造音频振幅或泄漏密钥", async () => {
-  const { buildTwinWaveBars, globalEyeSensorView, mossEyeCorePalette, mossEyeTwinView } = await import("../src/voiceState.js");
+  const { buildTwinWaveBars, globalEyeSensorView, isMossTwinConversing, mossEyeCorePalette, mossEyeTwinView } = await import("../src/voiceState.js");
 
   // 1. 内置服务链路：随真实 60ms 音频振幅驱动声波，记录识别字数、已播句数与工具名
   const builtinIdle = mossEyeTwinView({
@@ -1054,7 +1054,8 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
     builtinStatus: { running: false, sessions: [], events: [] },
   });
   assert.equal(builtinIdle.visualState, "offline");
-  assert.equal(builtinIdle.sourceBadge, "REALTIME AUDIO TWIN");
+  assert.equal(builtinIdle.sourceBadge, "内置语音");
+  assert.equal(isMossTwinConversing(builtinIdle.visualState), false);
   assert.equal(builtinIdle.level, 0);
   assert.equal(builtinIdle.bars.length, 12);
 
@@ -1079,6 +1080,7 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
     },
   });
   assert.equal(builtinSpeaking.visualState, "speaking");
+  assert.equal(isMossTwinConversing(builtinSpeaking.visualState), true);
   assert.equal(builtinSpeaking.level, 78);
   assert.equal(builtinSpeaking.activePolling, true);
   assert.ok(builtinSpeaking.bars[5] > builtinSpeaking.bars[0], "中央声波柱按对称权重高于边缘");
@@ -1094,7 +1096,8 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
     mcpStatus: { configured: true, connected: true, recent_events: ["[info] connected api_key=sk-secret-value-123"] },
   });
   assert.equal(legacy.mode, "official");
-  assert.equal(legacy.sourceBadge, "CLOUD MCP TELEMETRY");
+  assert.equal(legacy.sourceBadge, "官方小智");
+  assert.equal(legacy.headline, "小智云端连接正常 · 等待语音指令");
   assert.equal(legacy.level, 0, "非内置链路不伪造音频振幅");
   assert.equal(legacy.subline.includes("sk-secret-value-123"), false, "事件文字必须脱敏");
 
@@ -1112,7 +1115,8 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
     },
   });
   assert.equal(official.visualState, "pulse");
-  assert.equal(official.sourceBadge, "CLOUD MCP TELEMETRY");
+  assert.equal(official.sourceBadge, "官方小智");
+  assert.equal(isMossTwinConversing(official.visualState), false, "单次工具回包不视为持续语音对话态");
   assert.equal(official.level, 0);
   assert.equal(official.metrics.find((m) => m.label === "指令帧数").value, "19 帧");
 
@@ -1195,6 +1199,53 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
   assert.equal(mossEyeCorePalette("speaking").coreStops.length, 5);
   assert.equal(mossEyeCorePalette("engraving").tempo, "laser");
   assert.equal(mossEyeCorePalette("engraving").accent, "#10b981");
+
+  // 7. 内置语音三步配通清单（builtinSetupChecklist）：按真实状态勾选，三步全绿自动隐藏
+  const { builtinSetupChecklist } = await import("../src/voiceState.js");
+  assert.equal(builtinSetupChecklist("official", { running: false }), null, "官方链路不显示内置三步清单");
+  assert.equal(builtinSetupChecklist("builtin", null), null, "状态未就绪时不抢先假显");
+
+  const unready = builtinSetupChecklist("builtin", {
+    running: false,
+    mode: "echo",
+    models: {},
+    local: { settings: {}, models: [] },
+    devices: [],
+  });
+  assert.equal(unready.visible, true);
+  assert.deepEqual(unready.steps.map((s) => [s.key, s.done, s.tab]), [
+    ["service", false, "service"],
+    ["models", false, "models"],
+    ["device", false, "devices"],
+  ]);
+  assert.equal(unready.steps[2].group, "device-usb-provision", "尚无设备时第 3 步直达 USB 配网");
+
+  const pendingDev = builtinSetupChecklist("builtin", {
+    running: true,
+    mode: "chat",
+    models: { llm: { configured: true } },
+    local: {
+      settings: { asr: true, asr_model: "sense_voice", tts: true, tts_model: "kokoro" },
+      models: [
+        { id: "sense_voice", kind: "asr", label: "SenseVoice", installed: true },
+        { id: "kokoro", kind: "tts", label: "Kokoro", installed: true },
+      ],
+    },
+    devices: [{ device_id: "aa:bb", status: "pending" }],
+  });
+  assert.equal(pendingDev.visible, true);
+  assert.deepEqual(pendingDev.steps.map((s) => s.done), [true, true, false]);
+  assert.equal(pendingDev.steps[2].group, "builtin-devices", "已有待允许设备时第 3 步直达已连接设备列表");
+
+  const allReady = builtinSetupChecklist("builtin", {
+    running: true,
+    mode: "chat",
+    models: { llm: { configured: true }, asr: { configured: true }, tts: { configured: true } },
+    local: { settings: {}, models: [] },
+    devices: [{ device_id: "aa:bb", status: "allowed" }],
+  });
+  assert.equal(allReady.allDone, true);
+  assert.equal(allReady.visible, false, "三步全部完成后清单自动隐藏");
 });
 
 test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本地路由覆写成云端模型", () => {

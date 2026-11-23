@@ -25,6 +25,8 @@ import {
   strictHintText,
 } from "../aiPreviewState.js";
 import { createPollRunner } from "../pollGuard.js";
+import { DEVICE_CONNECTION_EVENT } from "../deviceConnection.js";
+import { OriginBadge, inferOriginKind } from "./OriginBadge.jsx";
 import { SendOverlay } from "./SendOverlay.jsx";
 import { voiceApi } from "../voiceApi.js";
 import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } from "../approvalJobMonitor.js";
@@ -38,7 +40,12 @@ import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } fro
  */
 // `onWaitingChange(n)`：被“稍后再看”收起、当前不在屏幕上的待确认预览数（供全局悬浮小窗显示入口）；
 // `reopenNonce` 变化时重新弹出被收起的预览。确认与发送仍只在本窗口完成。
-export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange = null, reopenNonce = 0 } = {}) {
+export function AiPreviewCenter({
+  pendingApprovalTargets = null,
+  onWaitingChange = null,
+  reopenNonce = 0,
+  onOpenConnection = null,
+} = {}) {
   const [pending, setPending] = useState([]);
   const [shown, setShown] = useState(null);
   const [hidden, setHidden] = useState(false);
@@ -58,6 +65,25 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
   const jobRef = useRef(null);
   jobRef.current = job;
   const enabled = hasDesktopSession();
+
+  // 顶栏设备连接面板改了目标后实时同步，目标变化时要求重新勾选现场确认
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined") return undefined;
+    const syncConn = () => {
+      const latestConn = connectionView(savedConnectionForm());
+      setConnection((prev) => {
+        if (prev.ready === latestConn.ready && prev.label === latestConn.label) return prev;
+        if (prev.ready && prev.label !== latestConn.label) setChecked(false);
+        return latestConn;
+      });
+    };
+    window.addEventListener(DEVICE_CONNECTION_EVENT, syncConn);
+    window.addEventListener("storage", syncConn);
+    return () => {
+      window.removeEventListener(DEVICE_CONNECTION_EVENT, syncConn);
+      window.removeEventListener("storage", syncConn);
+    };
+  }, [enabled]);
 
   // 一旦 ApprovalCenter 同步到新的严格模式待批目标，立即从本窗口移交，杜绝双弹窗重叠
   useEffect(() => {
@@ -405,15 +431,46 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
                   <dt>尺寸 / 时长</dt>
                   <dd>{[details?.size, details?.duration].filter(Boolean).join(" · ") || "—"}</dd>
                   <dt>目标设备</dt>
-                  <dd id="ai-preview-target">{connection.label}</dd>
+                  <dd className="ai-preview-target-dd">
+                    <span id="ai-preview-target">{connection.label}</span>
+                    {onOpenConnection ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost ai-preview-conn-btn"
+                        id="ai-preview-open-conn"
+                        onClick={onOpenConnection}
+                        disabled={busy}
+                      >
+                        {connection.ready ? "修改连接" : "配置设备连接"}
+                      </button>
+                    ) : null}
+                  </dd>
                 </dl>
               </div>
-              {origin && <div className="voice-hint ai-preview-origin" id="ai-preview-origin"><b>{origin}</b></div>}
+              {origin && (
+                <div className="voice-hint ai-preview-origin wb-origin-inline" id="ai-preview-origin">
+                  <OriginBadge origin={inferOriginKind(origin)} />
+                  <b>{origin}</b>
+                </div>
+              )}
               {notes.length > 0 && <p className="approval-summary" id="ai-preview-notes">{notes.join("；")}</p>}
               {framingStatus && <p className="approval-summary" id="ai-preview-framing-status" aria-live="polite">{framingStatus}</p>}
               <p className="voice-hint" id="ai-preview-strict-hint">{strictHintText(strict)}</p>
               {!connection.ready && (
-                <div className="approval-error" role="alert">还没有设备地址：请先在“雕刻工作台”填好设备 IP 或选择串口，再回来点同意。</div>
+                <div className="approval-error ai-preview-missing-conn" role="alert">
+                  <span>还没有配置设备地址：请先设置雕刻机 IP 或选择串口，核对后再勾选同意开刻。</span>
+                  {onOpenConnection ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost ai-preview-conn-btn"
+                      id="ai-preview-alert-open-conn"
+                      onClick={onOpenConnection}
+                      disabled={busy}
+                    >
+                      配置设备连接
+                    </button>
+                  ) : null}
+                </div>
               )}
               <label className="approval-check">
                 <input

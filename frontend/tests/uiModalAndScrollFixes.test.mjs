@@ -33,6 +33,11 @@ test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
     /\.laser-app-root\s*\{[^}]*z-index\s*:/s,
     ".laser-app-root 不得单独封死 z-index: 1 层叠上下文，否则会把 ApprovalCenter/AiPreviewCenter 压在 Portal 弹窗底下",
   );
+  assert.doesNotMatch(
+    css,
+    /\.ob-main\s*\{[^}]*z-index\s*:/s,
+    ".ob-main 不得设置 z-index 锁死层叠上下文，否则窄屏侧栏会压住内部顶栏与急停按钮",
+  );
   assert.match(
     css,
     /\.mat-modal,\s*\.send-confirm-dialog\s*\{[^}]*max-height:\s*calc\(100vh\s*-\s*40px\)[^}]*display:\s*flex[^}]*flex-direction:\s*column/s,
@@ -50,6 +55,7 @@ test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
   );
   assert.match(css, /#mat-modal\s*\{\s*z-index:\s*110;\s*\}/, "材料模态框层级应为 110");
   assert.match(css, /\.settings-box\s*\{\s*z-index:\s*115;\s*\}/, "偏好设置层级应为 115，低于安全审批中心 (125)");
+  assert.match(css, /\.device-conn-backdrop\s*\{\s*z-index:\s*126;\s*\}/, "统一设备连接弹窗层级应为 126，高于 AI 预览窗 (125) 以便就地配连接，低于严格模式审批卡 (128)");
   assert.match(css, /\.tts-voices-backdrop\s*\{\s*z-index:\s*115;\s*\}/, "本地合成音色弹窗层级应与设置弹窗对齐为 115");
   assert.match(css, /\.auth-box\s*\{\s*z-index:\s*132;\s*\}/, "局域网配对框层级应高于设置/材料/审批框");
   assert.match(css, /\.close-confirm-box\s*\{\s*z-index:\s*140;\s*\}/, "关闭窗口确认框层级应高于普通业务弹窗");
@@ -68,6 +74,7 @@ test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
 test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖拽安全背景点击", () => {
   for (const rel of [
     "components/SettingsModal.jsx",
+    "components/DeviceConnectionModal.jsx",
     "components/MaterialModal.jsx",
     "components/AuthModal.jsx",
     "components/CloseConfirmModal.jsx",
@@ -129,12 +136,15 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     const { AuthModal } = await server.ssrLoadModule("/src/components/AuthModal.jsx");
     const { CloseConfirmModal } = await server.ssrLoadModule("/src/components/CloseConfirmModal.jsx");
     const { SettingsModal } = await server.ssrLoadModule("/src/components/SettingsModal.jsx");
+    const { DeviceConnectionModal } = await server.ssrLoadModule("/src/components/DeviceConnectionModal.jsx");
     const { LocalTtsVoicesModal } = await server.ssrLoadModule("/src/components/LocalTtsVoicesModal.jsx");
 
     // 验证多层模态叠加时仅最顶层遮罩命中 isTopmostModalBackdrop
     const matBackdrop = { z: "110", inObMain: false, closest: () => null };
     const settingsBackdrop = { z: "115", inObMain: false, closest: () => null };
     const approvalBackdrop = { z: "125", inObMain: false, closest: () => null };
+    const deviceConnBackdrop = { z: "126", inObMain: false, closest: () => null };
+    const strictApprovalBackdrop = { z: "128", inObMain: false, closest: () => null };
     const authBackdrop = { z: "132", inObMain: false, closest: () => null };
     const inPageDrawBackdrop = { z: "130", inObMain: true, closest: (sel) => (sel === ".ob-main" ? {} : null) };
     const mockWin = {
@@ -148,6 +158,8 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     assert.equal(isTopmostModalBackdrop(matBackdrop, mockDoc([matBackdrop, authBackdrop]), mockWin), false);
     assert.equal(isTopmostModalBackdrop(authBackdrop, mockDoc([matBackdrop, authBackdrop]), mockWin), true);
     assert.equal(isTopmostModalBackdrop(settingsBackdrop, mockDoc([settingsBackdrop, approvalBackdrop]), mockWin), false);
+    assert.equal(isTopmostModalBackdrop(deviceConnBackdrop, mockDoc([approvalBackdrop, deviceConnBackdrop]), mockWin), true);
+    assert.equal(isTopmostModalBackdrop(deviceConnBackdrop, mockDoc([deviceConnBackdrop, strictApprovalBackdrop]), mockWin), false);
     assert.equal(isTopmostModalBackdrop(settingsBackdrop, mockDoc([inPageDrawBackdrop, settingsBackdrop]), mockWin), true);
     assert.equal(isTopmostModalBackdrop(authBackdrop, mockDoc([authBackdrop], true), mockWin), false);
 
@@ -182,6 +194,12 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
       }),
     );
     assert.match(ttsVoicesHtml, /Kokoro 合成 v1\.0/);
+
+    const connHtml = renderToStaticMarkup(
+      React.createElement(DeviceConnectionModal, { visible: true, onClose: () => {} }),
+    );
+    assert.match(connHtml, /id="device-connection-modal"/);
+    assert.match(connHtml, /设备连接/);
   } finally {
     await server.close();
   }

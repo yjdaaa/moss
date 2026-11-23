@@ -17,8 +17,10 @@ import {
   wizardMaterialKey,
   patternSaveTarget,
   resolveOpenWizardStep,
+  resolveWizardExpanded,
   toggleWizardStep,
   wizardProgress,
+  writeWizardFold,
 } from "../calibrationWizard.js";
 import {
   fillSettingsPayload,
@@ -49,11 +51,19 @@ export function CalibrationWizard({
 }) {
   const materialKey = wizardMaterialKey(material, thickness);
   const progress = wizardProgress(wizard, materialKey);
+  const allDone = progress.done + progress.skipped >= progress.total;
   const current = currentWizardStep(wizard, materialKey);
   // undefined = 跟随当前步骤；"" = 用户全部收起；其余 = 用户点开的那一步
   const [openStep, setOpenStep] = useState(undefined);
-  // 还有没处理的步骤时默认展开
-  const [expanded, setExpanded] = useState(() => progress.done + progress.skipped < progress.total);
+  // 全部完成或用户点“稍后”收起后默认收起，记住在 localStorage（try/catch）；
+  // 完成全部步骤自动收起时不写入 localStorage，切换到尚未标定的新材料时仍会自动展开
+  const syncKey = `${materialKey}::${allDone}`;
+  const [prevSyncKey, setPrevSyncKey] = useState(syncKey);
+  const [expanded, setExpanded] = useState(() => resolveWizardExpanded(wizard, materialKey));
+  if (prevSyncKey !== syncKey) {
+    setPrevSyncKey(syncKey);
+    setExpanded(resolveWizardExpanded(wizard, materialKey));
+  }
   const active = resolveOpenWizardStep(openStep, current);
   const [speedsText, setSpeedsText] = useState("");
   const [measured, setMeasured] = useState({});
@@ -202,7 +212,7 @@ export function CalibrationWizard({
   const kerfResult = pattern?.test_type === "kerf" ? kerfFromMeasurement(pattern.square_mm ?? 20, kerfMeasured) : null;
   const suggestion = overscanSuggestion(pattern?.pattern?.overscan_mm, { auto: pattern?.pattern?.overscan_auto !== false });
 
-  const body = (stepId) => {
+  const body = (stepId, trailingAction) => {
     switch (stepId) {
       case "interval":
       case "matrix":
@@ -220,6 +230,7 @@ export function CalibrationWizard({
               <button type="button" className="btn btn-ghost" onClick={() => mark(stepId, "done")} disabled={readOnly}>
                 已选好格子，完成本步
               </button>
+              {trailingAction}
             </div>
           </>
         );
@@ -239,6 +250,7 @@ export function CalibrationWizard({
                 生成测试方块
               </button>
               {sendButton("scan_offset")}
+              {trailingAction}
             </div>
             {pattern ? (
               <div className="lab-wizard-measure">
@@ -274,6 +286,7 @@ export function CalibrationWizard({
                 生成检查方块
               </button>
               {sendButton("overscan")}
+              {trailingAction}
             </div>
             {pattern ? (
               <div className="lab-wizard-measure">
@@ -320,6 +333,7 @@ export function CalibrationWizard({
                 生成切缝方块
               </button>
               {sendButton("kerf")}
+              {trailingAction}
             </div>
             {pattern ? (
               <div className="lab-wizard-measure">
@@ -355,73 +369,112 @@ export function CalibrationWizard({
                   清除校准记录
                 </button>
               ) : null}
+              {trailingAction}
             </div>
           </>
         );
     }
   };
 
+  const toggleWizardExpanded = () => {
+    const nextOpen = !expanded;
+    setExpanded(nextOpen);
+    // 6/6 已全部完成时回看展开或收起只作用于当前会话视图，不写入全局 "closed"，避免切换到未标定新材料时不再自动展开
+    if (!allDone) {
+      writeWizardFold(nextOpen);
+    }
+  };
+
+  const handleDeferOrCollapse = () => {
+    setExpanded(false);
+    if (!allDone) {
+      writeWizardFold(false);
+    }
+  };
+
   return (
-    <details
+    <section
       className="hud-card lab-wizard"
       id="lab-wizard"
-      open={expanded}
-      onToggle={(event) => setExpanded(event.currentTarget.open)}
+      data-open={expanded ? "true" : "false"}
     >
-      <summary>
-        <span className="lab-wizard-title">首次标定向导</span>
-        <span className="lab-wizard-progress">
-          {label} · 已完成 {progress.done} / {progress.total}
-          {progress.skipped ? `，跳过 ${progress.skipped}` : ""}
-        </span>
-      </summary>
-      <ol className="lab-wizard-steps">
-        {WIZARD_STEPS.map((step, index) => {
-          const record = stepRecord(wizard, step.id, materialKey);
-          const isActive = step.id === active;
-          return (
-            <li key={step.id} className={`lab-wizard-step${isActive ? " on" : ""}${record ? ` ${record.status}` : ""}`}>
-              <button
-                type="button"
-                className="lab-wizard-step-head"
-                aria-expanded={isActive}
-                aria-controls={`lab-wizard-body-${step.id}`}
-                title={isActive ? "收起这一步" : "展开这一步"}
-                onClick={() => setOpenStep(toggleWizardStep(active, step.id))}
-              >
-                <b>{index + 1}. {step.title}</b>
-                <span>
-                  {record?.status === "done" ? "已完成" : record?.status === "skipped" ? "已跳过" : step.id === current ? "当前" : "待做"}
-                  {step.scope === "machine" ? " · 跟机器" : " · 跟材料"}
-                  <ChevronDown size={14} className="lab-wizard-chevron" aria-hidden="true" />
-                </span>
-              </button>
-              {isActive ? (
-                <div className="lab-wizard-body" id={`lab-wizard-body-${step.id}`}>
-                  <p className="lab-wizard-summary">{step.summary}</p>
-                  {record?.note ? <p className="lab-wizard-status">上次结果：{record.note}</p> : null}
-                  {body(step.id)}
-                  {note ? <p className="lab-wizard-status" role="status">{note}</p> : null}
-                  {!readOnly ? (
-                    <div className="lab-wizard-actions">
-                      {record ? (
-                        <button type="button" className="btn btn-ghost" onClick={() => mark(step.id, null)}>
-                          重做这一步
-                        </button>
-                      ) : (
-                        <button type="button" className="btn btn-ghost" onClick={() => mark(step.id, "skipped")}>
-                          跳过这一步
-                        </button>
-                      )}
+      <div className="lab-wizard-head">
+        <button
+          type="button"
+          className="lab-wizard-toggle"
+          id="lab-wizard-toggle"
+          aria-expanded={expanded}
+          aria-controls={expanded ? "lab-wizard-steps" : undefined}
+          onClick={toggleWizardExpanded}
+        >
+          <span className="lab-wizard-title">首次标定向导</span>
+          <span className="lab-wizard-progress">
+            {label} · 已完成 {progress.done} / {progress.total}
+            {progress.skipped ? `，跳过 ${progress.skipped}` : ""}
+          </span>
+          {!expanded && !allDone ? (
+            <span className="lab-wizard-continue">继续</span>
+          ) : null}
+        </button>
+        {expanded ? (
+          <button
+            type="button"
+            className="btn btn-ghost lab-wizard-defer"
+            id="lab-wizard-defer"
+            onClick={handleDeferOrCollapse}
+          >
+            {allDone ? "收起" : "稍后"}
+          </button>
+        ) : null}
+      </div>
+      {expanded ? (
+        <>
+          <ol className="lab-wizard-steps" id="lab-wizard-steps">
+            {WIZARD_STEPS.map((step, index) => {
+              const record = stepRecord(wizard, step.id, materialKey);
+              const isActive = step.id === active;
+              const trailingAction = !readOnly ? (
+                record ? (
+                  <button type="button" className="btn btn-ghost" onClick={() => mark(step.id, null)}>
+                    重做这一步
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn-ghost" onClick={() => mark(step.id, "skipped")}>
+                    跳过这一步
+                  </button>
+                )
+              ) : null;
+              return (
+                <li key={step.id} className={`lab-wizard-step${isActive ? " on" : ""}${record ? ` ${record.status}` : ""}`}>
+                  <button
+                    type="button"
+                    className="lab-wizard-step-head"
+                    aria-expanded={isActive}
+                    aria-controls={`lab-wizard-body-${step.id}`}
+                    title={isActive ? "收起这一步" : "展开这一步"}
+                    onClick={() => setOpenStep(toggleWizardStep(active, step.id))}
+                  >
+                    <b>{index + 1}. {step.title}</b>
+                    <span>
+                      {record?.status === "done" ? "已完成" : record?.status === "skipped" ? "已跳过" : step.id === current ? "当前" : "待做"}
+                      {step.scope === "machine" ? " · 跟机器" : " · 跟材料"}
+                      <ChevronDown size={14} className="lab-wizard-chevron" aria-hidden="true" />
+                    </span>
+                  </button>
+                  {isActive ? (
+                    <div className="lab-wizard-body" id={`lab-wizard-body-${step.id}`}>
+                      {record?.note ? <p className="lab-wizard-status">上次结果：{record.note}</p> : null}
+                      {body(step.id, trailingAction)}
+                      {note ? <p className="lab-wizard-status" role="status">{note}</p> : null}
                     </div>
                   ) : null}
-                </div>
-              ) : null}
-            </li>
-          );
-        })}
-      </ol>
-      {readOnly ? <p className="lab-wizard-status">已连接电脑 MOSS：向导只能查看，测试与保存请在电脑上进行。</p> : null}
-    </details>
+                </li>
+              );
+            })}
+          </ol>
+          {readOnly ? <p className="lab-wizard-status">已连接电脑 MOSS：向导只能查看，测试与保存请在电脑上进行。</p> : null}
+        </>
+      ) : null}
+    </section>
   );
 }

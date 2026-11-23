@@ -100,6 +100,23 @@
 }
 .ob-fold-spacer {
   flex: 1;
+  min-width: 8px;
+}
+.ob-fold-summary {
+  flex: 0 1 auto;
+  max-width: 56%;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ob-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.app-dialog-origin-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .ob-fold-chevron {
   flex: none;

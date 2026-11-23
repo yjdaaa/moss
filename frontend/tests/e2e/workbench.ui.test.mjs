@@ -71,8 +71,11 @@ async function openWorkbench(port) {
   const page = await context.newPage();
   const diagnose = traceApi(page);
   await page.goto(`${API_BASE}/`);
-  await page.getByPlaceholder("控制器 IP (例 192.168.1.10)").fill(GRBL_HOST);
-  await page.locator("input.wb-field-3").fill(String(port));
+  await page.locator("#wb-open-connection").click();
+  await page.locator("#conn-network-host").fill(GRBL_HOST);
+  await page.locator("#conn-telnet-port").fill(String(port));
+  await page.locator("#device-conn-close").click();
+  await page.locator("#device-connection-modal").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
   return { context, page, diagnose };
 }
 
@@ -229,9 +232,9 @@ test("[UI-05] 画板: 自动继承工作台设备 + 导入场景与自定义参�
   const diagnose = traceApi(page);
   try {
     await page.goto(`${API_BASE}/draw`);
-    const hostInput = page.locator('[data-wb-card="draw-device"] input').first();
-    await hostInput.waitFor({ timeout: STEP_TIMEOUT_MS });
-    assert.equal(await hostInput.inputValue(), GRBL_HOST, "画板未单独配置时应自动带入工作台已填 IP");
+    const summaryCard = page.locator("#draw-device-summary");
+    await summaryCard.waitFor({ timeout: STEP_TIMEOUT_MS });
+    assert.match(await summaryCard.innerText(), new RegExp(`${GRBL_HOST}:${rec.port}`), "画板应与工作台共用同一份设备连接设置");
 
     // 导入一份包含单个实心深色矩形的 Excalidraw 场景 JSON
     const scenePayload = JSON.stringify({
@@ -279,7 +282,7 @@ test("[UI-05] 画板: 自动继承工作台设备 + 导入场景与自定义参�
     await page.locator("#draw-custom-params").check();
     await page.locator("#draw-custom-power").fill("45");
     await page.locator("#draw-custom-feed").fill("1400");
-    await page.getByRole("button", { name: "生成预览", exact: true }).click();
+    await page.locator("#draw-dock-preview-btn").click();
     await page.locator("#draw-origin-note").waitFor({ timeout: STEP_TIMEOUT_MS });
 
     // 先走边框：确认后请求必须带 relative_to_head: true 且模拟器收到 G92 移动行
@@ -368,7 +371,7 @@ test("[UI-06] 材料实验室: 合并导入确认框 + 保存不跳首项 + 标�
     await page.getByRole("button", { name: "生成矩阵" }).click();
     await page.getByText(/边缘切割矩阵已生成/).waitFor({ timeout: STEP_TIMEOUT_MS });
 
-    await matrixInputs.nth(1).fill("850");
+    await matrixInputs.nth(1).fill("85");
     await page.locator(".lab-stale-note").waitFor({ timeout: 5000 });
     assert.equal(await page.getByRole("button", { name: "发送测试" }).isDisabled(), true, "修改标定区间后必须禁用旧矩阵发送");
 
@@ -391,22 +394,19 @@ test("[UI-06] 材料实验室: 合并导入确认框 + 保存不跳首项 + 标�
   }
 });
 
-test("[UI-07] 双设备切页: 常驻画板切到工作台后按顶栏急停只停工作台设备；切回画板恢复停画板设备", async () => {
+test("[UI-07] 统一连接与常驻画板切页: 切到工作台改连接后按顶栏急停只由工作台发给新设备，隐藏画板不抢急停；切回画板同步新连接", async () => {
   const recDraw = await startRecordingGrbl({ ackDelayMs: 0 });
   const recHome = await startRecordingGrbl({ ackDelayMs: 0 });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  await context.addInitScript(([host, drawPort, homePort]) => {
-    localStorage.setItem("laserLab.connection_mode", "network");
-    localStorage.setItem("laserLab.network_host", host);
-    localStorage.setItem("laserLab.network_telnet_port", drawPort);
+  await context.addInitScript(([host, drawPort]) => {
     localStorage.setItem("laser-forge-conn-mode", "network");
     localStorage.setItem("laser-forge-host", host);
-    localStorage.setItem("laser-forge-telnet-port", homePort);
-  }, [GRBL_HOST, String(recDraw.port), String(recHome.port)]);
+    localStorage.setItem("laser-forge-telnet-port", drawPort);
+  }, [GRBL_HOST, String(recDraw.port)]);
   const page = await context.newPage();
   const diagnose = traceApi(page);
   try {
-    // 尝试给画板存档写入设备 B，后端丢弃连接字段，画板继续使用当前浏览器选的设备 A。
+    // 尝试给画板存档写入连接字段，后端丢弃连接字段
     const saved = await page.request.post(`${API_BASE}/api/draw/state`, {
       data: { form: { connection_mode: "network", network_host: GRBL_HOST, network_telnet_port: String(recHome.port) } },
     });
@@ -416,38 +416,91 @@ test("[UI-07] 双设备切页: 常驻画板切到工作台后按顶栏急停只�
       assert.equal(Object.hasOwn(savedForm, key), false, `后端必须丢弃 ${key}`);
     }
 
-    // 1. 先打开创作画板，让 #draw-keepalive 常驻挂载设备 A（recDraw）
+    // 1. 先打开创作画板，让 #draw-keepalive 常驻挂载（当前连接为 recDraw）
     await page.goto(`${API_BASE}/draw`);
-    await page.locator('[data-wb-card="draw-device"] input').first().waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#draw-device-summary").waitFor({ timeout: STEP_TIMEOUT_MS });
     await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
 
-    // 2. 通过左侧导航切到雕刻工作台（设备 B: recHome），画板保持挂载但隐藏
+    // 2. 通过左侧导航切到雕刻工作台，并在统一连接面板切换端口到设备 B（recHome）；画板保持挂载但隐藏
     await page.locator("nav.ob-nav button", { hasText: "雕刻工作台" }).click();
-    await page.getByPlaceholder("控制器 IP (例 192.168.1.10)").waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#wb-open-connection").waitFor({ timeout: STEP_TIMEOUT_MS });
     await page.locator("#draw-keepalive").waitFor({ state: "hidden", timeout: STEP_TIMEOUT_MS });
+    await page.locator("#wb-open-connection").click();
+    await page.locator("#conn-telnet-port").fill(String(recHome.port));
+    await page.locator("#device-conn-close").click();
+    await page.locator("#device-connection-modal").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
 
-    // 3. 在工作台按顶栏急停：必须停工作台设备 B，隐藏画板不得拦截并误停设备 A
+    // 3. 在工作台按顶栏急停：必须只由工作台向设备 B 写出 0x18，隐藏画板（无在途任务）不得重复弹框或误停设备 A
     const homeBefore = recHome.events.length;
     await page.locator("#nav-estop").click();
-    await waitFor(() => recHome.events.slice(homeBefore).includes("0x18"), "切到工作台后顶栏急停必须向工作台设备写出 0x18", 5000);
+    await waitFor(() => recHome.events.slice(homeBefore).includes("0x18"), "切到工作台后顶栏急停必须向当前设备写出 0x18", 5000);
     await page.getByTestId("app-dialog").getByText("停止请求已发送", { exact: true }).waitFor({ timeout: STEP_TIMEOUT_MS });
-    assert.equal(recDraw.events.includes("0x18"), false, "画板隐藏期间不得拦截顶栏急停并误停画板设备");
+    assert.equal(recDraw.events.includes("0x18"), false, "切换目标后不得向旧设备发急停");
     await page.getByTestId("app-dialog").getByRole("button", { name: "确定", exact: true }).click();
     await page.getByTestId("app-dialog").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
 
-    // 4. 切回创作画板后按顶栏急停：恢复由画板停设备 A，不误发给工作台设备 B
+    // 4. 切回创作画板：自动同步显示设备 B，再通过顶栏硬件胶囊切回设备 A 后按顶栏急停，向设备 A 写出 0x18
     await page.locator("nav.ob-nav button", { hasText: "创作画板" }).click();
     await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+    assert.match(await page.locator("#draw-device-summary").innerText(), new RegExp(`${GRBL_HOST}:${recHome.port}`), "切回画板应实时同步统一连接目标");
+    await page.locator("#nav-hardware-status").click();
+    await page.locator("#conn-telnet-port").fill(String(recDraw.port));
+    await page.keyboard.press("Escape");
+    await page.locator("#device-connection-modal").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
+
     const homeBeforeBack = recHome.events.length;
     await page.locator("#nav-estop").click();
-    await waitFor(() => recDraw.events.includes("0x18"), "切回画板后顶栏急停必须向画板设备写出 0x18", 5000);
+    await waitFor(() => recDraw.events.includes("0x18"), "切回画板后顶栏急停必须向当前统一目标写出 0x18", 5000);
     await page.getByTestId("app-dialog").getByText("已发送急停", { exact: true }).waitFor({ timeout: STEP_TIMEOUT_MS });
-    assert.equal(recHome.events.slice(homeBeforeBack).includes("0x18"), false, "切回画板后顶栏急停不得发给工作台设备");
+    assert.equal(recHome.events.slice(homeBeforeBack).includes("0x18"), false, "不得向非当前目标设备发急停");
   } catch (error) {
     await diagnose(error);
   } finally {
     await context.close();
     recDraw.close();
     recHome.close();
+  }
+});
+
+test("[UI-08] 工作台现场移头与对刀原点: 未探测时按钮禁用，握手通过后点动取消零发送、确认后经 /api/safe-action 到达模拟器", async () => {
+  const rec = await startRecordingGrbl({ ackDelayMs: 0 });
+  const { context, page, diagnose } = await openWorkbench(rec.port);
+  try {
+    // 1. 面板默认收起；展开后因尚未握手探测，点动与设原点按钮禁用
+    assert.equal(await page.locator("#wb-head-jog").evaluate((el) => el.open), false);
+    await page.locator("#wb-head-jog-toggle").click();
+    assert.equal(await page.locator("#wb-jog-x-plus").isDisabled(), true, "未握手探测时点动按钮必须禁用");
+    assert.match(await page.locator("#wb-jog-reason").innerText(), /握手探测/);
+
+    // 2. 在统一连接弹窗完成握手探测后，移头面板按钮解锁可用
+    await page.locator("#wb-open-connection").click();
+    await page.locator("#conn-probe-btn").click();
+    await page.locator("#conn-probe-status").filter({ hasText: "硬件握手通过" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#device-conn-close").click();
+    await page.locator("#device-connection-modal").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
+    assert.equal(await page.locator("#wb-jog-x-plus").isDisabled(), false, "握手通过后点动按钮可用");
+
+    // 3. 选 5 mm 步长点 X+：取消二次确认时模拟器不收任何运动指令；确认后经 /api/safe-action 收到 M5 / G91 / G0 X5.000 Y0.000 F1000 / G90
+    await page.locator("#wb-jog-step").selectOption("5");
+    const linesBefore = rec.lines.length;
+    await page.locator("#wb-jog-x-plus").click();
+    // 弹窗右上角关闭钮的 aria-label 也是“取消”，点底部的取消按钮
+    await page.getByTestId("app-dialog").locator("button.btn", { hasText: "取消" }).click();
+    await page.getByTestId("app-dialog").waitFor({ state: "detached", timeout: STEP_TIMEOUT_MS });
+    assert.deepEqual(rec.lines.slice(linesBefore), [], "取消点动确认不得向模拟器发送任何指令");
+
+    await page.locator("#wb-jog-x-plus").click();
+    await page.getByTestId("app-dialog").getByRole("button", { name: "确认移动", exact: true }).click();
+    await waitFor(
+      () => rec.lines.slice(linesBefore).includes("G0 X5.000 Y0.000 F1000"),
+      "确认点动后模拟器必须收到 5mm 相对移动指令",
+    );
+    const jogLines = rec.lines.slice(linesBefore);
+    assert.ok(jogLines.includes("M5") && jogLines.includes("G91") && jogLines.includes("G90"), `点动须包含关光与 G91/G90 恢复: ${jogLines.join(" | ")}`);
+  } catch (error) {
+    await diagnose(error);
+  } finally {
+    await context.close();
+    rec.close();
   }
 });

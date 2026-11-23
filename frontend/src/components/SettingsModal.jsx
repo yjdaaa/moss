@@ -50,6 +50,7 @@ function SettingsModalBody({
   const [savingMcpEndpoint, setSavingMcpEndpoint] = useState(false);
   const [mcpSaveStatus, setMcpSaveStatus] = useState("");
   const [jevEnabled, setJevEnabled] = useState(false);
+  const [savedJevEnabled, setSavedJevEnabled] = useState(false);
   const [jevApiKeyInput, setJevApiKeyInput] = useState("");
   const [jevMaskedKey, setJevMaskedKey] = useState("");
   const [jevRevealedKey, setJevRevealedKey] = useState("");
@@ -116,7 +117,9 @@ function SettingsModalBody({
       if (!alive) return;
       if (res.ok && res.data?.success) {
         const jev = res.data.result || {};
-        setJevEnabled(Boolean(jev.enabled));
+        const enabled = Boolean(jev.enabled);
+        setJevEnabled(enabled);
+        setSavedJevEnabled(enabled);
         setJevMaskedKey(jev.masked_key || "");
       }
     });
@@ -331,7 +334,7 @@ function SettingsModalBody({
     }
   };
 
-  const handleSaveJev = async () => {
+  const saveJevSettings = async ({ silentSuccess = false } = {}) => {
     setSavingJev(true);
     setJevSaveStatus("");
     const body = {
@@ -341,21 +344,30 @@ function SettingsModalBody({
     try {
       const res = await postJson("/api/settings", body);
       if (res.ok && res.data?.success) {
+        setSavedJevEnabled(jevEnabled);
         setJevApiKeyInput("");
         setJevKeyVisible(false);
         setJevRevealedKey("");
         const status = await getJson("/api/jev/status");
         if (status.ok && status.data?.success) setJevMaskedKey(status.data.result?.masked_key || "");
-        setJevSaveStatus("已保存");
-        setTimeout(() => setJevSaveStatus(""), 4000);
-      } else {
-        showAlert(res.data?.result || "保存失败", { title: "Jev 设置保存失败", tone: "error" });
+        if (!silentSuccess) {
+          setJevSaveStatus("已保存");
+          setTimeout(() => setJevSaveStatus(""), 4000);
+        }
+        return true;
       }
+      await showAlert(res.data?.result || "保存失败", { title: "Jev 设置保存失败", tone: "error" });
+      return false;
     } catch (e) {
-      showAlert(`保存 Jev 设置网络异常: ${e.message}`, { title: "Jev 设置保存失败", tone: "error" });
+      await showAlert(`保存 Jev 设置网络异常: ${e.message}`, { title: "Jev 设置保存失败", tone: "error" });
+      return false;
     } finally {
       setSavingJev(false);
     }
+  };
+
+  const handleSaveJev = async () => {
+    await saveJevSettings({ silentSuccess: false });
   };
 
   const handleDeleteJevKey = async () => {
@@ -385,27 +397,55 @@ function SettingsModalBody({
   };
 
   const handleTestJev = async () => {
-    if (jevApiKeyInput.trim()) {
-      showAlert("检测到输入框中有尚未保存的新密钥，请先点击「保存 Jev 设置」后再测试连接。", {
-        title: "请先保存设置",
-        tone: "warning",
-      });
-      return;
+    // 存在尚未保存的 Jev 输入或开关改动时先走保存，保存失败如实提示并中止，不得静默测旧密钥
+    const hasUnsavedJev = Boolean(jevApiKeyInput.trim()) || jevEnabled !== savedJevEnabled;
+    if (hasUnsavedJev) {
+      const savedOk = await saveJevSettings({ silentSuccess: true });
+      if (!savedOk) return;
     }
     setTestingJev(true);
+    setJevSaveStatus("");
     try {
       const res = await postJson("/api/jev/test");
       if (res.ok && res.data?.success) {
-        setJevSaveStatus("连接正常");
+        setJevSaveStatus(hasUnsavedJev ? "已保存并连接正常" : "连接正常");
       } else {
-        showAlert(res.data?.result || "Jev 连接失败", { title: "Jev 连接测试失败", tone: "error" });
+        await showAlert(res.data?.result || "Jev 连接失败", { title: "Jev 连接测试失败", tone: "error" });
       }
     } catch (e) {
-      showAlert(`测试 Jev 网络异常: ${e.message}`, { title: "Jev 连接测试失败", tone: "error" });
+      await showAlert(`测试 Jev 网络异常: ${e.message}`, { title: "Jev 连接测试失败", tone: "error" });
     } finally {
       setTestingJev(false);
     }
   };
+
+  const portSummary = systemInfo
+    ? systemInfo.is_fallback
+      ? `${systemInfo.actual_port}（首选 ${systemInfo.preferred_port} 占用）`
+      : `端口 ${systemInfo.actual_port}`
+    : `端口 ${portInput || 9666}`;
+  const mcpSummary = systemInfo?.mcp?.configured
+    ? systemInfo.mcp.connected
+      ? "已连接"
+      : "已配置 · 未连接"
+    : "未配置";
+  const jevSummary = !jevEnabled
+    ? jevMaskedKey
+      ? "未启用（已存密钥）"
+      : "未启用"
+    : jevMaskedKey
+      ? `已启用 · ${jevMaskedKey}`
+      : "已启用 · 未配密钥";
+  const updateSummary = updateReport?.has_update
+    ? `可更新 v${updateReport.latest_version}`
+    : `v${systemInfo?.version || FALLBACK_APP_VERSION} · ${autoCheckUpdate ? "自动检查" : "手动检查"}`;
+  const closeSummary =
+    closeAction === "exit"
+      ? "直接退出程序"
+      : closeAction === "tray"
+        ? trayActionCopy().title
+        : "每次询问";
+  const topPillsSummary = hideTopPills ? "已隐藏状态胶囊" : "显示状态胶囊";
 
   const content = (
     <div
@@ -448,7 +488,7 @@ function SettingsModalBody({
           {!isRemoteMode() && (<>
           {/* 网络与服务端口设置 */}
           <div className="ob-fold settings-box-3">
-            <FoldHeader variant="section" id="settings-port" icon={Network} title="服务监听端口 (Web Port)" defaultOpen={false} />
+            <FoldHeader variant="section" id="settings-port" icon={Network} title="服务监听端口 (Web Port)" summary={portSummary} defaultOpen={false} />
 
             <div className="settings-box-4">
               上位机 HTTP 服务监听端口，供本桌面端同源访问及手机/局域网连接：
@@ -508,7 +548,7 @@ function SettingsModalBody({
               仅在无语音中心的独立 moss-host 等环境保留兼容配置 */}
           {!onOpenVoice && (
             <div className="ob-fold settings-box-3">
-              <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" defaultOpen={false} />
+              <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" summary={mcpSummary} defaultOpen={false} />
               <div className="settings-box-4">
                 输入小智控制台生成的完整 WebSocket 地址；保存后重启 MOSS 生效。留空并保存可关闭桥接。
               </div>
@@ -549,7 +589,7 @@ function SettingsModalBody({
               官方链路及无语音中心的网页环境没有别的入口，在这里配置（2026-11-15） */}
           {showJevSettings && (
           <div className="ob-fold settings-box-3" id="settings-jev">
-            <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" defaultOpen={false} />
+            <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" summary={jevSummary} defaultOpen={false} />
             <div className="settings-box-4">
               Jev 只帮助判断“太焦、太浅、切不透”等加工反馈，不直接控制激光机。
             </div>
@@ -608,11 +648,12 @@ function SettingsModalBody({
               </button>
               <button
                 type="button"
+                id="settings-jev-test"
                 className="btn btn-ghost settings-btn-5"
                 onClick={handleTestJev}
                 disabled={testingJev || savingJev}
               >
-                {testingJev ? "测试中..." : "测试连接"}
+                {savingJev ? "保存中..." : testingJev ? "测试中..." : "保存并测试"}
               </button>
               {jevSaveStatus && <span className="settings-text">{jevSaveStatus}</span>}
             </div>
@@ -629,7 +670,7 @@ function SettingsModalBody({
           {/* 软件更新（Magpie 风格：当前版本 + 启动时自动检查更新 + 包含预览版 + 立即检查更新） */}
           {!isRemoteMode() && (
             <div className="ob-fold settings-box-3" id="settings-update-section">
-              <FoldHeader variant="section" id="settings-update" icon={RefreshCw} title="软件更新" defaultOpen={false} />
+              <FoldHeader variant="section" id="settings-update" icon={RefreshCw} title="软件更新" summary={updateSummary} defaultOpen={false} />
               <div className="settings-box-4">
                 当前版本：<strong className="mono">MOSS v{systemInfo?.version || FALLBACK_APP_VERSION}</strong>
               </div>
@@ -743,7 +784,7 @@ function SettingsModalBody({
 
           {/* 桌面客户端关闭行为 */}
           <div className="ob-fold settings-spacer">
-            <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" defaultOpen={false} />
+            <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" summary={closeSummary} defaultOpen={false} />
 
             <div className="settings-box-4">
               点击主窗口右上角关闭按钮（[X]）时的默认行为：
@@ -844,7 +885,7 @@ function SettingsModalBody({
 
           {/* 顶栏右上角状态显示 */}
           <div className="ob-fold settings-spacer" id="settings-top-pills-section">
-            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" defaultOpen={false} />
+            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" summary={topPillsSummary} defaultOpen={false} />
             <div className="settings-box-4">
               开启后隐藏页面右上角的「硬件」「小智」「审批」三个状态胶囊（未开启时保持原样显示；常驻「急停 0x18」按钮与新审批自动弹窗保持不变）：
             </div>

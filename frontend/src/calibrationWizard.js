@@ -4,6 +4,7 @@
 // 测出来的值存到该去的地方——线距、功率速度、过扫描、切缝补偿进材料库条目，扫描偏移表进本机填充设置。
 
 export const WIZARD_STORAGE_KEY = "moss.calibrationWizard.v1";
+export const WIZARD_FOLD_KEY = "moss_ui_fold_lab-wizard";
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -162,6 +163,39 @@ export function wizardProgress(state, materialKey) {
     if (record?.status === "skipped") skipped += 1;
   }
   return { done, skipped, total: WIZARD_STEPS.length };
+}
+
+/** 读取向导整体展开/收起偏好（遵循 foldState 约定，存储受限时返回 null）。 */
+export function readWizardFold(storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem?.(WIZARD_FOLD_KEY);
+    if (raw === "open" || raw === "closed") return raw;
+  } catch {
+    // 存储不可用时退回默认规则
+  }
+  return null;
+}
+
+/** 写入向导整体展开/收起偏好（读写均 try/catch）。 */
+export function writeWizardFold(open, storage = globalThis.localStorage) {
+  try {
+    storage?.setItem?.(WIZARD_FOLD_KEY, open ? "open" : "closed");
+  } catch {
+    // 存储不可用时仅当次会话生效
+  }
+}
+
+/**
+ * 计算向导卡片初始是否展开（2026-11-23 r58）：
+ * - 六步全部完成/跳过后默认收起；
+ * - 用户点过“稍后”或手动收起过（`closed`）默认收起；
+ * - 其余（尚有未处理步骤且未主动收起）默认展开。
+ */
+export function resolveWizardExpanded(state, materialKey, storage = globalThis.localStorage) {
+  const progress = wizardProgress(state, materialKey);
+  if (progress.done + progress.skipped >= progress.total) return false;
+  if (readWizardFold(storage) === "closed") return false;
+  return true;
 }
 
 const toNumber = (value) => {

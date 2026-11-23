@@ -1,6 +1,6 @@
 import React from "react";
 import { Grid } from "lucide-react";
-import { TEST_AXIS_OPTIONS, cellAxisText } from "../../materialLabState.js";
+import { TEST_AXIS_OPTIONS, cellAxisText, powerScaleToPercent } from "../../materialLabState.js";
 
 const TEST_AXIS_LABELS = Object.fromEntries(TEST_AXIS_OPTIONS.map((a) => [a.id, `${a.label} ${a.unit}`]));
 
@@ -61,7 +61,7 @@ export function LabMatrixGrid({
                   borderRadius: "2px",
                   border: "1px solid rgba(255,255,255,0.1)",
                 }}
-                title={`#${i + 1} ${cell.id}: S${cell.power} F${cell.speed} × ${cell.passes}${
+                title={`#${i + 1} ${cell.id}: ${powerScaleToPercent(cell.power)}%（S${cell.power}） F${cell.speed} × ${cell.passes}${
                   cell.line_interval_mm != null ? ` · 线距 ${cell.line_interval_mm} mm` : ""
                 }${cell.run_index ? ` · 第 ${cell.run_index} 个加工` : ""}`}
               >

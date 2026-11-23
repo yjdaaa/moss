@@ -24,6 +24,7 @@ const MCP_PILL_CLASS = {
 export function Navbar({
   currentPath,
   onNavigate,
+  onHardwareClick = null,
   onMcpClick = null,
   connectionStatus,
   mcpStatus,
@@ -44,14 +45,20 @@ export function Navbar({
   const headerRef = useRef(null);
 
   // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；
-  // 收起为右上角悬浮胶囊时不占整行高度（--ob-top-h 设为 0px），并将实测胶囊宽度写入 --ob-compact-top-w 供各页首行避让
+  // 宽屏收起为右上角悬浮胶囊（position: fixed）时不占整行高度（--ob-top-h 设为 0px），并将实测胶囊宽度写入 --ob-compact-top-w；
+  // ≤ 900px 窄屏自动退回常规顶栏，照常记录真实高度以确保滚动避让与吸顶标签不重叠。
   useLayoutEffect(() => {
     const element = headerRef.current;
     if (!element) return undefined;
     const apply = () => {
-      const h = compact ? 0 : element.offsetHeight;
+      const floating =
+        compact
+        && typeof window !== "undefined"
+        && typeof window.getComputedStyle === "function"
+        && window.getComputedStyle(element).position === "fixed";
+      const h = floating ? 0 : element.offsetHeight;
       document.documentElement.style.setProperty("--ob-top-h", `${h}px`);
-      if (compact) {
+      if (floating) {
         const w = Math.max(248, Math.ceil(element.offsetWidth + 28));
         document.documentElement.style.setProperty("--ob-compact-top-w", `${w}px`);
       } else {
@@ -59,11 +66,25 @@ export function Navbar({
       }
     };
     apply();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(apply);
-    observer.observe(element);
-    return () => observer.disconnect();
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", apply);
+    }
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(apply) : null;
+    observer?.observe(element);
+    return () => {
+      observer?.disconnect();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", apply);
+      }
+    };
   }, [compact]);
+
+  const hardwareToneClass =
+    hardware.tone === "ok"
+      ? "ob-pill--ok online"
+      : hardware.tone === "bad"
+        ? "ob-pill--bad offline"
+        : "ob-pill--off offline";
 
   return (
     <header className={`ob-top${compact ? " ob-top--compact" : ""}`} ref={headerRef} data-compact={compact ? "true" : "false"}>
@@ -73,14 +94,16 @@ export function Navbar({
       </h1>
       <div className="ob-top-spacer" />
       {updateNotice}
+      <div className="ob-top-page-actions" id="ob-top-page-actions" />
 
       {!hideStatusPills && (
         <div className="ob-top-status-cluster" role="group" aria-label="系统与硬件状态">
           <button
             type="button"
-            onClick={() => onNavigate("/")}
-            className={`ob-pill conn-pill ${hardware.online ? "ob-pill--ok online" : "ob-pill--bad offline"}`}
+            onClick={() => (onHardwareClick ? onHardwareClick() : onNavigate("/"))}
+            className={`ob-pill conn-pill ${hardwareToneClass}`}
             title={hardware.title}
+            aria-haspopup={onHardwareClick ? "dialog" : undefined}
             id="nav-hardware-status"
           >
             <Zap size={13} aria-hidden="true" />

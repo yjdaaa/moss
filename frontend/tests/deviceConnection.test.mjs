@@ -2,10 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DRAW_CONNECTION_KEYS,
+  SERIAL_BAUDRATES,
   WORKBENCH_CONNECTION_KEYS,
+  clearBufferedDeviceLogs,
+  connectionSummaryView,
+  emitDeviceLog,
+  probeControllerConnection,
+  readBufferedDeviceLogs,
   readConnectionForm,
   readRawConnection,
+  readUnifiedConnection,
   readWorkbenchConnection,
+  writeUnifiedConnection,
   writeWorkbenchConnection,
 } from "../src/deviceConnection.js";
 
@@ -15,6 +23,7 @@ function memoryStorage(initial = {}) {
     data,
     getItem: (key) => (data.has(key) ? data.get(key) : null),
     setItem: (key, value) => data.set(key, String(value)),
+    removeItem: (key) => data.delete(key),
   };
 }
 
@@ -71,4 +80,133 @@ test("原样读取区分没填与默认值；两组键互不串用", () => {
   });
   assert.equal(readConnectionForm(WORKBENCH_CONNECTION_KEYS, storage).network_host, "");
   assert.equal(readConnectionForm(DRAW_CONNECTION_KEYS, storage).network_host, "lab-host");
+});
+
+test("统一连接存储与紧凑摘要：兼容旧画板回退，写入后只保留单一存储源并正确格式化状态", () => {
+  const migrated = memoryStorage({
+    "laser-forge-conn-mode": "network",
+    "laser-forge-host": "",
+    "laserLab.connection_mode": "network",
+    "laserLab.network_host": "<device-ip>",
+    "laserLab.network_telnet_port": "2323",
+  });
+  assert.deepEqual(readUnifiedConnection(migrated), {
+    connection_mode: "network",
+    network_host: "<device-ip>",
+    network_telnet_port: "2323",
+    port: "",
+    baudrate: "115200",
+  });
+
+  writeUnifiedConnection({ connection_mode: "serial", port: "COM6", baudrate: 250000 }, migrated);
+  assert.equal(migrated.data.has("laserLab.network_host"), false, "统一写入后应清掉旧画板连接副本");
+  assert.equal(readUnifiedConnection(migrated).connection_mode, "serial");
+  assert.equal(readUnifiedConnection(migrated).port, "COM6");
+  assert.doesNotThrow(() => writeUnifiedConnection({ network_host: "<device-ip>" }, throwingStorage));
+
+  assert.deepEqual(connectionSummaryView({ connection_mode: "network", network_host: "" }, null), {
+    modeLabel: "网络",
+    targetReady: false,
+    targetText: "未填 IP",
+    statusText: "未探测",
+    statusTone: "off",
+  });
+  assert.deepEqual(
+    connectionSummaryView(
+      { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: "23" },
+      { connected: true, checkedAt: 1000, summary: "Idle" },
+    ),
+    {
+      modeLabel: "网络",
+      targetReady: true,
+      targetText: "<device-ip>:23",
+      statusText: "握手通过",
+      statusTone: "ok",
+    },
+  );
+  assert.deepEqual(
+    connectionSummaryView(
+      { connection_mode: "serial", port: "COM3", baudrate: "115200" },
+      { connected: false, checkedAt: 1000, summary: "打开串口失败" },
+    ),
+    {
+      modeLabel: "串口",
+      targetReady: true,
+      targetText: "COM3 · 115200",
+      statusText: "打开串口失败",
+      statusTone: "bad",
+    },
+  );
+});
+
+test("旧数据迁移：旧工作台只有残留默认串口、画板 laserLab.* 存了 network IP 时，统一读出 network + 该 IP 且写回后不丢", () => {
+  const legacy = memoryStorage({
+    // 旧工作台启动枚举时自动落下的默认串口，connection_mode 与 host 均未设置
+    "laser-forge-serial-port": "/dev/cu.Bluetooth-Incoming-Port",
+    // 用户此前在创作画板配好的真实网络控制器
+    "laserLab.connection_mode": "network",
+    "laserLab.network_host": "<device-ip>",
+    "laserLab.network_telnet_port": "2323",
+  });
+
+  const unified = readUnifiedConnection(legacy);
+  assert.equal(unified.connection_mode, "network", "残留串口不得在无模式下遮蔽画板已配好的网络模式");
+  assert.equal(unified.network_host, "<device-ip>", "必须读出画板保存的控制器 IP");
+  assert.equal(unified.network_telnet_port, "2323");
+
+  // 部分字段写回（如仅改端口或波特率）后，旧画板键被清理，但迁移出的 network_host 必须已完整落入新存储源且不丢失
+  writeUnifiedConnection({ network_telnet_port: "23" }, legacy);
+  assert.equal(legacy.data.has("laserLab.network_host"), false, "写回后清理旧 laserLab 副本");
+  const afterPartialWrite = readUnifiedConnection(legacy);
+  assert.equal(afterPartialWrite.connection_mode, "network");
+  assert.equal(afterPartialWrite.network_host, "<device-ip>", "部分写回后原画板控制器 IP 不得丢失");
+  assert.equal(afterPartialWrite.network_telnet_port, "23");
+});
+
+test("共享波特率常量、统一握手探测提示文案与终端日志缓冲", async () => {
+  assert.deepEqual(
+    SERIAL_BAUDRATES,
+    [9600, 19200, 38400, 57600, 115200, 230400, 250000, 460800, 921600],
+    "全站共享单一波特率列表且包含 19200 与 38400",
+  );
+
+  const okProbe = await probeControllerConnection(
+    async (_url, payload) => {
+      assert.deepEqual(payload, {
+        connection_mode: "network",
+        network_host: "<device-ip>",
+        network_telnet_port: 23,
+      });
+      return {
+        ok: true,
+        data: {
+          success: true,
+          result: { network_connected: true, summary: "FluidNC Idle ($32=1)", machine_limits: { x_accel_mm_s2: 1200 } },
+        },
+      };
+    },
+    { connection_mode: "network", network_host: " <device-ip> ", network_telnet_port: "23" },
+    12345,
+  );
+  assert.equal(okProbe.connected, true);
+  assert.equal(okProbe.status.checkedAt, 12345);
+  assert.match(okProbe.text, /语音和 AI 发送时没指定串口或 IP 就用这个连接/);
+  assert.deepEqual(okProbe.machineLimits, { x_accel_mm_s2: 1200 });
+
+  const failProbe = await probeControllerConnection(
+    async () => ({ ok: false, data: { success: false, result: "连接被拒绝" } }),
+    { connection_mode: "serial", port: "COM5", baudrate: 38400 },
+    67890,
+  );
+  assert.equal(failProbe.connected, false);
+  assert.equal(failProbe.status.checkedAt, 67890);
+  assert.equal(failProbe.text, "连接被拒绝");
+
+  clearBufferedDeviceLogs();
+  emitDeviceLog("DEVICE", "握手探测通过", "ok");
+  const logs = readBufferedDeviceLogs();
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].tag, "DEVICE");
+  assert.equal(logs[0].level, "ok");
+  clearBufferedDeviceLogs();
 });

@@ -67,7 +67,12 @@ import { WorkbenchGcodeTool } from "../components/workbench/WorkbenchGcodeTool.j
 import { WorkbenchMaterialCard } from "../components/workbench/WorkbenchMaterialCard.jsx";
 import { WorkbenchMonitorCard } from "../components/workbench/WorkbenchMonitorCard.jsx";
 import { notifyMaterialsUpdated, pickThicknessForMaterial, subscribeMaterialsUpdated } from "../materialSelectState.js";
-import { discoveryOutcome } from "../controllerDiscovery.js";
+import {
+  DEVICE_LOG_EVENT,
+  MACHINE_MOTION_EVENT,
+  probeControllerConnection,
+  readBufferedDeviceLogs,
+} from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
@@ -95,22 +100,24 @@ function writeLocal(key, value) {
   }
 }
 
-export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mcpStatus: externalMcpStatus = null }) {
-  // Connection state（连接参数读写收口在 useDeviceConnection，与材料实验室共用存储键）
+export function HomePage({
+  onNavigate,
+  connectionStatus,
+  setConnectionStatus,
+  onOpenConnection = null,
+  mcpStatus: externalMcpStatus = null,
+  activeJobs = [],
+}) {
+  // Connection state（连接参数读写收口在 useDeviceConnection，全站共用同一份存储）
   const {
     connectionMode,
-    setConnectionMode,
     serialPort,
-    setSerialPort,
     baudrate,
-    setBaudrate,
     networkHost,
     setNetworkHost,
     telnetPort,
-    setTelnetPort,
   } = useDeviceConnection({ numeric: true });
   const deviceConnection = { connectionMode, serialPort, baudrate, networkHost, telnetPort };
-  const [serialPorts, setSerialPorts] = useState([]);
 
   // Active Tool Mode
   const [activeTool, setActiveTool] = useState("text"); // text, image, gcode
@@ -153,6 +160,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const textIsCut = resolveTextStyle(textStyleEffective).laserMode === "cut";
   // 握手读到的机器加速度 / 最大速度：工时估算与自动过扫描用（2026-11-16）
   const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  useEffect(() => {
+    const onMotion = (e) => {
+      if (e?.detail) setMachineMotion(e.detail);
+    };
+    window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
+    return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
+  }, []);
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
@@ -291,8 +305,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [showMaterialModal, setShowMaterialModal] = useState(false);
   const [materialModalData, setMaterialModalData] = useState(null);
 
-  // Logs & Telemetry（正序追加：从上往下滚动，最新日志位于最底部）
-  const [logs, setLogs] = useState([]);
+  // Logs & Telemetry（正序追加：从上往下滚动，最新日志位于最底部；同步接收全局设备连接弹窗与启动握手日志）
+  const [logs, setLogs] = useState(() => readBufferedDeviceLogs());
+  useEffect(() => {
+    const onDeviceLog = (e) => {
+      const entry = e?.detail;
+      if (!entry) return;
+      setLogs((prev) => [...prev.slice(-99), entry]);
+    };
+    window.addEventListener(DEVICE_LOG_EVENT, onDeviceLog);
+    return () => window.removeEventListener(DEVICE_LOG_EVENT, onDeviceLog);
+  }, []);
   const [gcodeText, setGcodeText] = useState("");
   const gcodeLineCount = useMemo(() => (gcodeText ? gcodeText.split("\n").length : 0), [gcodeText]);
   const [mcpStatus, setMcpStatus] = useState(null);
@@ -304,49 +327,24 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     setLogs((prev) => [...prev.slice(-99), { time, tag, message, level }]);
   };
 
-  // 挂载时那次加载与启动握手用到的最新值和函数：每次渲染后同步，定时器触发时读到的是当时的连接目标
-  // （运行配置在这 600 ms 内加载回来改了默认连接时，握手按新目标，而不是首帧的旧值）
+  // 挂载时加载用到的最新函数：每次渲染后同步
   const startupRef = useRef(null);
-  // 挂载时是否已经探测过（从其他页面切回工作台时为 true）
-  const initialCheckedAtRef = useRef(connectionStatus?.checkedAt);
   useEffect(() => {
     startupRef.current = {
       loadMaterials,
-      loadSerialPorts,
       loadRuntimeConfig,
-      performConnectionProbe,
-      connectionMode,
-      networkHost,
-      serialPort,
     };
   });
 
-  // Initial Load: Materials & Config & 优化1: 启动自动静默握手一次（只在挂载时运行）
+  // Initial Load: Materials & Runtime Config（不自动发起串口/网络握手探测，避免切页或刚填新地址时自动重连/重启板子）
   useEffect(() => {
     const startup = startupRef.current;
     startup.loadMaterials();
-    startup.loadSerialPorts();
     startup.loadRuntimeConfig();
 
     // 材料实验室修改后经 BroadcastChannel 跨页同步刷新
     const unsubscribeMaterials = subscribeMaterialsUpdated(() => startupRef.current.loadMaterials());
-
-    // 优化 1: 仅在应用启动后尚未探测过时自动静默握手一次；从其他页面切回工作台时不重复探测
-    // （挂载那一刻的状态：之前已探测过就不再探测）
-    if (initialCheckedAtRef.current) {
-      return unsubscribeMaterials;
-    }
-    const timer = setTimeout(() => {
-      const latest = startupRef.current;
-      if (
-        (latest.connectionMode === "network" && latest.networkHost) ||
-        (latest.connectionMode === "serial" && latest.serialPort)
-      ) {
-        latest.performConnectionProbe(true);
-      }
-    }, 600);
     return () => {
-      clearTimeout(timer);
       unsubscribeMaterials();
     };
   }, []);
@@ -411,30 +409,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         }
       }
       setRecRefreshTick((n) => n + 1);
-    }
-  };
-
-  const loadSerialPorts = async (showFeedback = false) => {
-    try {
-      const res = await getJson("/api/ui/serial-ports", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
-      if (res.ok && res.data?.success) {
-        const ports = res.data.result?.ports || [];
-        setSerialPorts(ports);
-        if (ports.length > 0) {
-          if (!serialPort || !ports.includes(serialPort)) {
-            setSerialPort(ports[0]);
-          }
-        } else {
-          setSerialPort("");
-        }
-        if (showFeedback) {
-          addLog("SERIAL", `扫描完成，发现可用串口: ${ports.length > 0 ? ports.join(", ") : "未检测到可用串口"}`, ports.length > 0 ? "ok" : "warn");
-        }
-      } else if (showFeedback) {
-        addLog("SERIAL", "获取串口列表失败", "warn");
-      }
-    } catch (e) {
-      if (showFeedback) addLog("SERIAL", `探测异常: ${e.message}`, "error");
     }
   };
 
@@ -546,89 +520,29 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const currentMaterialObj = materials.find((m) => m.name === selectedMaterial);
   const availableThicknesses = currentMaterialObj?.thicknesses || [1, 2, 3, 5];
 
-  // 通用硬件握手探测方法（支持静默模式与主动模式）
-  const performConnectionProbe = async (silent = false) => {
-    const epoch = ++probeEpochRef.current;
-    if (!silent) {
-      addLog("DEVICE", `正在探测 ${connectionMode === "serial" ? "串口" : "网络"} 模式连接...`, "info");
-    }
-    const payload = workbenchConnectionFields(deviceConnection);
-    try {
-      const res = await postJson("/api/connection/check", payload);
-      if (probeEpochRef.current !== epoch) return false;
-      if (res.ok && res.data?.success) {
-        const result = res.data.result;
-        const isConnected =
-          connectionMode === "serial" ? result.serial_connected : result.network_connected;
-        setConnectionStatus({ connected: isConnected, summary: result.summary, checkedAt: Date.now() });
-        const motion = machineMotionFromLimits(result.machine_limits);
-        if (motion) {
-          writeMachineMotion(motion);
-          setMachineMotion(motion);
-        }
-        if (isConnected) {
-          addLog("DEVICE", `硬件握手通过: ${result.summary || "控制器已连接 ($32=1 就绪)"}；语音和 AI 发送时没指定串口或 IP 就用这个连接`, "ok");
-        } else if (!silent) {
-          addLog("DEVICE", result.summary || "未检测到控制器连接", "warn");
-        }
-        return isConnected;
-      } else {
-        const errorMsg = res.data?.result || "探测失败：未检测到控制器连接";
-        setConnectionStatus({ connected: false, summary: errorMsg, checkedAt: Date.now() });
-        if (!silent) {
-          addLog("DEVICE", errorMsg, "error");
-        }
-        return false;
-      }
-    } catch (e) {
-      if (probeEpochRef.current !== epoch) return false;
-      setConnectionStatus({ connected: false, summary: "连接探测网络异常", checkedAt: Date.now() });
-      if (!silent) {
-        addLog("DEVICE", `探测网络异常: ${e.message}`, "error");
-      }
-      return false;
-    }
-  };
-
-  // Test connection (用户主动点击)
-  const handleTestConnection = () => performConnectionProbe(false);
-
-  // 局域网发现（2026-11-09）：mDNS 与本网段 23 端口只是候选，后端逐台发只读的 `?` / `$I`，
-  // 按 GRBL / FluidNC 回应的才列出；只找到 1 台时自动填入，多台时让用户选，不替用户挑第一个
-  const [discovering, setDiscovering] = useState(false);
-  const [discoveredChoices, setDiscoveredChoices] = useState([]);
-  const pickController = (controller) => {
-    setNetworkHost(controller.ip);
-    if (controller.telnet_port) setTelnetPort(controller.telnet_port);
-  };
-  const discoverControllers = async () => {
-    if (discovering) return;
-    setDiscovering(true);
-    setDiscoveredChoices([]);
-    addLog("DEVICE", "正在查找局域网里的雕刻机，并逐台发送只读查询确认（约 3～5 秒）...", "info");
-    try {
-      const res = await postJson("/api/ui/discover-controllers", {});
-      if (!res.ok || !res.data?.success) {
-        addLog("DEVICE", `扫描失败: ${res.data?.result || res.error || "后端无响应"}`, "error");
-        return;
-      }
-      const outcome = discoveryOutcome(res.data.result);
-      if (outcome.fill) pickController(outcome.fill);
-      setDiscoveredChoices(outcome.choices);
-      addLog("DEVICE", outcome.log.text, outcome.log.level);
-    } catch (e) {
-      addLog("DEVICE", `扫描失败: ${e.message}`, "error");
-    } finally {
-      setDiscovering(false);
-    }
-  };
-
   const connectionForm = {
     connection_mode: connectionMode,
     port: serialPort,
     baudrate: String(baudrate),
     network_host: networkHost,
     network_telnet_port: String(telnetPort),
+  };
+
+  // 开刻/续雕前的快速连通性核验（复用全局共享 probeControllerConnection）
+  const verifyConnectionBeforeSend = async () => {
+    const epoch = ++probeEpochRef.current;
+    const outcome = await probeControllerConnection(postJson, connectionForm);
+    if (probeEpochRef.current !== epoch) return false;
+    setConnectionStatus(outcome.status);
+    const motion = machineMotionFromLimits(outcome.machineLimits);
+    if (motion) {
+      writeMachineMotion(motion);
+      setMachineMotion(motion);
+    }
+    if (outcome.connected) {
+      addLog("DEVICE", outcome.text, "ok");
+    }
+    return outcome.connected;
   };
 
   // Generate Preview
@@ -899,7 +813,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     }
     if (!drawTargetReady(connectionForm)) {
       showAlert(
-        connectionMode === "serial" ? "请先在左上角「通信链路」选择有效串口" : "请先在左上角「通信链路」填写控制器 IP 地址",
+        connectionMode === "serial" ? "请先点击顶栏硬件状态或「修改连接」选择有效串口" : "请先点击顶栏硬件状态或「修改连接」填写控制器 IP 地址",
         { title: "尚未指定雕刻机", tone: "warning" },
       );
       return;
@@ -1025,6 +939,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       danger: prompt.danger,
       confirmText: prompt.confirmText,
       cancelText: "取消",
+      origin: prompt.origin,
     });
     if (!confirmed) {
       addLog("DISPATCH", "已取消本次开刻确认，机器未启动", "info");
@@ -1041,7 +956,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       let isConnected = connectionStatus?.connected;
       if (!isConnected) {
         addLog("GATE", "检测到硬件尚未握手，正在自动执行快速握手校验...", "info");
-        isConnected = await performConnectionProbe(true);
+        isConnected = await verifyConnectionBeforeSend();
       }
 
       // 强连通性前置硬门禁：如果设备确实未连接，严禁下发伪发送，坚决报错拦截
@@ -1158,7 +1073,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       let isConnected = connectionStatus?.connected;
       if (!isConnected) {
         addLog("GATE", "正在自动执行快速握手校验...", "info");
-        isConnected = await performConnectionProbe(true);
+        isConnected = await verifyConnectionBeforeSend();
       }
       if (!isConnected) {
         setOverlayStatus(prevOverlayStatus);
@@ -1283,28 +1198,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       {/* 左窄右宽双栏：左 ①②③ 输入（16 列）；右 ④ 加工监视舱 + 加工反馈（32 列）；底部 控制台抽屉 */}
       <WorkbenchCanvas>
         <WorkbenchLinkCard
-          connectionMode={connectionMode}
-          setConnectionMode={setConnectionMode}
-          serialPort={serialPort}
-          setSerialPort={setSerialPort}
-          serialPorts={serialPorts}
-          setSerialPorts={setSerialPorts}
-          baudrate={baudrate}
-          setBaudrate={setBaudrate}
-          loadSerialPorts={loadSerialPorts}
-          networkHost={networkHost}
-          setNetworkHost={setNetworkHost}
-          telnetPort={telnetPort}
-          setTelnetPort={setTelnetPort}
-          discoveredChoices={discoveredChoices}
-          pickController={pickController}
-          discovering={discovering}
-          discoverControllers={discoverControllers}
-          handleTestConnection={handleTestConnection}
+          connectionForm={connectionForm}
+          connectionStatus={connectionStatus}
+          onOpenConnection={onOpenConnection}
         />
 
         <WbCard id="source" className="hud-card ob-card" label="加工内容">
-          <FoldHeader id="wb-source" title="加工内容" k="SOURCE" n={2} />
+          <FoldHeader id="wb-source" title="加工内容" n={2} />
             {/* Tool selection cards */}
             <div className="wb-grid">
               {[
@@ -1435,6 +1335,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           framingShape={framingShape}
           setFramingShape={setFramingShape}
           connectionForm={connectionForm}
+          connectionStatus={connectionStatus}
+          activeJobs={activeJobs}
           motionPayload={motionPayload}
           addLog={addLog}
           adoptDerivedWorkflow={adoptDerivedWorkflow}
@@ -1448,7 +1350,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         />
 
         <WbCard id="feedback" className="hud-card ob-card" label="加工反馈">
-          <FoldHeader id="wb-feedback" title="加工反馈" k="FEEDBACK" />
+          <FoldHeader
+            id="wb-feedback"
+            title="加工反馈"
+            defaultOpen={Boolean(currentWorkflow?.workflow_id || currentWorkflow?.feedback_origin)}
+            persist={false}
+            autoExpandKey={
+              currentWorkflow?.workflow_id
+                ? `${currentWorkflow.workflow_id}:${overlayStatus === "completed" ? "completed" : "ready"}`
+                : ""
+            }
+          />
           {!currentWorkflow?.workflow_id && (
             <p className="ob-sub wb-note">生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
           )}

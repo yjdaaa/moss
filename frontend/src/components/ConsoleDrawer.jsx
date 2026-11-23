@@ -106,7 +106,7 @@ export function ConsoleDrawer({
           id="tab-console-feed"
         >
           <Terminal size={13} className="drawer-icon" />
-          <span title="通信终端与状态监控 (CONSOLE FEED)">终端</span>
+          <span title="通信终端与状态监控">终端</span>
         </div>
 
         <div
@@ -189,7 +189,7 @@ export function ConsoleDrawer({
         >
           {logs.length === 0 ? (
             <div className="console-empty">
-              &gt; 控制台就绪 · 启动 JobWorker 逐行下发后，底层串口/TCP 通信与 ok 遥测流将在此实时呈现...
+              &gt; 开始雕刻或探测设备后，这里显示与雕刻机的实时通信记录
             </div>
           ) : (
             logs.map((item, idx) => (
@@ -288,7 +288,7 @@ export function ConsoleDrawer({
           <div className="drawer-spacer">
             <div className="drawer-row-3">
               <span className="drawer-text-6">
-                小智 JSON-RPC 实时交互流 (RPC AUDIT LOG)
+                小智实时交互记录
               </span>
               <span className="drawer-text-7">
                 已收到: {mcpStatus?.messages_count ?? 0} 帧

@@ -1,5 +1,6 @@
 import React from "react";
 import { Send, Wifi, X } from "lucide-react";
+import { OriginBadge, inferOriginKind } from "../OriginBadge.jsx";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
 
 // 创意画板发送确认框。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分）
@@ -35,8 +36,9 @@ export function SendConfirmDialog({
           </button>
         </div>
         <JobSummaryCard summary={summary} compact />
-        <div className="wb-origin-note" id="draw-confirm-origin">
-          对刀起点：{originNote || "开刻前请把激光头对准作品左下角"}
+        <div className="wb-origin-note wb-origin-inline" id="draw-confirm-origin">
+          <OriginBadge origin={inferOriginKind(originNote)} />
+          <span>对刀起点：{originNote || "开刻前请把激光头对准作品左下角"}</span>
         </div>
         <div className="confirm-device">
           <Wifi size={17} />

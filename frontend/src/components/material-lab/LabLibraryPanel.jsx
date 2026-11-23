@@ -18,7 +18,7 @@ export function LabLibraryPanel({
 }) {
   return (
     <div className="hud-card ob-card lab-row-2">
-      <FoldHeader id="lab-library" title="材料库" k="LIBRARY" n={1} />
+      <FoldHeader id="lab-library" title="材料库" n={1} />
       <div className="lab-row-3">
         <div className="lab-box-2">
           <Search size={14} className="lab-icon-2" />

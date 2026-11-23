@@ -9,6 +9,19 @@ const labels = {
   rough_edge: "毛边", broken_line: "断线", acceptable: "效果正常", unknown: "需要补充反馈",
 };
 
+export const FEEDBACK_SYMPTOM_CHIPS = ["刻太浅", "发黑过焦", "没切透", "边缘断线", "毛边"];
+
+/** 点击症状快捷胶囊时填入输入框：为空直接填入，已有内容且未包含该词时以中文逗号追加，不重复堆叠。 */
+export function applyFeedbackChip(currentText, chip) {
+  const base = String(currentText ?? "").trim();
+  const label = String(chip ?? "").trim();
+  if (!label) return base;
+  if (!base) return label;
+  const parts = base.split(/[，,；;\s]+/).filter(Boolean);
+  if (parts.includes(label)) return base;
+  return `${base}，${label}`;
+}
+
 function paramsText(params) {
   if (!params) return "未采用";
   return `S${params.laser_max_power} / ${params.power_scale} · F${params.feed_rate} mm/min · ${params.passes} 次`;
@@ -88,6 +101,22 @@ export function FeedbackPanel({ workflowId, origin = null, disabled = false, onA
     <section className="feedback-panel" aria-label="加工反馈">
       <h3><MessageSquare size={16} />加工反馈</h3>
       <form onSubmit={submit}>
+        <div className="feedback-chips" role="group" aria-label="常见症状快捷选择">
+          {FEEDBACK_SYMPTOM_CHIPS.map((chip) => {
+            const active = text.split(/[，,；;\s]+/).includes(chip);
+            return (
+              <button
+                type="button"
+                key={chip}
+                className={`ob-chip feedback-chip${active ? " on" : ""}`}
+                disabled={busy || disabled}
+                onClick={() => setText((prev) => applyFeedbackChip(prev, chip))}
+              >
+                {chip}
+              </button>
+            );
+          })}
+        </div>
         <textarea aria-label="加工效果反馈" value={text} maxLength={2000}
           onChange={(event) => setText(event.target.value)} disabled={busy || disabled}
           placeholder="例如：文字太浅，边缘清晰" rows={3} />

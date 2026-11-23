@@ -5,6 +5,7 @@ import { drawTargetMissingText } from "../../drawConnection.js";
 import { REGISTRATION_DRAW_SESSION_KEY, drawOriginNote } from "../../registrationState.js";
 import { FeedbackPanel } from "../FeedbackPanel.jsx";
 import { FoldHeader } from "../FoldHeader.jsx";
+import { OriginBadge } from "../OriginBadge.jsx";
 import RegistrationPanel from "../RegistrationPanel.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
@@ -71,7 +72,7 @@ export function DrawSendCard({
   const pathUrl = web.gcode_preview_url || web.image_preview_url;
   return (
     <WbCard id="draw-send" className="hud-card ob-card control-panel result-panel draw-send-card" label="预览与发送">
-      <FoldHeader id="draw-send" title="预览与发送" k="PREVIEW · SEND" n={3} />
+      <FoldHeader id="draw-send" title="预览与发送" n={3} />
 
       <div className="draw-send-primary">
         <button type="button" className="primary-button" onClick={generatePreview} disabled={busy || !excalidrawAPI}>
@@ -96,8 +97,9 @@ export function DrawSendCard({
         </div>
       ) : null}
       {canActOnWorkflow && !previewStale ? (
-        <div className="draw-send-origin" id="draw-origin-note">
-          {drawOriginNote(result?.result)}
+        <div className="draw-send-origin wb-origin-inline" id="draw-origin-note">
+          <OriginBadge origin={result?.result?.registration ? "point2" : "lower_left"} />
+          <span>{drawOriginNote(result?.result)}</span>
         </div>
       ) : null}
 

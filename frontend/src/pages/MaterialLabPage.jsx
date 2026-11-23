@@ -34,6 +34,7 @@ import {
   unwrapImportedMaterialLibrary,
   isSurfaceKey,
   thicknessChipLabel,
+  powerScaleToPercent,
 } from "../materialLabState.js";
 import { readLocalSafe, writeLocalSafe } from "../components/material-lab/labStorage.js";
 import { LabLibraryPanel } from "../components/material-lab/LabLibraryPanel.jsx";
@@ -43,7 +44,11 @@ import { LabConnectionBar } from "../components/material-lab/LabConnectionBar.js
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { LabMatrixGrid } from "../components/material-lab/LabMatrixGrid.jsx";
 
-export function MaterialLabPage({ onNavigate }) {
+export function MaterialLabPage({
+  onNavigate,
+  connectionStatus = null,
+  onOpenConnection = null,
+}) {
   const [materials, setMaterials] = useState({});
   const [sourcePath, setSourcePath] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -98,17 +103,11 @@ export function MaterialLabPage({ onNavigate }) {
   const [matrixLabels, setMatrixLabels] = useState(true);
   const {
     connectionMode,
-    setConnectionMode,
     networkHost: matrixHost,
-    setNetworkHost: setMatrixHost,
     telnetPort,
-    setTelnetPort,
     serialPort,
-    setSerialPort,
     baudrate,
-    setBaudrate,
   } = useDeviceConnection();
-  const [serialPorts, setSerialPorts] = useState([]);
   const [matrixPreview, setMatrixPreview] = useState(null);
   const [matrixSignature, setMatrixSignature] = useState("");
   const [matrixId, setMatrixId] = useState("");
@@ -180,22 +179,8 @@ export function MaterialLabPage({ onNavigate }) {
     }
   }, [applyEditorState]);
 
-  const loadSerialPorts = useCallback(async () => {
-    try {
-      const res = await getJson("/api/ui/serial-ports", { timeoutMs: DEFAULT_READ_TIMEOUT_MS });
-      if (res.ok && res.data?.success) {
-        const ports = Array.isArray(res.data.result?.ports) ? res.data.result.ports : [];
-        setSerialPorts(ports);
-        setSerialPort((prev) => (ports.length > 0 && (!prev || !ports.includes(prev)) ? ports[0] : prev));
-      }
-    } catch {
-      // 忽略串口列表读取异常
-    }
-  }, [setSerialPort]);
-
   useEffect(() => {
     void loadBootstrap();
-    void loadSerialPorts();
     const unsubscribeMaterials = subscribeMaterialsUpdated(() => {
       void loadBootstrap();
     });
@@ -203,7 +188,7 @@ export function MaterialLabPage({ onNavigate }) {
       matrixPollRef.current?.();
       unsubscribeMaterials();
     };
-  }, [loadBootstrap, loadSerialPorts]);
+  }, [loadBootstrap]);
 
   // 顶栏常驻急停与本页「停止测试」共用：在途发送先按 calibration_id 停，若刚发完最后一行仍在缓冲执行则按本页设备目标补发 0x18；
   // 不提前终止状态轮询、不伪造 cancelled，等后端落定真实终态后再解锁按钮
@@ -291,6 +276,12 @@ export function MaterialLabPage({ onNavigate }) {
       setEditorStatus("保存失败: 厚度必须大于 0");
       return;
     }
+    const minP = Number(minPower);
+    const maxP = Number(maxPower);
+    if (!Number.isFinite(minP) || !Number.isFinite(maxP) || minP < 0 || maxP > 1000 || minP > maxP) {
+      setEditorStatus("保存失败: 激光功率须在 0 ~ 100% 之间，且最小功率不大于最大功率");
+      return;
+    }
 
     setEditorStatus("正在保存...");
     const payload = {
@@ -300,8 +291,8 @@ export function MaterialLabPage({ onNavigate }) {
       title: entryTitle.trim(),
       laser_mode: activeMode === "cut" ? "cut" : "engrave",
       engraving_mode: activeMode === "cut" ? "" : activeMode,
-      laser_min_power: Number(minPower),
-      laser_max_power: Number(maxPower),
+      laser_min_power: Math.round(minP),
+      laser_max_power: Math.round(maxP),
       feed_rate: Number(feedRate),
       travel_rate: Number(travelRate),
       passes: Number(passes),
@@ -698,7 +689,7 @@ export function MaterialLabPage({ onNavigate }) {
             materialKey: wizardMaterialKey(targetMat, wizardThickness),
             note: wizardStep === "interval"
               ? `线距 ${cell.line_interval_mm ?? "-"} mm（#${cellNumber}）`
-              : `功率 S${cell.power ?? "-"} · 速度 ${cell.speed ?? "-"} mm/min（#${cellNumber}）`,
+              : `功率 ${cell.power != null ? `${powerScaleToPercent(cell.power)}%（S${cell.power}）` : "-"} · 速度 ${cell.speed ?? "-"} mm/min（#${cellNumber}）`,
           }));
         }
         notifyMaterialsUpdated();
@@ -900,7 +891,7 @@ export function MaterialLabPage({ onNavigate }) {
 
         {/* Right Column: Calibration Grid Matrix */}
         <div className="hud-card ob-card lab-row-4" id="lab-matrix-card">
-          <FoldHeader id="lab-matrix" title="校准矩阵" k="MATRIX" n={3} />
+          <FoldHeader id="lab-matrix" title="校准矩阵" n={3} />
           <LabMatrixSettings
             selectedMaterial={selectedMaterial}
             selectedThickness={selectedThickness}
@@ -940,21 +931,18 @@ export function MaterialLabPage({ onNavigate }) {
             setMatrixLabels={setMatrixLabels}
           />
 
-          {/* Device Connection Row（支持网络与 USB 串口） */}
+          {/* Device Connection Summary（与全站共用统一设备连接弹窗） */}
           <LabConnectionBar
-            connectionMode={connectionMode}
-            setConnectionMode={setConnectionMode}
-            serialPort={serialPort}
-            setSerialPort={setSerialPort}
-            serialPorts={serialPorts}
-            setSerialPorts={setSerialPorts}
-            baudrate={baudrate}
-            setBaudrate={setBaudrate}
-            loadSerialPorts={loadSerialPorts}
-            matrixHost={matrixHost}
-            setMatrixHost={setMatrixHost}
-            telnetPort={telnetPort}
-            setTelnetPort={setTelnetPort}
+            connectionForm={{
+              connection_mode: connectionMode,
+              port: serialPort,
+              baudrate,
+              network_host: matrixHost,
+              network_telnet_port: telnetPort,
+            }}
+            connectionStatus={connectionStatus}
+            onOpenConnection={onOpenConnection}
+            disabled={matrixBusy || isMatrixRunning}
           />
 
           <div className="lab-action-bar">

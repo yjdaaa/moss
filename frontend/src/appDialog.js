@@ -96,6 +96,7 @@ export function showDialog(options = {}) {
       confirmText: options.confirmText || "确定",
       cancelText: options.cancelText || "取消",
       danger: Boolean(options.danger),
+      origin: options.origin || null,
       resolve,
     });
     if (queue.length === 1) notify();

@@ -17,6 +17,9 @@ import {
   thicknessChipLabel,
   matrixPollOutcome,
   matrixSendOutcome,
+  powerScaleToPercent,
+  percentToPowerScale,
+  formatPowerScaleHint,
 } from "../src/materialLabState.js";
 import {
   MATERIAL_LIBRARY_CHANNEL,
@@ -325,4 +328,56 @@ test("标定矩阵轮询：进度合并、查询失败不算结束、终态停�
   );
   assert.equal(cancelled.terminal, true);
   assert.equal(cancelled.status, "标定矩阵记录为已取消，请确认设备状态: 用户急停");
+});
+
+test("B2 实验室功率 0–100% 与后端 S 值 (0–1000) 换算、S 值提示及全范围往返零漂移", () => {
+  // 典型边界：0、42%、100% 与非整数百分比
+  assert.equal(powerScaleToPercent(0), 0);
+  assert.equal(percentToPowerScale(0), 0);
+  assert.equal(powerScaleToPercent(420), 42);
+  assert.equal(percentToPowerScale(42), 420);
+  assert.equal(powerScaleToPercent(1000), 100);
+  assert.equal(percentToPowerScale(100), 1000);
+
+  // 一位小数精确对应整数 S 值
+  assert.equal(percentToPowerScale("42.5"), 425);
+  assert.equal(powerScaleToPercent(425), 42.5);
+  assert.equal(percentToPowerScale(0.1), 1);
+  assert.equal(powerScaleToPercent(1), 0.1);
+  assert.equal(percentToPowerScale(99.9), 999);
+  assert.equal(powerScaleToPercent(999), 99.9);
+
+  // 两位小数（如 35.85% / 33.33%）四舍五入到最近整数 S 值后，再次往返不再发生二次漂移
+  const sFrom3585 = percentToPowerScale("35.85");
+  assert.equal(sFrom3585, 359);
+  assert.equal(powerScaleToPercent(sFrom3585), 35.9);
+  assert.equal(percentToPowerScale(powerScaleToPercent(sFrom3585)), sFrom3585);
+
+  const sFrom3333 = percentToPowerScale(33.33);
+  assert.equal(sFrom3333, 333);
+  assert.equal(powerScaleToPercent(sFrom3333), 33.3);
+  assert.equal(percentToPowerScale(powerScaleToPercent(sFrom3333)), sFrom3333);
+
+  // 遍历全部 0..=1000 整数 S 值：S -> % -> S 往返 100% 无损不漂移
+  for (let s = 0; s <= 1000; s += 1) {
+    const pct = powerScaleToPercent(s);
+    assert.equal(percentToPowerScale(pct), s, `S=${s} 经 ${pct}% 往返后不应漂移`);
+  }
+
+  // 空串与非法输入返回 NaN；越界输入（如把 45% 误填为 450）不静默钳成 100%，交由校验拦截
+  assert.equal(Number.isNaN(percentToPowerScale("")), true);
+  assert.equal(Number.isNaN(percentToPowerScale(null)), true);
+  assert.equal(percentToPowerScale("450"), 4500);
+  assert.match(
+    buildMatrixPreviewPayload({ material: "椴木", thickness: "3", powerMin: 100, powerMax: 4500 }).error,
+    /0 ~ 100%/,
+  );
+  assert.match(
+    buildMatrixPreviewPayload({ material: "椴木", thickness: "3", powerMin: 700, powerMax: 300 }).error,
+    /下限不大于上限/,
+  );
+
+  assert.equal(formatPowerScaleHint(420, { withScale: true }), "对应 S420 / 1000");
+  assert.equal(formatPowerScaleHint(0, { withScale: false }), "对应 S0");
+  assert.equal(formatPowerScaleHint(NaN, { withScale: true }), "对应 S— / 1000");
 });

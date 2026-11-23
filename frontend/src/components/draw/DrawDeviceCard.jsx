@@ -1,178 +1,43 @@
 import React from "react";
-import { AlertTriangle, CheckCircle2, RefreshCw, Wifi } from "lucide-react";
-import { showPrompt } from "../../appDialog.js";
-import { controllerLabel } from "../../controllerDiscovery.js";
-import { isDrawConnectionOk, isSerial } from "../../drawConnection.js";
-import { defaultSerialPortHint } from "../../platform.js";
+import { Settings2 } from "lucide-react";
+import { connectionSummaryView } from "../../deviceConnection.js";
 import { FoldHeader } from "../FoldHeader.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
 
-/** 创意画板 ② 设备卡：连接方式、串口 / 网络目标、局域网扫描、测试连接（各项修改自动保存，r47 去掉了“保存配置”按钮）。2026-11-16 自 pages/DrawPage.jsx 拆出 */
+/**
+ * 创意画板 ② 设备卡（2026-11-23 r58 精简为紧凑状态摘要）：
+ * 与雕刻工作台、顶栏硬件胶囊共用同一份设备连接设置与状态；点「修改连接」打开统一设备连接面板。
+ */
 export function DrawDeviceCard({
   form,
-  updateForm,
-  busy,
-  serialPorts,
-  setSerialPorts,
-  loadSerialPorts,
-  discoveredChoices,
-  pickDiscoveredController,
-  discovering,
-  discoverControllers,
-  connectionBusy,
-  testConnection,
-  connectionResult,
+  connectionStatus,
+  onOpenConnection,
+  busy = false,
 }) {
+  const view = connectionSummaryView(form, connectionStatus);
   return (
     <WbCard id="draw-device" className="hud-card ob-card control-panel" label="设备">
-      <FoldHeader id="draw-device" title="设备" k="DEVICE" n={2} />
-      <label>
-        连接方式
-        <select value={form.connection_mode} onChange={(event) => updateForm("connection_mode", event.target.value)}>
-          <option value="network">网络 (Telnet/TCP)</option>
-          <option value="serial">串口 (USB/Serial)</option>
-        </select>
-      </label>
-
-      {isSerial(form) ? (
-        <>
-          <label>
-            串口
-            <span className="draw-inline">
-              <select
-                value={form.port}
-                onChange={async (event) => {
-                  const selectEl = event.target;
-                  const chosen = selectEl.value;
-                  if (chosen === "__custom__") {
-                    selectEl.value = form.port || "";
-                    const hint = defaultSerialPortHint();
-                    const custom = await showPrompt(hint.prompt, {
-                      title: "手动输入串口号",
-                      defaultValue: form.port || hint.fallback,
-                      placeholder: hint.fallback,
-                    });
-                    if (custom && custom.trim()) {
-                      const p = custom.trim();
-                      if (!serialPorts.includes(p)) setSerialPorts((prev) => [...prev, p]);
-                      updateForm("port", p);
-                    }
-                  } else {
-                    updateForm("port", chosen);
-                  }
-                }}
-              >
-                {form.port && !serialPorts.includes(form.port) ? <option value={form.port}>{form.port}</option> : null}
-                {serialPorts.length === 0 && !form.port ? <option value="">未检测到串口，请点刷新</option> : null}
-                {serialPorts.map((port) => (
-                  <option key={port} value={port}>
-                    {port}
-                  </option>
-                ))}
-                <option value="__custom__">✎ 手动输入串口…</option>
-              </select>
-              <button type="button" className="ghost-button" onClick={loadSerialPorts} disabled={busy}>
-                <RefreshCw size={15} /> 刷新
-              </button>
-            </span>
-          </label>
-          <label>
-            波特率
-            <select value={form.baudrate} onChange={(event) => updateForm("baudrate", event.target.value)}>
-              {["9600", "19200", "38400", "57600", "115200", "230400", "250000", "460800", "921600"].map((rate) => (
-                <option key={rate} value={rate}>
-                  {rate}
-                </option>
-              ))}
-            </select>
-          </label>
-        </>
-      ) : (
-        <>
-          <label>
-            控制器 IP / 地址
-            <input
-              value={form.network_host}
-              onChange={(event) => updateForm("network_host", event.target.value)}
-              placeholder="例如 192.168.1.10 或 laser.local"
-            />
-          </label>
-
-          <label>
-            Telnet 端口
-            <input
-              type="number"
-              min="1"
-              step="1"
-              value={form.network_telnet_port}
-              onChange={(event) => updateForm("network_telnet_port", event.target.value)}
-            />
-          </label>
-
-          {discoveredChoices.length > 1 ? (
-            <label>
-              选择发现的雕刻机
-              <select
-                id="draw-discovered-controllers"
-                value={
-                  discoveredChoices.find((c) => c.ip === form.network_host && String(c.telnet_port) === String(form.network_telnet_port))
-                    ? `${form.network_host}:${form.network_telnet_port}`
-                    : ""
-                }
-                onChange={(event) => {
-                  const picked = discoveredChoices.find((c) => `${c.ip}:${c.telnet_port}` === event.target.value);
-                  if (picked) pickDiscoveredController(picked);
-                }}
-              >
-                <option value="" disabled>找到 {discoveredChoices.length} 台，请选择…</option>
-                {discoveredChoices.map((c) => (
-                  <option key={`${c.ip}:${c.telnet_port}`} value={`${c.ip}:${c.telnet_port}`}>
-                    {controllerLabel(c)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          <button
-            type="button"
-            id="draw-discover-btn"
-            className="secondary-button"
-            onClick={discoverControllers}
-            disabled={busy || discovering || connectionBusy}
-            title="查找局域网里的雕刻机并逐台只读确认"
-          >
-            <RefreshCw size={16} />
-            {discovering ? "扫描局域网中..." : "扫描局域网"}
-          </button>
-        </>
-      )}
-
-      <button
-        type="button"
-        className="secondary-button"
-        onClick={testConnection}
-        disabled={busy || connectionBusy}
-      >
-        <Wifi size={17} />
-        {connectionBusy ? "测试中..." : "测试连接"}
-      </button>
-      <ConnectionStatus form={form} result={connectionResult} />
-
-
+      <FoldHeader id="draw-device" title="设备" n={2} />
+      <div className="conn-summary-card" id="draw-device-summary">
+        <div className="conn-summary-info">
+          <span className={`conn-summary-dot is-${view.statusTone}`} aria-hidden="true" />
+          <span className="conn-summary-mode">{view.modeLabel}</span>
+          <span className="conn-summary-sep" aria-hidden="true">·</span>
+          <span className={`conn-summary-target mono${view.targetReady ? "" : " is-empty"}`}>{view.targetText}</span>
+          <span className="conn-summary-sep" aria-hidden="true">·</span>
+          <span className={`conn-summary-status is-${view.statusTone}`}>{view.statusText}</span>
+        </div>
+        <button
+          type="button"
+          id="draw-open-connection"
+          className="btn btn-ghost wb-btn conn-summary-btn"
+          onClick={onOpenConnection}
+          disabled={busy}
+        >
+          <Settings2 size={14} className="wb-icon" aria-hidden="true" />
+          <span>修改连接</span>
+        </button>
+      </div>
     </WbCard>
-  );
-}
-
-function ConnectionStatus({ form, result }) {
-  if (!result) return null;
-  const payload = result.result && typeof result.result === "object" ? result.result : {};
-  const connected = isDrawConnectionOk(form, result);
-  const text = payload.summary || result.result || "连接检查失败";
-  return (
-    <div className={`connection-status ${connected ? "ok" : "warn"}`}>
-      {connected ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-      <span>{text}</span>
-    </div>
   );
 }

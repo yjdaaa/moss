@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, Info, ShieldAlert, X } from "lucide-react";
 import { resolveDialog, subscribe } from "../appDialog.js";
+import { OriginBadge } from "./OriginBadge.jsx";
 
 const TONE_META = {
   info: { Icon: Info, label: "INFO" },
@@ -133,7 +134,21 @@ export function AppDialogHost() {
         </div>
 
         <div className="mat-modal-body app-dialog-body">
-          <p className="app-dialog-message">{dialog.message}</p>
+          {dialog.origin ? (
+            <div className="app-dialog-message">
+              {String(dialog.message || "").split("\n").map((line, idx) => {
+                const isOriginLine = line.startsWith("对刀起点：");
+                return (
+                  <div key={idx} className={isOriginLine ? "app-dialog-origin-line" : undefined}>
+                    {isOriginLine ? <OriginBadge origin={dialog.origin} /> : null}
+                    <span>{line}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="app-dialog-message">{dialog.message}</p>
+          )}
           {isPrompt && (
             <input
               ref={inputRef}

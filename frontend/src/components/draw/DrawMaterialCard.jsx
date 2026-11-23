@@ -62,7 +62,7 @@ export function DrawMaterialCard({
 }) {
   return (
     <WbCard id="draw-material" className="hud-card ob-card control-panel" label="材料与尺寸">
-      <FoldHeader id="draw-material" title="材料与尺寸" k="MATERIAL" n={1} />
+      <FoldHeader id="draw-material" title="材料与尺寸" n={1} />
       <div className="material-library-label">
         <span>材料库</span>
         <div className="material-library-row">

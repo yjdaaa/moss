@@ -4,13 +4,7 @@
 // 同一个值）决定；转图片时再选“转图片方式”：光栅扫描（默认，与工作台图片同一套引擎）或轮廓描边。
 
 import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
-import {
-  DEFAULT_BAUDRATE,
-  DEFAULT_TELNET_PORT,
-  DRAW_CONNECTION_KEYS,
-  WORKBENCH_CONNECTION_KEYS,
-  readRawConnection,
-} from "./deviceConnection.js";
+import { readUnifiedConnection } from "./deviceConnection.js";
 import { normalizeEngraveRoute } from "./engraveRoute.js";
 import { intervalScaleValue } from "./qualityPresets.js";
 import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
@@ -165,7 +159,9 @@ export function formatFramingStatus(res, width, height) {
  * 优先从 `laserLab.*` 读画板自己的记忆；若画板尚未保存过任何设备地址/串口，自动回退复用雕刻工作台已填好的 `laser-forge-*` 连接参数。
  * 存储被禁用或读取抛错时逐项退回内置默认值，页面照常加载。
  */
-export function readDrawDefaultForm(storage = safeBrowserStorage()) {
+export function readDrawDefaultForm(...args) {
+  const explicitStorage = args.length > 0;
+  const storage = explicitStorage ? args[0] : safeBrowserStorage();
   const read = (fullKey) => {
     try {
       return storage?.getItem?.(fullKey) ?? null;
@@ -173,20 +169,7 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
       return null;
     }
   };
-  const lab = readRawConnection(DRAW_CONNECTION_KEYS, storage);
-  const labHost = lab.network_host || "";
-  const labPort = lab.port || "";
-  const hasLabTarget = Boolean(lab.connection_mode || labHost.trim() || labPort.trim());
-
-  const forge = readRawConnection(WORKBENCH_CONNECTION_KEYS, storage);
-  const forgeConnMode = forge.connection_mode === "serial" ? "serial" : "network";
-  const connection_mode = hasLabTarget
-    ? (lab.connection_mode === "serial" ? "serial" : "network")
-    : forgeConnMode;
-  const network_host = labHost || forge.network_host || "";
-  const network_telnet_port = lab.network_telnet_port || forge.network_telnet_port || DEFAULT_TELNET_PORT;
-  const port = labPort || forge.port || "";
-  const baudrate = lab.baudrate || forge.baudrate || DEFAULT_BAUDRATE;
+  const conn = explicitStorage ? readUnifiedConnection(storage) : readUnifiedConnection();
 
   return {
     material: read("laserLab.material") || "椴木",
@@ -200,11 +183,11 @@ export function readDrawDefaultForm(storage = safeBrowserStorage()) {
     image_mode: normalizeImageMode(read("laserLab.image_mode")),
     // 行间距倍数（质量预设用）；留空 = 1
     line_interval_scale: read("laserLab.line_interval_scale") || "",
-    connection_mode,
-    network_host,
-    network_telnet_port,
-    port,
-    baudrate,
+    connection_mode: conn.connection_mode,
+    network_host: conn.network_host,
+    network_telnet_port: conn.network_telnet_port,
+    port: conn.port,
+    baudrate: conn.baudrate,
     vector_simplify_factor: read("laserLab.vector_simplify_factor") || "3",
   };
 }

@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { LayoutGrid, Lock, RotateCcw, Unlock } from "lucide-react";
 import {
   COL_GAP, COLS, DEFAULT_LAYOUT, MIN_COLS, MIN_ROWS, ROW_GAP, ROW_UNIT, STORAGE_KEY,
@@ -19,31 +20,50 @@ import {
  */
 
 const ROWS_COLLAPSED = 8; // 折叠后只留标题条（8 行 ≈ 88px）
-const MIN_MONITOR_ROWS = 48; // 监视舱自动对齐左栏时的最小行数（保障内部视口与进度栏完整舒展）
+const MIN_MONITOR_ROWS = 36; // 监视舱自动对齐左栏时的最小行数（未生成轨迹时空态更紧凑，首屏即可见主按钮）
 const HANDLES = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
-// 内部带弹性画布视口的卡片（多余高度由内部视口吸收），其余表单卡片默认紧贴内容高度不留大块空白
-const STRETCH_VIEWPORT_CARDS = new Set(["monitor", "board"]);
-
 /**
  * 双栏默认排布下（左栏 link/source/material，右栏 monitor/feedback），
- * 若用户未手动拖拽过 monitor 高度且 monitor 未折叠，让 monitor 自动伸缩以对齐左右两栏底边，消除单侧留白。
+ * 若用户未手动拖拽过 monitor 高度且 monitor 未折叠，让 monitor 自动伸缩以对齐左右两栏底边，
+ * 并以内部最小内容高度为下限，防止展开两点对位或生成多条提示时向下遮挡加工反馈卡。
  */
-function alignDualColumns(layout, manualHeightSet) {
+function alignDualColumns(layout, manualHeightSet, monitorMinRows = MIN_MONITOR_ROWS) {
   const { link, source, material, monitor, feedback } = layout;
   if (!link || !source || !material || !monitor || !feedback) return layout;
   if (manualHeightSet.has("monitor") || monitor.h <= ROWS_COLLAPSED) return layout;
-  if (link.x !== 0 || source.x !== 0 || material.x !== 0) return layout;
-  if (monitor.x !== link.w || feedback.x !== link.w || monitor.y !== 0) return layout;
+  const floorRows = Math.max(MIN_MONITOR_ROWS, monitorMinRows || MIN_MONITOR_ROWS);
+  if (link.x !== 0 || source.x !== 0 || material.x !== 0) {
+    return monitor.h < floorRows ? reflowVertical(layout, "monitor", { ...monitor, h: floorRows }) : layout;
+  }
+  if (monitor.x !== link.w || feedback.x !== link.w || monitor.y !== 0) {
+    return monitor.h < floorRows ? reflowVertical(layout, "monitor", { ...monitor, h: floorRows }) : layout;
+  }
   const leftBottom = Math.max(link.y + link.h, source.y + source.h, material.y + material.h);
-  const idealMonitorH = clamp(leftBottom - feedback.h - 1, MIN_MONITOR_ROWS, 80);
+  const idealMonitorH = Math.max(floorRows, clamp(leftBottom - feedback.h - 1, floorRows, 120));
   if (idealMonitorH === monitor.h && feedback.y === monitor.y + monitor.h + 1) return layout;
   return reflowVertical(layout, "monitor", { ...monitor, h: idealMonitorH });
+}
+
+function measureMonitorMinHeightPx(contentEl) {
+  if (!contentEl) return 0;
+  const children = Array.from(contentEl.children);
+  if (children.length === 0) return 0;
+  let sum = 0;
+  for (const child of children) {
+    if (child.classList?.contains("chamber-viewport")) {
+      sum += child.classList.contains("has-preview") ? 220 : 96;
+    } else {
+      sum += child.offsetHeight || 0;
+    }
+  }
+  return sum + Math.max(0, children.length - 1) * 14;
 }
 
 const WbContext = createContext(null);
 
 /** 与 styles.css 里两栏 / 单列的断点保持一致。 */
 export const TWO_COLUMN_QUERY = "(min-width: 761px) and (max-width: 1200px)";
+export const SINGLE_COLUMN_QUERY = "(max-width: 760px)";
 
 function useMediaQuery(query) {
   const getMatch = () => typeof window !== "undefined" && typeof window.matchMedia === "function"
@@ -65,6 +85,7 @@ export function WorkbenchCanvas({
   defaultLayout = DEFAULT_LAYOUT,
   storageKey = STORAGE_KEY,
   toolbarStart = null,
+  active = true,
 }) {
   const stored = useMemo(() => readLayout(globalThis.localStorage, storageKey), [storageKey]);
   const [layout, setLayout] = useState(() => (stored?.cards ? { ...defaultLayout, ...stored.cards } : defaultLayout));
@@ -76,6 +97,8 @@ export function WorkbenchCanvas({
   const cleanupDragRef = useRef(null);
   const expandedRows = useRef({}); // 折叠前记下的行数，展开时还原
   const manualHeightIds = useRef(new Set()); // 用户在本轮显式上下拖拽过高度的卡片
+  const hasStoredBoardRef = useRef(Boolean(stored?.cards?.board));
+  const monitorMinRowsRef = useRef(MIN_MONITOR_ROWS);
 
   useEffect(() => () => {
     dragListenersRef.current?.();
@@ -85,6 +108,7 @@ export function WorkbenchCanvas({
     drag.current = null;
   }, []);
   const twoColumn = useMediaQuery(TWO_COLUMN_QUERY);
+  const singleColumn = useMediaQuery(SINGLE_COLUMN_QUERY);
   // 窄窗口只换显示位置；layout 本身（含内容自适应行数）照常更新，拉宽窗口后回到用户的排布
   const shown = useMemo(() => (twoColumn ? stackTwoColumns(layout) : layout), [twoColumn, layout]);
   // 两栏时画布换成真正的 2 列网格：48 列网格的 47 道列间距在 960px 窗口下就比画布还宽
@@ -116,6 +140,7 @@ export function WorkbenchCanvas({
         return alignDualColumns(
           reflowVertical(current, id, { ...box, h: ROWS_COLLAPSED }),
           manualHeightIds.current,
+          monitorMinRowsRef.current,
         );
       }
       // 没有折叠记录就什么都不做：挂载时 FoldHeader 也会触发一次 sync
@@ -127,24 +152,74 @@ export function WorkbenchCanvas({
       return alignDualColumns(
         reflowVertical(current, id, { ...box, h: restore }),
         manualHeightIds.current,
+        monitorMinRowsRef.current,
       );
     });
   }, []);
 
-  /** 表单类卡片根据内部实际内容高度自动贴合栅格行数，消除卡片底部的大片空白框。 */
+  const computeBoardTargetRows = useCallback(() => {
+    const defaultBoardH = defaultLayout?.board?.h;
+    const element = canvasRef.current;
+    if (!defaultBoardH || !element || typeof window === "undefined") return defaultBoardH || 0;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0) return defaultBoardH;
+    const docTop = Math.max(0, rect.top + (window.scrollY || 0));
+    const availPx = (window.innerHeight || 900) - docTop - 14;
+    const maxFitRows = Math.floor((availPx + ROW_GAP) / (ROW_UNIT + ROW_GAP));
+    return clamp(maxFitRows, 36, defaultBoardH);
+  }, [defaultLayout]);
+
+  // 创作画板未手动拉高时，将 board 卡片高度钳制在首屏可用高度内，使画布自带的底部缩放/撤销栏与下方快捷操作条同时落在首屏且上下分栏不重叠
+  useEffect(() => {
+    if (!active || singleColumn || !defaultLayout?.board) return undefined;
+    const syncBoardRows = () => {
+      if (hasStoredBoardRef.current || manualHeightIds.current.has("board") || drag.current) return;
+      const targetRows = computeBoardTargetRows();
+      if (!targetRows) return;
+      setLayout((current) => {
+        const box = current.board;
+        if (!box || box.h <= ROWS_COLLAPSED || box.h === targetRows) return current;
+        return reflowVertical(current, "board", { ...box, h: targetRows });
+      });
+    };
+    syncBoardRows();
+    if (typeof window === "undefined") return undefined;
+    window.addEventListener("resize", syncBoardRows);
+    return () => window.removeEventListener("resize", syncBoardRows);
+  }, [active, singleColumn, defaultLayout, computeBoardTargetRows]);
+
+  /** 表单类卡片根据内部实际内容高度自动贴合栅格行数；monitor 则更新最小内容下限以防溢出遮挡下方卡片。 */
   const fitCardRows = useCallback((id, contentHeightPx, force = false) => {
-    if (STRETCH_VIEWPORT_CARDS.has(id)) return;
+    if (id === "board") {
+      if (force) {
+        hasStoredBoardRef.current = false;
+        const targetRows = computeBoardTargetRows();
+        if (targetRows) {
+          setLayout((current) => {
+            const box = current.board;
+            if (!box || box.h <= ROWS_COLLAPSED || box.h === targetRows) return current;
+            return reflowVertical(current, "board", { ...box, h: targetRows });
+          });
+        }
+      }
+      return;
+    }
     if (!force && manualHeightIds.current.has(id)) return;
     if (drag.current) return;
     const totalPx = Math.max(0, Number(contentHeightPx) || 0) + 38;
     const neededRows = Math.max(MIN_ROWS, Math.ceil((totalPx + ROW_GAP) / (ROW_UNIT + ROW_GAP)));
+    if (id === "monitor") {
+      monitorMinRowsRef.current = Math.max(MIN_MONITOR_ROWS, neededRows);
+      setLayout((current) => alignDualColumns(current, manualHeightIds.current, monitorMinRowsRef.current));
+      return;
+    }
     setLayout((current) => {
       const box = current[id];
       if (!box || box.h <= ROWS_COLLAPSED) return current;
       const next = box.h === neededRows ? current : reflowVertical(current, id, { ...box, h: neededRows });
-      return alignDualColumns(next, manualHeightIds.current);
+      return alignDualColumns(next, manualHeightIds.current, monitorMinRowsRef.current);
     });
-  }, []);
+  }, [computeBoardTargetRows]);
 
   const clearManualHeight = useCallback((id) => {
     manualHeightIds.current.delete(id);
@@ -158,9 +233,10 @@ export function WorkbenchCanvas({
     const minWCols = MIN_COLS[state.id] || 6;
     const minWidthPx = Math.max(120, Math.round(minWCols * colStep - COL_GAP));
     const maxRightPx = Math.max(minWidthPx, Math.round((COLS - state.origin.x) * colStep - COL_GAP));
+    const minRowsForDrag = state.id === "monitor" ? monitorMinRowsRef.current : MIN_ROWS;
     const minHeightPx = state.isCollapsed
       ? state.size.height
-      : Math.max(160, Math.round(MIN_ROWS * rowStep - ROW_GAP));
+      : Math.max(160, Math.round(minRowsForDrag * rowStep - ROW_GAP));
 
     if (state.mode === "move") {
       const minDx = -Math.round(state.origin.x * colStep);
@@ -265,7 +341,11 @@ export function WorkbenchCanvas({
       };
     } else {
       const dir = state.mode;
-      const minRowsAllowed = state.isCollapsed ? ROWS_COLLAPSED : MIN_ROWS;
+      const minRowsAllowed = state.isCollapsed
+        ? ROWS_COLLAPSED
+        : state.id === "monitor"
+          ? monitorMinRowsRef.current
+          : MIN_ROWS;
       let { x, y, w, h } = origin;
       if (dir.includes("e")) w = clamp(origin.w + cols, minW, COLS - origin.x);
       if (dir.includes("s") && !state.isCollapsed) h = Math.max(minRowsAllowed, origin.h + rows);
@@ -284,6 +364,7 @@ export function WorkbenchCanvas({
       }
       if ((dir.includes("n") || dir.includes("s")) && h !== origin.h) {
         manualHeightIds.current.add(state.id);
+        if (state.id === "board") hasStoredBoardRef.current = true;
       }
       box = { x, y, w, h };
     }
@@ -298,7 +379,7 @@ export function WorkbenchCanvas({
   };
 
   const startDrag = (event) => {
-    if (locked || drag.current) return;
+    if (locked || singleColumn || drag.current) return;
     const cardElement = event.target.closest?.("[data-wb-card]");
     if (!cardElement || !canvasRef.current?.contains(cardElement)) return;
     const handle = event.target.closest?.("[data-wb-resize]");
@@ -344,12 +425,20 @@ export function WorkbenchCanvas({
   const resetLayout = () => {
     expandedRows.current = {};
     manualHeightIds.current.clear();
+    hasStoredBoardRef.current = false;
+    monitorMinRowsRef.current = MIN_MONITOR_ROWS;
     let next = { ...defaultLayout };
+    if (next.board && !singleColumn) {
+      const targetBoardRows = computeBoardTargetRows();
+      if (targetBoardRows && targetBoardRows !== next.board.h) {
+        next = reflowVertical(next, "board", { ...next.board, h: targetBoardRows });
+      }
+    }
     const root = canvasRef.current;
     if (root) {
       root.querySelectorAll("[data-wb-card]").forEach((cardEl) => {
         const id = cardEl.dataset.wbCard;
-        if (!id || STRETCH_VIEWPORT_CARDS.has(id) || !next[id]) return;
+        if (!id || id === "board" || !next[id]) return;
         const header = cardEl.querySelector(".ob-card-h");
         if (header?.dataset.open === "false") {
           expandedRows.current[id] = next[id].h;
@@ -357,13 +446,23 @@ export function WorkbenchCanvas({
           return;
         }
         const contentEl = cardEl.querySelector(".wb-card-content");
+        if (id === "monitor") {
+          const minPx = measureMonitorMinHeightPx(contentEl);
+          if (minPx > 0) {
+            monitorMinRowsRef.current = Math.max(
+              MIN_MONITOR_ROWS,
+              Math.ceil((minPx + 38 + ROW_GAP) / (ROW_UNIT + ROW_GAP)),
+            );
+          }
+          return;
+        }
         const h = contentEl?.offsetHeight || 0;
         if (h > 0) {
           const neededRows = Math.max(MIN_ROWS, Math.ceil((h + 38 + ROW_GAP) / (ROW_UNIT + ROW_GAP)));
           next = reflowVertical(next, id, { ...next[id], h: neededRows });
         }
       });
-      next = alignDualColumns(next, manualHeightIds.current);
+      next = alignDualColumns(next, manualHeightIds.current, monitorMinRowsRef.current);
     }
     setLayout(next);
     clearLayout(globalThis.localStorage, storageKey);
@@ -384,38 +483,118 @@ export function WorkbenchCanvas({
   }), [shown, twoColumn]);
 
   const context = useMemo(
-    // 两栏模式只保留上下边框把手（调高度），不能移动、不能改宽
-    () => ({ cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn }),
-    [cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn],
+    // 两栏模式只保留上下边框把手（调高度），单列模式禁用把手与拖拽
+    () => ({ cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn, singleColumn }),
+    [cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn, singleColumn],
+  );
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef(null);
+  const menuTriggerRef = useRef(null);
+  const [portalTarget, setPortalTarget] = useState(null);
+
+  useEffect(() => {
+    if (!active || typeof document === "undefined") {
+      setPortalTarget(null);
+      setMenuOpen(false);
+      return;
+    }
+    setPortalTarget(document.getElementById("ob-top-page-actions"));
+  }, [active]);
+
+  useEffect(() => {
+    if (!menuOpen || typeof document === "undefined") return undefined;
+    const onPointerDown = (event) => {
+      if (!menuWrapRef.current?.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuOpen(false);
+        menuTriggerRef.current?.focus?.();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
+
+  const hintText = singleColumn
+    ? "当前窄屏已自动排成单列；拉宽窗口可自由拖动与缩放卡片"
+    : twoColumn
+      ? "窗口较窄已自动排成两栏；可拖上下边框调高度，拉宽窗口可自由移动卡片"
+      : locked
+        ? "当前已锁定卡片位置；解锁后可拖标题移动、拖边框缩放"
+        : "拖标题移动 · 拖边框缩放";
+
+  const layoutMenuNode = (
+    <div className="wb-layout-menu-wrap" ref={menuWrapRef}>
+      <button
+        ref={menuTriggerRef}
+        type="button"
+        className={`btn btn-ghost wb-layout-trigger${locked ? " is-locked" : ""}`}
+        id="wb-layout-menu-btn"
+        aria-expanded={menuOpen}
+        aria-controls="wb-layout-menu"
+        title="布局：锁定/解锁卡片拖动、还原默认排布"
+        onClick={() => setMenuOpen((open) => !open)}
+      >
+        {locked ? <Lock size={13} aria-hidden="true" /> : <LayoutGrid size={13} aria-hidden="true" />}
+        <span>布局</span>
+      </button>
+      {menuOpen && (
+        <div className="wb-layout-popover" id="wb-layout-menu" role="group" aria-label="页面布局选项">
+          <p className="wb-layout-popover-hint">
+            <LayoutGrid size={13} aria-hidden="true" />
+            <span>{hintText}</span>
+          </p>
+          {!singleColumn && (
+            <button
+              type="button"
+              className="btn btn-ghost wb-layout-popover-btn"
+              onClick={toggleLock}
+              id="wb-layout-lock"
+              title={locked ? "解锁后可以拖动卡片" : "锁定后不会误拖"}
+            >
+              {locked ? <Lock size={13} /> : <Unlock size={13} />}
+              <span>{locked ? "布局已锁定（点击解锁）" : "锁定布局"}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-ghost wb-layout-popover-btn"
+            onClick={() => {
+              resetLayout();
+              setMenuOpen(false);
+            }}
+            id="wb-layout-reset"
+            title="清掉记下的位置与大小，回到默认排布"
+          >
+            <RotateCcw size={13} />
+            <span>还原默认布局</span>
+          </button>
+        </div>
+      )}
+    </div>
   );
 
   return (
     <WbContext.Provider value={context}>
-      {/* 布局工具与页面自己的操作合成一行（2026-11-07 布局优化），少占一整行高度 */}
-      <div className="ob-canvas-tools">
-        {toolbarStart && <div className="ob-canvas-tools-start">{toolbarStart}</div>}
-        <span className="ob-canvas-hint">
-          {twoColumn ? (
-            <>
-              <LayoutGrid size={13} aria-hidden="true" /> 窗口较窄，已自动排成两栏；可拖上下边框调高度，拉宽窗口可移动卡片
-            </>
-          ) : !locked && (
-            <>
-              <LayoutGrid size={13} aria-hidden="true" /> 拖标题移动 · 拖边框缩放
-            </>
-          )}
-        </span>
-        <button type="button" className="btn btn-ghost" onClick={toggleLock} id="wb-layout-lock"
-          title={locked ? "解锁后可以拖动卡片" : "锁定后不会误拖"}>
-          {locked ? <Lock size={13} /> : <Unlock size={13} />} {locked ? "布局已锁定" : "锁定布局"}
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={resetLayout} id="wb-layout-reset"
-          title="清掉记下的位置与大小，回到默认排布">
-          <RotateCcw size={13} /> 还原默认布局
-        </button>
-      </div>
+      {active && portalTarget ? createPortal(layoutMenuNode, portalTarget) : null}
+      {(toolbarStart || (!portalTarget && active)) && (
+        <div className="ob-canvas-tools">
+          {toolbarStart && <div className="ob-canvas-tools-start">{toolbarStart}</div>}
+          {!portalTarget && active ? layoutMenuNode : null}
+        </div>
+      )}
       <div
-        className={`ob-canvas${locked || twoColumn ? " ob-canvas--locked" : ""}${twoColumn ? " ob-canvas--two" : ""}`}
+        className={`ob-canvas${locked || twoColumn || singleColumn ? " ob-canvas--locked" : ""}${twoColumn ? " ob-canvas--two" : ""}`}
         ref={canvasRef}
         style={twoColumn ? { gridTemplateColumns: `minmax(0, ${split}fr) minmax(0, ${COLS - split}fr)` } : undefined}
         onPointerDown={startDrag}
@@ -435,6 +614,7 @@ export function WbCard({ id, className, label, children }) {
   const style = context ? context.cardProps(id).style : undefined;
   const locked = Boolean(context?.locked);
   const twoColumn = Boolean(context?.twoColumn);
+  const singleColumn = Boolean(context?.singleColumn);
   const setCollapsed = context?.setCollapsed;
   const fitCardRows = context?.fitCardRows;
   const clearManualHeight = context?.clearManualHeight;
@@ -449,7 +629,8 @@ export function WbCard({ id, className, label, children }) {
       setCollapsedState(isClosed);
       setCollapsed?.(id, isClosed);
       if (!isClosed && contentRef.current) {
-        fitCardRows?.(id, contentRef.current.offsetHeight);
+        const h = id === "monitor" ? measureMonitorMinHeightPx(contentRef.current) : contentRef.current.offsetHeight;
+        fitCardRows?.(id, h);
       }
     };
     sync();
@@ -458,34 +639,50 @@ export function WbCard({ id, className, label, children }) {
     return () => observer.disconnect();
   }, [id, setCollapsed, fitCardRows]);
 
-  // 监听卡片内部真实内容高度变化（切换模式、生成轨迹、宽度换行等），自动贴合高度不留大块空白
+  // 监听卡片内部真实内容高度变化（切换模式、生成轨迹、展开两点对位、宽度换行等），自动贴合高度或推开下方卡片
   useEffect(() => {
     const contentEl = contentRef.current;
-    if (!contentEl || STRETCH_VIEWPORT_CARDS.has(id)) return undefined;
+    if (!contentEl || id === "board") return undefined;
     const measureContent = () => {
       const header = rootRef.current?.querySelector(".ob-card-h");
       if (header?.dataset.open === "false") return;
-      const h = contentEl.offsetHeight;
+      const h = id === "monitor" ? measureMonitorMinHeightPx(contentEl) : contentEl.offsetHeight;
       if (h > 0) {
         fitCardRows?.(id, h);
       }
     };
     measureContent();
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measureContent) : null;
-    ro?.observe(contentEl);
-    return () => ro?.disconnect();
+    if (ro) {
+      ro.observe(contentEl);
+      if (id === "monitor") {
+        Array.from(contentEl.children).forEach((child) => ro.observe(child));
+      }
+    }
+    const mo = id === "monitor" && typeof MutationObserver !== "undefined"
+      ? new MutationObserver(() => {
+          measureContent();
+          if (ro) Array.from(contentEl.children).forEach((child) => ro.observe(child));
+        })
+      : null;
+    mo?.observe(contentEl, { childList: true, subtree: true, attributes: true, attributeFilter: ["open"] });
+    return () => {
+      ro?.disconnect();
+      mo?.disconnect();
+    };
   }, [id, fitCardRows]);
 
   const handleResizeDoubleClick = useCallback((dir) => {
     if (dir.includes("n") || dir.includes("s")) {
       clearManualHeight?.(id);
       if (contentRef.current) {
-        fitCardRows?.(id, contentRef.current.offsetHeight, true);
+        const h = id === "monitor" ? measureMonitorMinHeightPx(contentRef.current) : contentRef.current.offsetHeight;
+        fitCardRows?.(id, h, true);
       }
     }
   }, [id, clearManualHeight, fitCardRows]);
 
-  const activeHandles = twoColumn ? (collapsed ? [] : ["n", "s"]) : collapsed ? ["e", "w"] : HANDLES;
+  const activeHandles = singleColumn ? [] : twoColumn ? (collapsed ? [] : ["n", "s"]) : collapsed ? ["e", "w"] : HANDLES;
 
   return (
     <section

@@ -30,11 +30,11 @@ export const MIN_COLS = {
 
 /** 默认排布（左窄右宽双栏）：左栏 16 列竖排三张输入卡，右栏 32 列上方加工监视舱、下方紧贴加工反馈，左右底边齐平。 */
 export const DEFAULT_LAYOUT = {
-  link: { x: 0, y: 0, w: 16, h: 23 },
-  source: { x: 0, y: 24, w: 16, h: 27 },
-  material: { x: 0, y: 52, w: 16, h: 23 },
-  monitor: { x: 16, y: 0, w: 32, h: 64 },
-  feedback: { x: 16, y: 65, w: 32, h: 10 },
+  link: { x: 0, y: 0, w: 16, h: 11 },
+  source: { x: 0, y: 12, w: 16, h: 27 },
+  material: { x: 0, y: 40, w: 16, h: 23 },
+  monitor: { x: 16, y: 0, w: 32, h: 52 },
+  feedback: { x: 16, y: 53, w: 32, h: 10 },
 };
 
 /**

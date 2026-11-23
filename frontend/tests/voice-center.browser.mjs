@@ -487,8 +487,13 @@ try {
   await page.getByTitle("系统偏好设置").click();
   await page.locator(".settings-modal #settings-jev").waitFor();
   await page.locator(".settings-modal .mat-modal-close").click();
-  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "全息孪生舱默认跟随官方链路");
-  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /CLOUD MCP TELEMETRY/);
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "语音状态条默认跟随官方链路");
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-expanded"), "false", "非对话时默认收成单行状态条");
+  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /官方小智/);
+  await page.locator("#voice-moss-twin-toggle").click();
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-expanded"), "true", "点击单行状态条展开详情");
+  await page.locator("#voice-moss-twin-toggle").click();
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-expanded"), "false", "点击收起恢复单行状态条");
   // 1. 服务：官方链路只显示接入点与地址；其他链路的面板不渲染（不是折叠）
   await tab("服务").click();
   assert.ok(await page.locator("#voice-endpoint-card").isVisible(), "官方链路显示接入点");
@@ -555,8 +560,12 @@ try {
   await confirmDialog("确认切换");
   await page.locator("#voice-mode-builtin[aria-checked=true]").waitFor();
   assert.equal(last("voice_set_mode").args.mode, "builtin");
-  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "builtin", "切换内置链路后孪生舱同步为 REALTIME AUDIO TWIN");
-  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /REALTIME AUDIO TWIN/);
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "builtin", "切换内置链路后状态条同步为内置语音");
+  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /内置语音/);
+  await page.locator("#voice-builtin-checklist").waitFor();
+  assert.equal(await page.locator("#voice-setup-step-service").getAttribute("data-done"), "false", "未启动内置服务时第 1 步未勾选");
+  assert.equal(await page.locator("#voice-setup-step-models").getAttribute("data-done"), "false", "未配模型时第 2 步未勾选");
+  assert.equal(await page.locator("#voice-setup-step-device").getAttribute("data-done"), "true", "假数据里已有一台允许的设备（立创实战派小智），第 3 步应打勾（未允许设备不打勾由 voiceState 单测覆盖）");
 
   // 5. 内置大模型：先测试、后保存，只提交这一项
   await tab("模型").click();

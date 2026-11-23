@@ -451,8 +451,78 @@
   text-overflow: ellipsis;
 }
 
+.moss-twin-head-end {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.moss-twin-collapse-btn {
+  padding: 2px 8px !important;
+  font-size: 11.5px !important;
+  gap: 4px !important;
+}
+.moss-twin.moss-twin--compact {
+  display: block;
+  padding: 0;
+}
+.moss-twin-compact-btn {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.moss-twin-compact-btn:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.moss-twin-compact-btn:focus-visible {
+  outline: 2px solid var(--ob-accent-2, #8b7bff);
+  outline-offset: -2px;
+}
+.moss-twin-compact-eye {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+}
+.moss-twin-compact-svg {
+  width: 28px;
+  height: 28px;
+  display: block;
+}
+.moss-twin-compact-headline {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ob-ink-1, #f4f4f5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.moss-twin-compact-more {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--ob-ink-3);
+}
+
 @media (max-width: 900px) {
-  .moss-twin {
+  .moss-twin:not(.moss-twin--compact) {
     grid-template-columns: 1fr;
     justify-items: stretch;
   }

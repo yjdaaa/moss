@@ -105,13 +105,15 @@ try {
     await page.locator(".ob-select-popover").waitFor({ state: "detached", timeout: 5_000 });
   }
 
-  // 点击顶栏小智状态胶囊可直达语音中心，再点硬件状态胶囊回到工作台
+  // 点击顶栏小智状态胶囊可直达语音中心，再点硬件状态胶囊打开统一设备连接面板（按 Escape 关闭）
   await page.locator("#nav-mcp-status").click();
   await settle();
   assert.equal(new URL(page.url()).pathname, "/voice", "点击小智胶囊跳转语音中心");
   await page.locator("#nav-hardware-status").click();
-  await settle();
-  assert.equal(new URL(page.url()).pathname, "/", "点击硬件胶囊返回工作台");
+  await page.locator("#device-connection-modal").waitFor({ timeout: 5_000 });
+  assert.equal(new URL(page.url()).pathname, "/voice", "点击硬件胶囊在当前页打开统一连接面板");
+  await page.keyboard.press("Escape");
+  await page.locator("#device-connection-modal").waitFor({ state: "detached", timeout: 5_000 });
 
   // 记在本机：刷新后保持
   await page.reload({ waitUntil: "domcontentloaded" });

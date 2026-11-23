@@ -1,7 +1,8 @@
 import React from "react";
 import { Save, Settings2, Trash2 } from "lucide-react";
-import { MATRIX_MODE_OPTIONS, isSurfaceKey, thicknessChipLabel } from "../../materialLabState.js";
+import { MATRIX_MODE_OPTIONS, formatPowerScaleHint, isSurfaceKey, thicknessChipLabel } from "../../materialLabState.js";
 import { FoldHeader } from "../FoldHeader.jsx";
+import { PowerPercentInput } from "./PowerPercentInput.jsx";
 
 /** 材料实验室 ② 材料参数：模式切换、参数编辑、管理材料与保存到材料库。原样搬自 pages/MaterialLabPage.jsx（2026-11-16 按职责拆分） */
 export function LabParamsPanel({
@@ -41,7 +42,7 @@ export function LabParamsPanel({
 }) {
   return (
     <div className="hud-card ob-card lab-row-4">
-      <FoldHeader id="lab-params" title="材料参数" k="PARAMS" n={2} />
+      <FoldHeader id="lab-params" title="材料参数" n={2} />
       <div className="lab-row-5">
         <h3 className="lab-heading">
           <span>{selectedMaterial ? `${selectedMaterial} · ${thicknessChipLabel(selectedThickness)}` : "未选择材料"}</span>
@@ -120,33 +121,35 @@ export function LabParamsPanel({
       {/* Form Fields */}
       <div className="lab-grid">
         <div>
-          <label className="lab-label-2">
-            最小激光功率 (0-1000)
+          <label className="lab-label-2" htmlFor="lab-min-power">
+            最小激光功率 (0–100%)
           </label>
-          <input
-            type="number"
-            min={0}
-            max={1000}
-            value={minPower}
-            onChange={(e) => setMinPower(Number(e.target.value))}
+          <PowerPercentInput
+            id="lab-min-power"
+            sValue={minPower}
+            onChangeSValue={setMinPower}
             readOnly={readOnly}
             className="text-input lab-field-3"
           />
+          <small className="lab-s-hint" id="lab-min-power-s">
+            {formatPowerScaleHint(minPower, { withScale: true })}
+          </small>
         </div>
 
         <div>
-          <label className="lab-label-2">
-            最大激光功率 (0-1000)
+          <label className="lab-label-2" htmlFor="lab-max-power">
+            最大激光功率 (0–100%)
           </label>
-          <input
-            type="number"
-            min={0}
-            max={1000}
-            value={maxPower}
-            onChange={(e) => setMaxPower(Number(e.target.value))}
+          <PowerPercentInput
+            id="lab-max-power"
+            sValue={maxPower}
+            onChangeSValue={setMaxPower}
             readOnly={readOnly}
             className="text-input lab-field-3"
           />
+          <small className="lab-s-hint" id="lab-max-power-s">
+            {formatPowerScaleHint(maxPower, { withScale: true })}
+          </small>
         </div>
 
         <div>
@@ -222,7 +225,7 @@ export function LabParamsPanel({
           />
         </div>
 
-        <div>
+        <div className="lab-box-3">
           <label className="lab-label-2">
             材料别名 (逗号分隔)
           </label>

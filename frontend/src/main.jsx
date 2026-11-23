@@ -8,7 +8,17 @@ import { createPollRunner } from "./pollGuard.js";
 import { installCardSpotlight } from "./spotlight.js";
 import { AuthModal } from "./components/AuthModal.jsx";
 import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
+import { DeviceConnectionModal } from "./components/DeviceConnectionModal.jsx";
 import { SettingsModal } from "./components/SettingsModal.jsx";
+import {
+  MACHINE_MOTION_EVENT,
+  emitDeviceLog,
+  probeControllerConnection,
+  readUnifiedConnection,
+} from "./deviceConnection.js";
+import { drawTargetReady } from "./drawConnection.js";
+import { machineMotionFromLimits, writeMachineMotion } from "./fillOptions.js";
+import { useDeviceConnection } from "./useDeviceConnection.js";
 import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
 import { ObsidianSelectHost } from "./components/ObsidianSelectHost.jsx";
@@ -99,8 +109,89 @@ function App() {
   const [voiceStatus, setVoiceStatus] = useState(null);
   const [activeJobs, setActiveJobs] = useState([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showConnectionModal, setShowConnectionModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
+  const startupProbeRef = useRef({ done: false, cancelled: false, timer: null });
+  const connectionStatusRef = useRef(connectionStatus);
+  connectionStatusRef.current = connectionStatus;
+
+  const openConnectionModal = useCallback(() => {
+    startupProbeRef.current.cancelled = true;
+    if (startupProbeRef.current.timer !== null) {
+      clearTimeout(startupProbeRef.current.timer);
+      startupProbeRef.current.timer = null;
+    }
+    setShowConnectionModal(true);
+  }, []);
+
+  // 应用启动后单次静默握手（恢复原有便利功能）：
+  // 仅在首次启动、尚未探测过、未打开连接面板且已存在保存好的有效连接目标时，600ms 后静默握手一次；切页不重复。
+  useEffect(() => {
+    const probeState = startupProbeRef.current;
+    if (probeState.done || probeState.cancelled) return undefined;
+    let disposed = false;
+    probeState.timer = setTimeout(async () => {
+      probeState.timer = null;
+      if (disposed || probeState.done || probeState.cancelled) return;
+      probeState.done = true;
+      if (connectionStatusRef.current?.checkedAt) return;
+      const saved = readUnifiedConnection();
+      if (!drawTargetReady(saved)) return;
+      const outcome = await probeControllerConnection(postJson, saved);
+      if (disposed || probeState.cancelled || connectionStatusRef.current?.checkedAt) return;
+      const current = readUnifiedConnection();
+      const sameTarget = saved.connection_mode === current.connection_mode
+        && (saved.connection_mode === "serial"
+          ? saved.port === current.port && String(saved.baudrate) === String(current.baudrate)
+          : saved.network_host.trim() === current.network_host.trim()
+            && String(saved.network_telnet_port) === String(current.network_telnet_port));
+      if (!sameTarget) return;
+      setConnectionStatus(outcome.status);
+      const motion = machineMotionFromLimits(outcome.machineLimits);
+      if (motion) {
+        writeMachineMotion(motion);
+        try {
+          window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: motion }));
+        } catch (_error) {
+          // 非浏览器环境忽略广播
+        }
+      }
+      if (outcome.connected) {
+        emitDeviceLog("DEVICE", outcome.text, "ok");
+      }
+    }, 600);
+    return () => {
+      disposed = true;
+      if (probeState.timer !== null) {
+        clearTimeout(probeState.timer);
+        probeState.timer = null;
+      }
+    };
+  }, []);
+
+  // 全局监听统一连接目标变化：在任意页面或连接弹窗改了连接方式/地址/串口后，立即复位握手状态，不自动探测
+  const {
+    connectionMode: globalConnMode,
+    serialPort: globalSerialPort,
+    baudrate: globalBaudrate,
+    networkHost: globalNetworkHost,
+    telnetPort: globalTelnetPort,
+  } = useDeviceConnection({ numeric: true });
+  const globalTargetKey =
+    globalConnMode === "serial"
+      ? `serial:${globalSerialPort}:${globalBaudrate}`
+      : `network:${globalNetworkHost.trim()}:${globalTelnetPort}`;
+  const prevGlobalTargetKeyRef = useRef(globalTargetKey);
+  useEffect(() => {
+    if (prevGlobalTargetKeyRef.current !== globalTargetKey) {
+      prevGlobalTargetKeyRef.current = globalTargetKey;
+      setConnectionStatus({
+        connected: false,
+        summary: "连接参数已更改，请重新握手探测",
+      });
+    }
+  }, [globalTargetKey]);
   const [startupUpdate, setStartupUpdate] = useState(null);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState("");
   const [focusUpdateSection, setFocusUpdateSection] = useState(false);
@@ -390,6 +481,7 @@ function App() {
         <Navbar
           currentPath={currentPath}
           onNavigate={navigateTo}
+          onHardwareClick={openConnectionModal}
           onMcpClick={() => (voiceEnabled ? navigateTo("/voice") : setShowSettingsModal(true))}
           connectionStatus={connectionStatus}
           mcpStatus={mcpStatus}
@@ -456,7 +548,12 @@ function App() {
                 </div>
               }
             >
-              <DrawPage onNavigate={navigateTo} active={drawActive} />
+              <DrawPage
+                onNavigate={navigateTo}
+                active={drawActive}
+                connectionStatus={connectionStatus}
+                onOpenConnection={openConnectionModal}
+              />
             </Suspense>
           </div>
         ) : null}
@@ -474,13 +571,18 @@ function App() {
             }
           >
             {currentPath === "/material-lab" && (
-              <MaterialLabPage onNavigate={navigateTo} />
+              <MaterialLabPage
+                onNavigate={navigateTo}
+                connectionStatus={connectionStatus}
+                onOpenConnection={openConnectionModal}
+              />
             )}
             {currentPath === "/twin" && (
               <TwinPage
                 onNavigate={navigateTo}
                 connectionStatus={connectionStatus}
                 setConnectionStatus={setConnectionStatus}
+                onOpenConnection={openConnectionModal}
               />
             )}
             {currentPath === "/camera" && voiceEnabled && (
@@ -498,7 +600,9 @@ function App() {
                 onNavigate={navigateTo}
                 connectionStatus={connectionStatus}
                 setConnectionStatus={setConnectionStatus}
+                onOpenConnection={openConnectionModal}
                 mcpStatus={mcpStatus}
+                activeJobs={activeJobs}
               />
             )}
           </Suspense>
@@ -510,6 +614,14 @@ function App() {
         visible={showAuthModal}
         onClose={() => setShowAuthModal(false)}
         onAuthenticated={() => setShowAuthModal(false)}
+      />
+
+      <DeviceConnectionModal
+        visible={showConnectionModal}
+        onClose={() => setShowConnectionModal(false)}
+        connectionStatus={connectionStatus}
+        setConnectionStatus={setConnectionStatus}
+        onLog={emitDeviceLog}
       />
 
       <SettingsModal
@@ -550,6 +662,7 @@ function App() {
         pendingApprovalTargets={pendingApprovalTargets}
         onWaitingChange={setAiPreviewWaiting}
         reopenNonce={aiPreviewReopen}
+        onOpenConnection={openConnectionModal}
       />
 
       {/* 右下角浮层堆叠：小智雕刻同步小窗在上，雕刻任务浮层在下，互不遮挡 */}

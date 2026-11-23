@@ -5,6 +5,7 @@ import { IMAGE_PRESET_HINTS, detectImagePreset } from "../../qualityPresets.js";
 import { IMAGE_INTERVAL_SCALE_LIMITS, IMAGE_MODE_OPTIONS, imageAdvancedSummary } from "../../workbenchParams.js";
 import QualityPresetBar from "../QualityPresetBar.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
+import { OriginBadge } from "../OriginBadge.jsx";
 
 /** 雕刻工作台 ② 加工内容 · 图片处理：上传原图、质量预设、成品尺寸与图片高级设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
 export function WorkbenchImageTool({
@@ -123,6 +124,10 @@ export function WorkbenchImageTool({
             className="text-input"
           />
         </label>
+      </div>
+      <div className="wb-params-hint wb-origin-inline" id="wb-image-origin-hint">
+        <OriginBadge origin="lower_left" />
+        <span>对刀起点：图片左下角（开刻前把激光头移到图片左下角）</span>
       </div>
       <details className="fill-options" id="wb-image-advanced">
         <summary>

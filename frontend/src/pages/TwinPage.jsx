@@ -16,6 +16,7 @@ import {
   ArrowUpRight,
   ChevronUp,
   ChevronDown,
+  Settings2,
 } from "lucide-react";
 import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewText, postJson } from "../api/client.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
@@ -39,7 +40,8 @@ import {
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
-import { readWorkbenchConnection } from "../deviceConnection.js";
+import { connectionSummaryView, readUnifiedConnection } from "../deviceConnection.js";
+import { useDeviceConnection } from "../useDeviceConnection.js";
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
 const DEMO_GCODE = [
@@ -133,7 +135,24 @@ function loadSavedMaterialConfig() {
     textOffsetY: 0,
   };
 }
-export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) {
+export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, onOpenConnection = null }) {
+  const {
+    connectionMode,
+    serialPort,
+    baudrate,
+    networkHost,
+    telnetPort,
+  } = useDeviceConnection();
+  const connectionView = connectionSummaryView(
+    {
+      connection_mode: connectionMode,
+      port: serialPort,
+      baudrate,
+      network_host: networkHost,
+      network_telnet_port: telnetPort,
+    },
+    connectionStatus,
+  );
   // 驱动模式：sim (离线刀路推演) | job (加工下发同步) | telemetry (实机坐标映射)
   const [driveMode, setDriveMode] = useState("sim");
 
@@ -207,7 +226,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
   // 读取工作台保存的连接参数
   // 存储被禁用时读取会抛错；急停路径也会调用这里，必须退回空目标而不是中断（2026-11-05）
   const getConnectionPayload = useCallback(() => {
-    const saved = readWorkbenchConnection();
+    const saved = readUnifiedConnection();
     return buildTwinConnectionPayload({
       mode: saved.connection_mode,
       port: saved.port,
@@ -505,7 +524,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     try {
       const payload = getConnectionPayload();
       const res = await postJson("/api/connection/check", payload);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || JSON.stringify(payload) !== JSON.stringify(getConnectionPayload())) return;
       if (res.ok && res.data?.success) {
         const r = res.data.result || {};
         const isConn = Boolean(r.connected || r.serial_connected || r.network_connected);
@@ -1032,7 +1051,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
         <div className="twin-right-col">
           {/* 卡片 1：刀路源与任务同步 */}
           <section className="hud-card ob-card twin-side-card">
-            <FoldHeader id="twin-source" title="刀路源与任务同步" k="TOOLPATH" n={1} />
+            <FoldHeader id="twin-source" title="刀路源与任务同步" n={1} />
             <div className="twin-card-body">
               <div className="twin-source-current">
                 <span className="twin-field-label">当前挂载刀路</span>
@@ -1446,7 +1465,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
               {driveMode === "job" && (
                 <div className="twin-job-sync-box">
                   <div className="twin-job-sync-head">
-                    <span>JobWorker 下发状态：{jobStatus.toUpperCase()}</span>
+                    <span>实时下发状态：{jobStatus.toUpperCase()}</span>
                     <b>
                       {jobSendResult?.lines_sent || 0} / {jobSendResult?.total_lines || toolpath.totalLines} 行
                     </b>
@@ -1470,8 +1489,31 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
           {/* 卡片 2：控制器实时遥测映射 */}
           <section className="hud-card ob-card twin-side-card">
-            <FoldHeader id="twin-telemetry" title="控制器实时遥测" k="TELEMETRY" n={2} />
+            <FoldHeader id="twin-telemetry" title="控制器实时遥测" n={2} />
             <div className="twin-card-body">
+              <div className="conn-summary-card twin-conn-summary" id="twin-conn-summary">
+                <div className="conn-summary-info">
+                  <span className={`conn-summary-dot is-${connectionView.statusTone}`} aria-hidden="true" />
+                  <span className="conn-summary-mode">{connectionView.modeLabel}</span>
+                  <span className="conn-summary-sep" aria-hidden="true">·</span>
+                  <span className={`conn-summary-target mono${connectionView.targetReady ? "" : " is-empty"}`}>
+                    {connectionView.targetText}
+                  </span>
+                  <span className="conn-summary-sep" aria-hidden="true">·</span>
+                  <span className={`conn-summary-status is-${connectionView.statusTone}`}>
+                    {connectionView.statusText}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  id="twin-open-connection"
+                  className="btn btn-ghost wb-btn conn-summary-btn"
+                  onClick={onOpenConnection}
+                >
+                  <Settings2 size={13} className="wb-icon" aria-hidden="true" />
+                  <span>修改连接</span>
+                </button>
+              </div>
               <div className="twin-telemetry-head">
                 <span className={`ob-pill ob-pill--${telemetry.tone || "off"}`}>
                   <span>{telemetry.stateLabel}</span>
@@ -1564,7 +1606,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
           {/* 卡片 3：机台物理包络与安全制动 */}
           <section className="hud-card ob-card twin-side-card">
-            <FoldHeader id="twin-envelope" title="翼宿 V1.0 工作区与安全门禁" k="YISU V1.0" n={3} />
+            <FoldHeader id="twin-envelope" title="翼宿 V1.0 工作区与安全门禁" n={3} />
             <div className="twin-card-body">
               <div className="twin-row-actions">
                 <button
@@ -1659,10 +1701,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 type="button"
                 className="btn-estop-large"
                 onClick={handleTwinEmergencyStop}
-                title="向控制器发送 0x18 软件复位；紧急情况请直接按实体急停开关"
+                title="发送 0x18 软件复位；紧急情况请按机器实体急停"
               >
                 <AlertTriangle size={16} />
-                <span>0x18 软件复位 · 紧急停止请求</span>
+                <span>紧急停止（软件复位）</span>
               </button>
             </div>
           </section>

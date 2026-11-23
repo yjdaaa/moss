@@ -5,6 +5,7 @@ import { materialLayerHint } from "../../fillOptions.js";
 import { TEXT_ORIGIN_OPTIONS, TEXT_STYLE_OPTIONS } from "../../workbenchParams.js";
 import EngraveRouteSwitch from "../EngraveRouteSwitch.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
+import { OriginBadge } from "../OriginBadge.jsx";
 import { TEXT_ORIGIN_SHARED_HINT } from "../../textOrigin.js";
 
 /**
@@ -60,7 +61,7 @@ export function WorkbenchTextTool({
         saving={engraveRouteSaving}
         readOnly={engraveRouteReadOnly}
       />
-      <div className="wb-params-grid">
+      <div className="wb-params-grid wb-text-params-grid">
         <label>
           <span>字高 (mm)</span>
           <input
@@ -89,7 +90,10 @@ export function WorkbenchTextTool({
           </select>
         </label>
         <label title={TEXT_ORIGIN_SHARED_HINT}>
-          <span>对刀起点</span>
+          <span className="wb-origin-label-row">
+            <span>对刀起点</span>
+            <OriginBadge origin={textOrigin} />
+          </span>
           <select
             id="wb-text-origin"
             value={textOrigin}

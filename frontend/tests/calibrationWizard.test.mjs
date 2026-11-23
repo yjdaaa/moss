@@ -13,14 +13,17 @@ import {
   normalizeWizardState,
   overscanSuggestion,
   patternSaveTarget,
+  readWizardFold,
   readWizardState,
   resolveOpenWizardStep,
+  resolveWizardExpanded,
   scanOffsetRowsFromMeasurements,
   stepRecord,
   timeCalibrationSummary,
   toggleWizardStep,
   wizardMaterialKey,
   wizardProgress,
+  writeWizardFold,
   writeWizardState,
 } from "../src/calibrationWizard.js";
 import { wizardPatternLine } from "../src/materialLabState.js";
@@ -203,6 +206,23 @@ test("标定向导面板：列出六步、当前步骤展开、只读时不给�
     const readOnly = render({ readOnly: true });
     assert.match(readOnly, /只能查看/);
     assert.doesNotMatch(readOnly, /跳过这一步/);
+
+    // r58：去掉每步重复说明句（不再渲染 .lab-wizard-summary），且当前步骤三个操作按钮排在同一行容器内；
+    // 头部为独立双按钮容器，不存在违规的 <summary> 内嵌 <button>
+    assert.doesNotMatch(html, /lab-wizard-summary/);
+    assert.doesNotMatch(html, /<summary[\s\S]*?<button/, "禁止在 <summary> 内部嵌套 <button>");
+    assert.equal((html.match(/class="lab-wizard-actions"/g) || []).length, 1, "单步操作按钮应合并进同一行容器");
+    assert.match(html, /id="lab-wizard-defer"[^>]*>稍后</);
+
+    // 6/6 全部完成时初始自动收起为单行摘要且不显示“继续”
+    let doneState = normalizeWizardState(null);
+    for (const s of WIZARD_STEPS) {
+      doneState = markWizardStep(doneState, s.id, "done", { materialKey: key });
+    }
+    const doneHtml = render({ wizard: doneState });
+    assert.match(doneHtml, /data-open="false"/);
+    assert.doesNotMatch(doneHtml, /lab-wizard-continue/);
+    assert.doesNotMatch(doneHtml, /lab-wizard-steps/);
   } finally {
     await server.close();
   }
@@ -237,4 +257,37 @@ test("标定向导每一步都能单独收起：当前步骤收起后不会被�
   assert.equal(resolveOpenWizardStep(toggleWizardStep("matrix", "kerf"), "matrix"), "kerf");
   // 别的步骤也能收起
   assert.equal(resolveOpenWizardStep(toggleWizardStep("kerf", "kerf"), "matrix"), null);
+});
+
+test("标定向导整体收起记忆：六步全完成或点稍后后默认收起，存储异常安全回退", () => {
+  const key = wizardMaterialKey("椴木", "3");
+  const storage = memoryStorage();
+  let state = normalizeWizardState(null);
+
+  assert.equal(readWizardFold(storage), null);
+  assert.equal(resolveWizardExpanded(state, key, storage), true, "初始有未完成步骤时默认展开");
+
+  writeWizardFold(false, storage);
+  assert.equal(readWizardFold(storage), "closed");
+  assert.equal(resolveWizardExpanded(state, key, storage), false, "用户点稍后收起后默认保持收起");
+
+  writeWizardFold(true, storage);
+  assert.equal(resolveWizardExpanded(state, key, storage), true, "用户手动展开后记住展开");
+
+  for (const step of WIZARD_STEPS) {
+    state = markWizardStep(state, step.id, "done", { materialKey: key });
+  }
+  assert.equal(resolveWizardExpanded(state, key, storage), false, "六步全部完成后默认收起");
+
+  const brokenStorage = {
+    getItem() {
+      throw new Error("QuotaExceeded");
+    },
+    setItem() {
+      throw new Error("QuotaExceeded");
+    },
+  };
+  assert.doesNotThrow(() => writeWizardFold(false, brokenStorage));
+  assert.equal(readWizardFold(brokenStorage), null);
+  assert.equal(resolveWizardExpanded(normalizeWizardState(null), key, brokenStorage), true);
 });

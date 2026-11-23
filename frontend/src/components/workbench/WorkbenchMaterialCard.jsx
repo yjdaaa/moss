@@ -36,7 +36,7 @@ export function WorkbenchMaterialCard({
 }) {
   return (
     <WbCard id="material" className="hud-card ob-card" label="材质与参数">
-      <FoldHeader id="wb-material" title="材质与参数" k="MATERIAL" n={3} />
+      <FoldHeader id="wb-material" title="材质与参数" n={3} />
         {/* Material & Specs selection Deck */}
         <div
           className="wb-box-6"

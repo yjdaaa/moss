@@ -1,6 +1,10 @@
-// 无摄像头两点对位（2026-11-16，对齐 LightBurn Print and Cut）的纯逻辑，不依赖 React。
+// 无摄像头两点对位（2026-11-16，对齐 LightBurn Print and Cut）与工作台现场移头/对刀原点的纯逻辑，不依赖 React。
 // 坐标约定与后端相同：设计参考点用“相对任务开始时激光头位置”的坐标（与预览的 frame_mm 相同），
 // 实测点是状态查询读到的机器坐标（MPos，固件只报 WPos 时用 WPos，两点必须同一种）。
+
+import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
+import { drawTargetLabel } from "./drawConnection.js";
+import { estopTargetArgs } from "./globalEstop.js";
 
 export const REGISTRATION_SESSION_KEY = "moss-registration-v1";
 /** 画板的对位进度单独存，和工作台互不清掉对方的记录点。 */
@@ -245,5 +249,253 @@ export function adoptRegisteredDrawRecord(record, sourceWorkflowId) {
     result: { success: true, result: record },
     fingerprint: record.draw_lab.content_fingerprint || "",
     status: `对位预览已生成：${record.workflow_id}，尚未发送；${drawOriginNote(record)}`,
+  };
+}
+
+// ── 工作台“现场移头与对刀原点”（2026-11-23 r60 B3）：完全复用 `/api/safe-action` 与确认 / R3 审批门禁 ──
+
+export const HEAD_JOG_FOLD_ID = "wb-head-jog";
+export const WORKBENCH_JOG_STEPS_MM = Object.freeze([1, 5, 10]);
+export const WORKBENCH_MAX_JOG_STEP_MM = 10;
+
+const ACTIVE_OVERLAY_STATUSES = new Set(["running", "sending", "preparing", "awaiting_completion"]);
+
+/**
+ * 工作台单步点动请求：严格限定在允许步长 `[1, 5, 10]` mm 且单步 `<= 10 mm`、单轴 `±1`，
+ * 越界或非单轴一律返回 `null`（绝不静默截断），内部直接复用 `jogRequest`。
+ */
+export function workbenchJogRequest(target, dxUnit, dyUnit, stepMm) {
+  if (!target) return null;
+  const step = Number(stepMm);
+  if (
+    !Number.isFinite(step)
+    || step <= 0
+    || step > WORKBENCH_MAX_JOG_STEP_MM
+    || !WORKBENCH_JOG_STEPS_MM.includes(step)
+  ) {
+    return null;
+  }
+  const dx = Number(dxUnit);
+  const dy = Number(dyUnit);
+  const singleAxis = ((dx === -1 || dx === 1) && dy === 0) || (dx === 0 && (dy === -1 || dy === 1));
+  if (!singleAxis) return null;
+  return jogRequest(target, dx * step, dy * step, JOG_FEED_MM_PER_MIN);
+}
+
+/** 设为工作原点（`set_origin`）与解除报警锁定（`unlock`）请求体，仅走 `/api/safe-action`。 */
+export function safeOriginActionRequest(target, action) {
+  if (!target) return null;
+  if (action !== "set_origin" && action !== "unlock") return null;
+  return { action, confirmed: true, ...target };
+}
+
+/**
+ * 计算工作台现场移头面板的禁用状态与原因说明：
+ * 未配置连接、未握手探测、未连接、正在加工/发送/走边框、解算中或有在途动作时全部禁用并给出明确原因。
+ */
+export function resolveHeadJogGuard({
+  connectionForm,
+  connectionStatus,
+  busy = false,
+  framingBusy = false,
+  overlayStatus = "pending",
+  activeJobs = [],
+  workingAction = "",
+} = {}) {
+  const stopTarget = estopTargetArgs(connectionForm);
+  const targetLabel = stopTarget ? drawTargetLabel(connectionForm) : "";
+
+  if (workingAction) {
+    return {
+      disabled: true,
+      code: "in_flight",
+      reason: "当前指令正在确认或执行中，请等待完成后再操作（不排队连续移动）",
+      shortSummary: "执行中…",
+      stopTarget,
+      targetLabel,
+    };
+  }
+  const hasRunningJob = Array.isArray(activeJobs) && activeJobs.some((job) => job && job.state === "running");
+  if (framingBusy || ACTIVE_OVERLAY_STATUSES.has(overlayStatus) || hasRunningJob) {
+    return {
+      disabled: true,
+      code: "job_active",
+      reason: "正在加工或发送指令中，所有移头、设原点与解锁按钮已禁用",
+      shortSummary: "加工进行中已锁定",
+      stopTarget,
+      targetLabel,
+    };
+  }
+  if (busy) {
+    return {
+      disabled: true,
+      code: "busy",
+      reason: "正在计算加工轨迹，请稍候",
+      shortSummary: "解算轨迹中",
+      stopTarget,
+      targetLabel,
+    };
+  }
+  if (!stopTarget) {
+    return {
+      disabled: true,
+      code: "unconfigured",
+      reason: "尚未配置设备地址，请先点「修改连接」填写控制器 IP 或串口并完成握手探测",
+      shortSummary: "尚未配置连接",
+      stopTarget: null,
+      targetLabel: "",
+    };
+  }
+  if (!connectionStatus?.checkedAt) {
+    return {
+      disabled: true,
+      code: "unprobed",
+      reason: "设备尚未握手探测，请先在「修改连接」点击「握手探测」确认在线",
+      shortSummary: "需先握手探测",
+      stopTarget,
+      targetLabel,
+    };
+  }
+  if (!connectionStatus?.connected) {
+    const detail = typeof connectionStatus.summary === "string" && connectionStatus.summary.trim()
+      ? `（${connectionStatus.summary.trim()}）`
+      : "";
+    return {
+      disabled: true,
+      code: "disconnected",
+      reason: `设备未连接${detail}，请先检查连接并重新握手探测`,
+      shortSummary: "设备未连接",
+      stopTarget,
+      targetLabel,
+    };
+  }
+  return {
+    disabled: false,
+    code: "ready",
+    reason: "",
+    shortSummary: "",
+    stopTarget,
+    targetLabel,
+  };
+}
+
+function jogDirectionLabel(dxUnit, dyUnit) {
+  if (dxUnit < 0) return "X− 方向";
+  if (dxUnit > 0) return "X+ 方向";
+  if (dyUnit > 0) return "Y+ 方向";
+  return "Y− 方向";
+}
+
+/**
+ * 规划一次现场安全动作（点动 / 设工作原点 / 解锁 $X）：
+ * 先校验参数并返回二次确认弹窗文案；`buildConfirmedPayload` 仅在用户点击确认后调用，杜绝未确认自动带 `confirmed=true`。
+ */
+export function planHeadSafeAction({ kind, target, targetLabel, dxUnit = 0, dyUnit = 0, stepMm = 1 } = {}) {
+  if (!target) return null;
+  const label = targetLabel || (target.connection_mode === "serial" ? target.port : `${target.host}:${target.telnet_port}`);
+  if (kind === "jog") {
+    if (!workbenchJogRequest(target, dxUnit, dyUnit, stepMm)) return null;
+    const step = Number(stepMm);
+    const dir = jogDirectionLabel(dxUnit, dyUnit);
+    return {
+      actionLabel: "点动",
+      dialog: {
+        title: "确认点动移头（机器将移动）",
+        message: `目标设备：${label}\n激光头将向 ${dir} 移动 ${step} mm（速度 ${JOG_FEED_MM_PER_MIN} mm/min，激光全程关闭）。\n请人在机器旁观察，确认台面无障碍物；严格模式开启时需桌面审批，急停随时可用。`,
+        confirmText: "确认移动",
+      },
+      buildConfirmedPayload: () => workbenchJogRequest(target, dxUnit, dyUnit, step),
+    };
+  }
+  if (kind === "set_origin") {
+    return {
+      actionLabel: "设为工作原点",
+      dialog: {
+        title: "确认设为工作原点",
+        message: `目标设备：${label}\n将把激光头当前位置设为工作原点（G92 X0 Y0，激光头不移动、不出光）。\n严格模式开启时需桌面审批；请人在机器旁确认当前对刀位置无误。`,
+        confirmText: "设为工作原点",
+      },
+      buildConfirmedPayload: () => safeOriginActionRequest(target, "set_origin"),
+    };
+  }
+  if (kind === "unlock") {
+    return {
+      actionLabel: "解锁 $X",
+      dialog: {
+        title: "确认解除报警锁定 ($X)",
+        message: `目标设备：${label}\n将向控制器发送 $X 解除报警锁轴（激光关闭）。\n解锁后尚未回零前控制器可能不掌握准确机械限位，请人在机器旁确认故障已排除后再解锁；严格模式开启时需桌面审批。`,
+        confirmText: "确认解锁",
+      },
+      buildConfirmedPayload: () => safeOriginActionRequest(target, "unlock"),
+    };
+  }
+  return null;
+}
+
+/**
+ * 创建带同步在途锁的安全动作执行器：
+ * - 连续快速点击时在同步入口立即丢弃后续点击，绝不排队多次确认或多次移动；
+ * - 每次动作必先经 `confirmFn` 二次确认，取消则零请求；
+ * - 响应照 `RegistrationPanel` 复用 `isApprovalRequiredResponse` / `approvalPendingMessage` 处理严格模式 R3 审批与错误提示。
+ */
+export function createHeadSafeActionRunner({ confirmFn, postFn, alertFn, onLog, onWorkingChange } = {}) {
+  let inFlight = false;
+  return async function runAction(spec, guard) {
+    if (inFlight || guard?.disabled) {
+      return { status: "blocked" };
+    }
+    const plan = planHeadSafeAction({
+      ...spec,
+      target: guard?.stopTarget,
+      targetLabel: guard?.targetLabel,
+    });
+    if (!plan) {
+      return { status: "invalid" };
+    }
+    inFlight = true;
+    onWorkingChange?.(spec.kind);
+    try {
+      const confirmed = await confirmFn(plan.dialog.message, {
+        title: plan.dialog.title,
+        tone: "warning",
+        confirmText: plan.dialog.confirmText,
+        cancelText: "取消",
+      });
+      if (!confirmed) {
+        onLog?.(`已取消${plan.actionLabel}，未向设备发送指令`, "info");
+        return { status: "cancelled" };
+      }
+      const payload = plan.buildConfirmedPayload();
+      if (!payload) {
+        return { status: "invalid" };
+      }
+      const res = await postFn("/api/safe-action", payload);
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, plan.actionLabel);
+        onLog?.(msg, "warn");
+        await alertFn?.(msg, { title: "等待桌面审批", tone: "info" });
+        return { status: "approval_required", message: msg };
+      }
+      if (res?.ok && res?.data?.success) {
+        const summary = (typeof res.data.result === "string" && res.data.result) || `${plan.actionLabel}已执行`;
+        onLog?.(summary, "ok");
+        return { status: "ok", message: summary };
+      }
+      const reason = (typeof res?.data?.result === "string" && res.data.result) || `${plan.actionLabel}没有完成`;
+      onLog?.(`${plan.actionLabel}没有完成：${reason}`, "error");
+      await alertFn?.(reason, { title: `${plan.actionLabel}没有完成`, tone: "error" });
+      return { status: "failed", message: reason };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      onLog?.(`${plan.actionLabel}请求异常：${message}`, "error");
+      await alertFn?.(`${plan.actionLabel}请求异常：${message}\n请到设备旁确认机器状态，必要时按急停。`, {
+        title: `${plan.actionLabel}状态未知`,
+        tone: "error",
+      });
+      return { status: "error", message };
+    } finally {
+      inFlight = false;
+      onWorkingChange?.("");
+    }
   };
 }

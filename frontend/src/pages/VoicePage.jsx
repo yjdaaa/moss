@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Cloud, Cpu, Radio } from "lucide-react";
+import { Check, Cloud, Cpu, Radio, X } from "lucide-react";
 import { getJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
@@ -26,7 +26,7 @@ import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard, VoiceToolsCard } from "../components/VoiceEndpointsCard.jsx";
 import VoiceWakeWordSection from "../components/VoiceWakeWordSection.jsx";
-import { SaveBar, VOICE_GOTO_EVENT, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel, focusVoiceGroup } from "../components/VoiceLayout.jsx";
+import { SaveBar, VOICE_GOTO_EVENT, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel, focusVoiceGroup, gotoVoiceGroup } from "../components/VoiceLayout.jsx";
 import { HOME_APPROVALS, VOICE_FOCUS_EVENT, peekVoiceFocus } from "../voiceFocus.js";
 import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
@@ -39,13 +39,18 @@ import {
   approvalHistoryStatus,
   approvalListSummary,
   approvalOutcomeReason,
+  builtinSetupChecklist,
   deviceView,
   dirtyTabs,
+  dismissVoiceHint,
   modeConfirmText,
+  readDismissedVoiceHints,
+  restoreVoiceHint,
   savedNoteText,
   settingsGroupDirty,
   settingsGroupPayload,
   settingsSaveEffect,
+  visibleVoiceHints,
   voiceErrorText,
 } from "../voiceState.js";
 
@@ -250,6 +255,13 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     setGotoTarget(null);
   }, [gotoTarget]);
   const [dirty, setDirty] = useState({});
+  const [dismissedHints, setDismissedHints] = useState(() => readDismissedVoiceHints());
+  const strictEnabledFlag = Boolean(status?.strict?.enabled);
+  useEffect(() => {
+    if (strictEnabledFlag) {
+      setDismissedHints((prev) => (prev.includes("strict_off") ? restoreVoiceHint(prev, "strict_off") : prev));
+    }
+  }, [strictEnabledFlag]);
   const [approvals, setApprovals] = useState([]);
   // n68：列表上限与读取失败原因（失败时保留上次列表并明确提示，不悄悄显示旧数据）
   const [approvalsMeta, setApprovalsMeta] = useState({ limit: 0, error: "" });
@@ -478,7 +490,6 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
             <h2>
               <Radio size={16} aria-hidden="true" /> 语音链路
             </h2>
-            <span className="ob-k">VOICE LINK</span>
           </div>
           <div className="voice-mode-row" role="radiogroup" aria-label="语音链路">
             {/* 两条链路平分一行（2026-11-17 删除自建后由三列改两列）；卡片写清各自怎么连、有什么特点 */}
@@ -542,6 +553,31 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
               严格模式{status.strict?.enabled ? "已开启" : "未开启"} · 点此切换
             </button>
           </div>
+          {(() => {
+            const checklist = builtinSetupChecklist(mode, builtinStatus);
+            if (!checklist?.visible) return null;
+            return (
+              <div className="voice-setup-checklist" id="voice-builtin-checklist" role="group" aria-label="内置语音配通步骤">
+                {checklist.steps.map((step, idx) => (
+                  <React.Fragment key={step.key}>
+                    {idx > 0 && <span className="voice-setup-arrow" aria-hidden="true">→</span>}
+                    <button
+                      type="button"
+                      className={`voice-setup-step${step.done ? " is-done" : ""}`}
+                      id={`voice-setup-step-${step.key}`}
+                      data-done={step.done ? "true" : "false"}
+                      onClick={() => gotoVoiceGroup(step.tab, step.group, step.target)}
+                    >
+                      <span className="voice-setup-badge" aria-hidden="true">
+                        {step.done ? <Check size={12} /> : step.num}
+                      </span>
+                      <span>{step.label}</span>
+                    </button>
+                  </React.Fragment>
+                ))}
+              </div>
+            );
+          })()}
           <MossVoiceTwin
             mode={mode}
             status={status}
@@ -549,14 +585,48 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
             mcpStatus={mcpStatus}
             approvalCount={pendingApprovals}
           />
-          {(device.hint || (mode === "official" && !status.strict?.enabled)) && (
-            <div className={`voice-hint voice-hint--${mode === "official" && !status.strict?.enabled ? "warn" : device.tone}`} id="voice-ota-hint">
-              {[
-                device.hint,
-                mode === "official" && !status.strict?.enabled ? "严格模式未开启：大模型可以自行确认加工任务；要每次批准就点上面的开关。" : "",
-              ].filter(Boolean).join(" · ")}
-            </div>
-          )}
+          {(() => {
+            const hints = visibleVoiceHints({
+              mode,
+              strictEnabled: Boolean(status.strict?.enabled),
+              dismissed: dismissedHints,
+            });
+            if (hints.length === 0) return null;
+            return (
+              <div className="voice-hints-stack">
+                {hints.map((hint) => (
+                  <div
+                    key={hint.key}
+                    className={`voice-hint voice-hint--${hint.tone} voice-hint--dismissible`}
+                    id={hint.id}
+                  >
+                    <span className="voice-hint-text">{hint.text}</span>
+                    {hint.actionLabel ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost voice-hint-action"
+                        id={`${hint.id}-action`}
+                        onClick={toggleStrict}
+                        disabled={!status.strict}
+                      >
+                        {hint.actionLabel}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="voice-hint-close"
+                      id={`${hint.id}-close`}
+                      aria-label="关闭这条提示"
+                      title="关闭这条提示"
+                      onClick={() => setDismissedHints((prev) => dismissVoiceHint(prev, hint.key))}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </section>
 
         <div className="voice-pagetabs" role="tablist" aria-label="语音中心">

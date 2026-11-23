@@ -6,8 +6,12 @@ import {
   VOICE_OUTCOMES,
   approvalListSummary,
   approvalOutcomeReason,
+  dismissVoiceHint,
   filterVoiceEvents,
   formatEventTime,
+  readDismissedVoiceHints,
+  restoreVoiceHint,
+  visibleVoiceHints,
   voiceErrorText,
   voiceEventDropNotices,
   voiceEventView,
@@ -113,4 +117,69 @@ test("审批列表标题不把 50 条上限当总数；失败原因带错误码"
   assert.equal(approvalOutcomeReason({ outcome: { success: false, message: "", error_code: "approval_mismatch" } }), "错误码 approval_mismatch");
   assert.equal(approvalOutcomeReason({ outcome: { success: true, message: "已完成" } }), "");
   assert.equal(approvalOutcomeReason({}), "");
+});
+
+test("语音中心顶部提示拆成独立可关闭条目，严格模式条保留开启入口且读写存储 try/catch", () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, String(v)),
+  };
+  assert.deepEqual(readDismissedVoiceHints(storage), []);
+
+  const initial = visibleVoiceHints({ mode: "official", strictEnabled: false, dismissed: [] });
+  assert.equal(initial.length, 2, "官方链路且严格模式未开时应拆成两条独立提示");
+  assert.equal(initial[0].id, "voice-ota-hint");
+  assert.equal(initial[1].id, "voice-strict-hint");
+  assert.equal(initial[1].actionLabel, "开启严格模式");
+
+  const afterCloseOta = dismissVoiceHint([], initial[0].key, storage);
+  assert.deepEqual(readDismissedVoiceHints(storage), ["ota_official"]);
+  const remaining = visibleVoiceHints({ mode: "official", strictEnabled: false, dismissed: afterCloseOta });
+  assert.deepEqual(remaining.map((h) => h.id), ["voice-strict-hint"], "关掉设备说明后严格模式提示仍独立保留");
+
+  assert.deepEqual(
+    visibleVoiceHints({ mode: "official", strictEnabled: true, dismissed: afterCloseOta }),
+    [],
+    "严格模式开启后不再显示未开启警告",
+  );
+  assert.deepEqual(
+    visibleVoiceHints({ mode: "builtin", strictEnabled: false, dismissed: afterCloseOta }).map((h) => h.key),
+    ["ota_builtin", "strict_off"],
+    "切换到内置链路后同时独立显示内置 OTA 提示与严格模式未开启警告",
+  );
+
+  // 第 8 条：关闭严格模式提示后，开启严格模式并再次切回关闭时提示必须重新出现
+  const afterDismissStrict = dismissVoiceHint(afterCloseOta, "strict_off", storage);
+  assert.deepEqual(
+    visibleVoiceHints({ mode: "official", strictEnabled: false, dismissed: afterDismissStrict }),
+    [],
+    "当前关闭状态下手动关掉后暂时隐藏",
+  );
+  // 严格模式开启：自动从已关闭记录中清除 strict_off
+  const afterStrictTurnedOn = restoreVoiceHint(afterDismissStrict, "strict_off", storage);
+  assert.equal(readDismissedVoiceHints(storage).includes("strict_off"), false);
+  // 严格模式再次从开切回关：两条语音链路均重新显示警告
+  assert.deepEqual(
+    visibleVoiceHints({ mode: "official", strictEnabled: false, dismissed: afterStrictTurnedOn }).map((h) => h.id),
+    ["voice-strict-hint"],
+    "严格模式重新从开切回关后，官方链路再次弹出警告",
+  );
+  assert.deepEqual(
+    visibleVoiceHints({ mode: "builtin", strictEnabled: false, dismissed: afterStrictTurnedOn }).map((h) => h.id),
+    ["voice-ota-hint", "voice-strict-hint"],
+    "严格模式重新从开切回关后，内置链路同样显示警告",
+  );
+
+  const throwingStorage = {
+    getItem() {
+      throw new Error("SecurityError");
+    },
+    setItem() {
+      throw new Error("SecurityError");
+    },
+  };
+  assert.deepEqual(readDismissedVoiceHints(throwingStorage), []);
+  assert.deepEqual(dismissVoiceHint([], "strict_off", throwingStorage), ["strict_off"]);
+  assert.deepEqual(restoreVoiceHint(["strict_off", "ota_official"], "strict_off", throwingStorage), ["ota_official"]);
 });

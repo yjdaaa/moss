@@ -1,21 +1,22 @@
 import React, { useRef, useState } from "react";
-import { mossEyeCorePalette, mossEyeTwinView } from "../voiceState.js";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { isMossTwinConversing, mossEyeCorePalette, mossEyeTwinView } from "../voiceState.js";
 import { MossEye } from "./MossEye.jsx";
 
 const STATE_BADGE = {
-  offline: { code: "OPTIC · OFFLINE", label: "休眠待命" },
-  idle: { code: "OPTIC · STANDBY", label: "在线守望" },
-  listening: { code: "ACOUSTIC · LOCK", label: "实时拾音" },
-  thinking: { code: "NEURAL · ROUTE", label: "神经推理" },
-  speaking: { code: "VOICE · STREAM", label: "同步播报" },
-  pulse: { code: "MCP · TELEMETRY", label: "指令脉冲" },
-  alert: { code: "SAFETY · ALERT", label: "安全警戒" },
+  offline: { label: "未连接" },
+  idle: { label: "待命" },
+  listening: { label: "正在听" },
+  thinking: { label: "思考中" },
+  speaking: { label: "播报中" },
+  pulse: { label: "执行指令" },
+  alert: { label: "待批准" },
 };
 
 /**
- * MOSS 全息语音孪生舱（按链路自适应 + 多态光学球核与注视联动）：
- * - builtin：真实 PCM 振幅驱动机械眼光圈、核心呼吸与对称交错声波 + 会话阶段/识别字数/已播句数；
- * - official：同步云端 MCP 握手状态、累计 JSON-RPC 指令帧数与远端工具调用脉冲。
+ * 语音中心状态卡（非对话时压缩为单行状态条，点击或正在对话时展开完整声波与指标）：
+ * - builtin：真实 PCM 振幅驱动机械眼光圈与对称声波 + 会话阶段/识别字数/已播句数；
+ * - official：同步小智云端连接状态、指令帧数与最近调用。
  */
 export function MossVoiceTwin({
   mode = "official",
@@ -34,10 +35,13 @@ export function MossVoiceTwin({
   const stateMeta = STATE_BADGE[twin.visualState] || STATE_BADGE.idle;
   const palette = mossEyeCorePalette(twin.visualState);
   const levelRatio = Math.max(0, Math.min(1, (Number(twin.level) || 0) / 100));
+  const conversing = isMossTwinConversing(twin.visualState);
 
   const rootRef = useRef(null);
   const [gaze, setGaze] = useState({ x: 0, y: 0 });
   const [focusPulse, setFocusPulse] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const expanded = conversing || manualOpen;
 
   const handlePointerMove = (e) => {
     const el = rootRef.current;
@@ -61,6 +65,57 @@ export function MossVoiceTwin({
     requestAnimationFrame(() => setFocusPulse(true));
   };
 
+  if (!expanded) {
+    return (
+      <div
+        ref={rootRef}
+        className={`moss-twin moss-twin--compact moss-twin--${twin.visualState}`}
+        id="voice-moss-twin"
+        data-mode={twin.mode}
+        data-visual-state={twin.visualState}
+        data-tempo={palette.tempo}
+        data-expanded="false"
+        style={{
+          "--moss-twin-level": levelRatio.toFixed(2),
+          "--eye-gaze-x": gaze.x.toFixed(3),
+          "--eye-gaze-y": gaze.y.toFixed(3),
+          "--moss-accent": palette.accent,
+        }}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
+        role="region"
+        aria-label="MOSS 语音状态"
+      >
+        <button
+          type="button"
+          className="moss-twin-compact-btn"
+          id="voice-moss-twin-toggle"
+          aria-expanded="false"
+          onClick={() => setManualOpen(true)}
+          title="点击展开语音状态详情"
+        >
+          <span className="moss-twin-compact-eye" aria-hidden="true">
+            <MossEye state={twin.visualState} level={twin.level} size="sm" className="moss-twin-compact-svg" />
+          </span>
+          <span className="moss-twin-state-pill" id="voice-moss-twin-state">
+            <span className="moss-twin-dot" aria-hidden="true" />
+            <b>{stateMeta.label}</b>
+          </span>
+          <span className="moss-twin-compact-headline" id="voice-moss-twin-headline">
+            {twin.headline}
+          </span>
+          <span className="moss-twin-source" id="voice-moss-twin-source">
+            <b>{twin.sourceBadge}</b>
+          </span>
+          <span className="moss-twin-compact-more">
+            <span>展开</span>
+            <ChevronDown size={14} aria-hidden="true" />
+          </span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={rootRef}
@@ -69,6 +124,7 @@ export function MossVoiceTwin({
       data-mode={twin.mode}
       data-visual-state={twin.visualState}
       data-tempo={palette.tempo}
+      data-expanded="true"
       style={{
         "--moss-twin-level": levelRatio.toFixed(2),
         "--eye-gaze-x": gaze.x.toFixed(3),
@@ -78,7 +134,7 @@ export function MossVoiceTwin({
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
       role="region"
-      aria-label="MOSS 语音数字孪生监视器"
+      aria-label="MOSS 语音状态"
     >
       <div className="moss-twin-ocular">
         <div
@@ -117,11 +173,24 @@ export function MossVoiceTwin({
           <span className="moss-twin-state-pill" id="voice-moss-twin-state">
             <span className="moss-twin-dot" aria-hidden="true" />
             <b>{stateMeta.label}</b>
-            <small className="mono">{stateMeta.code}</small>
           </span>
-          <span className="moss-twin-source" id="voice-moss-twin-source">
-            <b className="mono">{twin.sourceBadge}</b>
-            <span>{twin.sourceLabel}</span>
+          <span className="moss-twin-head-end">
+            <span className="moss-twin-source" id="voice-moss-twin-source">
+              <b>{twin.sourceBadge}</b>
+              <span>{twin.sourceLabel}</span>
+            </span>
+            {!conversing && (
+              <button
+                type="button"
+                className="btn btn-ghost moss-twin-collapse-btn"
+                id="voice-moss-twin-toggle"
+                aria-expanded="true"
+                onClick={() => setManualOpen(false)}
+              >
+                <span>收起</span>
+                <ChevronUp size={13} aria-hidden="true" />
+              </button>
+            )}
           </span>
         </div>
 

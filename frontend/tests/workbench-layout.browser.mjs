@@ -57,7 +57,6 @@ try {
   assert.match(initialLinkRow, /^1 \/ span \d+$/, "默认第一张卡在第 1 行");
   const initialSpanMatch = initialLinkRow.match(/span (\d+)$/);
   assert.ok(initialSpanMatch, "默认应带有效 span 行数");
-  const initialSpan = initialSpanMatch[1];
 
   // 验证左窄（16 列）右宽（32 列）双栏排布，且左右两栏底边对齐不留大截空位
   assert.equal(await colOf("link"), "1 / span 16", "左栏卡片占 16 列");
@@ -124,13 +123,19 @@ try {
 
   // 3. 折叠只留标题条，内容隐藏且移除纵向缩放把手，展开恢复原来的高度
   const foldButton = page.locator('[data-wb-card="link"] .ob-card-h button');
+  // 展开要还原的是折叠前那一刻的高度（首屏读到的 initialSpan 可能早于内容自适应贴合）
+  const preCollapseSpan = (await gridOf("link")).match(/span (\d+)$/)?.[1];
+  assert.ok(preCollapseSpan, "折叠前应带有效 span 行数");
   await foldButton.click();
   assert.match(await gridOf("link"), /span 8$/, "折叠后高度应收到标题条");
   assert.equal(await card("link").getAttribute("data-wb-collapsed"), "true", "折叠后标记 data-wb-collapsed=true");
   assert.equal(await page.locator('[data-wb-card="link"] [data-wb-resize="s"]').count(), 0, "折叠后移除底部高度缩放把手");
   assert.equal(await page.locator('[data-wb-card="link"] .wb-btn').isVisible(), false, "折叠后卡片主体内容彻底隐藏");
   await foldButton.click();
-  assert.match(await gridOf("link"), new RegExp(`span ${initialSpan}$`), "展开应恢复原来的高度");
+  // 展开后内容自适应会再贴合一次，等布局稳定（最多 3 秒）再比对，最终高度必须等于折叠前
+  const expandedPattern = new RegExp(`span ${preCollapseSpan}$`);
+  for (let i = 0; i < 30 && !expandedPattern.test(await gridOf("link")); i += 1) await page.waitForTimeout(100);
+  assert.match(await gridOf("link"), expandedPattern, "展开应恢复折叠前的高度");
   assert.equal(await page.locator('[data-wb-card="link"] .wb-btn').isVisible(), true, "展开后卡片主体内容重新显示");
 
   // 4. 拖右边框可以改宽度
@@ -144,14 +149,17 @@ try {
   await page.mouse.up();
   assert.notEqual(await colOf("material"), beforeCols, "拖右边框应改变宽度");
 
-  // 5. 还原默认布局
+  // 5. 还原默认布局（从右上角「布局」菜单触发）
+  await page.locator("#wb-layout-menu-btn").click();
   await page.locator("#wb-layout-reset").click();
   assert.equal(await gridOf("link"), initialLinkRow, "还原后回到默认位置");
   assert.equal(await page.evaluate(() => globalThis.localStorage.getItem("moss_wb_layout_v3")), null, "还原应清掉记忆");
 
   // 6. 锁定后拖不动
+  await page.locator("#wb-layout-menu-btn").click();
   await page.locator("#wb-layout-lock").click();
   assert.equal(await page.locator("#wb-layout-lock").getAttribute("title"), "解锁后可以拖动卡片");
+  await page.keyboard.press("Escape");
   await drag("link", 0, 320);
   assert.equal(await gridOf("link"), initialLinkRow, "锁定时拖动不应改变布局");
 
@@ -212,7 +220,17 @@ try {
     assert.ok(source.y > link.y && Math.abs(source.x - link.x) <= 2, `工作台 ${width}px：左栏上下堆叠`);
     // 两栏模式只保留上下边框把手：不能移动、不能改宽，但能调高度
     assert.equal(await page.locator(".wb-handle--e, .wb-handle--w, .wb-handle--se").count(), 0, "两栏模式没有左右与角把手");
-    assert.ok(await page.locator(".wb-handle--s").count() >= 5, "两栏模式每张卡都有下边框把手");
+    // 无刀路时“加工反馈”默认收起成标题条（2026-11-23 B7），收起的卡本来就没有纵向把手；其余每张展开的卡都要有下边框把手
+    const handleReport = await page.evaluate(() =>
+      [...document.querySelectorAll("[data-wb-card]")].map((el) => ({
+        id: el.dataset.wbCard,
+        collapsed: el.dataset.wbCollapsed === "true",
+        south: el.querySelectorAll(".wb-handle--s").length,
+      })),
+    );
+    const expandedCards = handleReport.filter((c) => !c.collapsed);
+    assert.ok(expandedCards.length >= 4, `两栏模式至少 4 张展开的卡：${JSON.stringify(handleReport)}`);
+    assert.ok(expandedCards.every((c) => c.south === 1), `两栏模式每张展开的卡都有下边框把手：${JSON.stringify(handleReport)}`);
     await noHorizontalOverflow(`工作台 ${width}px`);
     await page.goto(new URL("draw", local).href, { waitUntil: "domcontentloaded" });
     await page.locator(".ob-draw-page .ob-canvas.ob-canvas--two").waitFor({ timeout: 20_000 });

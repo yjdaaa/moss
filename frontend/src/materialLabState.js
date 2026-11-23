@@ -12,6 +12,42 @@ export const MATRIX_MODE_OPTIONS = [
   { id: "cut", label: "边缘切割", code: "Cut" },
 ];
 
+/**
+ * 后端 0–1000 功率值（S 值）换算为前端显示的 0–100% 数值（最多一位小数）。
+ * 例：0 -> 0，420 -> 42，425 -> 42.5，1000 -> 100。
+ */
+export function powerScaleToPercent(sValue) {
+  const num = Number(sValue);
+  if (!Number.isFinite(num)) return 0;
+  return Number((Math.round(num) / 10).toFixed(1));
+}
+
+/**
+ * 前端输入的 0–100% 功率值换算为后端存储与接口使用的 0–1000 整数 S 值。
+ * 先消去 IEEE-754 乘 10 尾差再四舍五入，确保与 powerScaleToPercent 往返不漂移；
+ * 不在此处静默钳制越界值，交由表单校验拦截误填（如把 45% 误输成 450）。
+ */
+export function percentToPowerScale(percentValue) {
+  if (percentValue === "" || percentValue === null || percentValue === undefined || typeof percentValue === "boolean") {
+    return NaN;
+  }
+  const trimmed = typeof percentValue === "string" ? percentValue.trim() : percentValue;
+  if (trimmed === "") return NaN;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num)) return NaN;
+  return Math.round(Number((num * 10).toPrecision(12)));
+}
+
+/** 输入框旁小字提示对应的 GRBL S 值（0–1000）。 */
+export function formatPowerScaleHint(sValue, { withScale = false } = {}) {
+  const num = Number(sValue);
+  if (sValue === "" || sValue === null || sValue === undefined || !Number.isFinite(num)) {
+    return withScale ? "对应 S— / 1000" : "对应 S—";
+  }
+  const rounded = Math.round(num);
+  return withScale ? `对应 S${rounded} / 1000` : `对应 S${rounded}`;
+}
+
 /** 默认未保存单元格的干净初始值，避免切材料或切模式时残留上一项脏数据。 */
 export function defaultCellValues(mode = "raster") {
   if (mode === "cut") {
@@ -293,11 +329,16 @@ export function buildMatrixPreviewPayload({
   }
   const axes = validateMatrixAxes({ xAxis, yAxis, mode: modeInfo.mode });
   if (axes.error) return axes;
+  const pMin = Number(powerMin);
+  const pMax = Number(powerMax);
+  if (!Number.isFinite(pMin) || !Number.isFinite(pMax) || pMin < 0 || pMax > 1000 || pMin > pMax) {
+    return { error: "功率区间须在 0 ~ 100% 之间，且下限不大于上限" };
+  }
   Object.assign(payload, {
     rows: Number(rows),
     columns: Number(cols),
-    power_min: Number(powerMin),
-    power_max: Number(powerMax),
+    power_min: Math.round(pMin),
+    power_max: Math.round(pMax),
     speed_min: Number(speedMin),
     speed_max: Number(speedMax),
     x_axis: axes.xAxis,
@@ -537,6 +578,10 @@ export function buildMatrixConfirmPrompt({
   const cellCount = preview?.cell_count || preview?.cells?.length || 0;
   const pMin = preview?.power_min ?? "-";
   const pMax = preview?.power_max ?? "-";
+  const powerRangeText =
+    pMin !== "-" && pMax !== "-" && Number.isFinite(Number(pMin)) && Number.isFinite(Number(pMax))
+      ? `${powerScaleToPercent(pMin)}% ~ ${powerScaleToPercent(pMax)}%（S${pMin}~S${pMax}）`
+      : `S${pMin}~S${pMax}`;
   const sMin = preview?.speed_min ?? "-";
   const sMax = preview?.speed_max ?? "-";
   const isInterval = preview?.test_type === "interval";
@@ -563,7 +608,7 @@ export function buildMatrixConfirmPrompt({
       `目标设备：${targetLabel || "未指定"}`,
       `标定对象：${mat} · ${preview?.surface_entry ? "表面通用" : `${thick} mm`}（${modeInfo.label}）`,
       `矩阵规格：${cellCount} 格 · 外框尺寸 ${sizeText}`,
-      `参数区间：功率 S${pMin}~S${pMax} · 速度 F${sMin}~F${sMax} mm/min`,
+      `参数区间：功率 ${powerRangeText} · 速度 F${sMin}~F${sMax} mm/min`,
       ...[axisLine, orderLine, labelLine].filter(Boolean),
       "",
       "注意：标定刀路以当前激光头位置为左下角起点（G92 X0 Y0），行列标注也在这个范围内。请确认样板已放稳、排风开启并已佩戴护目镜。",

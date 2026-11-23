@@ -23,7 +23,7 @@ export const TEXT_STYLE_OPTIONS = [
 ];
 
 export const TEXT_ORIGIN_OPTIONS = [
-  { value: "center", label: "木牌中心 (默认)" },
+  { value: "center", label: "木牌中心" },
   { value: "lower_left", label: "左下角" },
 ];
 
@@ -384,6 +384,17 @@ export function workbenchConfirmSendPrompt({
       : "";
   const paramsLine = actualParamsText(workflow);
   const originLine = dimensions?.originNote || workflow?.artifacts?.origin_note || "";
+  const origin = workflow?.registration
+    ? "point2"
+    : workflow?.artifacts?.origin === "lower_left"
+      ? "lower_left"
+      : workflow?.artifacts?.origin === "center"
+        ? "center"
+        : originLine.includes("中心")
+          ? "center"
+          : originLine
+            ? "lower_left"
+            : null;
   const lines = [
     `目标设备：${targetLabel || "当前连接设备"}`,
     `加工材质：${material || "—"} ${thickness ? `${thickness} mm` : ""}`.trim(),
@@ -401,6 +412,7 @@ export function workbenchConfirmSendPrompt({
     confirmText: isRepeat ? "已挪动材料，确认开刻" : "确认开刻",
     danger: isRepeat,
     sha256,
+    origin,
   };
 }
 

@@ -320,7 +320,7 @@ test("四个页面共用 usePageEmergencyStop 两段式急停；走边框与标�
   const hook = readFileSync(path.join(srcRoot, "usePageEstop.js"), "utf8");
   assert.doesNotMatch(hook, /showConfirm/, "急停路径不得增加确认框");
   const draw = readPageSource("pages/DrawPage.jsx");
-  const framing = draw.slice(draw.indexOf("async function runFraming()"), draw.indexOf("async function testConnection()"));
+  const framing = draw.slice(draw.indexOf("async function runFraming()"), draw.indexOf("usePageEmergencyStop("));
   assert.ok(framing.indexOf("showConfirm(") > 0 && framing.indexOf("showConfirm(") < framing.indexOf('postJson("/api/device/framing"'), "走边框必须先确认再下发");
   assert.match(framing, /if \(!confirmed\)/);
   assert.match(framing, /buildDrawFramingPayload\(/, "画板走边框必须经 buildDrawFramingPayload 附带 relative_to_head");
@@ -346,7 +346,11 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   assert.match(approval, /if \(!shown \|\| failure \|\| busy \|\| remaining > 0\) return;\s*removeShown\(shown\.approval_id\)/, "倒计时过期移除须经 removeShown 同步顶栏待审批计数");
 
   const settings = readFileSync(path.join(srcRoot, "components/SettingsModal.jsx"), "utf8");
-  assert.match(settings, /检测到输入框中有尚未保存的新密钥/, "未保存新 Jev 密钥时不得静默测旧密钥");
+  assert.match(
+    settings,
+    /const savedOk = await saveJevSettings\(\{ silentSuccess: true \}\);\s*if \(!savedOk\) return;/,
+    "未保存新 Jev 密钥时必须先走保存且保存失败时立即中止，不得静默测旧密钥",
+  );
 
   const homeCard = readFileSync(path.join(srcRoot, "components/VoiceHomeCard.jsx"), "utf8");
   assert.match(homeCard, /media_text:\s*raw/, "家居媒体白名单须保留原始换行草稿，避免回车被实时吃掉");
@@ -372,7 +376,11 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   assert.match(matModal, /if \(isEditing && !resolvedExistingThicknesses\)/, "MaterialModal 编辑缺省 existing_thicknesses 时须兜底拉取防覆盖");
 
   const matLab = readPageSource("pages/MaterialLabPage.jsx");
-  assert.match(matLab, /<option value="__custom__">✎ 手动输入串口…<\/option>/, "材料实验室串口下拉须支持手动输入串口号");
+  const connModal = readFileSync(path.join(srcRoot, "components/DeviceConnectionModal.jsx"), "utf8");
+  assert.match(connModal, /<option value="__custom__">✎ 手动输入串口…<\/option>/, "全站统一设备连接弹窗串口下拉须支持手动输入串口号");
+  assert.match(connModal, /!String\(serialPort \|\| ""\)\.trim\(\)/, "统一连接弹窗刷新串口列表不得覆盖用户已存的非空串口号");
+  assert.match(matLab, /id="lab-open-connection"/, "材料实验室连接条须接入统一设备连接弹窗");
+  assert.doesNotMatch(matLab, /\/api\/ui\/serial-ports/, "材料实验室挂载不得自行拉取串口列表覆写全局已存串口");
 
   // 顶部混搭栏与录真话测实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
   const builtinCard = readFileSync(path.join(srcRoot, "components/voice-builtin/BuiltinModelGroups.jsx"), "utf8");

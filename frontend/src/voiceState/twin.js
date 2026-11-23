@@ -134,6 +134,11 @@ function pickPrimarySession(sessions) {
   })[0];
 }
 
+/** 当前是否处于实时对话阶段（拾音 / 思考 / 播报），用于自动展开语音状态条。 */
+export function isMossTwinConversing(visualState) {
+  return visualState === "listening" || visualState === "thinking" || visualState === "speaking";
+}
+
 /**
  * 语音中心顶部「MOSS 全息语音孪生舱」按链路自适应的视图（确定性纯函数）。
  * - `builtin`：同步 60ms 真实 PCM 振幅 `level`、会话阶段、识别字数、已播句数与工具调用；
@@ -175,28 +180,28 @@ export function mossEyeTwinView({
       visualState = "alert";
     }
 
-    let headline = "内置语音未启动 · 光学镜头待命";
+    let headline = "内置语音未启动";
     if (running) {
       if (sessions.length === 0) {
-        headline = "内置服务运行中 · 等待小智设备接入";
+        headline = "内置服务运行中 · 等待小智连接";
       } else if (rawState === "speaking") {
-        headline = "MOSS 正在播报 · 60ms 帧同步输出";
+        headline = "MOSS 正在说话";
       } else if (rawState === "thinking") {
-        headline = activeTool ? `正在执行工具 · ${activeTool}` : "神经网络推理中 · Jev / LLM 路由";
+        headline = activeTool ? `正在执行 · ${activeTool}` : "正在思考回答";
       } else if (rawState === "listening") {
-        headline = level > 0 ? "正在拾音倾听 · 实时声波锁定" : "拾音通道开启 · 等待语音输入";
+        headline = level > 0 ? "正在听你说话" : "麦克风已开启 · 请说话";
       } else if (approvalAlert) {
-        headline = `等待桌面安全审批 (${approvals} 项)`;
+        headline = `等待电脑批准 (${approvals} 项)`;
       } else {
-        headline = `小智设备在线 (${sessions.length} 台) · 随时唤醒`;
+        headline = `小智在线 (${sessions.length} 台) · 随时唤醒`;
       }
     }
 
     const latestEvent = sanitizeTwinLine(events[0]?.text);
     const subline = latestEvent
       || (running
-        ? `工作模式：${builtinStatus?.mode === "chat" ? "AI 对话模式" : "回声测试模式"}`
-        : "启动内置语音服务后，此处实时镜像小智设备的拾音振幅、思考路由与播报节奏");
+        ? `当前模式：${builtinStatus?.mode === "chat" ? "AI 对话" : "回声测试"}`
+        : "启动内置语音服务后，这里显示小智当前的对话状态与音量");
 
     const progressValue = spokenSentences > 0
       ? `已播 ${spokenSentences} 句`
@@ -211,8 +216,8 @@ export function mossEyeTwinView({
     return {
       mode: "builtin",
       visualState,
-      sourceBadge: "REALTIME AUDIO TWIN",
-      sourceLabel: "内置服务 · 60ms 实时音频孪生",
+      sourceBadge: "内置语音",
+      sourceLabel: "本机实时语音对话",
       level,
       approvalAlert,
       approvalCount: approvals,
@@ -257,27 +262,27 @@ export function mossEyeTwinView({
     visualState = hasToolCall ? "pulse" : "idle";
   }
 
-  let headline = "官方 MCP 接入点未配置";
+  let headline = "尚未填写官方接入点";
   if (approvalAlert) {
-    headline = `云端发起受控操作 · ${approvals} 项待桌面批准`;
+    headline = `收到受控操作 · ${approvals} 项待电脑批准`;
   } else if (!configured) {
-    headline = "官方 MCP 接入点未配置 · 请在下方填写";
+    headline = "尚未填写官方接入点 · 请在下方配置";
   } else if (!bridgeConnected) {
-    headline = "官方 MCP 桥未连接 · 正在等待握手";
+    headline = "小智接入点未连接 · 正在等待连接";
   } else if (hasToolCall) {
-    headline = `收到云端小智指令 · ${toolName}`;
+    headline = `收到小智指令 · ${toolName}`;
   } else {
-    headline = "云端 MCP 神经桥在线 · 实时监听工具指令";
+    headline = "小智云端连接正常 · 等待语音指令";
   }
 
   const subline = recentEvent
-    || "语音闲聊在官方云端处理；当小智查询机床状态或发起雕刻时，此处同步触发指令脉冲";
+    || "日常对话在小智云端处理；调用雕刻机工具时在此同步显示";
 
   return {
     mode: "official",
     visualState,
-    sourceBadge: "CLOUD MCP TELEMETRY",
-    sourceLabel: "官方链路 · 云端 MCP 指令遥测",
+    sourceBadge: "官方小智",
+    sourceLabel: "小智云端接入点",
     level: 0,
     approvalAlert,
     approvalCount: approvals,
@@ -375,7 +380,7 @@ export function globalEyeSensorView({
         hardwareState,
         jobProgress,
         level: 0,
-        shortBadge: activeJobCount > 0 ? `思考中 · ${engravingBadge}` : "AI 思考路由",
+        shortBadge: activeJobCount > 0 ? `思考中 · ${engravingBadge}` : "正在思考",
         label: withHwSuffix("MOSS 正在思考 / 调用工具"),
       };
     }
@@ -447,7 +452,7 @@ export function globalEyeSensorView({
       hardwareState,
       jobProgress,
       level: 0,
-      shortBadge: activeJobCount > 0 ? `指令脉冲 · ${engravingBadge}` : "指令脉冲执行",
+      shortBadge: activeJobCount > 0 ? `执行指令 · ${engravingBadge}` : "收到小智指令",
       label: withHwSuffix(`小智最近调用：${sanitizeIdentifier(lastReq.slice("tools/call:".length), 48)}`),
     };
   }

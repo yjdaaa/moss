@@ -143,10 +143,17 @@ function ComputerHostPanel() {
   };
 
   const address = info.addresses?.[0] ? `${info.addresses[0]}:${info.port}` : null;
+  const hostSummary = info.restart_required
+    ? info.lan_access_saved
+      ? "已开启（待重启生效）"
+      : "已关闭（待重启生效）"
+    : info.lan_access_active
+      ? `${address || `端口 ${info.port}`}${Number(info.paired_devices_count) > 0 ? ` · 已配对 ${info.paired_devices_count} 台` : ""}`
+      : "未开启";
 
   return (
     <div className="ob-fold" style={foldStyle}>
-      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="手机连接" defaultOpen={false} />
+      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="手机连接" summary={hostSummary} defaultOpen={false} />
       <div style={hintStyle}>
         开启后，同一 WiFi 下的手机 App 可以连接这台电脑，用电脑的数据操作雕刻机（连接、预览、发送、急停）。
         配对成功后会自动长久记住（MOSS 软件重启或电脑重启后均无需重新配对）。
@@ -272,7 +279,7 @@ function ConnectToComputerPanel() {
 
   return (
     <div className="ob-fold" style={foldStyle}>
-      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="连接电脑 MOSS" defaultOpen={false} />
+      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="连接电脑 MOSS" summary="本机独立模式" defaultOpen={false} />
       <div style={hintStyle}>
         连接后手机使用电脑上的数据（材料库、任务记录），通过电脑操作雕刻机；手机上材料与设置只读。
         需要电脑开着 MOSS 并在“偏好设置 → 手机连接”中允许手机连接，手机与电脑在同一个 WiFi。
@@ -311,7 +318,7 @@ function RemoteConnectedPanel() {
 
   return (
     <div className="ob-fold" style={foldStyle}>
-      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="连接电脑 MOSS" defaultOpen />
+      <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="连接电脑 MOSS" summary={`已连 ${remoteOriginLabel()}`} defaultOpen />
       <div style={hintStyle}>
         已连接电脑：<span className="mono phone-link-text">{remoteOriginLabel()}</span>
         <br />

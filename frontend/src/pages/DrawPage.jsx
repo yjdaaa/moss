@@ -4,10 +4,12 @@ import "@excalidraw/excalidraw/index.css";
 import {
   Download,
   FileJson,
-  Home,
+  Layers,
+  Send,
   Trash2,
   Undo2,
   Upload,
+  UploadCloud,
 } from "lucide-react";
 import { prepareRasterExportElements } from "../rasterInkElements.js";
 import {
@@ -62,8 +64,10 @@ import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { manualParamsPayload } from "../workbenchParams.js";
 import { applyImagePreset } from "../qualityPresets.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
-import { discoveryOutcome } from "../controllerDiscovery.js";
+import { connectionSummaryView, MACHINE_MOTION_EVENT } from "../deviceConnection.js";
+import { useDeviceConnection } from "../useDeviceConnection.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import { OriginBadge } from "../components/OriginBadge.jsx";
 import {
   adoptRegisteredDrawRecord,
   drawFramingExtent,
@@ -76,7 +80,6 @@ import {
   fillSettingsPayload,
   fillSettingsSignature,
   localSettingsToStore,
-  machineMotionFromLimits,
   machineMotionPayload,
   materialLayerFromRecommendation,
   materialLayerPayload,
@@ -87,7 +90,6 @@ import {
   readMachineMotion,
   timeEstimateNote,
   writeFillSettings,
-  writeMachineMotion,
 } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DrawMaterialCard } from "../components/draw/DrawMaterialCard.jsx";
@@ -133,21 +135,62 @@ const BACKEND_CONFIG_KEYS = [
   "line_interval_scale",
   "vector_simplify_factor",
 ];
-const CONFIG_KEYS = [...BACKEND_CONFIG_KEYS,
-  "connection_mode",
-  "network_host",
-  "network_telnet_port",
-  "port",
-  "baudrate",
-];
+const CONFIG_KEYS = BACKEND_CONFIG_KEYS;
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 
-export function DrawPage({ onNavigate, active = true }) {
+export function DrawPage({
+  onNavigate,
+  active = true,
+  connectionStatus = null,
+  onOpenConnection = null,
+}) {
   // r49：关掉 MOSS 再打开也接着画——上次的画布（含插入的图片，超量时只存图形）从本机存储恢复
   const [initialScene] = useState(() => parseDrawScene(readStored(safeBrowserStorage(), DRAW_SCENE_KEY)));
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
-  // 挂载时惰性读取（存储被禁用时退回默认值，若画板未填过设备则自动复用雕刻工作台已填好的连接目标）
-  const [form, setForm] = useState(() => readDrawDefaultForm());
+  const {
+    connectionMode,
+    setConnectionMode,
+    serialPort,
+    setSerialPort,
+    baudrate,
+    setBaudrate,
+    networkHost,
+    setNetworkHost,
+    telnetPort,
+    setTelnetPort,
+  } = useDeviceConnection();
+  // 挂载时惰性读取（存储被禁用时退回默认值，连接字段统一跟随全局 useDeviceConnection）
+  const [form, setForm] = useState(() => ({
+    ...readDrawDefaultForm(),
+    connection_mode: connectionMode,
+    port: serialPort,
+    baudrate: String(baudrate),
+    network_host: networkHost,
+    network_telnet_port: String(telnetPort),
+  }));
+  useEffect(() => {
+    setForm((current) => {
+      const nextBaud = String(baudrate);
+      const nextTelnet = String(telnetPort);
+      if (
+        current.connection_mode === connectionMode
+        && current.port === serialPort
+        && current.baudrate === nextBaud
+        && current.network_host === networkHost
+        && current.network_telnet_port === nextTelnet
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        connection_mode: connectionMode,
+        port: serialPort,
+        baudrate: nextBaud,
+        network_host: networkHost,
+        network_telnet_port: nextTelnet,
+      };
+    });
+  }, [connectionMode, serialPort, baudrate, networkHost, telnetPort]);
   // 雕刻路线全局开关（2026-11-17 技术书 r45，与工作台、语音同一个值）：矢量 → vector；
   // 转图片 → 按“转图片方式”光栅扫描 raster / 轮廓描边 outline。请求照样写明实际 mode
   const {
@@ -167,10 +210,6 @@ export function DrawPage({ onNavigate, active = true }) {
   const clearedSceneRef = useRef(null);
   const [canUndoClear, setCanUndoClear] = useState(false);
   const [previewSnap, setPreviewSnap] = useState(null);
-  const [connectionBusy, setConnectionBusy] = useState(false);
-  const [connectionResult, setConnectionResult] = useState(null);
-  const [discovering, setDiscovering] = useState(false);
-  const [discoveredChoices, setDiscoveredChoices] = useState([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [materialLibrary, setMaterialLibrary] = useState([]);
   const [materialMode, setMaterialMode] = useState("custom");
@@ -194,12 +233,18 @@ export function DrawPage({ onNavigate, active = true }) {
   };
   // 握手读到的机器加速度 / 最大速度（与工作台共用本机记录）：工时估算与自动过扫描用
   const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  useEffect(() => {
+    const onMotion = (e) => {
+      if (e?.detail) setMachineMotion(e.detail);
+    };
+    window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
+    return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
+  }, []);
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
   const [customPasses, setCustomPasses] = useState("1");
   const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(safeBrowserStorage()));
-  const [serialPorts, setSerialPorts] = useState([]);
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与工作台共用
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
   // 只刻选中的图形（矢量模式）：选区变化计入预览签名
@@ -669,16 +714,27 @@ export function DrawPage({ onNavigate, active = true }) {
   const canConfirmSend = canActOnWorkflow && !previewStale && hostReady && summaryAllowsSend;
 
   function updateForm(key, value) {
-    dirtyFormKeysRef.current.add(key);
-    if (
-      key === "connection_mode" ||
-      key === "port" ||
-      key === "baudrate" ||
-      key === "network_host" ||
-      key === "network_telnet_port"
-    ) {
-      setConnectionResult(null);
+    if (key === "connection_mode") {
+      setConnectionMode(value);
+      return;
     }
+    if (key === "port") {
+      setSerialPort(value);
+      return;
+    }
+    if (key === "baudrate") {
+      setBaudrate(value);
+      return;
+    }
+    if (key === "network_host") {
+      setNetworkHost(value);
+      return;
+    }
+    if (key === "network_telnet_port") {
+      setTelnetPort(value);
+      return;
+    }
+    dirtyFormKeysRef.current.add(key);
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -812,39 +868,6 @@ export function DrawPage({ onNavigate, active = true }) {
       material: next.material,
       thickness_mm: next.thickness_mm,
     }));
-  }
-
-  function pickDiscoveredController(controller) {
-    dirtyFormKeysRef.current.add("network_host");
-    dirtyFormKeysRef.current.add("network_telnet_port");
-    setConnectionResult(null);
-    setForm((current) => ({
-      ...current,
-      network_host: controller.ip,
-      network_telnet_port: String(controller.telnet_port || 23),
-    }));
-  }
-
-  async function discoverControllers() {
-    if (discovering || busy) return;
-    setDiscovering(true);
-    setDiscoveredChoices([]);
-    setStatus("正在查找局域网里的雕刻机，并逐台发送只读查询确认（约 1～5 秒）...");
-    try {
-      const res = await postJson("/api/ui/discover-controllers", {});
-      if (!res.ok || !res.data?.success) {
-        setStatus(`扫描失败：${res.data?.result || res.error || "后端无响应"}`);
-        return;
-      }
-      const outcome = discoveryOutcome(res.data.result);
-      if (outcome.fill) pickDiscoveredController(outcome.fill);
-      setDiscoveredChoices(outcome.choices);
-      setStatus(outcome.log.text);
-    } catch (error) {
-      setStatus(`扫描失败：${error.message || error}`);
-    } finally {
-      setDiscovering(false);
-    }
   }
 
   async function handleImportSceneFile(event) {
@@ -1224,64 +1247,6 @@ export function DrawPage({ onNavigate, active = true }) {
     }
   }
 
-  async function testConnection() {
-    if (!hostReady) {
-      setConnectionResult({ success: false, result: drawTargetMissingText(form) });
-      setStatus(drawTargetMissingText(form));
-      return;
-    }
-    setConnectionBusy(true);
-    setStatus("测试设备连接...");
-    try {
-      const res = await postJson("/api/connection/check", {
-        ...drawConnectionPayload(form),
-        network_transport: "telnet",
-        network_timeout: 3,
-        include_detail: false,
-      });
-      const data = res.data || { success: false, result: `HTTP ${res.status}` };
-      setConnectionResult(data);
-      const motion = res.ok && data.success ? machineMotionFromLimits(data.result?.machine_limits) : null;
-      if (motion) {
-        writeMachineMotion(motion);
-        setMachineMotion(motion);
-      }
-      setStatus(
-        res.ok && data.success
-          ? data.result?.summary || "连接检查完成"
-          : (typeof data.result === "string" && data.result) || "连接检查失败",
-      );
-    } catch (error) {
-      const message = error.message || String(error);
-      setConnectionResult({ success: false, result: message });
-      setStatus(`连接检查失败：${message}`);
-    } finally {
-      setConnectionBusy(false);
-    }
-  }
-
-  async function loadSerialPorts() {
-    try {
-      const response = await apiFetch("/api/ui/serial-ports");
-      let data = null;
-      try {
-        data = await response.json();
-      } catch {
-        data = null;
-      }
-      if (!response.ok || !data?.success) {
-        setStatus(`读取串口列表失败：${(typeof data?.result === "string" && data.result) || `HTTP ${response.status}`}`);
-        return;
-      }
-      const ports = Array.isArray(data?.result?.ports) ? data.result.ports : [];
-      setSerialPorts(ports);
-      if (ports.length && !ports.includes(formRef.current.port)) updateForm("port", ports[0]);
-      setStatus(ports.length ? `发现串口：${ports.join(", ")}` : "未检测到可用串口");
-    } catch (error) {
-      setStatus(`读取串口列表失败：${error.message || error}`);
-    }
-  }
-
   // 顶栏常驻急停（2026-11-05）：只走 `/api/safe-action` 实时 0x18，绝不退化为 workflow cancel。
   // 顶栏已先停后端登记的任务；轮到本页说明任务已不在登记表（如刚全量发送完、GRBL 仍在执行缓冲）
   // 或任务通道挂起，此时按任务编号失败后改用本页设备目标新开连接写 0x18（`usePageEmergencyStop`）。
@@ -1452,6 +1417,27 @@ export function DrawPage({ onNavigate, active = true }) {
     setStatus("调参预览已生成，尚未发送");
   };
 
+  const dockConn = connectionSummaryView(form, connectionStatus);
+  const dockMaterialText = `${form.material || "未选材料"} · ${form.thickness_mm === "surface" ? "表面通用" : `${form.thickness_mm || "-"}mm`}`;
+  const scrollToCard = (cardId) => {
+    const el = typeof document !== "undefined" ? document.querySelector(`[data-wb-card="${cardId}"]`) : null;
+    el?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  };
+  const dockNeedsConn = canActOnWorkflow && !previewStale && summaryAllowsSend && !hostReady;
+  const dockPreviewSize = (() => {
+    const w = Number(jobSummary?.actual_width_mm ?? result?.result?.artifacts?.width_mm);
+    const h = Number(jobSummary?.actual_height_mm ?? result?.result?.artifacts?.height_mm);
+    return Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0 ? `${w.toFixed(0)}×${h.toFixed(0)}mm` : "";
+  })();
+  const dockPreviewSeconds = Number(jobSummary?.estimated_seconds ?? result?.result?.artifacts?.time_estimate?.estimated_seconds);
+  const dockSummaryText = previewStale
+    ? "预览已过期 · 查看刀路 ↓"
+    : [
+        dockPreviewSize,
+        Number.isFinite(dockPreviewSeconds) && dockPreviewSeconds > 0 ? `约 ${Math.round(dockPreviewSeconds)}s` : "",
+        "查看刀路/走边框 ↓",
+      ].filter(Boolean).join(" · ");
+
   return (
     <main className="app-shell ob-page ob-draw-page">
 
@@ -1460,13 +1446,10 @@ export function DrawPage({ onNavigate, active = true }) {
         <WorkbenchCanvas
           defaultLayout={DRAW_DEFAULT_LAYOUT}
           storageKey={DRAW_STORAGE_KEY}
+          active={active}
           toolbarStart={
             <>
               <div className="topbar-actions">
-                <button type="button" className="btn btn-ghost" onClick={() => onNavigate("/")}>
-                  <Home size={14} aria-hidden="true" />
-                  工作台
-                </button>
                 <button
                   type="button"
                   id="draw-import-scene"
@@ -1527,7 +1510,7 @@ export function DrawPage({ onNavigate, active = true }) {
           }
         >
         <WbCard id="board" className="hud-card ob-card canvas-panel ob-board" label="画布">
-          <FoldHeader id="draw-board" title="创作画布" k="CANVAS" />
+          <FoldHeader id="draw-board" title="创作画布" />
           <div className="ob-board-stage" ref={boardStageRef}>
             <Excalidraw
               excalidrawAPI={setExcalidrawAPI}
@@ -1570,6 +1553,92 @@ export function DrawPage({ onNavigate, active = true }) {
                 setSelectionKey((prev) => (prev === nextSelection ? prev : nextSelection));
               }}
             />
+          </div>
+          <div className="draw-board-action-bar" id="draw-board-action-bar" role="toolbar" aria-label="画布底部快捷操作">
+            <button
+              type="button"
+              id="draw-dock-material"
+              className="btn btn-ghost draw-dock-chip"
+              onClick={() => scrollToCard("draw-material")}
+              title="点击滚动定位到下方「材料与尺寸」卡"
+            >
+              <Layers size={14} aria-hidden="true" />
+              <span>{dockMaterialText}</span>
+            </button>
+            <button
+              type="button"
+              id="draw-dock-connection"
+              className="btn btn-ghost draw-dock-chip"
+              onClick={onOpenConnection}
+              title="点击打开统一设备连接面板"
+            >
+              <span className={`conn-summary-dot is-${dockConn.statusTone}`} aria-hidden="true" />
+              <span>{dockConn.modeLabel} · {dockConn.targetText} · {dockConn.statusText}</span>
+            </button>
+            <span
+              className="draw-dock-origin"
+              id="draw-dock-origin"
+              title={drawOriginNote(result?.result)}
+            >
+              <OriginBadge origin={result?.result?.registration ? "point2" : "lower_left"} />
+              <span>{result?.result?.registration ? "第 2 标记起点" : "左下角起点"}</span>
+            </span>
+            {canActOnWorkflow ? (
+              <button
+                type="button"
+                id="draw-dock-preview-summary"
+                className={`btn btn-ghost draw-dock-chip draw-dock-summary${previewStale ? " is-stale" : ""}`}
+                onClick={() => scrollToCard("draw-send")}
+                title={`${drawOriginNote(result?.result)}；点击向下滚动查看刀路预览图与走边框`}
+              >
+                <span>{dockSummaryText}</span>
+              </button>
+            ) : null}
+            <div className="draw-dock-spacer" />
+            <button
+              type="button"
+              id="draw-dock-preview-btn"
+              className="primary-button draw-dock-btn"
+              onClick={generatePreview}
+              disabled={busy || !excalidrawAPI}
+            >
+              <UploadCloud size={16} aria-hidden="true" />
+              <span>{busy ? "正在解算..." : workflowId ? "重新生成预览" : "生成预览"}</span>
+            </button>
+            <button
+              type="button"
+              id="draw-dock-send-btn"
+              className={dockNeedsConn ? "btn btn-ghost draw-dock-btn" : "danger-button draw-dock-btn"}
+              onClick={() => {
+                if (dockNeedsConn) {
+                  if (onOpenConnection) onOpenConnection();
+                  else openSendConfirmation();
+                } else {
+                  openSendConfirmation();
+                }
+              }}
+              disabled={busy || (!canConfirmSend && !dockNeedsConn)}
+              title={
+                !canActOnWorkflow
+                  ? "请先点击「生成预览」"
+                  : previewStale
+                    ? "画布或参数已修改，请先重新生成预览"
+                    : dockNeedsConn
+                      ? `${drawTargetMissingText(form)}（点击打开设备连接面板）`
+                      : !summaryAllowsSend
+                        ? "当前不可发送：请检查材料厚度参数与确认权限"
+                        : undefined
+              }
+            >
+              <Send size={16} aria-hidden="true" />
+              <span>
+                {previewStale
+                  ? "参数已改 · 请先重算"
+                  : dockNeedsConn
+                    ? "请先配置连接"
+                    : "确认发送"}
+              </span>
+            </button>
           </div>
         </WbCard>
 
@@ -1620,18 +1689,9 @@ export function DrawPage({ onNavigate, active = true }) {
 
         <DrawDeviceCard
           form={form}
-          updateForm={updateForm}
+          connectionStatus={connectionStatus}
+          onOpenConnection={onOpenConnection}
           busy={busy}
-          serialPorts={serialPorts}
-          setSerialPorts={setSerialPorts}
-          loadSerialPorts={loadSerialPorts}
-          discoveredChoices={discoveredChoices}
-          pickDiscoveredController={pickDiscoveredController}
-          discovering={discovering}
-          discoverControllers={discoverControllers}
-          connectionBusy={connectionBusy}
-          testConnection={testConnection}
-          connectionResult={connectionResult}
         />
 
         <DrawSendCard

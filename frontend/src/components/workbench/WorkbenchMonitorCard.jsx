@@ -9,8 +9,9 @@ import { actualParamsText, workbenchStatusLabel } from "../../workbenchParams.js
 import { FoldHeader } from "../FoldHeader.jsx";
 import RegistrationPanel from "../RegistrationPanel.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
+import { WorkbenchHeadJogPanel } from "./WorkbenchHeadJogPanel.jsx";
 
-/** 雕刻工作台 ④ 加工监视舱：刀路预览、刀路摘要、生成与下发、走边框 / 导出 / 取消、两点对位、急停与下发进度。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
+/** 雕刻工作台 ④ 加工监视舱：现场移头与对刀原点、刀路预览、刀路摘要、生成与下发、走边框 / 导出 / 取消、两点对位、急停与下发进度。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
 export function WorkbenchMonitorCard({
   onNavigate,
   previewUrl,
@@ -29,6 +30,8 @@ export function WorkbenchMonitorCard({
   framingShape,
   setFramingShape,
   connectionForm,
+  connectionStatus = null,
+  activeJobs = [],
   motionPayload,
   addLog,
   adoptDerivedWorkflow,
@@ -42,8 +45,17 @@ export function WorkbenchMonitorCard({
 }) {
   return (
     <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
-      <FoldHeader id="wb-monitor" title="加工监视舱" k="MONITOR" n={4} />
-        <div className="chamber-viewport">
+      <FoldHeader id="wb-monitor" title="加工监视舱" n={4} />
+        <WorkbenchHeadJogPanel
+          connectionForm={connectionForm}
+          connectionStatus={connectionStatus}
+          busy={busy}
+          framingBusy={framingBusy}
+          overlayStatus={overlayStatus}
+          activeJobs={activeJobs}
+          onLog={addLog}
+        />
+        <div className={`chamber-viewport ${previewUrl ? "has-preview" : "is-empty"}`}>
           {/* 坐标雷达网格背景 */}
           <div className="chamber-grid" />
 
@@ -88,6 +100,23 @@ export function WorkbenchMonitorCard({
             </div>
           )}
         </div>
+
+        {/* 两点对位（2026-11-16，对齐 LightBurn Print and Cut）：默认收起，放在吸底操作卡上方以免展开后撑高常驻条 */}
+        {currentWorkflow?.workflow_id && (
+          <RegistrationPanel
+            workflow={currentWorkflow}
+            connectionForm={connectionForm}
+            machineMotion={motionPayload.machine_motion}
+            disabled={
+              busy
+              || framingBusy
+              || previewStale
+              || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)
+            }
+            onLog={addLog}
+            onRegistered={(workflow) => adoptDerivedWorkflow(workflow, "对位预览")}
+          />
+        )}
 
         <div className="job-dispatch-card">
           {/* 刀路摘要：尺寸与预估耗时（r47 去掉了刀路总行数与 SHA-256 这两项技术细节） */}
@@ -241,33 +270,16 @@ export function WorkbenchMonitorCard({
             </div>
           )}
 
-          {/* 两点对位（2026-11-16，对齐 LightBurn Print and Cut）：默认收起，只在已生成预览时出现 */}
-          {currentWorkflow?.workflow_id && (
-            <RegistrationPanel
-              workflow={currentWorkflow}
-              connectionForm={connectionForm}
-              machineMotion={motionPayload.machine_motion}
-              disabled={
-                busy
-                || framingBusy
-                || previewStale
-                || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)
-              }
-              onLog={addLog}
-              onRegistered={(workflow) => adoptDerivedWorkflow(workflow, "对位预览")}
-            />
-          )}
-
           {/* 大号醒目急停安全制动按钮 */}
           <button
             type="button"
             className="btn-estop-large"
             onClick={handleEStop}
-            title="向控制器请求 0x18 软件复位；不能替代硬件急停"
+            title="发送 0x18 软件复位；紧急情况请按机器实体急停"
             id="btn-estop-trigger"
           >
             <AlertTriangle size={16} />
-            <span>0x18 软件复位 · 紧急停止请求</span>
+            <span>紧急停止（软件复位）</span>
           </button>
 
           {/* 雕刻下发进度 */}
