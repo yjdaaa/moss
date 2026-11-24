@@ -146,9 +146,11 @@ export function readTimelines(dir, days = 30, now = new Date()) {
   const records = [];
   let badLines = 0;
   if (!existsSync(dir)) return { records, badLines, dayCount: 0 };
+  // 过程记录按本机日期分目录（见 laser_runtime::process_trace），这里也按本机日期算
   const oldest = new Date(now);
   oldest.setDate(oldest.getDate() - (days - 1));
-  const oldestDay = oldest.toISOString().slice(0, 10);
+  const pad = (n) => String(n).padStart(2, "0");
+  const oldestDay = `${oldest.getFullYear()}-${pad(oldest.getMonth() + 1)}-${pad(oldest.getDate())}`;
   const dayDirs = readdirSync(dir)
     .filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name) && name >= oldestDay)
     .filter((name) => statSync(join(dir, name)).isDirectory())

@@ -24,10 +24,9 @@ export const MIX_SECTIONS = [
  */
 /**
  * 每类本地模型的推荐项（本机实测，技术书 n95 / n99）：判停 Silero v6.2（敲击声与持续机器噪声都不误触发，
- * 机器噪声下识别最准）、识别 SenseVoice 2024（最准最快）、合成 Kokoro v1.0（整段回答不停顿）。
- * 只用于在界面上标“推荐”，不改任何默认值。
+ * 机器噪声下识别最准）、识别 Qwen3-ASR（整链实测最准；n111 前推荐 SenseVoice 2024）、合成 Kokoro v1.0（整段回答不停顿）。
+ * 只用于在界面上标“推荐”；与后端新安装默认组合 `BuiltinLocal::new_install` 一致（n111），老用户的设置不受影响。
  */
-// 2026-11-24 n111：与新安装默认组合一致（识别由 SenseVoice 改为整链实测更准的 Qwen3-ASR）
 export const RECOMMENDED_LOCAL_MODELS = { vad: "silero_vad_v6", asr: "qwen3_asr_0_6b", tts: "kokoro" };
 
 /** “当前语音链路”下拉框下方的一句推荐（短名 + 为什么），依据 n95 / n99 本机实测。 */
