@@ -28,6 +28,7 @@ const HOLD_TIMEOUT: Duration = Duration::from_millis(360);
 /// 否则结果回来时窗口已过，判对了也用不上，只是让每句话多等（2026-11-07）。
 pub const MAX_HOLD_TIMEOUT: Duration = Duration::from_millis(800);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const CACHE_CAPACITY: usize = 256;
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -169,7 +170,44 @@ impl OpenRouterDecisionClient {
     }
 }
 
-fn shared_http_client() -> Result<reqwest::Client, DecisionError> {
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    bare.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn shared_http_client(endpoint: &str) -> Result<reqwest::Client, DecisionError> {
+    if is_loopback_endpoint(endpoint) {
+        static LOOPBACK_CLIENT: std::sync::OnceLock<Result<reqwest::Client, ()>> =
+            std::sync::OnceLock::new();
+        return LOOPBACK_CLIENT
+            .get_or_init(|| {
+                // 本机 OneJev / Laya 网关直连回环：禁用系统代理（防 Clash 等代理劫持 127.0.0.1），
+                // 并用短连接超时避免 Windows 未监听端口 SYN 重传卡满整轮等待预算。
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .connect_timeout(LOOPBACK_CONNECT_TIMEOUT)
+                    .tcp_nodelay(true)
+                    .pool_max_idle_per_host(8)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|_| ())
+            })
+            .clone()
+            .map_err(|_| DecisionError::Failed);
+    }
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, ()>> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -200,7 +238,7 @@ impl DecisionClient for OpenRouterDecisionClient {
             let Some(api_key) = secret.filter(|k| !k.trim().is_empty()) else {
                 return Err(DecisionError::Failed);
             };
-            let client = shared_http_client()?;
+            let client = shared_http_client(&self.endpoint)?;
             let mut body = payload.clone();
             if body.get("model").is_none() {
                 body["model"] = Value::String(self.model.clone());
@@ -662,6 +700,12 @@ fn recently_used_tools<'a>(text: &str, history: &'a [ChatMessage]) -> HashSet<&'
     keep
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JevHoldOutcome {
+    pub applied: bool,
+    pub unfinished: bool,
+}
+
 struct CacheEntry {
     key: u64,
     at: Instant,
@@ -670,6 +714,9 @@ struct CacheEntry {
 
 struct RuntimeGuard {
     cooldown_until: Option<Instant>,
+    /// `should_hold_unfinished` 刚超时说明上游单槽仍在跑上一请求或不可达：紧随其后的正轮 `evaluate_turn`
+    /// 直接放行，避免同一句话连吃 `hold_timeout + turn_timeout` 双重阻塞。
+    hold_busy_until: Option<Instant>,
     consecutive_timeouts: u32,
     cache: VecDeque<CacheEntry>,
 }
@@ -705,6 +752,7 @@ impl VoiceJevFilter {
             prewarm_in_flight: Semaphore::new(MAX_PREWARM_IN_FLIGHT),
             guard: Mutex::new(RuntimeGuard {
                 cooldown_until: None,
+                hold_busy_until: None,
                 consecutive_timeouts: 0,
                 cache: VecDeque::with_capacity(CACHE_CAPACITY),
             }),
@@ -721,37 +769,48 @@ impl VoiceJevFilter {
         self.options
     }
 
-    fn in_cooldown(&self) -> bool {
+    fn in_cooldown(&self, include_unfinished: bool) -> bool {
         let Ok(mut guard) = self.guard.lock() else {
             return false;
         };
-        match guard.cooldown_until {
-            Some(until) if Instant::now() < until => true,
-            Some(_) => {
-                guard.cooldown_until = None;
-                false
+        let now = Instant::now();
+        if let Some(until) = guard.cooldown_until {
+            if now < until {
+                return true;
             }
-            None => false,
+            guard.cooldown_until = None;
         }
+        if !include_unfinished && let Some(until) = guard.hold_busy_until {
+            if now < until {
+                return true;
+            }
+            guard.hold_busy_until = None;
+        }
+        false
     }
 
-    fn record_outcome(&self, err: Option<&DecisionError>) {
+    fn record_outcome(&self, err: Option<&DecisionError>, include_unfinished: bool) {
         let Ok(mut guard) = self.guard.lock() else {
             return;
         };
         match err {
             None => {
                 guard.consecutive_timeouts = 0;
+                guard.hold_busy_until = None;
             }
             Some(DecisionError::RateLimited { retry_after }) => {
                 guard.cooldown_until =
                     Some(Instant::now() + retry_after.unwrap_or(DEFAULT_COOLDOWN));
             }
             Some(DecisionError::Timeout) => {
+                let now = Instant::now();
+                if include_unfinished {
+                    guard.hold_busy_until = Some(now + self.turn_timeout);
+                }
                 guard.consecutive_timeouts += 1;
                 if guard.consecutive_timeouts >= 2 {
                     guard.consecutive_timeouts = 0;
-                    guard.cooldown_until = Some(Instant::now() + Duration::from_secs(30));
+                    guard.cooldown_until = Some(now + Duration::from_secs(30));
                 }
             }
             Some(DecisionError::Failed) => {}
@@ -791,6 +850,33 @@ impl VoiceJevFilter {
         });
     }
 
+    /// 流式 VAD 首次遇到短静音时：快速判断用户这句话是否明显没说完，同时预热同句路由缓存，并区分“真实判完”与“超时跳过”。
+    pub async fn check_unfinished_hold(
+        &self,
+        interim_text: &str,
+        history: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> JevHoldOutcome {
+        if !self.options.enabled || !self.options.unfinished_hold {
+            return JevHoldOutcome::default();
+        }
+        let clean = crate::fast::normalized(interim_text);
+        if clean.chars().count() < 2
+            || crate::fast::is_stop(interim_text)
+            || crate::fast::is_noise_filler(interim_text)
+        {
+            return JevHoldOutcome::default();
+        }
+        // 抢跑时顺便把快答路由和工具筛选一起带上并写入 60s 缓存；若最终识别文本一致，正轮直接 0ms 命中缓存
+        let decision = self
+            .evaluate_internal(interim_text, history, tools, &[], true, self.hold_timeout)
+            .await;
+        JevHoldOutcome {
+            applied: decision.applied,
+            unfinished: decision.applied && decision.unfinished,
+        }
+    }
+
     /// 流式 VAD 首次遇到短静音时：快速判断用户这句话是否明显没说完，同时预热同句路由缓存。
     pub async fn should_hold_unfinished(
         &self,
@@ -798,21 +884,9 @@ impl VoiceJevFilter {
         history: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> bool {
-        if !self.options.enabled || !self.options.unfinished_hold {
-            return false;
-        }
-        let clean = crate::fast::normalized(interim_text);
-        if clean.chars().count() < 2
-            || crate::fast::is_stop(interim_text)
-            || crate::fast::is_noise_filler(interim_text)
-        {
-            return false;
-        }
-        // 抢跑时顺便把快答路由和工具筛选一起带上并写入 60s 缓存；若最终识别文本一致，正轮直接 0ms 命中缓存
-        let decision = self
-            .evaluate_internal(interim_text, history, tools, &[], true, self.hold_timeout)
-            .await;
-        decision.applied && decision.unfinished
+        self.check_unfinished_hold(interim_text, history, tools)
+            .await
+            .unfinished
     }
 
     /// 正式对话轮次：单次请求并发评估口语快答、工具组剪枝与记忆候选精筛。
@@ -870,7 +944,7 @@ impl VoiceJevFilter {
         if let Some(cached) = self.get_cached(cache_key) {
             return cached;
         }
-        if self.in_cooldown() {
+        if self.in_cooldown(include_unfinished) {
             return JevTurnDecision::passthrough();
         }
         let _permit = if include_unfinished {
@@ -997,11 +1071,11 @@ impl VoiceJevFilter {
         });
         let response = match self.client.decide(&payload, timeout).await {
             Ok(resp) => {
-                self.record_outcome(None);
+                self.record_outcome(None, include_unfinished);
                 resp
             }
             Err(err) => {
-                self.record_outcome(Some(&err));
+                self.record_outcome(Some(&err), include_unfinished);
                 return JevTurnDecision::passthrough();
             }
         };
@@ -2261,5 +2335,34 @@ mod tests {
             parse_external_mcp_answers(&low_answers, &plan),
             ExternalMcpFilter::KeepAll
         ));
+    }
+
+    #[tokio::test]
+    async fn hold_timeout_skips_immediate_turn_evaluation_and_loopback_endpoints_are_recognized() {
+        assert!(is_loopback_endpoint("http://127.0.0.1:18090/v1/systemone"));
+        assert!(is_loopback_endpoint("http://localhost:18090/v1/systemone"));
+        assert!(is_loopback_endpoint("http://[::1]:18090/v1/systemone"));
+        assert!(!is_loopback_endpoint(DEFAULT_DECISIONS_ENDPOINT));
+
+        let fake =
+            FakeDecisionClient::new([Err(DecisionError::Timeout), Ok(json!({"answers": {}}))]);
+        let filter = VoiceJevFilter::new(
+            fake.clone(),
+            JevFilterOptions {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .with_timeouts(Duration::from_millis(1500), Duration::from_millis(600));
+        let tools = sample_tools();
+
+        let hold = filter.check_unfinished_hold("你是什么", &[], &tools).await;
+        assert!(!hold.applied && !hold.unfinished);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+
+        // 同一轮紧接着进入正式 evaluate_turn：直接跳过，不再撞上仍在跑或不可达的单槽服务白等第二个 1500ms
+        let turn = filter.evaluate_turn("你是什么", &[], &tools, &[]).await;
+        assert!(!turn.applied);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
 }

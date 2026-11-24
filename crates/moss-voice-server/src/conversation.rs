@@ -476,6 +476,115 @@ pub struct ConversationSettings {
     pub asr_corrections: Vec<(String, String)>,
 }
 
+pub(crate) const DEFAULT_ERROR_REPLY: &str = "抱歉，我这边出了点问题，请稍后再试";
+/// 断网 / 超时类报错话术：出这类错时云端合成多半也连不上，所以随固定话术在启动时预合成（见 `fixed_phrases`）。
+pub(crate) const LLM_TIMEOUT_REPLY: &str = "连接大模型超时";
+pub(crate) const LLM_OFFLINE_REPLY: &str = "连不上大模型，请检查网络";
+pub(crate) const ASR_TIMEOUT_REPLY: &str = "语音识别超时";
+pub(crate) const ASR_OFFLINE_REPLY: &str = "连不上语音识别，请检查网络";
+const NETWORK_ERROR_REPLIES: [&str; 4] = [
+    LLM_TIMEOUT_REPLY,
+    LLM_OFFLINE_REPLY,
+    ASR_TIMEOUT_REPLY,
+    ASR_OFFLINE_REPLY,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorStage {
+    Asr,
+    Llm,
+    ToolLimit,
+}
+
+/// 把识别、大模型或工具超限错误映射为简短直白的口语播报（闭集静态中文短句，绝不拼入密钥、地址、IP 或服务方英文原文）。
+/// 调用方若自定义了非默认 `settings_reply`，优先保留自定义话术。
+pub(crate) fn spoken_error_reply<'a>(
+    settings_reply: &'a str,
+    stage: ErrorStage,
+    error: &ProviderError,
+) -> &'a str {
+    use moss_voice_providers::DiagCategory;
+    if settings_reply != DEFAULT_ERROR_REPLY {
+        return settings_reply;
+    }
+    if stage == ErrorStage::ToolLimit {
+        return "工具调用次数超限，换个说法试试";
+    }
+    let msg = error.message.as_str();
+    let has = |needles: &[&str]| needles.iter().any(|n| msg.contains(n));
+    let uncategorized = matches!(error.category, DiagCategory::Model | DiagCategory::General);
+    let is_auth = error.category == DiagCategory::Auth
+        || (uncategorized && has(&["密钥", "权限", "HTTP 401", "HTTP 403"]));
+    let is_quota = error.category == DiagCategory::Quota
+        || (uncategorized && has(&["余额", "HTTP 402", "频繁", "额度", "HTTP 429"]));
+    let is_config = error.category == DiagCategory::Config
+        || (uncategorized
+            && has(&[
+                "地址",
+                "模型名",
+                "资源 ID",
+                "参数",
+                "HTTP 400",
+                "HTTP 404",
+                "HTTP 422",
+                "跳转",
+            ]));
+    let is_network = error.category == DiagCategory::Network
+        || (uncategorized
+            && has(&[
+                "超时",
+                "无法连接",
+                "网络",
+                "域名",
+                "连接中断",
+                "连接中途断开",
+            ]));
+
+    match stage {
+        ErrorStage::Llm => {
+            if is_auth {
+                "大模型密钥无效或没权限"
+            } else if is_quota {
+                if has(&["余额", "402"]) {
+                    "大模型余额不足"
+                } else {
+                    "大模型额度用完或请求太快"
+                }
+            } else if is_config {
+                "大模型地址或名称配错了"
+            } else if is_network {
+                if has(&["超时"]) {
+                    LLM_TIMEOUT_REPLY
+                } else {
+                    LLM_OFFLINE_REPLY
+                }
+            } else {
+                "大模型服务出错了"
+            }
+        }
+        ErrorStage::Asr => {
+            if is_auth {
+                "语音识别密钥无效或没权限"
+            } else if is_quota {
+                "语音识别额度不足或太快"
+            } else if is_config {
+                "语音识别配置不对"
+            } else if is_network {
+                if has(&["超时"]) {
+                    ASR_TIMEOUT_REPLY
+                } else {
+                    ASR_OFFLINE_REPLY
+                }
+            } else if has(&["本地", "辅助程序"]) {
+                "本地语音识别出错了"
+            } else {
+                "语音识别出错了"
+            }
+        }
+        ErrorStage::ToolLimit => "工具调用次数超限，换个说法试试",
+    }
+}
+
 impl Default for ConversationSettings {
     fn default() -> Self {
         Self {
@@ -500,7 +609,7 @@ impl Default for ConversationSettings {
             .collect(),
             wake_reply: Some("我在".into()),
             goodbye: "好的，再见".into(),
-            error_reply: "抱歉，我这边出了点问题，请稍后再试".into(),
+            error_reply: DEFAULT_ERROR_REPLY.into(),
             max_tool_rounds: 5,
             tool_timeout: Duration::from_secs(30),
             read_only_shortcuts: true,
@@ -661,9 +770,9 @@ impl Conversation {
         self.fallback_tts = Some(fallback_tts);
         self
     }
-    /// 整句退出意图：去掉称呼、起头词与句尾语气词后须与退出词完全相等
+    /// 整句退出意图：去掉称呼、起头词与句尾语气词后与退出词（或其连说两三遍，如“退下退下”“再见再见”）完全相等
     /// （“小智退下吧”“好了你退下”算，“不要退下”“退出登录”不算，留给正常对话）。
-    fn is_exit(&self, text: &str) -> bool {
+    pub(crate) fn is_exit(&self, text: &str) -> bool {
         const PREFIXES: &[&str] = &[
             "你好小智",
             "小智同学",
@@ -687,11 +796,15 @@ impl Conversation {
         let mut core = normalized.as_str();
         let matches = |core: &str| {
             !core.is_empty()
-                && self
-                    .settings
-                    .exit_words
-                    .iter()
-                    .any(|word| crate::fast::normalized(word) == core)
+                && self.settings.exit_words.iter().any(|word| {
+                    let w = crate::fast::normalized(word);
+                    !w.is_empty()
+                        && core.strip_prefix(&w).is_some_and(|rest| {
+                            rest.is_empty()
+                                || rest == w
+                                || rest.strip_prefix(&w) == Some(w.as_str())
+                        })
+                })
         };
         if matches(core) {
             return true;
@@ -782,7 +895,14 @@ impl Conversation {
             push_unique(wake);
         }
         push_unique(&self.settings.goodbye);
-        push_unique(&self.settings.error_reply);
+        if self.settings.error_reply == DEFAULT_ERROR_REPLY {
+            // 默认设置下出错改说具体原因（n116），旧的笼统话术不会再念；断网类原因要预合成，断网时才念得出来
+            for reply in NETWORK_ERROR_REPLIES {
+                push_unique(reply);
+            }
+        } else {
+            push_unique(&self.settings.error_reply);
+        }
         push_unique(STOP_OK_SPEECH);
         push_unique(STOP_ERR_SPEECH);
         push_unique(crate::tools::APPROVAL_SPEECH);
@@ -1214,14 +1334,14 @@ impl Turn {
             return if result.success {
                 format!("查询结果：{}", result.result)
             } else {
-                format!("查询失败：{}", result.result)
+                read_failure_speech(&result.result, "查询失败")
             };
         }
         let recent = self
             .fixed_tool("laser_workflow_tool", json!({"action":"recent"}))
             .await;
         if !recent.success {
-            return format!("查询失败：{}", recent.result);
+            return read_failure_speech(&recent.result, "查询失败");
         }
         let recent = body(&recent);
         let active: Vec<&Value> = recent["workflows"]
@@ -1257,7 +1377,7 @@ impl Turn {
             )
             .await;
         if !result.success {
-            return format!("查询失败：{}", result.result);
+            return read_failure_speech(&result.result, "查询失败");
         }
         let record = body(&result);
         if intent == ReadIntent::Material {
@@ -1275,7 +1395,7 @@ impl Turn {
             }
             let result = self.fixed_tool("material_params_tool", args).await;
             if !result.success {
-                return format!("材料参数查询失败：{}", result.result);
+                return read_failure_speech(&result.result, "材料参数查询失败");
             }
             let params = body(&result);
             let (Some(power), Some(speed), Some(passes)) = (
@@ -2168,13 +2288,19 @@ impl Turn {
             "后台查询完成。用户之前问：{question}\n查询结果：\n{results}"
         )));
         let mut emotion_sent = false;
-        let (reply, _, _) = self.generate(&messages, &[], &mut emotion_sent).await;
+        let (reply, spoke, streamed) = self.generate(&messages, &[], &mut emotion_sent).await;
         let messages = match reply {
             Ok(reply) if !reply.text.trim().is_empty() => vec![ChatMessage::assistant(reply.text)],
             Ok(_) => Vec::new(),
             Err(error) => {
+                let reply_text = spoken_error_reply(&settings.error_reply, ErrorStage::Llm, &error);
                 self.send(TurnEvent::Failed(error));
-                Vec::new()
+                self.speak_fixed(reply_text).await;
+                if spoke && !streamed.trim().is_empty() {
+                    vec![ChatMessage::assistant(streamed)]
+                } else {
+                    Vec::new()
+                }
             }
         };
         self.send(TurnEvent::Done {
@@ -2221,8 +2347,9 @@ impl Turn {
                 if let Some(task) = smart_turn_task.take() {
                     task.abort();
                 }
+                let reply_text = spoken_error_reply(&settings.error_reply, ErrorStage::Asr, &error);
                 self.send(TurnEvent::Failed(error));
-                self.speak_fixed(&settings.error_reply).await;
+                self.speak_fixed(reply_text).await;
                 self.send(TurnEvent::Done {
                     messages: Vec::new(),
                     close: false,
@@ -2576,13 +2703,14 @@ impl Turn {
             let mut reply = match reply {
                 Ok(reply) => reply,
                 Err(error) => {
-                    self.send(TurnEvent::Failed(error));
-                    if !spoke_any {
-                        self.speak_fixed(&settings.error_reply).await;
-                    } else if spoke && !streamed.trim().is_empty() {
+                    if spoke && !streamed.trim().is_empty() {
                         // 大模型说到一半出错：已经说出去的半句照样记进历史（n114），下一轮它才知道自己说过什么
                         messages.push(ChatMessage::assistant(streamed));
                     }
+                    let reply_text =
+                        spoken_error_reply(&settings.error_reply, ErrorStage::Llm, &error);
+                    self.send(TurnEvent::Failed(error));
+                    self.speak_fixed(reply_text).await;
                     break;
                 }
             };
@@ -2619,14 +2747,15 @@ impl Turn {
                         "工具调用轮数超过上限，未执行",
                     ));
                 }
-                self.send(TurnEvent::Failed(
-                    ProviderError::with_category(
-                        moss_voice_providers::DiagCategory::Model,
-                        format!("工具调用超过 {} 轮，已停止", settings.max_tool_rounds),
-                    )
-                    .hint("大模型反复调用工具没有收尾：换个说法再试，或换一个更擅长工具调用的模型"),
-                ));
-                self.speak_fixed(&settings.error_reply).await;
+                let error = ProviderError::with_category(
+                    moss_voice_providers::DiagCategory::Model,
+                    format!("工具调用超过 {} 轮，已停止", settings.max_tool_rounds),
+                )
+                .hint("大模型反复调用工具没有收尾：换个说法再试，或换一个更擅长工具调用的模型");
+                let reply_text =
+                    spoken_error_reply(&settings.error_reply, ErrorStage::ToolLimit, &error);
+                self.send(TurnEvent::Failed(error));
+                self.speak_fixed(reply_text).await;
                 break;
             }
             if reply
@@ -2696,6 +2825,7 @@ impl Turn {
                 self.send(TurnEvent::Failed(ProviderError::new(
                     "音乐播放不能和其他工具同时执行",
                 )));
+                self.speak_fixed("点歌请单独说，不要同时做别的操作").await;
                 self.send(TurnEvent::Done {
                     messages: Vec::new(),
                     close: false,
@@ -2865,6 +2995,25 @@ fn end_conversation_tool() -> ToolSpec {
 
 /// 没有在途任务时，用最近一条记录回答“上一个任务怎么样了”。
 /// 只说记录里已有的行数，不编造物理加工进度或剩余时间。
+/// 本地只读快答里工具失败时的口语播报（n116）：只说闭集短句，不念工具原文——原文可能很长，
+/// 还可能带设备地址、串口或服务方英文报错（如“设备连接失败 (<device-ip>): …”）；原文照旧记在工具调试事件里。
+pub(crate) fn read_failure_speech(raw: &str, prefix: &str) -> String {
+    let has = |needles: &[&str]| needles.iter().any(|n| raw.contains(n));
+    if has(&["超时"]) {
+        "查询超时，请稍后再问".into()
+    } else if has(&["授权"]) {
+        "设备授权失效，请重新连接".into()
+    } else if has(&["正在关闭"]) {
+        "MOSS 正在关闭".into()
+    } else if has(&["未就绪"]) {
+        "激光机还没就绪".into()
+    } else if has(&["未连接", "连接失败", "无法连接", "断开", "探测目标"]) {
+        "激光机没连上，请检查连接".into()
+    } else {
+        format!("{prefix}，详情看桌面端")
+    }
+}
+
 fn terminal_reply(record: &Value) -> String {
     let send = &record["send_result"];
     let sent = send["lines_sent"].as_u64();

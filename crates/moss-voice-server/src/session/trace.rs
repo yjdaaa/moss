@@ -386,6 +386,7 @@ pub(crate) fn voice_step_text(kind: &str, data: &Value) -> String {
             "extend" => "Jev 判断这句话还没说完，延长拾音等用户接着说（最多 1.2 秒）".to_owned(),
             "expired" => "延长的拾音到期，用户没有接着说，按说完处理".to_owned(),
             "late" => "Jev 判断回来时已过续听期限，按说完处理".to_owned(),
+            "skipped" => "Jev 未在期限内给出判断（超时或跳过），按说完处理".to_owned(),
             _ => "Jev 判断这句话已经说完，按说完处理".to_owned(),
         },
         "smart_turn" => {

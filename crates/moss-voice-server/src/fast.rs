@@ -9,6 +9,9 @@ pub fn normalized(text: &str) -> String {
 /// 交给正常对话处理。
 pub fn is_stop(text: &str) -> bool {
     let text = normalized(text);
+    if text.is_empty() {
+        return false;
+    }
     let words = [
         "停",
         "停止",
@@ -19,12 +22,17 @@ pub fn is_stop(text: &str) -> bool {
         "别打了",
         "关掉激光",
     ];
-    words.iter().any(|word| {
-        text == *word
-            || ["吧", "啊", "了", "一下", "快"]
-                .iter()
-                .any(|end| text == format!("{word}{end}"))
-    })
+    let matches_word = |candidate: &str| {
+        words.iter().any(|word| {
+            candidate.strip_prefix(word).is_some_and(|rest| {
+                rest.is_empty() || rest == *word || rest.strip_prefix(word) == Some(*word)
+            })
+        })
+    };
+    matches_word(&text)
+        || ["吧", "啊", "了", "一下", "快"]
+            .iter()
+            .any(|end| text.strip_suffix(end).is_some_and(matches_word))
 }
 
 /// 纯思考气音或无语义口头碎片（0ms 本地静默跳过，不打扰用户继续组织语言）。
@@ -143,7 +151,24 @@ pub fn completeness(text: &str) -> Completeness {
         "一样的",
     ];
     const CLOSED_ENDS: &[&str] = &[
-        "吗", "呢", "吧", "了", "啊", "呀", "嘛", "啦", "哦", "呗", "么",
+        "吗",
+        "呢",
+        "吧",
+        "了",
+        "啊",
+        "呀",
+        "嘛",
+        "啦",
+        "哦",
+        "呗",
+        "么",
+        "什么意思",
+        "啥意思",
+        "怎么办",
+        "怎么弄",
+        "多少钱",
+        "在哪里",
+        "在哪儿",
     ];
     let core = normalized(text);
     if core.is_empty() {
@@ -359,6 +384,10 @@ mod tests {
             ("现在几点了？", Complete),
             ("帮我看看机器连上了吗", Complete),
             ("好了", Complete),
+            ("什么意思", Complete),
+            ("这是什么意思", Complete),
+            ("接下来怎么办", Complete),
+            ("这个怎么弄", Complete),
             ("开始", Unknown),
             ("确认", Unknown),
             ("是的", Unknown),
@@ -386,7 +415,19 @@ mod tests {
     }
     #[test]
     fn stops_are_whole_phrases_and_negations_are_not_stops() {
-        for text in ["停！", "急停", "停止吧", "关掉激光"] {
+        for text in [
+            "停！",
+            "停停",
+            "停停停",
+            "停停吧",
+            "停下停下",
+            "急停",
+            "急停急停",
+            "快停快停",
+            "停止吧",
+            "停止停止",
+            "关掉激光",
+        ] {
             assert!(is_stop(text), "{text}");
         }
         for text in [

@@ -8,11 +8,14 @@ impl<'a> Session<'a> {
         let was_music = self.music.as_ref().is_some_and(|music| music.active());
         if was_music && let Some(music) = self.music.as_mut() {
             match music.refill(&mut self.pump) {
-                MusicProgress::Failed(reason) => self.event(
-                    EventRecord::error(DiagCategory::Audio, "音乐解码或缓冲失败，已终止播放")
-                        .hint("这首歌的文件可能损坏或格式不支持：换一首试试")
-                        .detail(format!("{reason:?}")),
-                ),
+                MusicProgress::Failed(reason) => {
+                    self.music_failed = true;
+                    self.event(
+                        EventRecord::error(DiagCategory::Audio, "音乐解码或缓冲失败，已终止播放")
+                            .hint("这首歌的文件可能损坏或格式不支持：换一首试试")
+                            .detail(format!("{reason:?}")),
+                    );
+                }
                 MusicProgress::Cancelled => self.event(EventRecord::warn(
                     DiagCategory::Device,
                     "设备权限撤销，音乐已停止",
@@ -51,6 +54,7 @@ impl<'a> Session<'a> {
                         if let Some(music) = self.music.as_mut() {
                             music.cancel(&mut self.pump);
                         }
+                        self.music_failed = false;
                         return Err("设备权限已撤销".into());
                     }
                     for text in marks {
@@ -112,6 +116,7 @@ impl<'a> Session<'a> {
                             return Ok(());
                         }
                     }
+                    let music_failed = was_music && std::mem::take(&mut self.music_failed);
                     if was_music {
                         self.screen.music_hud = None;
                         if let Some(music) = self.music.as_mut() {
@@ -120,7 +125,18 @@ impl<'a> Session<'a> {
                     }
                     self.stop_speaking(socket, None).await?;
                     return if was_music {
-                        if self.listen.listen_realtime {
+                        if music_failed
+                            && self.permission.load(std::sync::atomic::Ordering::Acquire)
+                            && self.conversation.is_some()
+                        {
+                            self.start_turn(
+                                TurnInput::Say {
+                                    text: "这首歌播放出错，换一首试试".into(),
+                                    close: false,
+                                },
+                                TurnKind::Notice,
+                            );
+                        } else if self.listen.listen_realtime {
                             self.start_listening(false);
                         }
                         Ok(())

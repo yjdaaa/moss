@@ -186,8 +186,12 @@ struct Listening {
     stream: Option<(AsrStream, Option<Resampler>)>,
     /// 最新流式中间识别文字（用于半截话防抢话判定与路由预热）
     last_interim: String,
-    /// 防抖中的流式预热任务（新 interim 到达或离开拾音时立即中止旧任务）
-    prewarm_task: Option<tokio::task::JoinHandle<()>>,
+    /// 防抖中的流式预热任务（新 interim 到达时替换；同句进入静音判停时直接唤醒复用，避免自撞单槽推理）
+    prewarm_task: Option<(
+        String,
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<crate::jev::JevHoldOutcome>,
+    )>,
     /// 每轮拾音最多允许一次半截话续听延长，防止背景人声无限挂起
     hold_used: bool,
     /// 半截话续听宽限窗截止时刻（自首次静音判停时刻起算 1.2 秒）
@@ -198,7 +202,7 @@ struct Listening {
 
 impl Drop for Listening {
     fn drop(&mut self) {
-        if let Some(task) = self.prewarm_task.take() {
+        if let Some((_, _, task)) = self.prewarm_task.take() {
             task.abort();
         }
     }
@@ -206,7 +210,7 @@ impl Drop for Listening {
 
 struct PendingHoldCheck {
     paused_at: Instant,
-    task: tokio::task::JoinHandle<bool>,
+    task: tokio::task::JoinHandle<crate::jev::JevHoldOutcome>,
 }
 
 impl Drop for PendingHoldCheck {
@@ -417,6 +421,8 @@ struct ActiveTurn {
     endpoint_wait: Option<(u64, u64)>,
     /// 抢跑轮次被认定说完、放行开口的时刻
     released_at: Option<Instant>,
+    /// 本轮触发点歌但歌曲无法启动时待补播的短提示（在本轮 Done 收尾后播报）
+    music_error: Option<&'static str>,
 }
 
 impl Drop for ActiveTurn {
@@ -698,13 +704,15 @@ async fn next_stop_check(
     }
 }
 
-async fn next_listening_hold_check(slot: &mut Option<PendingHoldCheck>) -> (Instant, bool) {
+async fn next_listening_hold_check(
+    slot: &mut Option<PendingHoldCheck>,
+) -> (Instant, crate::jev::JevHoldOutcome) {
     match slot.as_mut() {
         Some(pending) => {
             let at = pending.paused_at;
-            let held = (&mut pending.task).await.unwrap_or(false);
+            let outcome = (&mut pending.task).await.unwrap_or_default();
             *slot = None;
-            (at, held)
+            (at, outcome)
         }
         None => std::future::pending().await,
     }
@@ -895,6 +903,7 @@ struct Session<'a> {
     synced_turn: u64,
     pending_listen_stop: bool,
     music: Option<MusicController>,
+    music_failed: bool,
     pump: PlaybackPump,
     decode_errors: u64,
     phase: Phase,

@@ -987,3 +987,135 @@ fn smart_turn_slow_predictor_never_delays_stop_fast_path() {
         "急停快路径不应被尾音判停超时或额外等待阻塞（耗时 {after_asr_ms} ms）"
     );
 }
+
+#[test]
+fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_duplicate_call() {
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ScriptedInterimAsr(Mutex<VecDeque<&'static str>>);
+    impl StreamingAsr for ScriptedInterimAsr {
+        fn start(&self) -> AsrStream {
+            let text = self.0.lock().unwrap().pop_front().unwrap_or("你好");
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                let mut pushed = false;
+                while rx.recv().await.is_some() {
+                    if !pushed {
+                        pushed = true;
+                        interim_tx.send_replace(text.into());
+                    }
+                }
+                let _ = done_tx.send(Ok(text.into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    struct CountingJev(AtomicUsize);
+    impl DecisionClient for CountingJev {
+        fn decide<'a>(
+            &'a self,
+            _payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok(serde_json::json!({
+                    "answers": {
+                        "unfinished": {"type": "noul", "noul": 0.05},
+                        "quick_read": {
+                            "type": "choice",
+                            "choice": "none",
+                            "confidence": 0.96,
+                            "probabilities": {"none": 0.97, "status": 0.03}
+                        }
+                    }
+                }))
+            })
+        }
+    }
+
+    let jev_client = Arc::new(CountingJev(AtomicUsize::new(0)));
+    let filter = Arc::new(VoiceJevFilter::new(
+        jev_client.clone(),
+        JevFilterOptions {
+            enabled: true,
+            tool_prune: false,
+            memory_filter: false,
+            ..Default::default()
+        },
+    ));
+    let llm = Arc::new(FakeLlm::default());
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    )
+    .with_streaming_asr(Arc::new(ScriptedInterimAsr(Mutex::new(VecDeque::from([
+        "你是什么",
+        "退下退下",
+    ])))))
+    .with_jev_filter(filter);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    // 第 1 轮：“你是什么”在说话期已起预热，静音判停直接复用同一请求并写缓存，整轮 Jev 只请求 1 次
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
+    std::thread::sleep(Duration::from_millis(160));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
+    let _ = collect_items(&mut device);
+    assert_eq!(
+        jev_client.0.load(Ordering::SeqCst),
+        1,
+        "说话期预热、静音判停与正式轮次应共享同一次 Jev 推理"
+    );
+    assert_eq!(llm.seen.lock().unwrap().len(), 1);
+
+    // 第 2 轮：“退下退下”走整句退出快路径，0 次 Jev、0 次新增大模型请求，播完再见断开
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
+    std::thread::sleep(Duration::from_millis(40));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
+    let exit_items = texts(&collect_items(&mut device));
+    assert!(
+        exit_items.contains(&"听:退下退下".to_owned()),
+        "{exit_items:?}"
+    );
+    expect_closed(&mut device);
+    assert_eq!(
+        jev_client.0.load(Ordering::SeqCst),
+        1,
+        "连说退出词不得触发 Jev 预热或续听等待"
+    );
+    assert_eq!(
+        llm.seen.lock().unwrap().len(),
+        1,
+        "连说退出词不得落入大模型"
+    );
+}

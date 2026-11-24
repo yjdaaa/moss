@@ -217,6 +217,7 @@ impl<'a> Session<'a> {
             hold: None,
             endpoint_wait: None,
             released_at: None,
+            music_error: None,
         }) && !replaced.close
         {
             self.stash_uncommitted_photo(&mut replaced);
@@ -260,27 +261,34 @@ impl<'a> Session<'a> {
 
     /// Music is a separate audio source, never a TTS sentence or assistant
     /// message in conversation history. Only the trusted catalog opens a song.
+    /// 启动异常时返回一句简短口语原因，由会话在本轮收尾后播报给用户。
     async fn start_music(
         &mut self,
         socket: &mut crate::link::Link,
         track_id: String,
         title: String,
-    ) -> Result<(), String> {
-        if !self.permission.load(std::sync::atomic::Ordering::Acquire)
-            || self.shared.config.downlink_sample_rate != 24_000
-        {
+    ) -> Result<Option<&'static str>, String> {
+        self.music_failed = false;
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             self.event(EventRecord::warn(
                 DiagCategory::Audio,
-                "音乐请求被拒绝：设备权限或播放采样率不符合要求",
+                "音乐请求被拒绝：设备权限已撤销",
             ));
-            return Ok(());
+            return Ok(None);
+        }
+        if self.shared.config.downlink_sample_rate != 24_000 {
+            self.event(EventRecord::warn(
+                DiagCategory::Audio,
+                "音乐请求被拒绝：播放采样率不符合要求",
+            ));
+            return Ok(Some("当前音频参数不支持放歌"));
         }
         let Some(index) = self.shared.config.music.clone() else {
             self.event(
                 EventRecord::warn(DiagCategory::Config, "音乐功能未启用")
                     .hint("在“能力”标签里打开本地音乐并选好音乐文件夹"),
             );
-            return Ok(());
+            return Ok(Some("本地音乐还没开启"));
         };
         // No pathname or file descriptor is supplied by the model.
         let opened = tokio::task::spawn_blocking(move || index.open(&track_id)).await;
@@ -291,24 +299,34 @@ impl<'a> Session<'a> {
                     EventRecord::warn(DiagCategory::Audio, "所选歌曲不存在、已变化或不允许读取")
                         .hint("音乐文件可能被移动或删除了：在“能力”标签重新选择音乐文件夹"),
                 );
-                return Ok(());
+                return Ok(Some("找不到这首歌，请刷新音乐目录"));
             }
         };
         if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
-            return Ok(());
+            return Ok(None);
+        }
+        if self.music.is_none() {
+            return Ok(Some("本地音乐还没开启"));
         }
         if matches!(self.phase, Phase::Speaking { .. }) {
             self.stop_speaking(socket, Some("开始新歌曲")).await?;
+            if let Some(turn) = self.turn.as_mut() {
+                turn.audio_started = false;
+                turn.tts_started_at = None;
+            }
         }
         let Some(music) = self.music.as_mut() else {
-            return Ok(());
+            return Ok(Some("本地音乐还没开启"));
         };
         if music.start(file, &extension, &mut self.pump).is_err() {
+            if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(None);
+            }
             self.event(EventRecord::error(
                 DiagCategory::Audio,
                 "本地音乐解码任务未能启动",
             ));
-            return Ok(());
+            return Ok(Some("这首歌打不开，换一首试试"));
         }
         self.tts(socket, TtsState::Start, None).await?;
         self.phase = Phase::speaking_after_tts_start();
@@ -332,7 +350,7 @@ impl<'a> Session<'a> {
                 None,
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         let can_color_music = want_hud
             && self.device_mcp.as_ref().is_some_and(|d| {
@@ -392,7 +410,7 @@ impl<'a> Session<'a> {
                 let _ = self.send_stt(socket, format!("[音乐] {short_title}")).await;
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     pub(super) async fn on_turn_event(
@@ -752,7 +770,11 @@ impl<'a> Session<'a> {
                     turn.debug_text_reply
                         .push(format!("[播放本地音乐] {title}"));
                 }
-                self.start_music(socket, track_id, title).await?;
+                if let Some(reason) = self.start_music(socket, track_id, title).await?
+                    && let Some(turn) = self.turn.as_mut()
+                {
+                    turn.music_error = Some(reason);
+                }
             }
             TurnEvent::Speech { text, pcm } => {
                 let Some(turn) = self.turn.as_mut() else {
@@ -979,6 +1001,17 @@ impl<'a> Session<'a> {
         }
         if let Some(manual) = turn.listen_after {
             self.start_listening(manual);
+        } else if let Some(speech) = turn.music_error.take().filter(|_| {
+            self.permission.load(std::sync::atomic::Ordering::Acquire)
+                && self.conversation.is_some()
+        }) {
+            self.start_turn(
+                TurnInput::Say {
+                    text: speech.into(),
+                    close: false,
+                },
+                TurnKind::Notice,
+            );
         } else if self.listen.listen_realtime
             || (!played && turn.kind == TurnKind::Answer && !self.listen.listen_manual)
         {
@@ -1313,6 +1346,7 @@ impl<'a> Session<'a> {
         {
             music.cancel(&mut self.pump);
         }
+        self.music_failed = false;
         if let Some(mut turn) = self.turn.take() {
             if turn.kind == TurnKind::Answer
                 && let Some(user) = turn.user.clone()

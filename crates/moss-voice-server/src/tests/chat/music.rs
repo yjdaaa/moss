@@ -181,3 +181,88 @@ fn abort_during_fake_xiaozhi_music_stops_before_full_song() {
             .any(|item| item.text.contains("播放被打断"))
     );
 }
+
+#[test]
+fn missing_music_file_speaks_short_reason_instead_of_staying_silent() {
+    let (server, registry, dir, tts) = start_song(1);
+    std::fs::remove_file(dir.path().join("合成歌曲.wav")).unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 260);
+    let spoken: String = texts(&collect_items(&mut device))
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    assert_eq!(spoken, "找不到这首歌，请刷新音乐目录");
+    assert_eq!(
+        *tts.said.lock().unwrap(),
+        vec!["找不到这首歌，请刷新音乐目录"]
+    );
+}
+
+#[test]
+fn missing_music_file_after_spoken_preamble_still_speaks_reason_after_preamble() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_wav(dir.path(), 1);
+    let index = Arc::new(MusicIndex::scan(dir.path()).unwrap());
+    std::fs::remove_file(dir.path().join("合成歌曲.wav")).unwrap();
+    let tools = Arc::new(MusicTools::new(
+        Arc::new(FakeTools::default()),
+        index.clone(),
+    ));
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([Round::Reply {
+            deltas: vec!["好，给你放。"],
+            calls: vec![ToolCall::new(
+                "music-1",
+                "play_music",
+                r#"{"query":"合成歌曲"}"#,
+            )],
+            delay_ms: 0,
+        }])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("播放合成歌曲".to_owned())])),
+        ..Default::default()
+    });
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        tts.clone(),
+        tools,
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            music: Some(index),
+            playback_start_ms: 100,
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 260);
+    // 第 1 段播完开场白“好，给你放。”（tts:stop），紧接着 Notice 轮播完“找不到这首歌，请刷新音乐目录”（tts:stop）
+    let first: String = texts(&collect_items(&mut device))
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    let second: String = texts(&collect_items(&mut device))
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    assert_eq!(first, "好，给你放。");
+    assert_eq!(second, "找不到这首歌，请刷新音乐目录");
+    assert_eq!(
+        *tts.said.lock().unwrap(),
+        vec!["好，给你放。", "找不到这首歌，请刷新音乐目录"]
+    );
+}

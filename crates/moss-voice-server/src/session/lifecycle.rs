@@ -128,6 +128,7 @@ impl<'a> Session<'a> {
                 .music
                 .as_ref()
                 .map(|_| MusicController::new(permission.clone())),
+            music_failed: false,
             pump: PlaybackPump::new(
                 OpusEncoder::new(downlink, FRAME_MS as u32)?,
                 downlink,
@@ -400,6 +401,7 @@ impl<'a> Session<'a> {
         if let Some(music) = self.music.as_mut() {
             music.cancel(&mut self.pump);
         }
+        self.music_failed = false;
         // 先收尾在途轮次的完整过程记录与耗时，再清空 self.turn，避免常连结束时漏记 turn_end 与合成语音
         self.finish_timing("disconnected");
         self.turn = None;
@@ -496,7 +498,7 @@ impl<'a> Session<'a> {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(_)) => return "连接出错".into(),
                 },
-                (paused_at, held) = next_listening_hold_check(&mut self.listen.hold_check) => self.on_hold_check_done(socket, paused_at, held).await,
+                (paused_at, outcome) = next_listening_hold_check(&mut self.listen.hold_check) => self.on_hold_check_done(socket, paused_at, outcome).await,
                 stop = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop, crate::conversation::FastStopSource::Recheck).await,
                 call = next_device_call(&mut self.device_mcp) => self.forward_device_call(socket, call).await,
                 request = async {

@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 断网时也能念出报错原因，快速查询失败不再念工具原文（2026-11-24）
+
+- **现象**：n116 改成按原因播报后，“连不上大模型，请检查网络”这类话术没有预合成，断网时云端合成也连不上，只能在屏幕上显示文字（原先的笼统话术是预合成的）；本地只读快答（“机器状态”等）失败时把工具原文拼进“查询失败：…”，可能念出一长串、设备地址或英文报错。
+- **根因与修复**：`Conversation::fixed_phrases` 在默认话术下改为预合成 4 句断网 / 超时原因（`LLM_TIMEOUT_REPLY` 等），不再预合成已不会念的旧话术，自定义 `error_reply` 照旧；新增 `read_failure_speech`，快答失败只说“查询超时，请稍后再问”“激光机没连上，请检查连接”“激光机还没就绪”等闭集短句，原文仍记在工具调试事件里；删掉大模型出错分支里不会执行到的等待。
+- **验证**：新增 `network_error_replies_are_prewarmed_and_read_failures_never_speak_raw_tool_text`，`fixed_routes_skip_llm_keep_full_progress_and_report_failure` 增加查状态失败用例；`verify.mjs --finish` 通过（全工作区 clippy / Rust 测试，`moss-voice-server` 409 项通过、8 项忽略，本机桌面程序快更与签名校验）。断网实机播报未验证（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/conversation.rs`（`fixed_phrases`、`read_failure_speech`、`read_reply`）、内置语音技术书 n117。
+
+### 语音对话全链路出错简短直报原因，修复连说退出与本地 Jev 双重超时阻塞（2026-11-24）
+
+- **现象**：识别、大模型或工具超限出错时小智只会笼统说“抱歉，我这边出了点问题”，且说了开场白后第二轮工具汇总大模型报错、中途断流、后台查询回报出错、点歌混调及本地音乐缺文件/解码出错时直接静默无声；说“退下退下”“停停”会漏出快路径落入 Jev 与大模型；本地单槽 OneJev 在说话期预热被静音判停中止重发时自撞，续听超时后同轮 `evaluate_turn` 再卡满 1500 ms。
+- **根因与修复**：`conversation::spoken_error_reply` 在默认话术下按故障环节与 `DiagCategory` 映射为 6～15 字闭集静态中文短句（不含套话，绝不拼入密钥、地址或英文原文，自定义 `error_reply` 仍保留），并补齐开场白后/中途断流、后台查询播报、点歌混调及本地音乐启动/解码异常的语音播报；`is_exit` 与 `fast::is_stop` 支持两三遍连说且命中退出/急停/本地快答时跳过 Jev 等待；静音判停复用同句预热，`check_unfinished_hold` 超时后跳过同轮 `evaluate_turn`，回环 `127.0.0.1`/`localhost` 直连（`.no_proxy()` + 250 ms 连接超时），`jev_hold` 轨迹区分 `skipped` 与 `finished`，`completeness` 补无标点问句结尾。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（`moss-voice-server` 416/416 通过，新增 `spoken_errors_explain_category_in_plain_chinese_without_leaking_secrets`、`llm_failure_after_preamble_and_tool_call_still_speaks_concise_error`、`missing_music_file_after_spoken_preamble_still_speaks_reason_after_preamble`、`reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_duplicate_call` 等 6 项）、分层与规范检查及本机桌面程序快更通过；待 Windows 真机复测（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{conversation,fast,jev,session}.rs`、`session/{lifecycle,listen,playback,trace,turn}.rs`、`docs/integration/moss-native-voice-spec.md`、内置语音技术书 n116。
+
 ### 修复语音模型列表样式冲突，打磨曜石下拉框、侧边栏过渡与工作台卡片布局（2026-11-24）
 
 - **现象**：① 语音中心模型下拉列表与场景推荐套系重用 `.voice-combo-list` 导致内边距清零与 `220px` 限高互相串台；点 `<label>` 文字打不开曜石下拉浮层、长选项折成多行且向上弹出动画方向相反；② 侧边栏展开动画期间文字竖排挤成多行跳动、左侧激活竖条越界被裁切、窄屏折成多行且短页面纵向拉伸导航高度、隐藏顶栏胶囊后侧栏无待审批提示；③ 工作台底部控制台不可收起且标签无法键盘聚焦，加工内容四按钮宽窄状态高度不一，自由网格解锁态缺 `grab` 光标且右下浮窗展开易挡底部控件。

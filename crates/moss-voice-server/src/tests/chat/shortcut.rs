@@ -10,6 +10,7 @@ async fn fixed_routes_skip_llm_keep_full_progress_and_report_failure() {
         ("当前进度", "百分之40", true),
         ("还要多久", "没有可信", true),
         ("当前材料参数", "材料库建议功率400", true),
+        ("机器状态", "激光机没连上，请检查连接", false),
     ] {
         let tools = Arc::new(FastTools {
             fail: !success,

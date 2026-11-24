@@ -182,11 +182,11 @@ fn endless_tool_calls_stop_after_five_rounds() {
     let mut device = chat_device(&server, &registry, 1);
     speak_manual(&mut device, 1, 600);
     let spoken = texts(&collect_items(&mut device));
-    // 超过设备一行的句子按屏宽分段显示，拼起来是原句
-    assert_eq!(
-        spoken[2..4].concat().replace("句:", ""),
-        ConversationSettings::default().error_reply
-    );
+    let spoken_lines: String = spoken
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    assert_eq!(spoken_lines, "工具调用次数超限，换个说法试试");
     assert_eq!(
         fakes.llm.seen.lock().unwrap().len(),
         6,
@@ -215,17 +215,16 @@ fn model_errors_and_failed_sentences_are_handled() {
         start_chat(llm, &["你好", "再试一次"], Duration::from_secs(120));
     let mut device = chat_device(&server, &registry, 1);
     speak_manual(&mut device, 1, 600);
-    // 错误提示超过设备一行（320 px、20 px 字号约 14 个汉字），字幕在标点处分成两段随音频先后显示
-    assert_eq!(
-        texts(&collect_items(&mut device)),
-        vec![
-            "听:你好",
-            "tts:start",
-            "句:抱歉，我这边出了点问题，",
-            "句:请稍后再试",
-            "tts:stop"
-        ]
-    );
+    // 错误提示按具体故障类别播报大白话原因；超过设备一行（320 px、20 px 字号约 14 个汉字）时在标点处分段随音频显示
+    let first_turn = texts(&collect_items(&mut device));
+    assert_eq!(first_turn.first().map(String::as_str), Some("听:你好"));
+    assert_eq!(first_turn.get(1).map(String::as_str), Some("tts:start"));
+    assert_eq!(first_turn.last().map(String::as_str), Some("tts:stop"));
+    let first_spoken: String = first_turn
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    assert_eq!(first_spoken, "大模型密钥无效或没权限");
     assert!(
         server.status().events.iter().any(|event| event
             .text
@@ -253,6 +252,10 @@ fn model_errors_and_failed_sentences_are_handled() {
 fn exit_phrases_tolerate_address_and_particles_but_not_other_content() {
     for (heard, exits) in [
         ("退下吧。", true),
+        ("退下退下", true),
+        ("退下退下退下", true),
+        ("再见再见！", true),
+        ("小智退下退下吧", true),
         ("小智，退下", true),
         ("好了你退下吧", true),
         ("那你先去休息吧", true),
@@ -275,6 +278,137 @@ fn exit_phrases_tolerate_address_and_particles_but_not_other_content() {
             expect_closed(&mut device);
         }
     }
+}
+
+#[test]
+fn spoken_errors_explain_category_in_plain_chinese_without_leaking_secrets() {
+    use crate::conversation::{DEFAULT_ERROR_REPLY, ErrorStage, spoken_error_reply};
+    use moss_voice_providers::DiagCategory;
+
+    let llm_403 = ProviderError::with_category(
+        DiagCategory::Auth,
+        "大模型返回 HTTP 403，密钥无效或没有权限",
+    )
+    .detail("服务方原话：Error 403: not subscribed sk-secret-123456 https://api.example.com/v1");
+    let spoken = spoken_error_reply(DEFAULT_ERROR_REPLY, ErrorStage::Llm, &llm_403);
+    assert_eq!(spoken, "大模型密钥无效或没权限");
+    assert!(!spoken.contains("sk-") && !spoken.contains("http") && !spoken.contains("403"));
+
+    let llm_429 = ProviderError::with_category(
+        DiagCategory::Quota,
+        "大模型返回 HTTP 429，请求太频繁或额度不足",
+    );
+    assert_eq!(
+        spoken_error_reply(DEFAULT_ERROR_REPLY, ErrorStage::Llm, &llm_429),
+        "大模型额度用完或请求太快"
+    );
+
+    let llm_timeout = ProviderError::with_category(
+        DiagCategory::Network,
+        "大模型请求超时：对方服务器太久没有回应",
+    );
+    assert_eq!(
+        spoken_error_reply(DEFAULT_ERROR_REPLY, ErrorStage::Llm, &llm_timeout),
+        "连接大模型超时"
+    );
+
+    let asr_auth = ProviderError::with_category(
+        DiagCategory::Auth,
+        "语音识别返回 HTTP 401，密钥无效或没有权限",
+    );
+    assert_eq!(
+        spoken_error_reply(DEFAULT_ERROR_REPLY, ErrorStage::Asr, &asr_auth),
+        "语音识别密钥无效或没权限"
+    );
+
+    // 调用方显式自定义 error_reply 时优先保留自定义话术
+    assert_eq!(
+        spoken_error_reply("自定义故障提示", ErrorStage::Llm, &llm_403),
+        "自定义故障提示"
+    );
+}
+
+#[test]
+fn network_error_replies_are_prewarmed_and_read_failures_never_speak_raw_tool_text() {
+    use crate::conversation::{
+        ASR_OFFLINE_REPLY, ASR_TIMEOUT_REPLY, DEFAULT_ERROR_REPLY, LLM_OFFLINE_REPLY,
+        LLM_TIMEOUT_REPLY, read_failure_speech,
+    };
+    let conversation = |error_reply: &str| {
+        Conversation::new(
+            Arc::new(FakeAsr::default()),
+            Arc::new(FakeLlm::default()),
+            Arc::new(FakeTts::default()),
+            Arc::new(FakeTools::default()),
+            ConversationSettings {
+                error_reply: error_reply.into(),
+                ..ConversationSettings::default()
+            },
+        )
+        .fixed_phrases()
+    };
+    // 断网时云端合成也连不上：断网 / 超时类原因必须启动时就预合成，默认设置下不再念的笼统话术不占缓存
+    let phrases = conversation(DEFAULT_ERROR_REPLY);
+    for reply in [
+        LLM_TIMEOUT_REPLY,
+        LLM_OFFLINE_REPLY,
+        ASR_TIMEOUT_REPLY,
+        ASR_OFFLINE_REPLY,
+    ] {
+        assert!(phrases.iter().any(|p| p == reply), "{reply}");
+    }
+    assert!(!phrases.iter().any(|p| p == DEFAULT_ERROR_REPLY));
+    assert!(phrases.len() < 32, "固定话术不能挤满 32 条合成缓存");
+    // 自定义话术时照旧只预合成自定义的那句
+    let custom = conversation("自定义故障提示");
+    assert!(custom.iter().any(|p| p == "自定义故障提示"));
+    assert!(!custom.iter().any(|p| p == LLM_OFFLINE_REPLY));
+
+    for (raw, expect) in [
+        ("工具执行超时", "查询超时，请稍后再问"),
+        ("语音设备授权已失效，请重新连接", "设备授权失效，请重新连接"),
+        ("服务正在关闭，已拒绝新的工具调用", "MOSS 正在关闭"),
+        ("设备未就绪（当前状态: Alarm）", "激光机还没就绪"),
+        (
+            "设备连接失败 (<device-ip>): Connection refused (os error 61)",
+            "激光机没连上，请检查连接",
+        ),
+        (
+            "laser_workflow_tool 调用 moss-host 失败: error sending request",
+            "查询失败，详情看桌面端",
+        ),
+    ] {
+        let spoken = read_failure_speech(raw, "查询失败");
+        assert_eq!(spoken, expect, "{raw}");
+        assert!(!spoken.contains("device-ip") && !spoken.contains("error"));
+    }
+    assert_eq!(
+        read_failure_speech("参数校验失败: thickness_mm 必填", "材料参数查询失败"),
+        "材料参数查询失败，详情看桌面端"
+    );
+}
+
+#[test]
+fn llm_failure_after_preamble_and_tool_call_still_speaks_concise_error() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: vec!["好，我看下。"],
+                calls: vec![ToolCall::new("call-get_time", "get_time", "{}")],
+                delay_ms: 0,
+            },
+            Round::Fail("大模型返回 HTTP 429，请求太频繁或额度不足"),
+        ])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, _fakes) = start_chat(llm, &["现在几点"], Duration::from_secs(120));
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    let spoken: String = texts(&collect_items(&mut device))
+        .iter()
+        .filter_map(|item| item.strip_prefix("句:"))
+        .collect();
+    assert_eq!(spoken, "好，我看下。大模型额度用完或请求太快");
 }
 
 /// 没命中退出词时，大模型调用宿主保留的 end_conversation：说完告别语后结束对话，同轮其他工具不执行。

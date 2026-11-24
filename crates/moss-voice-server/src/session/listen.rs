@@ -299,14 +299,14 @@ impl<'a> Session<'a> {
             };
             if listening.last_interim != corrected {
                 listening.last_interim.clone_from(&corrected);
-                if let Some(prev) = listening.prewarm_task.take() {
+                if let Some((_, _, prev)) = listening.prewarm_task.take() {
                     prev.abort();
                 }
                 if let Some(jev) = conversation
                     .jev_filter
                     .clone()
                     .filter(|f| f.options().enabled && f.options().unfinished_hold)
-                    && crate::fast::normalized(&corrected).chars().count() >= 2
+                    && !Self::skip_jev_hold(&conversation, &corrected)
                 {
                     let history = Self::jev_prewarm_history(
                         &self.shared.vision_photos,
@@ -315,17 +315,22 @@ impl<'a> Session<'a> {
                         &conversation,
                     );
                     let prewarm_text = corrected.clone();
-                    listening.prewarm_task = Some(tokio::spawn(async move {
-                        tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE).await;
+                    let flush = Arc::new(tokio::sync::Notify::new());
+                    let flush_wait = flush.clone();
+                    let handle = tokio::spawn(async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE) => {}
+                            _ = flush_wait.notified() => {}
+                        }
                         let tool_executor = conversation.tools.clone();
                         let mut tools = tokio::task::spawn_blocking(move || tool_executor.tools())
                             .await
                             .unwrap_or_default();
                         tools.extend(device_specs);
-                        let _ = jev
-                            .should_hold_unfinished(&prewarm_text, &history, &tools)
-                            .await;
-                    }));
+                        jev.check_unfinished_hold(&prewarm_text, &history, &tools)
+                            .await
+                    });
+                    listening.prewarm_task = Some((corrected.clone(), flush, handle));
                 }
             }
             let now = Instant::now();
@@ -350,6 +355,15 @@ impl<'a> Session<'a> {
             return Err("发送失败".into());
         }
         Ok(())
+    }
+
+    fn skip_jev_hold(conversation: &Conversation, text: &str) -> bool {
+        crate::fast::normalized(text).chars().count() < 2
+            || crate::fast::is_stop(text)
+            || conversation.is_exit(text)
+            || crate::fast::is_noise_filler(text)
+            || (conversation.settings.read_only_shortcuts
+                && crate::fast::read_intent(text).is_some())
     }
 
     fn jev_prewarm_history(
@@ -403,11 +417,7 @@ impl<'a> Session<'a> {
                 && !listening.manual
                 && !listening.hold_used
             {
-                if let Some(task) = listening.prewarm_task.take()
-                    && !task.is_finished()
-                {
-                    task.abort();
-                }
+                let prewarm = listening.prewarm_task.take();
                 let latest = listening
                     .stream
                     .as_ref()
@@ -420,35 +430,48 @@ impl<'a> Session<'a> {
                     })
                     .unwrap_or_else(|| listening.last_interim.clone());
                 listening.last_interim = latest.clone();
-                if !latest.is_empty() {
+                if !latest.is_empty() && !Self::skip_jev_hold(&conversation, &latest) {
                     let paused_at = Instant::now();
                     let checking = latest.clone();
-                    let history = Self::jev_prewarm_history(
-                        &self.shared.vision_photos,
-                        self.device_id,
-                        &self.history,
-                        &conversation,
-                    );
-                    let tool_executor = conversation.tools.clone();
+                    // 若说话期间的同句预热已在跑或刚算完，唤醒其防抖并直接复用该任务，避免自杀重发撞上本地单槽推理。
+                    let task = match prewarm {
+                        Some((prewarm_text, flush, handle)) if prewarm_text == latest => {
+                            flush.notify_one();
+                            handle
+                        }
+                        other => {
+                            if let Some((_, _, stale)) = other {
+                                stale.abort();
+                            }
+                            let history = Self::jev_prewarm_history(
+                                &self.shared.vision_photos,
+                                self.device_id,
+                                &self.history,
+                                &conversation,
+                            );
+                            let tool_executor = conversation.tools.clone();
+                            tokio::spawn(async move {
+                                tokio::task::yield_now().await;
+                                let mut tools =
+                                    tokio::task::spawn_blocking(move || tool_executor.tools())
+                                        .await
+                                        .unwrap_or_default();
+                                tools.extend(device_specs);
+                                jev.check_unfinished_hold(&latest, &history, &tools).await
+                            })
+                        }
+                    };
                     // 暂存前半句录音、保持 Phase::Listening 不中断，交由 select! 异步接收结果；
                     // `tools()` 放到后台任务内的 spawn_blocking，既不阻塞会话循环也不占 2-worker Tokio 线程。
                     listening.utterance = pcm;
                     listening.speaking = false;
-                    self.listen.hold_check = Some(PendingHoldCheck {
-                        paused_at,
-                        task: tokio::spawn(async move {
-                            tokio::task::yield_now().await;
-                            let mut tools =
-                                tokio::task::spawn_blocking(move || tool_executor.tools())
-                                    .await
-                                    .unwrap_or_default();
-                            tools.extend(device_specs);
-                            jev.should_hold_unfinished(&latest, &history, &tools).await
-                        }),
-                    });
+                    self.listen.hold_check = Some(PendingHoldCheck { paused_at, task });
                     self.set_level(0);
                     self.trace_record("jev_hold_check", serde_json::json!({"text": checking}));
                     return Ok(());
+                }
+                if let Some((_, _, stale)) = prewarm {
+                    stale.abort();
                 }
             }
         }
@@ -459,11 +482,12 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
         paused_at: Instant,
-        held: bool,
+        outcome: crate::jev::JevHoldOutcome,
     ) -> Result<(), String> {
         if self.pending_listen_stop {
             return self.finish_listen_stop(socket).await;
         }
+        let held = outcome.applied && outcome.unfinished;
         let deadline = paused_at + UNFINISHED_HOLD_WINDOW;
         let in_time = Instant::now() < deadline;
         if held
@@ -485,10 +509,18 @@ impl<'a> Session<'a> {
             self.event("检测到语句尚未说完，延长拾音等待续说");
             return Ok(());
         }
+        let decision = if held && !in_time {
+            "late"
+        } else if !outcome.applied {
+            "skipped"
+        } else {
+            "finished"
+        };
         self.trace_record(
             "jev_hold",
             serde_json::json!({
-                "decision": if held && !in_time { "late" } else { "finished" },
+                "decision": decision,
+                "applied": outcome.applied,
                 "held": held,
                 "waited_ms": paused_at.elapsed().as_millis() as u64,
             }),
