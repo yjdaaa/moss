@@ -598,6 +598,8 @@ pub struct JevTurnDecision {
     pub authorizes_actions: bool,
     /// 本次是否实际用上了 Jev 结果（命中缓存或在线返回）。
     pub applied: bool,
+    /// 因停止词、关闭开关或句式无需提问等本地规则直接跳过上游请求（并非超时或请求失败）。
+    pub local_bypass: bool,
     /// 是否命中本地 60s 缓存。
     pub cached: bool,
     /// 开关 A：句子明显尚未说完（用于流式 VAD 续听防抢话）。
@@ -617,12 +619,20 @@ impl JevTurnDecision {
         Self {
             authorizes_actions: false,
             applied: false,
+            local_bypass: false,
             cached: false,
             unfinished: false,
             fast_read: None,
             allowed_groups: None,
             external_mcp: ExternalMcpFilter::KeepAll,
             keep_memories: None,
+        }
+    }
+
+    fn local_bypass() -> Self {
+        Self {
+            local_bypass: true,
+            ..Self::passthrough()
         }
     }
 
@@ -898,11 +908,11 @@ impl VoiceJevFilter {
         memory_candidates: &[String],
     ) -> JevTurnDecision {
         if !self.options.active() {
-            return JevTurnDecision::passthrough();
+            return JevTurnDecision::local_bypass();
         }
         let clean = crate::fast::normalized(text);
         if clean.is_empty() || crate::fast::is_stop(text) || crate::fast::is_noise_filler(text) {
-            return JevTurnDecision::passthrough();
+            return JevTurnDecision::local_bypass();
         }
         self.evaluate_internal(
             text,
@@ -1034,7 +1044,7 @@ impl VoiceJevFilter {
         }
 
         if questions.is_empty() {
-            return JevTurnDecision::passthrough();
+            return JevTurnDecision::local_bypass();
         }
 
         // state 严格只放单份 utterance 与极简短上下文，每条字段均远低于 600 字符上限
@@ -1153,6 +1163,7 @@ impl VoiceJevFilter {
         let decision = JevTurnDecision {
             authorizes_actions: false,
             applied: true,
+            local_bypass: false,
             cached: false,
             unfinished,
             fast_read,

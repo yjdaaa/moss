@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 消除语音对话客服腔与碎顿，五步连贯试跑对齐真机全链路处理（2026-11-24）
+
+- **现象**：运行语音中心「连贯试跑」时，测试句“你好，汇报一下当前待命状态。”被识别成“一号。”，大模型回复“😊 好，我在，请说指令。”并带出屏幕专用表情，听感机械生硬；真机系统提示词也引导用“好，”“嗯，”拆成两三字碎顿，容易诱发对讲机口令腔。
+- **根因与修复**：`moss-voice-server` 更新 `PLAIN_HEAD` 与 `IMMUTABLE_SAFETY_RULES`，明确禁止“请说指令 / 随时待命 / 有什么可以帮您”等客服套话，将短句改为一口气自然说完、长句在 6～12 字处停顿断开（匹配 `Segmenter` 6 字首逗阈值，`moss_station` 角色与全部安全确认铁律不变）；`BuiltinVoice::chain_test` 对齐真机会话全套处理：换用日常工坊测试句，首尾静音扩至 500ms/800ms，判停前置缓冲从 160ms 对齐真机 `1000ms` 并合并句中逗号气口多段人声，接入已开启的降噪、命令词抗噪融合与 Smart Turn 语义判停，识别优先走 `StreamingAsr` 流式会话识别（失败回退整段），对话走 `build_turn_system_prompt` + `ThinkFilter` + `Segmenter` 切句并剥除仅小智副屏使用的句首表情，合成按分句逐句调用 `Tts::synthesize_stream` 与句界淡入淡出。
+- **验证**：新增 `n118_natural_workshop_tone_forbids_robotic_cliches_while_keeping_safety_gates`，扩展 `chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage` 覆盖逗号停顿双段人声合并、`<think>` 与句首表情剥离及 `Segmenter` 分句流式合成；`verify.mjs --finish` 通过并快更本机桌面程序。小智真机对话自然度未实机验证（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/conversation.rs`、`crates/moss-voice-host/src/builtin/chain_test.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`、内置语音技术书 n118。
+
 ### 读模型列表不再边打字边请求，裸域名提示改用 /v1，多模态模型回到语音分区（2026-11-24）
 
 - **现象**：上一条改动后，在地址或密钥框打字停顿 0.35 秒就读一次模型列表，密钥没输完先报一次鉴权失败；只填裸域名时 `/models` 404 后改读 `/v1/models` 能列出模型，但对话不补 `/v1` 会失败；能听音频的多模态对话模型只剩在“大模型”列表，原先在语音识别里选过的要改成手填。

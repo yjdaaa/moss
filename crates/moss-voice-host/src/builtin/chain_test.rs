@@ -22,8 +22,23 @@ impl BuiltinVoice {
         };
 
         const STEP_KEYS: [&str; 5] = ["vad", "asr", "jev", "llm", "tts"];
-        const DEFAULT_PROMPT: &str = "你好，汇报一下当前待命状态。";
+        const DEFAULT_PROMPT: &str = "你好，三毫米椴木刻字一般要注意什么？";
         const MAX_AUDIO_BASE64_LEN: usize = 6 * 1024 * 1024;
+        /// 与真机会话 `moss_voice_server::session::PREROLL_MS`（1000 ms）一致：Silero / TEN-VAD 确认起音晚 0.4~0.9 秒，必须留足 1 秒前置音频才不会削掉句首字音。
+        const PREROLL_SAMPLES_16K: usize = 16_000;
+        const TAIL_PAD_SAMPLES_16K: usize = 3_200;
+
+        let strip_leading_screen_emoji = |text: &str| -> String {
+            let is_screen_emoji = |c: char| {
+                matches!(
+                    c as u32,
+                    0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D | 0x2B50 | 0x2B55
+                )
+            };
+            text.trim_start_matches(|c: char| is_screen_emoji(c) || c.is_whitespace())
+                .trim_end()
+                .to_owned()
+        };
 
         let truncate_chars = |text: &str, max_chars: usize| -> String {
             let clean = text.trim();
@@ -79,6 +94,22 @@ impl BuiltinVoice {
         let models = &settings.builtin_models;
         let colab = self.active_colab(&settings)?;
 
+        // n111：选了但还没下载的本地模型，实际对话会退回能量判停 / 云端（见 `local_models_report`），试跑跟它一致，
+        // 只在退回后的那一项也不可用时报错，并写明本地模型还没下载
+        let missing_local = |on: bool, id: &str, kind: ModelKind| -> Option<String> {
+            let spec = local_models::spec_of(id, kind)?;
+            (on && self.models.path_if_installed(spec.id).is_none()).then(|| spec.label.to_owned())
+        };
+        let missing_vad = missing_local(experience.vad, &experience.vad_model, ModelKind::Vad);
+        let missing_asr = missing_local(experience.asr, &experience.asr_model, ModelKind::Asr);
+        let missing_tts = missing_local(experience.tts, &experience.tts_model, ModelKind::Tts);
+        let fallback_note = |missing: &Option<String>| {
+            missing
+                .as_ref()
+                .map(|label| format!("（本地“{label}”还没下载，和实际对话一样先用它）"))
+                .unwrap_or_default()
+        };
+
         // 内置服务已运行且加载了同款本地模型时直接复用，否则按需启动隔离的临时 LocalHelper（结束即自动回收）
         let (mut local_parts, _helper_guard) = match self
             .local_parts_for_chain_test(experience, colab.is_some())
@@ -86,9 +117,30 @@ impl BuiltinVoice {
             Ok(pair) => pair,
             Err(err) => {
                 let msg = err.message.clone();
-                let target = if msg.contains("本地判停") {
+                let installed = |kind: ModelKind| {
+                    experience
+                        .selected(kind)
+                        .is_some_and(|spec| self.models.path_if_installed(spec.id).is_some())
+                };
+                let vad_uses_local = installed(ModelKind::Vad) || installed(ModelKind::Turn);
+                let asr_uses_local = installed(ModelKind::Asr);
+                let target = if msg.contains("本地判停")
+                    || msg.contains("语义判停")
+                    || msg.contains("本地降噪")
+                    || msg.contains("命令词抗噪")
+                {
                     "vad"
                 } else if msg.contains("本地识别") {
+                    "asr"
+                } else if msg.contains("本地合成")
+                    || msg.contains("本地语音合成")
+                    || msg.contains("音色")
+                    || msg.contains("speech")
+                {
+                    "tts"
+                } else if vad_uses_local {
+                    "vad"
+                } else if asr_uses_local {
                     "asr"
                 } else {
                     "tts"
@@ -116,22 +168,6 @@ impl BuiltinVoice {
             self.secret(sec)
                 .map(Option::unwrap_or_default)
                 .map_err(|e| e.message)
-        };
-
-        // n111：选了但还没下载的本地模型，实际对话会退回能量判停 / 云端（见 `local_models_report`），试跑跟它一致，
-        // 只在退回后的那一项也不可用时报错，并写明本地模型还没下载
-        let missing_local = |on: bool, id: &str, kind: ModelKind| -> Option<String> {
-            let spec = local_models::spec_of(id, kind)?;
-            (on && self.models.path_if_installed(spec.id).is_none()).then(|| spec.label.to_owned())
-        };
-        let missing_vad = missing_local(experience.vad, &experience.vad_model, ModelKind::Vad);
-        let missing_asr = missing_local(experience.asr, &experience.asr_model, ModelKind::Asr);
-        let missing_tts = missing_local(experience.tts, &experience.tts_model, ModelKind::Tts);
-        let fallback_note = |missing: &Option<String>| {
-            missing
-                .as_ref()
-                .map(|label| format!("（本地“{label}”还没下载，和实际对话一样先用它）"))
-                .unwrap_or_default()
         };
 
         // 提前构造主 TTS（第 5 棒必用；免麦模式下第 0 棒也可借它生成真实中文人声种子录音）
@@ -235,11 +271,11 @@ impl BuiltinVoice {
             let secs = mono_16k.len() as f64 / 16_000.0;
             let preview_wav = moss_voice_providers::wav::encode_wav(&mono_16k, 16_000);
             let data_url = moss_voice::models::audio_data_url(&preview_wav, "audio/wav");
-            // 前后留足静音段以便 VAD 检测起音与 200ms 尾部静音收口
-            let mut framed = Vec::with_capacity(2_560 + mono_16k.len() + 8_320);
-            framed.resize(2_560, 0i16);
+            // 前后留足静音段（前 500ms、后 800ms）以便本地 Silero / TEN-VAD 建立底噪收口并留够命令词抗噪尾音窗口
+            let mut framed = Vec::with_capacity(8_000 + mono_16k.len() + 12_800);
+            framed.resize(8_000, 0i16);
             framed.extend_from_slice(&mono_16k);
-            framed.resize(framed.len() + 8_320, 0i16);
+            framed.resize(framed.len() + 12_800, 0i16);
             (
                 framed,
                 format!("麦克风真声录音（{secs:.1} 秒）"),
@@ -324,10 +360,10 @@ impl BuiltinVoice {
             };
             let preview_wav = moss_voice_providers::wav::encode_wav(&mono_16k, 16_000);
             let data_url = moss_voice::models::audio_data_url(&preview_wav, "audio/wav");
-            let mut framed = Vec::with_capacity(3_840 + mono_16k.len() + 8_320);
-            framed.resize(3_840, 0i16);
+            let mut framed = Vec::with_capacity(8_000 + mono_16k.len() + 12_800);
+            framed.resize(8_000, 0i16);
             framed.extend_from_slice(&mono_16k);
-            framed.resize(framed.len() + 8_320, 0i16);
+            framed.resize(framed.len() + 12_800, 0i16);
             (
                 framed,
                 format!("内置测试人声：“{}”", truncate_chars(&prompt_text, 24)),
@@ -335,8 +371,24 @@ impl BuiltinVoice {
             )
         };
 
-        // ---------------- 第 1 棒：1. 拾音判停 (VAD) ----------------
+        // ---------------- 第 1 棒：1. 拾音判停 (VAD + 命令词抗噪 / 降噪 / 语义判停) ----------------
         let vad_started = std::time::Instant::now();
+        let turn_predictor = local_parts.turn_predictor.take();
+        let mut addon_notes = Vec::new();
+        if local_parts.denoise_active.is_some() {
+            addon_notes.push("降噪");
+        }
+        if local_parts.kws_active.is_some() {
+            addon_notes.push("命令词抗噪");
+        }
+        if local_parts.turn_active.is_some() {
+            addon_notes.push("语义判停");
+        }
+        let addon_suffix = if addon_notes.is_empty() {
+            String::new()
+        } else {
+            format!("（+ {}）", addon_notes.join("、"))
+        };
         let (mut vad, vad_label): (Box<dyn Vad>, String) = if experience.vad
             && missing_vad.is_none()
         {
@@ -384,16 +436,20 @@ impl BuiltinVoice {
                     msg,
                 ));
             };
-            (instance, format!("本地 {label}"))
+            (instance, format!("本地 {label}{addon_suffix}"))
         } else {
             (
                 Box::new(EnergyVad::new(16_000, VadConfig::default())),
-                format!("内置能量判停{}", fallback_note(&missing_vad)),
+                format!("内置能量判停{}{addon_suffix}", fallback_note(&missing_vad)),
             )
         };
 
+        // 完整扫描整段音频并合并句中逗号停顿分割的多段语音（对齐真机 `Session` 续听合并，不在首个 250ms 逗号停顿处截断后半句）
         let mut speech_start_idx: Option<usize> = None;
         let mut speech_end_idx: Option<usize> = None;
+        let mut in_speech = false;
+        let mut segment_count = 0usize;
+        let mut heard_keyword: Option<moss_voice_providers::local::CommandKeyword> = None;
         let mut vad_error_notice: Option<String> = None;
         for (chunk_i, frame) in test_pcm_16k.chunks(320).enumerate() {
             let sample_pos = chunk_i * 320;
@@ -404,22 +460,30 @@ impl BuiltinVoice {
             }
             for ev in events {
                 match ev {
-                    VadEvent::SpeechStart if speech_start_idx.is_none() => {
-                        speech_start_idx = Some(sample_pos);
+                    VadEvent::SpeechStart => {
+                        if speech_start_idx.is_none() {
+                            speech_start_idx = Some(sample_pos);
+                        }
+                        if !in_speech {
+                            segment_count += 1;
+                            in_speech = true;
+                        }
                     }
-                    VadEvent::SpeechEnd
-                        if speech_start_idx.is_some() && speech_end_idx.is_none() =>
-                    {
+                    VadEvent::SpeechEnd if speech_start_idx.is_some() => {
                         speech_end_idx = Some(sample_pos + frame.len());
+                        in_speech = false;
+                    }
+                    VadEvent::Keyword(kind) => {
+                        heard_keyword = Some(kind);
                     }
                     _ => {}
                 }
             }
-            if speech_end_idx.is_some() {
-                break;
-            }
         }
-        let vad_ms = vad_started.elapsed().as_millis() as u64;
+        if in_speech {
+            speech_end_idx = None;
+        }
+        let mut vad_ms = vad_started.elapsed().as_millis() as u64;
         if let Some(notice) = vad_error_notice {
             let msg = format!("本地判停推理异常：{notice}");
             steps.insert(
@@ -458,29 +522,47 @@ impl BuiltinVoice {
                 msg,
             ));
         };
-        let end_idx = speech_end_idx
+        let raw_end_idx = speech_end_idx
             .unwrap_or(test_pcm_16k.len())
             .min(test_pcm_16k.len());
-        let seg_from = start_idx.saturating_sub(2_560);
-        let speech_segment = &test_pcm_16k[seg_from..end_idx];
+        let seg_from = start_idx.saturating_sub(PREROLL_SAMPLES_16K);
+        let seg_to = raw_end_idx
+            .saturating_add(TAIL_PAD_SAMPLES_16K)
+            .min(test_pcm_16k.len());
+        let speech_segment = &test_pcm_16k[seg_from..seg_to];
+        let turn_note = if let Some(predictor) = turn_predictor.as_ref() {
+            let prob = crate::block_on(predictor.predict_turn_end(speech_segment, 16_000));
+            vad_ms = vad_started.elapsed().as_millis() as u64;
+            prob.map(|p| format!(" · 语义判停 {:.0}%", p * 100.0))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let start_ms_audio = (start_idx * 1000) / 16_000;
-        let end_ms_audio = (end_idx * 1000) / 16_000;
+        let end_ms_audio = (raw_end_idx * 1000) / 16_000;
+        let merge_note = if segment_count > 1 {
+            format!("（合并 {segment_count} 段气口）")
+        } else if speech_end_idx.is_some() {
+            " 并准确判停".to_owned()
+        } else {
+            "（至音频末尾）".to_owned()
+        };
         steps.insert(
-                "vad".into(),
-                serde_json::json!({
-                    "ok": true,
-                    "skipped": false,
-                    "elapsed_ms": vad_ms,
-                    "detail": format!(
-                        "{vad_label}：检出语音 {start_ms_audio}→{end_ms_audio} ms{}（耗时 {vad_ms} ms）",
-                        if speech_end_idx.is_some() { " 并准确判停" } else { "（至音频末尾）" }
-                    ),
-                }),
-            );
+            "vad".into(),
+            serde_json::json!({
+                "ok": true,
+                "skipped": false,
+                "elapsed_ms": vad_ms,
+                "detail": format!(
+                    "{vad_label}：检出语音 {start_ms_audio}→{end_ms_audio} ms{merge_note}{turn_note}（耗时 {vad_ms} ms）"
+                ),
+            }),
+        );
 
-        // ---------------- 第 2 棒：2. 语音识别 (ASR) ----------------
+        // ---------------- 第 2 棒：2. 语音识别 (ASR：对齐真机优先流式会话识别，失败回退整段) ----------------
         let asr_started = std::time::Instant::now();
         let hotwords = self.hotwords(experience);
+        let mut streaming_asr: Option<Arc<dyn StreamingAsr>> = None;
         let (asr_provider, asr_label): (Arc<dyn Asr>, String) = if experience.asr
             && missing_asr.is_none()
         {
@@ -509,6 +591,7 @@ impl BuiltinVoice {
                     msg,
                 ));
             };
+            streaming_asr = local_parts.streaming_asr.take();
             (Arc::new(local_asr), format!("本地 {label}"))
         } else {
             let Some(cloud) = models.asr.as_ref() else {
@@ -560,8 +643,10 @@ impl BuiltinVoice {
                 if cloud.kind == ProviderKind::Doubao {
                     DoubaoAsr::new(&cloud.url, &key, &cloud.model)
                         .map(|d| {
+                            let arc = Arc::new(d.with_hotwords(&hotwords));
+                            streaming_asr = Some(arc.clone());
                             (
-                                Arc::new(d.with_hotwords(&hotwords)) as Arc<dyn Asr>,
+                                arc as Arc<dyn Asr>,
                                 format!("豆包 {}{}", cloud.model, fallback_note(&missing_asr)),
                             )
                         })
@@ -599,7 +684,20 @@ impl BuiltinVoice {
             }
         };
 
-        let raw_heard = match crate::block_on(asr_provider.transcribe(speech_segment, 16_000)) {
+        let raw_heard = match crate::block_on(async {
+            if let Some(streaming) = streaming_asr.as_ref() {
+                let stream = streaming.start();
+                for chunk in speech_segment.chunks(1_600) {
+                    stream.feed(chunk);
+                }
+                match stream.finish().await {
+                    Ok(text) if !text.trim().is_empty() => Ok(text),
+                    _ => asr_provider.transcribe(speech_segment, 16_000).await,
+                }
+            } else {
+                asr_provider.transcribe(speech_segment, 16_000).await
+            }
+        }) {
             Ok(text) => text,
             Err(err) => {
                 let asr_ms = asr_started.elapsed().as_millis() as u64;
@@ -627,14 +725,20 @@ impl BuiltinVoice {
             experience.asr_homophone_fix,
             &experience.custom_asr_corrections,
         );
-        let mut recognized_text = raw_heard.trim().to_owned();
-        for (wrong, right) in &corrections {
-            if !wrong.is_empty() && wrong != right && recognized_text.contains(wrong.as_str()) {
-                recognized_text = recognized_text.replace(wrong.as_str(), right.as_str());
-            }
+        let mut recognized_text =
+            moss_voice_server::conversation::apply_asr_corrections(raw_heard.trim(), &corrections);
+        let mut kws_fused_note = "";
+        if let Some(kind) = heard_keyword
+            && let Some(fused) =
+                moss_voice_server::conversation::fuse_command_keyword_hint(kind, &recognized_text)
+        {
+            recognized_text = fused.to_owned();
+            kws_fused_note = " · 命令词抗噪纠偏";
         }
-        if recognized_text.trim().is_empty() {
-            let msg = "识别结果为空（未能从该段语音识别出文字）".to_owned();
+        if !moss_voice_providers::text::speakable(&recognized_text)
+            || moss_voice_server::fast::is_noise_filler(&recognized_text)
+        {
+            let msg = "识别结果为空或仅为语气杂音（未能从该段语音识别出有效文字）".to_owned();
             steps.insert(
                     "asr".into(),
                     serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": asr_ms, "detail": msg }),
@@ -659,16 +763,22 @@ impl BuiltinVoice {
                 "skipped": false,
                 "elapsed_ms": asr_ms,
                 "detail": format!(
-                    "{asr_label} → “{}”（{asr_ms} ms）",
+                    "{asr_label} → “{}”{kws_fused_note}（{asr_ms} ms）",
                     truncate_chars(&recognized_text, 22)
                 ),
             }),
         );
 
         // ---------------- 第 3 棒：3. Jev 前置粗筛 ----------------
-        let mut jev_options = JevFilterOptions {
+        let jev_model = moss_voice::settings::validate_jev_model(&experience.jev_model)
+            .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+        let local_jev_id = moss_voice::settings::canonical_local_jev_model(&jev_model);
+        let local_budget = local_jev_id
+            .and_then(|id| moss_voice::onejev::local_jev_budget(id, self.onejev_uses_gpu(id)));
+        let jev_options = JevFilterOptions {
             enabled: experience.jev_filter_enabled,
-            unfinished_hold: experience.jev_unfinished_hold,
+            unfinished_hold: experience.jev_unfinished_hold
+                && !local_budget.is_some_and(|b| b.hold_ms.is_none()),
             fast_route: experience.read_only_shortcuts && experience.jev_fast_route,
             tool_prune: experience.jev_tool_prune,
             memory_filter: experience.jev_memory_filter,
@@ -683,16 +793,18 @@ impl BuiltinVoice {
                     "detail": "已关闭，识别文本直通大模型",
                 }),
             );
+        } else if moss_voice_server::fast::is_stop(&recognized_text) {
+            steps.insert(
+                "jev".into(),
+                serde_json::json!({
+                    "ok": true,
+                    "skipped": true,
+                    "elapsed_ms": 0,
+                    "detail": "命中急停短令，按真机快路径免 Jev 直通",
+                }),
+            );
         } else {
             let jev_started = std::time::Instant::now();
-            let jev_model = moss_voice::settings::validate_jev_model(&experience.jev_model)
-                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
-            let local_jev_id = moss_voice::settings::canonical_local_jev_model(&jev_model);
-            let local_budget = local_jev_id
-                .and_then(|id| moss_voice::onejev::local_jev_budget(id, self.onejev_uses_gpu(id)));
-            if local_budget.is_some_and(|b| b.hold_ms.is_none()) {
-                jev_options.unfinished_hold = false;
-            }
             let filter_res: Result<VoiceJevFilter, String> = if let Some(local_id) = local_jev_id {
                 if self.models.path_if_installed(local_id).is_none() {
                     Err(format!("本地决策模型“{local_id}”尚未下载"))
@@ -757,45 +869,125 @@ impl BuiltinVoice {
             }));
             let specs = host_tools.specs();
             let total_specs = specs.len();
-            let decision =
-                crate::block_on(filter.evaluate_turn(&recognized_text, &[], &specs, &[]));
-            let jev_ms = jev_started.elapsed().as_millis() as u64;
-            if !decision.applied {
-                let msg = format!(
-                    "Jev（{jev_model}）请求超时或未返回有效判断，请检查密钥、余额或本地进程状态"
-                );
-                steps.insert(
+            if !jev_options.tool_prune && !jev_options.fast_route && !jev_options.memory_filter {
+                if moss_voice_server::fast::normalized(&recognized_text)
+                    .chars()
+                    .count()
+                    < 2
+                {
+                    steps.insert(
                         "jev".into(),
-                        serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": jev_ms, "detail": msg }),
+                        serde_json::json!({
+                            "ok": true,
+                            "skipped": true,
+                            "elapsed_ms": 0,
+                            "detail": "单字短句按真机规则免查尾音续听",
+                        }),
                     );
-                return Ok(make_response(
-                    false,
-                    Some("jev"),
-                    started_all.elapsed().as_millis() as u64,
-                    &seed_source,
-                    input_audio_url,
-                    Some(recognized_text),
-                    None,
-                    None,
-                    &steps,
-                    msg,
-                ));
-            }
-            let kept_specs = decision.filter_tools(&specs, &recognized_text, &[]).len();
-            let route_note = if decision.fast_read.is_some() {
-                "命中只读状态快答"
+                } else {
+                    let hold = crate::block_on(filter.check_unfinished_hold(
+                        &recognized_text,
+                        &[],
+                        &specs,
+                    ));
+                    let jev_ms = jev_started.elapsed().as_millis() as u64;
+                    if !hold.applied {
+                        let msg = format!(
+                            "Jev（{jev_model}）请求超时或未返回有效判断，请检查密钥、余额或本地进程状态"
+                        );
+                        steps.insert(
+                                "jev".into(),
+                                serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": jev_ms, "detail": msg }),
+                            );
+                        return Ok(make_response(
+                            false,
+                            Some("jev"),
+                            started_all.elapsed().as_millis() as u64,
+                            &seed_source,
+                            input_audio_url,
+                            Some(recognized_text),
+                            None,
+                            None,
+                            &steps,
+                            msg,
+                        ));
+                    }
+                    let state_label = if hold.unfinished {
+                        "未说完续听"
+                    } else {
+                        "已说完放行"
+                    };
+                    steps.insert(
+                        "jev".into(),
+                        serde_json::json!({
+                            "ok": true,
+                            "skipped": false,
+                            "elapsed_ms": jev_ms,
+                            "detail": format!("尾音续听检测：{state_label}（{jev_ms} ms）"),
+                        }),
+                    );
+                }
             } else {
-                "常规对话路由"
-            };
-            steps.insert(
-                    "jev".into(),
-                    serde_json::json!({
-                        "ok": true,
-                        "skipped": false,
-                        "elapsed_ms": jev_ms,
-                        "detail": format!("{route_note} · 工具保留 {kept_specs}/{total_specs}（{jev_ms} ms）"),
-                    }),
-                );
+                let sample_memories = if jev_options.memory_filter {
+                    vec!["常用材料：3mm 东北椴木，刻字功率 35%、速度 1800 mm/min".to_owned()]
+                } else {
+                    Vec::new()
+                };
+                let decision = crate::block_on(filter.evaluate_turn(
+                    &recognized_text,
+                    &[],
+                    &specs,
+                    &sample_memories,
+                ));
+                let jev_ms = jev_started.elapsed().as_millis() as u64;
+                if decision.local_bypass {
+                    steps.insert(
+                        "jev".into(),
+                        serde_json::json!({
+                            "ok": true,
+                            "skipped": true,
+                            "elapsed_ms": jev_ms,
+                            "detail": "当前句式按真机规则本地直通大模型",
+                        }),
+                    );
+                } else if !decision.applied {
+                    let msg = format!(
+                        "Jev（{jev_model}）请求超时或未返回有效判断，请检查密钥、余额或本地进程状态"
+                    );
+                    steps.insert(
+                            "jev".into(),
+                            serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": jev_ms, "detail": msg }),
+                        );
+                    return Ok(make_response(
+                        false,
+                        Some("jev"),
+                        started_all.elapsed().as_millis() as u64,
+                        &seed_source,
+                        input_audio_url,
+                        Some(recognized_text),
+                        None,
+                        None,
+                        &steps,
+                        msg,
+                    ));
+                } else {
+                    let kept_specs = decision.filter_tools(&specs, &recognized_text, &[]).len();
+                    let route_note = if decision.fast_read.is_some() {
+                        "命中只读状态快答"
+                    } else {
+                        "常规对话路由"
+                    };
+                    steps.insert(
+                            "jev".into(),
+                            serde_json::json!({
+                                "ok": true,
+                                "skipped": false,
+                                "elapsed_ms": jev_ms,
+                                "detail": format!("{route_note} · 工具保留 {kept_specs}/{total_specs}（{jev_ms} ms）"),
+                            }),
+                        );
+                }
+            }
         }
 
         // ---------------- 第 4 棒：4. 大模型回复 (LLM) ----------------
@@ -880,55 +1072,57 @@ impl BuiltinVoice {
         };
         self.persona.configure(persona_config(experience));
         let sys_prompt = format!(
-            "{}\n（当前是语音中心整链连贯测试，请简短自然地用一两句话回应用户，不要调用任何设备操作。）",
-            self.persona.system_prompt()
+            "{}\n（当前未连接硬件执行器，直接按角色自然口语作答即可。）",
+            moss_voice_server::conversation::build_turn_system_prompt(
+                &self.persona.system_prompt(),
+                true,
+                false,
+            )
         );
         let messages = vec![
             ChatMessage::system(sys_prompt),
             ChatMessage::user(recognized_text.clone()),
         ];
-        let (llm_outcome, first_delta_ms) = crate::block_on(async {
+        let (llm_outcome, first_delta_ms, segmented_sentences) = crate::block_on(async {
+            use moss_voice_providers::text::{Segmenter, ThinkFilter};
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let t0 = std::time::Instant::now();
             let first_slot = Arc::new(Mutex::new(None::<u64>));
             let first_clone = first_slot.clone();
             let drain = tokio::spawn(async move {
+                let mut think = ThinkFilter::default();
+                let mut segmenter = Segmenter::new();
+                let mut sentences = Vec::new();
                 while let Some(chunk) = rx.recv().await {
-                    if !chunk.is_empty()
-                        && let Ok(mut guard) = first_clone.lock()
-                        && guard.is_none()
-                    {
-                        *guard = Some(t0.elapsed().as_millis() as u64);
+                    let clean_delta = think.push(&chunk);
+                    if !clean_delta.is_empty() {
+                        if let Ok(mut guard) = first_clone.lock()
+                            && guard.is_none()
+                        {
+                            *guard = Some(t0.elapsed().as_millis() as u64);
+                        }
+                        sentences.extend(segmenter.push(&clean_delta, std::time::Instant::now()));
                     }
                 }
+                let tail = think.finish();
+                if !tail.is_empty() {
+                    sentences.extend(segmenter.push(&tail, std::time::Instant::now()));
+                }
+                if let Some(rest) = segmenter.finish() {
+                    sentences.push(rest);
+                }
+                sentences
             });
             let reply = llm_client.chat(&messages, &[], tx).await;
-            let _ = drain.await;
+            let sentences = drain.await.unwrap_or_default();
             let first_ms = first_slot.lock().ok().and_then(|g| *g);
-            (reply, first_ms)
+            (reply, first_ms, sentences)
         });
         let llm_ms = llm_started.elapsed().as_millis() as u64;
-        let reply_text = match llm_outcome {
-            Ok(rep) if !rep.text.trim().is_empty() => rep.text.trim().to_owned(),
-            Ok(_) => {
-                let msg = "大模型未返回可读回复内容".to_owned();
-                steps.insert(
-                        "llm".into(),
-                        serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": llm_ms, "detail": msg }),
-                    );
-                return Ok(make_response(
-                    false,
-                    Some("llm"),
-                    started_all.elapsed().as_millis() as u64,
-                    &seed_source,
-                    input_audio_url,
-                    Some(recognized_text),
-                    None,
-                    None,
-                    &steps,
-                    msg,
-                ));
-            }
+        let raw_reply_text = match llm_outcome {
+            Ok(rep) => moss_voice_providers::text::strip_think(&rep.text)
+                .trim()
+                .to_owned(),
             Err(e) => {
                 let msg = e.to_string();
                 steps.insert(
@@ -949,6 +1143,26 @@ impl BuiltinVoice {
                 ));
             }
         };
+        let reply_text = strip_leading_screen_emoji(&raw_reply_text);
+        if reply_text.is_empty() {
+            let msg = "大模型未返回可读回复内容".to_owned();
+            steps.insert(
+                    "llm".into(),
+                    serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": llm_ms, "detail": msg }),
+                );
+            return Ok(make_response(
+                false,
+                Some("llm"),
+                started_all.elapsed().as_millis() as u64,
+                &seed_source,
+                input_audio_url,
+                Some(recognized_text),
+                None,
+                None,
+                &steps,
+                msg,
+            ));
+        }
         let first_note = first_delta_ms
             .map(|ms| format!("首字 {ms} ms · "))
             .unwrap_or_default();
@@ -965,7 +1179,7 @@ impl BuiltinVoice {
             }),
         );
 
-        // ---------------- 第 5 棒：5. 语音合成 (TTS) ----------------
+        // ---------------- 第 5 棒：5. 语音合成 (TTS：对齐真机按 Segmenter 分句流式合成与边界淡入淡出) ----------------
         let tts_started = std::time::Instant::now();
         let (tts_provider, tts_label) = match main_tts {
             Ok(pair) => pair,
@@ -988,11 +1202,82 @@ impl BuiltinVoice {
                 ));
             }
         };
-        let mut speak_text = moss_voice_providers::text::clean_for_speech(&reply_text);
-        if speak_text.trim().is_empty() {
-            speak_text = "收到。".to_owned();
+        let mut sentences_to_speak: Vec<String> = segmented_sentences
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        if sentences_to_speak.is_empty() {
+            let mut fallback = moss_voice_providers::text::clean_for_speech(&reply_text);
+            if fallback.trim().is_empty() {
+                fallback = "收到。".to_owned();
+            }
+            sentences_to_speak.push(fallback);
         }
-        let reply_pcm = match crate::block_on(tts_provider.synthesize(&speak_text)) {
+        let sentence_count = sentences_to_speak.len();
+        let stream_tts_res: Result<moss_voice_providers::Pcm, moss_voice_providers::ProviderError> =
+            crate::block_on(async {
+                use moss_voice_server::audio::{
+                    BOUNDARY_FADE_MS, CLAUSE_SILENCE_KEEP_MS, CLAUSE_SILENCE_TRIGGER_MS,
+                    fade_head_i16, fade_tail_i16, trim_trailing_silence_i16,
+                };
+                let mut merged_samples: Vec<i16> = Vec::new();
+                let mut out_rate: u32 = 0;
+                for sentence in &sentences_to_speak {
+                    let (chunks_tx, mut chunks_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<moss_voice_providers::Pcm>();
+                    let synth_fut = tts_provider.synthesize_stream(sentence, chunks_tx);
+                    let collect_fut = async {
+                        let mut clause = Vec::new();
+                        let mut clause_rate: u32 = 0;
+                        while let Some(pcm) = chunks_rx.recv().await {
+                            if pcm.samples.is_empty() || pcm.sample_rate == 0 {
+                                continue;
+                            }
+                            if clause_rate == 0 {
+                                clause_rate = pcm.sample_rate;
+                            }
+                            if pcm.sample_rate == clause_rate {
+                                clause.extend_from_slice(&pcm.samples);
+                            } else {
+                                let resampled = moss_voice_providers::resample::Resampler::new(
+                                    pcm.sample_rate,
+                                    clause_rate,
+                                )
+                                .process(&pcm.samples);
+                                clause.extend_from_slice(&resampled);
+                            }
+                        }
+                        (clause, clause_rate)
+                    };
+                    let (synth_res, (mut clause_samples, clause_rate)) =
+                        tokio::join!(synth_fut, collect_fut);
+                    synth_res?;
+                    if clause_samples.is_empty() || clause_rate == 0 {
+                        continue;
+                    }
+                    if out_rate == 0 {
+                        out_rate = clause_rate;
+                    } else if clause_rate != out_rate {
+                        clause_samples =
+                            moss_voice_providers::resample::Resampler::new(clause_rate, out_rate)
+                                .process(&clause_samples);
+                    }
+                    trim_trailing_silence_i16(
+                        &mut clause_samples,
+                        out_rate,
+                        CLAUSE_SILENCE_KEEP_MS,
+                        CLAUSE_SILENCE_TRIGGER_MS,
+                    );
+                    fade_head_i16(&mut clause_samples, out_rate, BOUNDARY_FADE_MS);
+                    fade_tail_i16(&mut clause_samples, out_rate, BOUNDARY_FADE_MS);
+                    merged_samples.extend_from_slice(&clause_samples);
+                }
+                Ok(moss_voice_providers::Pcm {
+                    samples: merged_samples,
+                    sample_rate: out_rate,
+                })
+            });
+        let reply_pcm = match stream_tts_res {
             Ok(pcm) if !pcm.samples.is_empty() && pcm.sample_rate > 0 => pcm,
             Ok(_) => {
                 let tts_ms = tts_started.elapsed().as_millis() as u64;
@@ -1040,13 +1325,18 @@ impl BuiltinVoice {
         let reply_wav =
             moss_voice_providers::wav::encode_wav(&reply_pcm.samples, reply_pcm.sample_rate);
         let reply_audio_url = moss_voice::models::audio_data_url(&reply_wav, "audio/wav");
+        let clause_note = if sentence_count > 1 {
+            format!("（分 {sentence_count} 句流式合成）")
+        } else {
+            String::new()
+        };
         steps.insert(
             "tts".into(),
             serde_json::json!({
                 "ok": true,
                 "skipped": false,
                 "elapsed_ms": tts_ms,
-                "detail": format!("{tts_label} → 合成 {reply_secs:.1} 秒语音（{tts_ms} ms）"),
+                "detail": format!("{tts_label} → 合成 {reply_secs:.1} 秒语音{clause_note}（{tts_ms} ms）"),
             }),
         );
 

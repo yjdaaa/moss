@@ -29,14 +29,15 @@ use tokio::time::Instant;
 
 macro_rules! plain_head {
     () => {
-        "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。"
+        "你是 MOSS，运行在用户电脑上的激光工坊中文语音助手，通过小智设备与用户对话。\
+说话像在工坊旁边搭手的熟人，自然松弛、直接说正事，别说“请说指令”“请下达指令”“随时待命”“有什么可以帮您”这类客服对讲机套话。"
     };
 }
 
 macro_rules! immutable_safety_rules {
     () => {
         "回答要简短、口语化，一般不超过三句话；不要使用 Markdown、列表和代码块，句子中间不要用表情符号，因为你的回答会被直接朗读出来。\
-像面对面聊天那样说话：开口就直接回答，不要先复述问题或说客套话；开头那句尤其要短，头几个字就用逗号断开，可以用“好，”“嗯，”“行，”这类口语承接，也可以先说结论的前半句，比如“现在空闲，……”，但不要每次都用同一个词；之后的句子也要短，一句话超过十五个字就用逗号断开；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
+像面对面聊天那样说话：开口就直接回答结论，不要先复述问题、说客套话，也不要硬塞“好，”“嗯，”拆成两三字的碎顿；回答只有一句短话时一口气自然说完，有两句以上或句子较长时，第一小句在六到十二个字处自然停顿断开，方便先开口播报；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
 内容比较多时先说最要紧的一两句，再问要不要接着听。\
 用户的话是语音识别出来的，可能有同音错字或不完整，按最可能的意思理解，不要纠正用户的用词；确实听不明白就简短地请他再说一遍。\
 可以在整段回答的最开头放一个表情（😊 开心、🤔 思考、😮 惊讶、😢 难过），它只用来切换小智屏幕上的表情、不会被读出来；没有合适的就不放。\
@@ -280,6 +281,83 @@ pub(crate) fn command_hint_fits(
                         || EXIT_HINT_CHARS.contains(c))
             })
         })
+}
+
+/// 命令词模型命中后对识别文本做融合改判（供会话与全链路连贯试跑共用同一规则）：
+/// 已是明确停止 / 退出意图时不改；仅在识别文本为空或 ≤4 字且符合同字 / 近音条件时改判为“停”或“退下”。
+pub fn fuse_command_keyword_hint(
+    kind: moss_voice_providers::local::CommandKeyword,
+    text: &str,
+) -> Option<&'static str> {
+    if crate::fast::is_stop(text) {
+        return None;
+    }
+    let dummy_settings = ConversationSettings::default();
+    if is_exit_phrase(text, &dummy_settings.exit_words) {
+        return None;
+    }
+    let normalized = crate::fast::normalized(text);
+    if !command_hint_fits(kind, &normalized) {
+        return None;
+    }
+    Some(match kind {
+        moss_voice_providers::local::CommandKeyword::Stop => "停",
+        moss_voice_providers::local::CommandKeyword::Exit => "退下",
+    })
+}
+
+fn is_exit_phrase(text: &str, exit_words: &[String]) -> bool {
+    const PREFIXES: &[&str] = &[
+        "你好小智",
+        "小智同学",
+        "小智",
+        "好了",
+        "好的",
+        "好吧",
+        "行了",
+        "可以了",
+        "那就",
+        "那你",
+        "那",
+        "你可以",
+        "你先",
+        "你就",
+        "你",
+        "先",
+    ];
+    const SUFFIXES: &[&str] = &["去吧", "吧", "了", "啊", "啦", "呀", "哦", "咯"];
+    let normalized = crate::fast::normalized(text);
+    let mut core = normalized.as_str();
+    let matches = |core: &str| {
+        !core.is_empty()
+            && exit_words.iter().any(|word| {
+                let w = crate::fast::normalized(word);
+                !w.is_empty()
+                    && core.strip_prefix(&w).is_some_and(|rest| {
+                        rest.is_empty() || rest == w || rest.strip_prefix(&w) == Some(w.as_str())
+                    })
+            })
+    };
+    if matches(core) {
+        return true;
+    }
+    for _ in 0..3 {
+        if let Some(rest) = PREFIXES.iter().find_map(|p| core.strip_prefix(p)) {
+            core = rest;
+            if matches(core) {
+                return true;
+            }
+        }
+    }
+    for _ in 0..2 {
+        if let Some(rest) = SUFFIXES.iter().find_map(|p| core.strip_suffix(p)) {
+            core = rest;
+            if matches(core) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 只读慢查询转到后台时说的话（n100）
@@ -773,59 +851,7 @@ impl Conversation {
     /// 整句退出意图：去掉称呼、起头词与句尾语气词后与退出词（或其连说两三遍，如“退下退下”“再见再见”）完全相等
     /// （“小智退下吧”“好了你退下”算，“不要退下”“退出登录”不算，留给正常对话）。
     pub(crate) fn is_exit(&self, text: &str) -> bool {
-        const PREFIXES: &[&str] = &[
-            "你好小智",
-            "小智同学",
-            "小智",
-            "好了",
-            "好的",
-            "好吧",
-            "行了",
-            "可以了",
-            "那就",
-            "那你",
-            "那",
-            "你可以",
-            "你先",
-            "你就",
-            "你",
-            "先",
-        ];
-        const SUFFIXES: &[&str] = &["去吧", "吧", "了", "啊", "啦", "呀", "哦", "咯"];
-        let normalized = crate::fast::normalized(text);
-        let mut core = normalized.as_str();
-        let matches = |core: &str| {
-            !core.is_empty()
-                && self.settings.exit_words.iter().any(|word| {
-                    let w = crate::fast::normalized(word);
-                    !w.is_empty()
-                        && core.strip_prefix(&w).is_some_and(|rest| {
-                            rest.is_empty()
-                                || rest == w
-                                || rest.strip_prefix(&w) == Some(w.as_str())
-                        })
-                })
-        };
-        if matches(core) {
-            return true;
-        }
-        for _ in 0..3 {
-            if let Some(rest) = PREFIXES.iter().find_map(|p| core.strip_prefix(p)) {
-                core = rest;
-                if matches(core) {
-                    return true;
-                }
-            }
-        }
-        for _ in 0..2 {
-            if let Some(rest) = SUFFIXES.iter().find_map(|p| core.strip_suffix(p)) {
-                core = rest;
-                if matches(core) {
-                    return true;
-                }
-            }
-        }
-        false
+        is_exit_phrase(text, &self.settings.exit_words)
     }
 
     async fn cached_speech(&self, text: &str) -> Result<Pcm, ProviderError> {

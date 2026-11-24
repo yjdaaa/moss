@@ -37,7 +37,7 @@ impl RunningLocalSpec {
 pub(super) struct LocalParts {
     pub(super) asr: Option<LocalAsr>,
     /// 选用流式识别模型时：边说边识别（整段识别 `asr` 作为它失败时的退路）
-    streaming_asr: Option<Arc<dyn StreamingAsr>>,
+    pub(super) streaming_asr: Option<Arc<dyn StreamingAsr>>,
     pub(super) tts: Option<Arc<dyn Tts>>,
     /// 选用 `speech.cpp`（Qwen3-TTS）时的长驻子进程句柄。
     pub(super) speech_worker: Option<SpeechCppWorker>,

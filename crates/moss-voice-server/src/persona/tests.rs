@@ -382,6 +382,27 @@ fn n75_four_roles_risk_notes_switch_and_legacy_ids() {
     );
 }
 
+#[test]
+fn n118_natural_workshop_tone_forbids_robotic_cliches_while_keeping_safety_gates() {
+    let workshop = config("workshop", vec![]).system_prompt();
+    assert!(workshop.contains("别说“请说指令”"));
+    assert!(workshop.contains("一口气自然说完"));
+    assert!(workshop.contains("六到十二个字处自然停顿断开"));
+    assert!(!workshop.contains("头几个字就用逗号断开"));
+    for gate in [
+        "PVC 与含氯材料一律拒绝加工",
+        "确认开始吗",
+        "confirmed=true",
+        "确认走边框吗",
+        "不需要确认",
+    ] {
+        assert!(workshop.contains(gate), "safety gate missing: {gate}");
+    }
+    let station = config("moss_station", vec![]).system_prompt();
+    assert!(station.contains("550W 量子计算机"));
+    assert!(station.ends_with(IMMUTABLE_SAFETY_RULES));
+}
+
 #[tokio::test]
 async fn revoked_voice_session_cannot_switch_persona() {
     use std::sync::atomic::{AtomicBool, Ordering};

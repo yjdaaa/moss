@@ -633,9 +633,13 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
     // 2. 启动本机回环假 OpenAI 语音 + 对话服务端（覆盖 TTS 种子语音 + ASR 识别 + LLM 流式回复 + TTS 最终合成）
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let asr_wav_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let asr_wav_samples_srv = asr_wav_samples.clone();
+    let tts_call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tts_call_count_srv = tts_call_count.clone();
     let server_handle = std::thread::spawn(move || {
-        // 共接收 3 个请求：第 0 棒 TTS 种子语音 -> 第 2 棒 ASR 识别 -> 第 4 棒 LLM 回复 -> 第 5 棒 TTS 回复合成（共 4 个连接）
-        for _ in 0..4 {
+        // 共接收 5 个连接：0 棒种子 TTS (1) + 2 棒 ASR (1) + 4 棒 LLM (1) + 5 棒分 2 句流式 TTS (2)
+        for _ in 0..5 {
             let Ok((mut stream, _)) = listener.accept() else {
                 break;
             };
@@ -675,13 +679,32 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
             let req_head = String::from_utf8_lossy(&req_buf);
             let first_line = req_head.lines().next().unwrap_or("");
             if first_line.contains("/audio/speech") {
-                // 返回 0.6 秒高幅值 16kHz 正弦人声模拟波，确保 EnergyVad 稳定触发 SpeechStart 与尾部静音 SpeechEnd
-                let samples: Vec<i16> = (0..9_600)
-                    .map(|i| {
-                        ((i as f64 / 16_000.0 * 320.0 * std::f64::consts::TAU).sin() * 12_000.0)
-                            as i16
-                    })
-                    .collect();
+                let call_idx = tts_call_count_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let samples: Vec<i16> = if call_idx == 0 {
+                    // 第 0 棒种子音频：两段人声中间隔 360 ms 逗号静音（> 250ms 静音判停阈值），验证不会在“你好，”处提前截断后半句
+                    let mut two_clauses = Vec::with_capacity(5_600 + 5_760 + 7_200);
+                    for i in 0..5_600 {
+                        two_clauses.push(
+                            ((i as f64 / 16_000.0 * 320.0 * std::f64::consts::TAU).sin() * 12_000.0)
+                                as i16,
+                        );
+                    }
+                    two_clauses.resize(two_clauses.len() + 5_760, 0i16);
+                    for i in 0..7_200 {
+                        two_clauses.push(
+                            ((i as f64 / 16_000.0 * 360.0 * std::f64::consts::TAU).sin() * 12_000.0)
+                                as i16,
+                        );
+                    }
+                    two_clauses
+                } else {
+                    (0..6_400)
+                        .map(|i| {
+                            ((i as f64 / 16_000.0 * 320.0 * std::f64::consts::TAU).sin() * 10_000.0)
+                                as i16
+                        })
+                        .collect()
+                };
                 let wav = moss_voice_providers::wav::encode_wav(&samples, 16_000);
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -690,8 +713,24 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(&wav);
             } else if first_line.contains("/audio/transcriptions") {
+                if let Some(riff_pos) = req_buf.windows(4).position(|w| w == b"RIFF")
+                    && req_buf.len() >= riff_pos + 8
+                {
+                    let chunk_size = u32::from_le_bytes([
+                        req_buf[riff_pos + 4],
+                        req_buf[riff_pos + 5],
+                        req_buf[riff_pos + 6],
+                        req_buf[riff_pos + 7],
+                    ]) as usize;
+                    let wav_end = (riff_pos + 8 + chunk_size).min(req_buf.len());
+                    if let Ok(decoded) =
+                        moss_voice_providers::wav::decode_wav(&req_buf[riff_pos..wav_end])
+                    {
+                        *asr_wav_samples_srv.lock().unwrap() = decoded.samples;
+                    }
+                }
                 // 返回含同音错词“段木”的识别结果，顺带验证链内同音纠偏生效
-                let body = r#"{"text":"你好看看段木状态"}"#.as_bytes();
+                let body = r#"{"text":"你好三毫米段木刻字要注意什么"}"#.as_bytes();
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -700,7 +739,8 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
                 let _ = stream.write_all(body);
             } else if first_line.contains("/chat/completions") {
                 let sse = concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"😊 我在线，东北椴木参数已就绪。\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"<think>先过一遍椴木参数</think>😊 三毫米椴木建议先对准焦距，\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"雕刻前走一遍边框确认位置。\"}}]}\n\n",
                     "data: [DONE]\n\n"
                 );
                 let head = format!(
@@ -731,15 +771,48 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
 
     assert_eq!(out["ok"], true, "five-step chain test failed: {out}");
     assert!(out["failed_step"].is_null());
-    assert_eq!(
-        out["recognized_text"], "你好看看椴木状态",
-        "同音纠偏应在连贯识别环节生效"
+    let uploaded_asr = asr_wav_samples.lock().unwrap().clone();
+    assert!(
+        uploaded_asr.len() >= 25_000,
+        "ASR 应收到含前置缓冲与合并两段气口后的完整音频（>=1.56s），实际仅 {} 采样点",
+        uploaded_asr.len()
+    );
+    let active_tail = uploaded_asr[uploaded_asr.len() - 8_000..]
+        .iter()
+        .filter(|s| s.unsigned_abs() > 3_000)
+        .count();
+    assert!(
+        active_tail > 500,
+        "逗号停顿后的第二段人声不得被提前截断，尾段高幅值采样数: {active_tail}"
     );
     assert!(
-        out["reply_text"]
+        out["steps"]["vad"]["detail"]
             .as_str()
             .unwrap_or("")
-            .contains("东北椴木参数已就绪")
+            .contains("合并 2 段气口"),
+        "VAD 详情应标明合并了逗号分隔的两段语音: {}",
+        out["steps"]["vad"]["detail"]
+    );
+    assert_eq!(
+        out["recognized_text"], "你好三毫米椴木刻字要注意什么",
+        "同音纠偏应在连贯识别环节生效"
+    );
+    assert_eq!(
+        out["reply_text"], "三毫米椴木建议先对准焦距，雕刻前走一遍边框确认位置。",
+        "连贯试跑展示文案应剥除 <think> 与仅用于小智副屏切换的句首表情"
+    );
+    assert!(
+        out["steps"]["tts"]["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("分 2 句流式合成"),
+        "TTS 应按 Segmenter 切句逐句流式合成: {}",
+        out["steps"]["tts"]["detail"]
+    );
+    assert_eq!(
+        tts_call_count.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "TTS 调用次数应为 1 次种子生成 + 2 次分句流式合成"
     );
     assert!(
         out["input_audio_data_url"]
@@ -767,6 +840,136 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
         out.to_string().contains("还没下载，和实际对话一样先用它"),
         "退回时要写明本地模型还没下载：{out}"
     );
+
+    // 2b. 纯标点/语气杂音识别在 ASR 阶段拦截；“停”受同音纠偏保护且开启 Jev 时按真机快路径免 Jev 直通而不误报 Jev 失败
+    {
+        use base64::Engine as _;
+        let mic_samples: Vec<i16> = (0..9_600)
+            .map(|i| {
+                ((i as f64 / 16_000.0 * 320.0 * std::f64::consts::TAU).sin() * 12_000.0) as i16
+            })
+            .collect();
+        let mic_b64 = base64::engine::general_purpose::STANDARD
+            .encode(moss_voice_providers::wav::encode_wav(&mic_samples, 16_000));
+
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let handle2 = std::thread::spawn(move || {
+            // 第 1 次：ASR 返回纯标点“。。。” -> 应在 asr 结束，不请求后续环节
+            // 第 2 次：ASR 返回“停” -> 应保护“停”不被同音纠偏改写、Jev skipped 直通，再完成 LLM + TTS（共 1 + 3 = 4 次连接）
+            let mut asr_turn = 0usize;
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener2.accept() else {
+                    break;
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .ok();
+                let mut req_buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut header_end = None;
+                let mut content_len = 0usize;
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            req_buf.extend_from_slice(&chunk[..n]);
+                            if header_end.is_none()
+                                && let Some(pos) = req_buf.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                let head_str = String::from_utf8_lossy(&req_buf[..pos]);
+                                for line in head_str.lines() {
+                                    if let Some(rest) =
+                                        line.to_ascii_lowercase().strip_prefix("content-length:")
+                                    {
+                                        content_len = rest.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                                header_end = Some(pos + 4);
+                            }
+                            if let Some(h_end) = header_end
+                                && req_buf.len() >= h_end + content_len
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let first_line = String::from_utf8_lossy(&req_buf)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                if first_line.contains("/audio/transcriptions") {
+                    let body = if asr_turn == 0 {
+                        asr_turn += 1;
+                        r#"{"text":"。。。"}"#.as_bytes()
+                    } else {
+                        r#"{"text":"停机"}"#.as_bytes()
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                } else if first_line.contains("/chat/completions") {
+                    let sse = concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"已停下。\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        sse.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(sse.as_bytes());
+                } else if first_line.contains("/audio/speech") {
+                    let samples: Vec<i16> = (0..6_400).map(|_| 4_000i16).collect();
+                    let wav = moss_voice_providers::wav::encode_wav(&samples, 16_000);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        wav.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&wav);
+                }
+            }
+        });
+
+        let base_url2 = format!("http://{addr2}/v1");
+        builtin
+            .models_save(
+                &serde_json::from_value(serde_json::json!({
+                    "asr": { "kind": "openai", "url": format!("{base_url2}/audio/transcriptions"), "api_key": "test-key", "model": "whisper-1" },
+                    "llm": { "kind": "openai", "url": base_url2, "api_key": "test-key", "model": "qwen-test" },
+                    "tts": { "kind": "openai", "url": format!("http://{addr2}/v1/audio/speech"), "api_key": "test-key", "model": "tts-1", "voice": "alloy", "speed": 1.0 }
+                }))
+                .unwrap(),
+                &[],
+            )
+            .unwrap();
+        builtin
+            .local_save(&serde_json::json!({
+                "jev_filter_enabled": true,
+                "custom_asr_corrections": ["机=鸡"]
+            }))
+            .unwrap();
+
+        let punct_out = builtin
+            .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
+            .unwrap();
+        assert_eq!(punct_out["ok"], false);
+        assert_eq!(punct_out["failed_step"], "asr", "{punct_out}");
+
+        let stop_out = builtin
+            .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
+            .unwrap();
+        let _ = handle2.join();
+        assert_eq!(stop_out["ok"], true, "{stop_out}");
+        assert_eq!(stop_out["recognized_text"], "停机");
+        assert_eq!(stop_out["steps"]["jev"]["skipped"], true);
+    }
 
     // 3. 单飞互斥锁生效：占住 chain_test_lock 期间再次调用立即返回 409 chain_test_busy
     {

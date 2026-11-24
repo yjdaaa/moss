@@ -20,7 +20,7 @@ pub mod audio;
 mod barge;
 pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
-mod fast;
+pub mod fast;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 pub use moss_xiaozhi_display::{glyph_font, goggle_bot, screen_pack};
 pub mod home_tools;
