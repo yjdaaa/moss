@@ -239,10 +239,7 @@ pub(super) fn normalize_canonical_str(raw: &str) -> io::Result<String> {
     if raw.starts_with(r"\\?\UNC\") {
         return Err(io::Error::other("不支持网络共享路径，请选择本机硬盘文件夹"));
     }
-    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
-        return Ok(stripped.to_owned());
-    }
-    Ok(raw.to_owned())
+    Ok(crate::paths::strip_verbatim(raw).unwrap_or_else(|| raw.to_owned()))
 }
 
 fn normalize_canonical_path(path: PathBuf) -> io::Result<PathBuf> {

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Windows 上过程记录默认保存位置不再显示 `\\?\` 前缀，资源管理器能打开（2026-11-24）
+
+- **现象**：Windows 上“完整过程记录”的默认保存位置显示成 `\\?\C:\Users\…\moss\logs\process-trace`，点“打开文件夹”时资源管理器不认这种写法，可能打不开或打开别处；自选目录不受影响。
+- **根因与修复**：运行目录启动时经 `fs::canonicalize` 规范化，Windows 上会加 `\\?\` 逐字前缀，默认过程记录目录与运行目录下的其他路径都带上了它。新增 `laser_runtime::paths::without_verbatim_prefix`，运行目录规范化后去掉前缀（盘符路径与网络共享都处理，去掉后超过 260 字符的保留）；自选目录原有的去前缀改用同一函数；`exposed_path` 对老版本存下的带前缀路径也先去前缀。macOS / Linux 行为不变。
+- **验证**：在只含本次改动的独立副本里跑 `verify.mjs --finish --no-update` 通过：全工作区 clippy / Rust 测试（新增 `verbatim_prefix_is_removed_from_drive_and_share_paths_only`，运行目录测试加“不带 `\\?\` 前缀”断言）、前端检查与浏览器测试、回环 E2E；本机没有 Windows 编译目标，只在 Windows 上生效的代码待 CI 的 Windows 构建与实机确认；没有快更本机程序。
+- **关联**：`crates/laser-runtime/src/paths.rs`、`root.rs`（`RuntimeRoot::resolve`、`exposed_path`）、`process_trace/directory.rs`（`normalize_canonical_str`）。
+
 ### 统一材料编辑弹窗速度单位，折叠数字孪生 3D 摆位并收口弹窗与标签细节（2026-11-24）
 
 - **现象**：① 添加/编辑材料弹窗用 `mm/s`（新建默认 `100` 折算达 `6000 mm/min`），与全站 `mm/min` 割裂且非 60 整倍数速度编辑往返有取整漂移；② 数字孪生首屏平铺两块仅改本页 3D 视角的摆位控件，挤出遥测与行程安全卡且易误导为真实对刀，另残留 `$CD`、裸 `workflow_id`、写死机型名与 `LINE`；③ 关闭窗口确认框残留“杀死进程”与错误的“右上角设置”指引，AI 预览窗与审批卡缺 `Esc` 收起，多处仍带重复英文小标并遗留两个零引用文件。

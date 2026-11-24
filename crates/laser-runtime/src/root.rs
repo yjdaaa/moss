@@ -54,7 +54,9 @@ impl RuntimeRoot {
             Self::default_base()?
         };
         fs::create_dir_all(&base)?;
-        let path = fs::canonicalize(&base)?;
+        // Windows 上去掉 canonicalize 加的 `\\?\` 前缀：运行目录下的所有路径（含默认过程记录目录）
+        // 会显示给用户、交给资源管理器打开
+        let path = crate::paths::without_verbatim_prefix(fs::canonicalize(&base)?);
         for child in ["uploads", "previews", "generated_assets"] {
             fs::create_dir_all(path.join(child))?;
         }
@@ -80,8 +82,10 @@ impl RuntimeRoot {
 
     pub fn exposed_path(&self, path: &Path, loopback: bool) -> String {
         if loopback {
+            // 老版本存下的绝对路径可能还带 `\\?\` 前缀
+            let path = crate::paths::without_verbatim_prefix(path.to_path_buf());
             path.strip_prefix(&self.path)
-                .unwrap_or(path)
+                .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/")
         } else {
@@ -138,6 +142,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = RuntimeRoot::resolve(Some(temp.path()), None).unwrap();
         assert!(root.path.is_absolute());
+        // Windows 上不带 canonicalize 的 `\\?\` 前缀（会显示给用户、交给资源管理器打开）
+        assert!(!root.path.to_string_lossy().starts_with(r"\\?\"));
         assert_eq!(root.uploads, root.path.join("uploads"));
         assert!(root.database.ends_with("moss.sqlite"));
 

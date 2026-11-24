@@ -6,6 +6,7 @@ pub mod firmware_store;
 mod home_secret;
 pub mod knowledge_store;
 pub mod migration;
+pub mod paths;
 pub mod process_trace;
 pub mod root;
 pub mod settings_store;
