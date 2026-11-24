@@ -568,10 +568,26 @@ try {
   assert.equal(await page.locator("#voice-setup-step-models").getAttribute("data-done"), "false", "未配模型时第 2 步未勾选");
   assert.equal(await page.locator("#voice-setup-step-device").getAttribute("data-done"), "true", "假数据里已有一台允许的设备（立创实战派小智），第 3 步应打勾（未允许设备不打勾由 voiceState 单测覆盖）");
 
-  // 5. 内置大模型：先测试、后保存，只提交这一项
+  // 5. 内置大模型：先测试、后保存，只提交这一项；同时验证千问折行地址清理、预设模型立即可见与 sk-sp- 套餐地址一键切换
   await tab("模型").click();
   await openGroup("builtin-model-llm");
   const llmSave = page.locator("#voice-builtin-model-save-llm");
+  await page.locator("#voice-builtin-model-url-llm").fill("https://maas.qianwenaiapi.com/compatible-mo\n  de/v1");
+  assert.equal(
+    await page.locator("#voice-builtin-model-url-llm").inputValue(),
+    "https://maas.qianwenaiapi.com/compatible-mode/v1",
+    "多行折行粘贴的地址自动清理空白",
+  );
+  await page.locator("#voice-builtin-model-name-llm").click();
+  await page.locator("#voice-builtin-model-options-llm").getByRole("option", { name: /qwen3\.8-flash/ }).waitFor();
+  await page.locator("#voice-builtin-model-key-llm").fill("sk-sp-fake");
+  await page.locator("#voice-builtin-endpoint-mismatch-llm").waitFor();
+  await page.locator("#voice-builtin-fix-endpoint-llm").click();
+  assert.equal(
+    await page.locator("#voice-builtin-model-url-llm").inputValue(),
+    "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+    "一键切换为千问 Token Plan 套餐专属地址",
+  );
   await page.locator("#voice-builtin-model-url-llm").fill("https://llm.example.test/v1");
   await page.locator("#voice-builtin-model-key-llm").fill("fake-llm-key");
   await page.locator("#voice-builtin-model-name-llm").fill("fake-model");

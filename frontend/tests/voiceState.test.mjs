@@ -2027,3 +2027,61 @@ test("voice_local_save 生效提示以后端 hot_applied 与 restarted 为准，
   assert.equal(restartEffect({ hot_applied: false, restarted: false, mode: "echo" }), "下次启动内置服务时生效（回声测试模式）");
   assert.equal(restartEffect({ restarted: false, mode: "chat" }), "下次启动内置服务时生效（对话模式）");
 });
+
+test("千问开放平台 / 百炼 / Token Plan：折行地址自动清理、裸域名补齐、预设模型与套餐密钥混填识别", async () => {
+  const {
+    ALIBABA_TOKEN_PLAN_MODELS,
+    ARK_PLAN_MODELS,
+    classifyModelSections,
+    cleanUrlInput,
+    finalUrl,
+    modelsListError,
+    modelsListUrl,
+    presetModelOptionsFor,
+    sectionPayload,
+    tokenPlanEndpointMismatch,
+  } = await import("../src/voiceState.js");
+
+  // 1. 多行折行粘贴的地址自动清掉换行与缩进空白，占位符 `<host>` 仍拦截
+  const wrapped = "https://maas.qianwenaiapi.com/compatible-mo\n  de/v1";
+  assert.equal(cleanUrlInput(wrapped), "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(finalUrl("llm", wrapped), "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(modelsListUrl(wrapped), "https://maas.qianwenaiapi.com/compatible-mode/v1/models");
+  assert.equal(modelsListError({ url: wrapped }, "llm"), "");
+  assert.equal(sectionPayload("llm", { url: wrapped, api_key: "k", model: "qwen3.8-flash" }).url, "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(modelsListError({ url: "https://<host>/v1" }, "llm"), "地址包含空白或占位符");
+
+  // 2. 裸根域名、大写协议头、带端点后缀时幂等补齐 `/compatible-mode/v1`（前后端一致）
+  assert.equal(finalUrl("llm", "HTTPS://maas.qianwenaiapi.com"), "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(finalUrl("llm", "https://maas.qianwenaiapi.com/chat/completions"), "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(modelsListUrl("https://maas.qianwenaiapi.com/models"), "https://maas.qianwenaiapi.com/compatible-mode/v1/models");
+  assert.equal(modelsListUrl("https://token-plan.maas.qianwenaiapi.com/"), "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1/models");
+
+  // 3. 未拉取 `/models` 前即可直接显示千问 / Token Plan / 方舟套餐预设模型（对齐 magpie）
+  const qwenPresets = presetModelOptionsFor("llm", "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.ok(qwenPresets.some((m) => m.id === "qwen3.8-flash"));
+  assert.equal(presetModelOptionsFor("asr", "https://maas.qianwenaiapi.com/compatible-mode/v1").length, 0);
+  assert.deepEqual(
+    presetModelOptionsFor("llm", "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1").map((m) => m.id),
+    ALIBABA_TOKEN_PLAN_MODELS,
+  );
+  assert.deepEqual(
+    presetModelOptionsFor("llm", "https://ark.cn-beijing.volces.com/api/coding/v3").map((m) => m.id),
+    ARK_PLAN_MODELS,
+  );
+
+  // 4. sk-sp- 套餐密钥与按量地址混填时返回明确提示与一键修正地址，且绝不泄露密钥
+  const planMismatch = tokenPlanEndpointMismatch("https://maas.qianwenaiapi.com/compatible-mode/v1", "sk-sp-fake");
+  assert.equal(planMismatch?.suggestedUrl, "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.ok(!JSON.stringify(planMismatch).includes("sk-sp-fake"));
+  const paygMismatch = tokenPlanEndpointMismatch("https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1", "fake-payg");
+  assert.equal(paygMismatch?.suggestedUrl, "https://maas.qianwenaiapi.com/compatible-mode/v1");
+  assert.equal(tokenPlanEndpointMismatch("https://maas.qianwenaiapi.com/compatible-mode/v1", "fake-payg"), null);
+  assert.equal(tokenPlanEndpointMismatch("https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1", "sk-sp-fake"), null);
+
+  // 5. 千问语音合成/识别专属模型与 System One 决策模型不再被误判进大模型列表
+  assert.deepEqual(classifyModelSections("qwen-audio-3.0-tts-plus"), ["tts"]);
+  assert.deepEqual(classifyModelSections("qwen-audio-3.0-asr-flash"), ["asr"]);
+  assert.deepEqual(classifyModelSections("decision-model-preview"), []);
+  assert.deepEqual(classifyModelSections("qwen-image-2.0"), []);
+});

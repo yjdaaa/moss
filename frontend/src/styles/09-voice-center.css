@@ -266,6 +266,7 @@
 }
 .voice-savebar [role="status"], .voice-savebar [role="alert"] { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
 .voice-inline-btn { padding: 3px 10px; font-size: 12px; }
+.voice-hint > .voice-inline-btn { margin-left: 10px; }
 .voice-inline { display: flex; gap: 8px; align-items: center; }
 .voice-inline .text-input { flex: 1; min-width: 0; }
 .voice-block { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 4px 0 8px; }

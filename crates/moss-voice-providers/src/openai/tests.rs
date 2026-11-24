@@ -75,6 +75,18 @@ fn urls_are_normalized() {
         "https://h/v1"
     );
     assert_eq!(
+        llm_base_url("https://maas.qianwenaiapi.com/compatible-mo\n  de/v1/"),
+        "https://maas.qianwenaiapi.com/compatible-mode/v1"
+    );
+    assert_eq!(
+        llm_base_url("https://maas.qianwenaiapi.com/"),
+        "https://maas.qianwenaiapi.com/compatible-mode/v1"
+    );
+    assert_eq!(
+        llm_base_url("https://token-plan.maas.qianwenaiapi.com"),
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+    );
+    assert_eq!(
         asr_full_url("https://h/v1/"),
         "https://h/v1/audio/transcriptions"
     );
@@ -82,6 +94,15 @@ fn urls_are_normalized() {
         tts_full_url("https://h/v1/audio/speech"),
         "https://h/v1/audio/speech"
     );
+    for host_url in [
+        "https://maas.qianwenaiapi.com/compatible-mode/v1",
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+        "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+    ] {
+        let params = thinking_off_params(host_url, "qwen3.8-flash").expect(host_url);
+        assert_eq!(params.get("enable_thinking"), Some(&json!(false)));
+    }
 }
 
 #[test]
@@ -188,6 +209,14 @@ async fn llm_streams_deltas_and_tool_calls() {
             .head
             .to_ascii_lowercase()
             .contains(&format!("authorization: bearer {KEY}").to_ascii_lowercase())
+    );
+    assert!(
+        request
+            .head
+            .to_ascii_lowercase()
+            .contains("user-agent: moss/"),
+        "{}",
+        request.head
     );
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["model"], "test-model");

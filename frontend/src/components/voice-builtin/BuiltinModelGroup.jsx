@@ -21,12 +21,14 @@ import {
   isSectionBlank,
   modelsListError,
   modelsListKey,
+  presetModelOptionsFor,
   savedNoteText,
   isDoubao,
   sectionFingerprint,
   sectionInputError,
   sectionPayload,
   switchKind,
+  tokenPlanEndpointMismatch,
   ttsVoiceOptionsFor,
   voiceErrorText,
 } from "../../voiceState.js";
@@ -66,14 +68,21 @@ function BuiltinModelGroup({ section, builtin }) {
   const currentListKey = modelsListKey(form, entry, peerKeySet);
   const currentCacheKey = remoteCacheKey(section, form, entry, peerKeySet);
   const cachedModels = !doubao ? REMOTE_MODELS_CACHE.get(currentCacheKey) : null;
-  const rawOptions = doubao
-    ? DOUBAO_MODEL_OPTIONS[section] || []
-    : remoteModels.key === currentListKey && remoteModels.ok !== null
+  const presetOptions = !doubao ? presetModelOptionsFor(section, form.url) : [];
+  const liveItems = !doubao
+    ? remoteModels.key === currentListKey && remoteModels.ok !== null
       ? remoteModels.items
       : cachedModels
         ? cachedModels.items
-        : [];
-  const modelSections = !doubao
+        : null
+    : null;
+  const usingPresets = !doubao && (!liveItems || liveItems.length === 0) && presetOptions.length > 0;
+  const rawOptions = doubao
+    ? DOUBAO_MODEL_OPTIONS[section] || []
+    : liveItems && liveItems.length > 0
+      ? liveItems
+      : presetOptions;
+  const modelSections = !doubao && !usingPresets
     ? remoteModels.key === currentListKey && remoteModels.ok !== null
       ? remoteModels.modelSections
       : cachedModels?.modelSections || null
@@ -86,6 +95,12 @@ function BuiltinModelGroup({ section, builtin }) {
   const filteredOptions = filterModelOptions(rawOptions, form.model, filtering, { section, onlyMatched, modelSections });
   const voiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
   const gatewayAudioErr = !doubao ? chatOnlyAudioGatewayError(section, form.url) : "";
+  const endpointMismatch = !doubao && section === "llm" ? tokenPlanEndpointMismatch(form.url, form.api_key) : null;
+  const listErr = !doubao && form.url.trim() ? modelsListError(form, section) : "";
+  const inlineListError =
+    !doubao && remoteModels.key === currentListKey && remoteModels.ok === false && remoteModels.detail
+      ? remoteModels.detail
+      : "";
 
   useEffect(() => {
     if (!menuOpen && !voiceMenuOpen) return undefined;
@@ -113,7 +128,11 @@ function BuiltinModelGroup({ section, builtin }) {
   }, []);
 
   const update = (key, value) => {
-    setForm((all) => ({ ...all, [key]: value }));
+    const cleaned =
+      key === "url" && /^(?:https?|wss?):\/\//i.test(value.trim()) && !/[<>]/.test(value)
+        ? value.trim().replace(/\s+/g, "").replace(/^(https?|wss?):\/\//i, (m) => m.toLowerCase())
+        : value;
+    setForm((all) => ({ ...all, [key]: cleaned }));
     setResult(null);
   };
 
@@ -156,6 +175,7 @@ function BuiltinModelGroup({ section, builtin }) {
     const reqKey = modelsListKey(nextForm, entry, nextPeerKeySet);
     const cacheKey = remoteCacheKey(section, nextForm, entry, nextPeerKeySet);
     if (auto) {
+      if (section === "llm" && tokenPlanEndpointMismatch(nextForm.url, nextForm.api_key)) return;
       if (!canAutoFetchModels(nextForm, entry, status, section)) return;
       if (remoteModels.loading && remoteModels.key === reqKey) return;
       if (remoteModels.key === reqKey && remoteModels.ok !== null) return;
@@ -212,6 +232,26 @@ function BuiltinModelGroup({ section, builtin }) {
     }
   };
 
+  useEffect(() => {
+    // 仅在用户当前编辑表单（dirty）时防抖自动拉取，避免后台隐藏标签/折叠分组挂载时静默并发请求 `/models`
+    if (!dirty || doubao || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
+    if (remoteModels.key === currentListKey && (remoteModels.loading || remoteModels.ok !== null)) return undefined;
+    const timer = setTimeout(() => {
+      fetchModels({ auto: true, nextForm: form });
+    }, 350);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty, doubao, Boolean(endpointMismatch), currentListKey]);
+
+  const applySuggestedEndpoint = () => {
+    if (!endpointMismatch) return;
+    const nextForm = { ...form, url: endpointMismatch.suggestedUrl };
+    setForm(nextForm);
+    setResult(null);
+    setTest(null);
+    fetchModels({ auto: true, nextForm });
+  };
+
   const reusePeerSource = (event) => {
     event?.stopPropagation?.();
     if (!peerCloud.reusable) return;
@@ -238,9 +278,9 @@ function BuiltinModelGroup({ section, builtin }) {
   const handleModelFocus = () => {
     setFiltering(false);
     setActiveIndex(-1);
-    if (doubao || allOptions.length > 0 || canAutoFetchModels(form, entry, status, section)) {
+    if (doubao || allOptions.length > 0 || Boolean(form.url.trim()) || canAutoFetchModels(form, entry, status, section)) {
       setMenuOpen(true);
-      fetchModels({ auto: true });
+      if (!endpointMismatch) fetchModels({ auto: true });
     }
   };
 
@@ -253,6 +293,11 @@ function BuiltinModelGroup({ section, builtin }) {
   };
 
   const handleModelKeyDown = (event) => {
+    if (event.key === "Tab" && menuOpen) {
+      setMenuOpen(false);
+      setFiltering(false);
+      return;
+    }
     if (event.key === "Escape" && menuOpen) {
       event.preventDefault();
       setMenuOpen(false);
@@ -288,7 +333,7 @@ function BuiltinModelGroup({ section, builtin }) {
     setMenuOpen(nextOpen);
     setFiltering(false);
     setActiveIndex(-1);
-    if (nextOpen) fetchModels({ auto: true });
+    if (nextOpen && !endpointMismatch) fetchModels({ auto: true });
   };
 
 
@@ -421,7 +466,6 @@ function BuiltinModelGroup({ section, builtin }) {
             className="text-input mono"
             value={form.url}
             onChange={(e) => update("url", e.target.value)}
-            onBlur={() => fetchModels({ auto: true })}
             spellCheck="false"
             autoComplete="off"
             id={n("model-url")}
@@ -435,13 +479,21 @@ function BuiltinModelGroup({ section, builtin }) {
             value={form.api_key}
             placeholder={doubao && !entry?.key_set ? "控制台 API Key；旧版控制台填“APP ID:Access Token”" : builtinKeyPlaceholder(entry, peerCloud.sameOrigin)}
             onChange={(e) => update("api_key", e.target.value)}
-            onBlur={() => fetchModels({ auto: true })}
             autoComplete="new-password"
             spellCheck="false"
             id={n("model-key")}
           />
         </label>
-        <div className="voice-field" ref={comboRef}>
+        <div
+          className="voice-field"
+          ref={comboRef}
+          onBlur={(e) => {
+            if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) {
+              setMenuOpen(false);
+              setFiltering(false);
+            }
+          }}
+        >
           <div className="voice-field-head">
             <label htmlFor={n("model-name")}>{doubao ? "资源 ID（留空用默认）" : "模型"}</label>
             {!doubao && (
@@ -449,6 +501,7 @@ function BuiltinModelGroup({ section, builtin }) {
                 type="button"
                 className="voice-link-btn"
                 disabled={remoteModels.loading || sectionBusy}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   setMenuOpen(true);
                   setFiltering(false);
@@ -459,9 +512,11 @@ function BuiltinModelGroup({ section, builtin }) {
                 <RefreshCw size={11} className={remoteModels.loading ? "voice-spin" : ""} />
                 {remoteModels.loading
                   ? "读取中…"
-                  : allOptions.length > 0
+                  : allOptions.length > 0 && !usingPresets
                     ? `刷新列表（${onlyMatched && matchedOptions.length < allOptions.length ? `${matchedOptions.length}/${allOptions.length}` : allOptions.length}）`
-                    : "读取模型"}
+                    : usingPresets
+                      ? "读取全量模型"
+                      : "读取模型"}
               </button>
             )}
           </div>
@@ -472,11 +527,13 @@ function BuiltinModelGroup({ section, builtin }) {
               placeholder={
                 doubao
                   ? "下拉选择或手动填写资源 ID"
-                  : allOptions.length > 0
-                    ? onlyMatched && matchedOptions.length < allOptions.length
-                      ? `已筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个），点击选择或输入查询`
-                      : `已读 ${allOptions.length} 个，输入关键词查询或下拉选择`
-                    : "输入关键词筛选，或填好地址密钥读取"
+                  : usingPresets
+                    ? `已预置 ${allOptions.length} 个常用模型，点击选择或填密钥读取全量`
+                    : allOptions.length > 0
+                      ? onlyMatched && matchedOptions.length < allOptions.length
+                        ? `已筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个），点击选择或输入查询`
+                        : `已读 ${allOptions.length} 个，输入关键词查询或下拉选择`
+                      : "输入关键词筛选，或填好地址密钥读取"
               }
               onFocus={handleModelFocus}
               onChange={handleModelChange}
@@ -501,8 +558,16 @@ function BuiltinModelGroup({ section, builtin }) {
               <div className="voice-combo-meta">
                 {remoteModels.loading ? (
                   <span>正在读取服务商支持的全部模型…</span>
+                ) : !doubao && listErr ? (
+                  <span className="voice-combo-err">{listErr}</span>
                 ) : !doubao && remoteModels.ok === false && remoteModels.detail ? (
-                  <span className="voice-combo-err">{remoteModels.detail}（仍可直接手动输入模型名）</span>
+                  <span className="voice-combo-err">
+                    {remoteModels.detail}（{usingPresets ? "下方仍可选择预置模型或手动输入" : "仍可直接手动输入模型名"}）
+                  </span>
+                ) : usingPresets ? (
+                  <span>
+                    已列出 {allOptions.length} 个常用预设模型（填好密钥点“读取全量模型”可拉取账号全部可用模型）
+                  </span>
                 ) : allOptions.length > 0 ? (
                   <>
                     <span>
@@ -573,7 +638,15 @@ function BuiltinModelGroup({ section, builtin }) {
         </div>
         {section === "tts" && (
           <>
-            <div className="voice-field" ref={voiceComboRef}>
+            <div
+              className="voice-field"
+              ref={voiceComboRef}
+              onBlur={(e) => {
+                if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) {
+                  setVoiceMenuOpen(false);
+                }
+              }}
+            >
               <div className="voice-field-head">
                 <label htmlFor={n("model-voice")}>{doubao ? "音色 ID（可下拉选常用或手填）" : "音色（可下拉选常用或手填）"}</label>
               </div>
@@ -641,6 +714,25 @@ function BuiltinModelGroup({ section, builtin }) {
           {gatewayAudioErr}
         </div>
       )}
+      {endpointMismatch && (
+        <div className="voice-hint voice-hint--warn" id={n("endpoint-mismatch")}>
+          <span>{endpointMismatch.message}</span>
+          <button
+            type="button"
+            className="btn btn-ghost voice-inline-btn"
+            onClick={applySuggestedEndpoint}
+            disabled={sectionBusy}
+            id={n("fix-endpoint")}
+          >
+            {endpointMismatch.actionLabel}
+          </button>
+        </div>
+      )}
+      {!menuOpen && !endpointMismatch && !test && inlineListError && (
+        <div className="voice-hint voice-hint--bad" id={n("models-list-error")}>
+          读取模型列表未通过：{inlineListError}（也可直接手动输入模型名后点“测试连接”）
+        </div>
+      )}
       {test ? (
         <div className={`voice-hint voice-hint--${test.ok ? "ok" : "bad"}`} id={n("model-result")}>
           <span>
@@ -654,7 +746,6 @@ function BuiltinModelGroup({ section, builtin }) {
               className="btn btn-ghost voice-inline-btn"
               onClick={toggleAudioPreview}
               id={n("model-play")}
-              style={{ marginLeft: "10px" }}
             >
               {playingAudio ? <Square size={12} /> : <Volume2 size={13} />}
               {playingAudio ? "停止试听" : "试听语音"}

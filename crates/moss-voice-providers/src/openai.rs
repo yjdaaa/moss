@@ -23,23 +23,82 @@ const LLM_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 
-/// 大模型基础地址；误填了完整 `/chat/completions` 时去掉。
+fn is_alibaba_compat_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "dashscope.aliyuncs.com"
+        || lower == "dashscope-intl.aliyuncs.com"
+        || lower == "qianwenaiapi.com"
+        || lower.ends_with(".qianwenaiapi.com")
+        || lower == "qwencloudapi.com"
+        || lower.ends_with(".qwencloudapi.com")
+        || lower == "maas.aliyuncs.com"
+        || lower.ends_with(".maas.aliyuncs.com")
+}
+
+fn clean_scheme_and_whitespace(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let matched_scheme = ["https://", "http://", "wss://", "ws://"]
+        .into_iter()
+        .find(|scheme| {
+            trimmed
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        });
+    let cleaned = if let Some(scheme) = matched_scheme
+        && !trimmed.contains(['<', '>'])
+    {
+        let rest: String = trimmed[scheme.len()..]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        format!("{scheme}{rest}")
+    } else {
+        trimmed.to_owned()
+    };
+    cleaned.trim_end_matches('/').to_owned()
+}
+
+fn complete_alibaba_bare_root(base: &str) -> String {
+    if (base.starts_with("http://") || base.starts_with("https://"))
+        && let Ok(parsed) = reqwest::Url::parse(base)
+        && parsed.path() == "/"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.host_str().is_some_and(is_alibaba_compat_host)
+    {
+        return format!("{base}/compatible-mode/v1");
+    }
+    base.to_owned()
+}
+
+fn normalize_service_url(input: &str) -> String {
+    complete_alibaba_bare_root(&clean_scheme_and_whitespace(input))
+}
+
+/// 大模型基础地址；清理粘贴换行空格与大写协议头、去掉误填的 `/chat/completions`，再补齐千问/百炼裸域名 `/compatible-mode/v1`。
 pub fn llm_base_url(input: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    trimmed
+    let cleaned = clean_scheme_and_whitespace(input);
+    let stripped = cleaned
         .strip_suffix("/chat/completions")
-        .unwrap_or(trimmed)
-        .trim_end_matches('/')
-        .to_owned()
+        .unwrap_or(&cleaned)
+        .trim_end_matches('/');
+    complete_alibaba_bare_root(stripped)
 }
 
 fn full_url(input: &str, suffix: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.ends_with(suffix) {
-        trimmed.to_owned()
-    } else {
-        format!("{trimmed}{suffix}")
+    let cleaned = clean_scheme_and_whitespace(input);
+    if cleaned.is_empty() {
+        return String::new();
     }
+    let stripped = cleaned
+        .strip_suffix(suffix)
+        .unwrap_or(&cleaned)
+        .trim_end_matches('/');
+    let base = complete_alibaba_bare_root(stripped);
+    format!("{base}{suffix}")
 }
 
 pub fn asr_full_url(input: &str) -> String {
@@ -56,6 +115,7 @@ fn client() -> Result<reqwest::Client, ProviderError> {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
+                .user_agent(concat!("moss/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(CONNECT_TIMEOUT)
                 .tcp_nodelay(true)
                 .pool_max_idle_per_host(8)
@@ -270,17 +330,14 @@ fn with_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::Reques
 /// 只对认识的服务商给参数；服务不认（返回 400 / 422）时由调用方去掉参数重试一次并记入
 /// [`mark_thinking_off_unsupported`]，之后同一地址与模型不再携带。推理专用模型（如 DeepSeek-R1）关不掉，照常运行。
 pub fn thinking_off_params(base_url: &str, model: &str) -> Option<serde_json::Map<String, Value>> {
-    let host = reqwest::Url::parse(base_url.trim())
+    let normalized = llm_base_url(base_url);
+    let host = reqwest::Url::parse(&normalized)
         .ok()?
         .host_str()?
         .to_ascii_lowercase();
     let model = model.trim().to_ascii_lowercase();
     let on = |suffix: &str| host == suffix || host.ends_with(&format!(".{suffix}"));
-    let value = if on("dashscope.aliyuncs.com")
-        || on("dashscope-intl.aliyuncs.com")
-        || on("siliconflow.cn")
-        || on("siliconflow.com")
-    {
+    let value = if is_alibaba_compat_host(&host) || on("siliconflow.cn") || on("siliconflow.com") {
         json!({"enable_thinking": false})
     } else if on("volces.com") || on("bigmodel.cn") || on("z.ai") {
         json!({"thinking": {"type": "disabled"}})
@@ -324,7 +381,8 @@ pub fn fast_reply_params(base_url: &str, model: &str) -> Option<serde_json::Map<
 }
 
 pub fn is_cline_api_url(url: &str) -> bool {
-    reqwest::Url::parse(url.trim())
+    let normalized = normalize_service_url(url);
+    reqwest::Url::parse(&normalized)
         .ok()
         .and_then(|parsed| {
             parsed.host_str().map(|host| {

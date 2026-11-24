@@ -21,8 +21,9 @@ pub const LIST_TIMEOUT: Duration = Duration::from_secs(8);
 /// TCP + TLS 连接握手超时（不可达地址快速返回，不占满整个请求超时）。
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
-const MAX_MODELS_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_MODELS_COUNT: usize = 2000;
+const MAX_MODELS_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MODELS_COUNT: usize = 4000;
+const MAX_MODELS_PAGES: usize = 10;
 
 /// OpenRouter Decisions 固定端点与常用 Jev 模型预设。
 pub const DEFAULT_JEV_DECISIONS_URL: &str = laser_contracts::OPENROUTER_DECISIONS_URL;
@@ -131,9 +132,93 @@ pub const CLINE_FREE_MODELS: [&str; 4] = [
     "stealth/space-bunny-alpha",
 ];
 
+/// 千问开放平台 / 阿里云百炼 / Qwen Cloud 的 Token Plan 套餐可用模型（对齐 `yetone/magpie` `alibabaPlanModels`）：
+/// 套餐端点（`token-plan.maas.qianwenaiapi.com`、`token-plan.*.maas.aliyuncs.com`、`token-plan.maas.qwencloudapi.com`）
+/// 的 `/models` 可能返回 404 或不完整列表，读取大模型列表时兜底并置顶补齐。
+pub const ALIBABA_TOKEN_PLAN_MODELS: [&str; 15] = [
+    "auto",
+    "qwen4-max",
+    "qwen4-max-preview",
+    "qwen3.8-max",
+    "qwen3.8-flash",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v4.1-flash-1017",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-flash-0731",
+    "glm-5.3",
+    "glm-5.2",
+];
+
+/// 火山方舟 Coding Plan / Agent Plan 套餐可用模型（对齐 `yetone/magpie` `arkPlanModels`）：
+/// `/api/coding/v3` 的 `/models` 会返回套餐不可用的通用模型、`/api/plan/v3` 返回 404，统一置顶并兜底。
+pub const ARK_PLAN_MODELS: [&str; 15] = [
+    "ark-code-latest",
+    "doubao-seed-evolving",
+    "doubao-seed-2.1-pro",
+    "doubao-seed-2.1-lite",
+    "doubao-seed-2.0-mini",
+    "minimax-m3",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v4.1-flash-economy",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "kimi-k2.8-preview",
+    "kimi-k3",
+    "kimi-k3.1-pro",
+];
+
+fn is_alibaba_compat_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "dashscope.aliyuncs.com"
+        || lower == "dashscope-intl.aliyuncs.com"
+        || lower == "qianwenaiapi.com"
+        || lower.ends_with(".qianwenaiapi.com")
+        || lower == "qwencloudapi.com"
+        || lower.ends_with(".qwencloudapi.com")
+        || lower == "maas.aliyuncs.com"
+        || lower.ends_with(".maas.aliyuncs.com")
+}
+
+/// 判断目标地址是否为千问 / 百炼 / Qwen Cloud 的 Token Plan 套餐端点。
+pub fn is_alibaba_token_plan_url(url: &str) -> bool {
+    let cleaned = clean_url_input(url);
+    reqwest::Url::parse(&cleaned)
+        .ok()
+        .and_then(|parsed| {
+            parsed.host_str().map(|host| {
+                let lower = host.to_ascii_lowercase();
+                lower.starts_with("token-plan.") && is_alibaba_compat_host(&lower)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 判断目标地址是否为火山方舟 Coding Plan / Agent Plan 端点。
+pub fn is_ark_plan_url(url: &str) -> bool {
+    let cleaned = clean_url_input(url);
+    reqwest::Url::parse(&cleaned)
+        .ok()
+        .and_then(|parsed| {
+            let host = parsed.host_str()?.to_ascii_lowercase();
+            let path = parsed.path().to_ascii_lowercase();
+            Some(
+                (host == "volces.com" || host.ends_with(".volces.com"))
+                    && (path.contains("/api/coding") || path.contains("/api/plan")),
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// 判断目标地址是否为 Cline 官方网关（`api.cline.bot` 或 `*.cline.bot`）。
 pub fn is_cline_api_url(url: &str) -> bool {
-    reqwest::Url::parse(url.trim())
+    let cleaned = clean_url_input(url);
+    reqwest::Url::parse(&cleaned)
         .ok()
         .and_then(|parsed| {
             parsed.host_str().map(|host| {
@@ -147,7 +232,8 @@ pub fn is_cline_api_url(url: &str) -> bool {
 /// 严格判断目标地址是否属于官方 `https://openrouter.ai:443` 源（用于决定是否允许复用大模型密钥）。
 /// 拒绝 `http://`、自定义端口、userinfo、伪后缀域名（如 `openrouter.ai.example`）以及路径/查询参数伪装。
 pub fn is_openrouter_https_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+    let cleaned = clean_url_input(url);
+    let Ok(parsed) = reqwest::Url::parse(&cleaned) else {
         return false;
     };
     if parsed.scheme() != "https"
@@ -165,7 +251,8 @@ pub fn is_openrouter_https_url(url: &str) -> bool {
 /// 识别仅提供大模型对话接口、不提供 OpenAI `/audio/transcriptions` 与 `/audio/speech` 语音端点的网关
 /// （对齐 `yetone/magpie` `internal/provider/presets.go` 的 Chat-only 服务商与 Coding/Token Plan 专属端点）。
 pub fn chat_only_gateway_name(url: &str) -> Option<&'static str> {
-    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    let cleaned = clean_url_input(url);
+    let parsed = reqwest::Url::parse(&cleaned).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
     let path = parsed.path().to_ascii_lowercase();
     if host == "cline.bot" || host.ends_with(".cline.bot") {
@@ -195,6 +282,8 @@ pub fn chat_only_gateway_name(url: &str) -> Option<&'static str> {
     }
     if host.starts_with("token-plan")
         || path.contains("/api/coding")
+        || path.contains("/api/plan")
+        || path.contains("/plan/v")
         || path.contains("/tokenplan/")
         || path.contains("/step_plan/")
     {
@@ -340,23 +429,95 @@ fn validate_http_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 大模型写入 `url` 的基础地址（如 `https://<host>/v1`）；误填了完整 `/chat/completions` 时去掉。
+fn clean_scheme_and_whitespace(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let matched_scheme = ["https://", "http://", "wss://", "ws://"]
+        .into_iter()
+        .find(|scheme| {
+            trimmed
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        });
+    let cleaned = if let Some(scheme) = matched_scheme
+        && !trimmed.contains(['<', '>'])
+    {
+        let rest: String = trimmed[scheme.len()..]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        format!("{scheme}{rest}")
+    } else {
+        trimmed.to_owned()
+    };
+    cleaned.trim_end_matches('/').to_owned()
+}
+
+fn complete_alibaba_bare_root(base: &str) -> String {
+    if (base.starts_with("http://") || base.starts_with("https://"))
+        && let Ok(parsed) = reqwest::Url::parse(base)
+        && parsed.path() == "/"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.host_str().is_some_and(is_alibaba_compat_host)
+    {
+        return format!("{base}/compatible-mode/v1");
+    }
+    base.to_owned()
+}
+
+/// 清理复制多行折行带入的空白字符、统一小写协议头（保留 `<` `>` 以便拦截占位符），并为千问 / 百炼裸根域名自动补齐 `/compatible-mode/v1`。
+pub fn clean_url_input(input: &str) -> String {
+    complete_alibaba_bare_root(&clean_scheme_and_whitespace(input))
+}
+
+fn base_service_url(input: &str) -> String {
+    let cleaned = clean_scheme_and_whitespace(input);
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let stripped = [
+        "/chat/completions",
+        "/audio/transcriptions",
+        "/audio/speech",
+        "/models",
+    ]
+    .into_iter()
+    .fold(cleaned.as_str(), |current, suffix| {
+        current
+            .strip_suffix(suffix)
+            .unwrap_or(current)
+            .trim_end_matches('/')
+    });
+    complete_alibaba_bare_root(stripped)
+}
+
+/// 大模型写入 `url` 的基础地址（如 `https://<host>/v1`）；误填了完整 `/chat/completions` 时先去掉再做裸根补齐。
 pub fn llm_base_url(input: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    trimmed
+    let cleaned = clean_scheme_and_whitespace(input);
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let stripped = cleaned
         .strip_suffix("/chat/completions")
-        .unwrap_or(trimmed)
-        .trim_end_matches('/')
-        .to_owned()
+        .unwrap_or(&cleaned)
+        .trim_end_matches('/');
+    complete_alibaba_bare_root(stripped)
 }
 
 fn full_url(input: &str, suffix: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.ends_with(suffix) {
-        trimmed.to_owned()
-    } else {
-        format!("{trimmed}{suffix}")
+    let cleaned = clean_scheme_and_whitespace(input);
+    if cleaned.is_empty() {
+        return String::new();
     }
+    let stripped = cleaned
+        .strip_suffix(suffix)
+        .unwrap_or(&cleaned)
+        .trim_end_matches('/');
+    let base = complete_alibaba_bare_root(stripped);
+    format!("{base}{suffix}")
 }
 
 /// 语音识别 `base_url` 必须是完整的 `/audio/transcriptions` 地址；填基础地址时自动补全。
@@ -371,25 +532,7 @@ pub fn tts_full_url(input: &str) -> String {
 
 /// 从各分区填写的地址推导模型列表查询地址（`<基础地址>/models`），去掉已补全的具体端点后缀。
 pub fn models_list_url(input: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if trimmed.ends_with("/models") {
-        return trimmed.to_owned();
-    }
-    let base = [
-        "/chat/completions",
-        "/audio/transcriptions",
-        "/audio/speech",
-    ]
-    .into_iter()
-    .fold(trimmed, |current, suffix| {
-        current
-            .strip_suffix(suffix)
-            .unwrap_or(current)
-            .trim_end_matches('/')
-    });
+    let base = base_service_url(input);
     if base.is_empty() {
         String::new()
     } else {
@@ -447,11 +590,11 @@ pub fn resolve_list_request(
                     Section::Asr => DOUBAO_ASR_URL,
                     Section::Tts => DOUBAO_TTS_URL,
                 };
-            let url = input.url.trim().trim_end_matches('/');
-            let url = if url.is_empty() {
+            let cleaned = clean_url_input(&input.url);
+            let url = if cleaned.is_empty() {
                 default_url.to_owned()
             } else {
-                url.to_owned()
+                cleaned
             };
             if !url.starts_with("wss://") {
                 return Err(format!("{}：豆包地址必须以 wss:// 开头", section.label()));
@@ -517,11 +660,11 @@ fn resolve_doubao(section: Section, input: &SectionInput) -> Result<ResolvedSect
         Section::Asr => (DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE),
         Section::Tts => (DOUBAO_TTS_URL, DOUBAO_TTS_RESOURCE),
     };
-    let url = input.url.trim().trim_end_matches('/');
-    let url = if url.is_empty() {
+    let cleaned = clean_url_input(&input.url);
+    let url = if cleaned.is_empty() {
         default_url.to_owned()
     } else {
-        url.to_owned()
+        cleaned
     };
     if !url.starts_with("wss://") {
         return Err(format!("{}：豆包地址必须以 wss:// 开头", section.label()));
@@ -680,6 +823,7 @@ fn client() -> Result<&'static reqwest::blocking::Client, String> {
     CLIENT
         .get_or_init(|| {
             reqwest::blocking::Client::builder()
+                .user_agent(concat!("moss/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(TEST_TIMEOUT)
                 .tcp_nodelay(true)
@@ -721,10 +865,67 @@ fn read_limited(response: reqwest::blocking::Response) -> Result<Vec<u8>, String
     read_limited_bytes(response, MAX_RESPONSE_BYTES)
 }
 
-fn http_error_detail(code: u16, bytes: &[u8], secret: Option<&str>) -> String {
+/// 检测千问开放平台 / 百炼 / Qwen Cloud 的按量地址与 `sk-sp-` 套餐密钥混填（绝不回显密钥内容）。
+pub fn token_plan_auth_hint(url: &str, api_key: &str) -> Option<String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let cleaned = clean_url_input(url);
+    let parsed = reqwest::Url::parse(&cleaned).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if !is_alibaba_compat_host(&host) {
+        return None;
+    }
+    let is_plan_host = host.starts_with("token-plan.");
+    let is_plan_key = key.starts_with("sk-sp-");
+    if is_plan_key && !is_plan_host {
+        let suggested = if host == "qianwenaiapi.com" || host.ends_with(".qianwenaiapi.com") {
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+        } else if host == "qwencloudapi.com" || host.ends_with(".qwencloudapi.com") {
+            "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
+        } else if host == "dashscope-intl.aliyuncs.com" {
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        } else {
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        };
+        return Some(format!(
+            "检测到 sk-sp- 开头的 Token Plan 套餐密钥，不能用于按量地址，请改填套餐专属地址 {suggested}"
+        ));
+    }
+    if !is_plan_key && is_plan_host {
+        let suggested = if host.ends_with(".qianwenaiapi.com") {
+            "https://maas.qianwenaiapi.com/compatible-mode/v1"
+        } else if host.ends_with(".qwencloudapi.com") {
+            "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1"
+        } else {
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        };
+        return Some(format!(
+            "当前为 Token Plan 套餐专属地址（需 sk-sp- 开头密钥）；按量付费密钥请改填 {suggested}"
+        ));
+    }
+    None
+}
+
+fn http_error_detail_for_url(
+    code: u16,
+    bytes: &[u8],
+    secret: Option<&str>,
+    url: Option<&str>,
+) -> String {
     let hint = error_hint(bytes, secret);
+    let plan_note = if matches!(code, 401 | 403) {
+        url.zip(secret)
+            .and_then(|(u, k)| token_plan_auth_hint(u, k))
+    } else {
+        None
+    };
     let detail = if code == 401 || code == 403 {
-        format!("鉴权失败（HTTP {code}），请检查密钥")
+        match plan_note {
+            Some(note) => format!("鉴权失败（HTTP {code}）：{note}"),
+            None => format!("鉴权失败（HTTP {code}），请检查密钥"),
+        }
     } else if code == 402 {
         format!(
             "账户余额不足（HTTP {code}；若已开通 ClinePass 等包月订阅，请选用 cline-pass/ 前缀模型）"
@@ -739,6 +940,10 @@ fn http_error_detail(code: u16, bytes: &[u8], secret: Option<&str>) -> String {
     } else {
         format!("{detail}：{hint}")
     }
+}
+
+fn http_error_detail(code: u16, bytes: &[u8], secret: Option<&str>) -> String {
+    http_error_detail_for_url(code, bytes, secret, None)
 }
 
 /// 从错误响应里取一段可读的说明（只取 `error.message` 一类字段，截断，并脱敏）。
@@ -1271,11 +1476,16 @@ pub fn test_section_with(
             Ok(bytes) => bytes,
             Err(detail) => return finish(false, Some(code), detail),
         };
-        return finish(
-            false,
-            Some(code),
-            http_error_detail(code, &bytes, Some(&resolved.api_key)),
-        );
+        let mut detail =
+            http_error_detail_for_url(code, &bytes, Some(&resolved.api_key), Some(&request_url));
+        if section == Section::Llm
+            && resolved
+                .model
+                .eq_ignore_ascii_case("decision-model-preview")
+        {
+            detail.push_str("（decision-model-preview 为千问 System One 路由模型，不能作为对话大模型，请改选 qwen3.8-flash、qwen3.7-plus 等对话模型）");
+        }
+        return finish(false, Some(code), detail);
     }
     if section == Section::Llm {
         let mut stats = ProbeStats {
@@ -1391,7 +1601,7 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
         }
     }
 
-    for key in ["sub_type", "type", "task", "pipeline_tag"] {
+    for key in ["sub_type", "type", "task", "pipeline_tag", "domain", "kind"] {
         if let Some(val) = obj.get(key).and_then(serde_json::Value::as_str) {
             let lower = val.trim().to_ascii_lowercase();
             match lower.as_str() {
@@ -1409,11 +1619,52 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
                     push_unique_section(&mut sections, Section::Llm);
                 }
                 "embedding" | "embeddings" | "rerank" | "reranker" | "text-to-image"
-                | "image-to-image" | "text-to-video" | "moderation" | "image" | "video" => {
+                | "image-to-image" | "text-to-video" | "moderation" | "image" | "video"
+                | "decision" => {
                     explicit_non_voice = true;
                 }
                 _ => {}
             }
+        }
+    }
+
+    let modality_list = |ptr: &str, alt_key: &str| -> Option<Vec<String>> {
+        item.pointer(ptr)
+            .or_else(|| obj.get(alt_key))
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .collect()
+            })
+    };
+    if let (Some(ins), Some(outs)) = (
+        modality_list("/modalities/input", "input_modalities"),
+        modality_list("/modalities/output", "output_modalities"),
+    ) {
+        let has = |list: &[String], needle: &str| list.iter().any(|m| m.contains(needle));
+        let in_text = has(&ins, "text");
+        let out_text = has(&outs, "text");
+        let in_audio = has(&ins, "audio");
+        let out_audio = has(&outs, "audio");
+        // 纯音频转文本标为 ASR，纯文本转音频标为 TTS；凡支持文本进、文本出（含支持图片/音频理解输入的多模态对话模型）且未被显式排除的均归入 LLM
+        if !in_text && in_audio && out_text {
+            push_unique_section(&mut sections, Section::Asr);
+        }
+        if !out_text && out_audio {
+            push_unique_section(&mut sections, Section::Tts);
+        }
+        if in_text
+            && out_text
+            && !explicit_non_voice
+            && !sections.contains(&Section::Asr)
+            && !sections.contains(&Section::Tts)
+        {
+            push_unique_section(&mut sections, Section::Llm);
+        }
+        if (has(&outs, "image") || has(&outs, "video")) && !out_text && !out_audio {
+            explicit_non_voice = true;
         }
     }
 
@@ -1423,20 +1674,25 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
     {
         let lower = modality.to_ascii_lowercase();
         if let Some((ins, outs)) = lower.split_once("->") {
-            if ins.contains("audio") && outs.contains("text") {
+            let in_text = ins.contains("text");
+            let out_text = outs.contains("text");
+            let in_audio = ins.contains("audio");
+            let out_audio = outs.contains("audio");
+            if !in_text && in_audio && out_text {
                 push_unique_section(&mut sections, Section::Asr);
             }
-            if outs.contains("audio") {
+            if !out_text && out_audio {
                 push_unique_section(&mut sections, Section::Tts);
             }
-            // 纯文本对话模型，或输入输出都含音频的全能模型，都可以当对话大模型
-            if ins.contains("text")
-                && outs.contains("text")
-                && ins.contains("audio") == outs.contains("audio")
+            if in_text
+                && out_text
+                && !explicit_non_voice
+                && !sections.contains(&Section::Asr)
+                && !sections.contains(&Section::Tts)
             {
                 push_unique_section(&mut sections, Section::Llm);
             }
-            if outs.contains("image") && !outs.contains("text") {
+            if (outs.contains("image") || outs.contains("video")) && !out_text && !out_audio {
                 explicit_non_voice = true;
             }
         }
@@ -1498,13 +1754,10 @@ fn extract_models_and_sections(
     Some((models, model_sections))
 }
 
-/// 为 Cline 大模型列表置顶补齐 `cline-pass/` 订阅模型与 `cline-free/` 免费模型 ID 并去重
-/// （对齐 `yetone/magpie` `internal/provider/cline.go`）。
-pub fn prepend_cline_pass_models(remote: Vec<String>) -> Vec<String> {
+fn prepend_preset_models(presets: &[&str], remote: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    let mut merged =
-        Vec::with_capacity(CLINE_PASS_MODELS.len() + CLINE_FREE_MODELS.len() + remote.len());
-    for preset in CLINE_PASS_MODELS.iter().chain(CLINE_FREE_MODELS.iter()) {
+    let mut merged = Vec::with_capacity(presets.len() + remote.len());
+    for preset in presets {
         if seen.insert((*preset).to_owned()) {
             merged.push((*preset).to_owned());
         }
@@ -1518,6 +1771,45 @@ pub fn prepend_cline_pass_models(remote: Vec<String>) -> Vec<String> {
         }
     }
     merged
+}
+
+/// 为 Cline 大模型列表置顶补齐 `cline-pass/` 订阅模型与 `cline-free/` 免费模型 ID 并去重
+/// （对齐 `yetone/magpie` `internal/provider/cline.go`）。
+pub fn prepend_cline_pass_models(remote: Vec<String>) -> Vec<String> {
+    let mut presets = Vec::with_capacity(CLINE_PASS_MODELS.len() + CLINE_FREE_MODELS.len());
+    presets.extend_from_slice(&CLINE_PASS_MODELS);
+    presets.extend_from_slice(&CLINE_FREE_MODELS);
+    prepend_preset_models(&presets, remote)
+}
+
+fn unversioned_v1_models_fallback(models_url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(models_url).ok()?;
+    if parsed.path() == "/models" && parsed.query().is_none() && parsed.fragment().is_none() {
+        let base = models_url.strip_suffix("/models")?;
+        Some(format!("{base}/v1/models"))
+    } else {
+        None
+    }
+}
+
+fn paginated_models_url(base_models_url: &str, after_id: &str) -> Option<String> {
+    let mut parsed = reqwest::Url::parse(base_models_url).ok()?;
+    let preserved: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k != "limit" && k != "after_id")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    {
+        let mut pairs = parsed.query_pairs_mut();
+        pairs.clear();
+        for (k, v) in preserved {
+            pairs.append_pair(&k, &v);
+        }
+        pairs
+            .append_pair("limit", "1000")
+            .append_pair("after_id", after_id);
+    }
+    Some(parsed.into())
 }
 
 /// 测试 OpenRouter Decisions（Jev）连接；密钥只在本函数内使用，结果绝不回显密钥。
@@ -1649,7 +1941,14 @@ pub fn list_jev_models(models_url: &str, api_key: Option<&str>) -> serde_json::V
     let mut http_status = None;
     if !key.is_empty()
         && let Ok(client) = client()
-        && let Ok(resp) = with_auth(client.get(models_url).timeout(LIST_TIMEOUT), key).send()
+        && let Ok(resp) = with_auth(
+            client
+                .get(models_url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .timeout(LIST_TIMEOUT),
+            key,
+        )
+        .send()
     {
         http_status = Some(resp.status().as_u16());
         if resp.status().is_success()
@@ -1728,6 +2027,38 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
         );
     }
     let cline_llm = section == Section::Llm && is_cline_api_url(&resolved.url);
+    let alibaba_plan_llm = section == Section::Llm && is_alibaba_token_plan_url(&resolved.url);
+    let ark_plan_llm = section == Section::Llm && is_ark_plan_url(&resolved.url);
+    let plan_fallback = |code: Option<u16>| -> Option<ModelsListResult> {
+        if cline_llm {
+            return Some(finish(
+                true,
+                code,
+                prepend_cline_pass_models(Vec::new()),
+                std::collections::BTreeMap::new(),
+                "Cline 在线列表不可用，已列出 ClinePass 订阅模型（也可手动输入其他模型名）".into(),
+            ));
+        }
+        if alibaba_plan_llm {
+            return Some(finish(
+                true,
+                code,
+                prepend_preset_models(&ALIBABA_TOKEN_PLAN_MODELS, Vec::new()),
+                std::collections::BTreeMap::new(),
+                "已列出 Token Plan 套餐可用模型（也可手动输入其他模型名）".into(),
+            ));
+        }
+        if ark_plan_llm {
+            return Some(finish(
+                true,
+                code,
+                prepend_preset_models(&ARK_PLAN_MODELS, Vec::new()),
+                std::collections::BTreeMap::new(),
+                "已列出火山方舟套餐可用模型（也可手动输入其他模型名）".into(),
+            ));
+        }
+        None
+    };
     let client = match client() {
         Ok(client) => client,
         Err(detail) => {
@@ -1740,13 +2071,19 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             );
         }
     };
-    let response = match with_openai_compat(
-        client.get(&resolved.url).timeout(LIST_TIMEOUT),
-        &resolved.url,
-        &resolved.api_key,
-    )
-    .send()
-    {
+    let fetch_page = |target_url: &str, timeout: Duration| {
+        with_openai_compat(
+            client
+                .get(target_url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .timeout(timeout),
+            target_url,
+            &resolved.api_key,
+        )
+        .send()
+    };
+    let mut active_url = resolved.url.clone();
+    let mut response = match fetch_page(&active_url, LIST_TIMEOUT) {
         Ok(response) => response,
         Err(error) => {
             return finish(
@@ -1758,6 +2095,17 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             );
         }
     };
+    if response.status().as_u16() == 404
+        && let Some(remaining) = LIST_TIMEOUT
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+        && let Some(v1_url) = unversioned_v1_models_fallback(&active_url)
+        && let Ok(retry_resp) = fetch_page(&v1_url, remaining)
+        && retry_resp.status().is_success()
+    {
+        active_url = v1_url;
+        response = retry_resp;
+    }
     let status = response.status();
     let code = status.as_u16();
     if status.is_redirection() {
@@ -1782,36 +2130,24 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
         }
     };
     if !status.is_success() {
-        if cline_llm && code == 404 {
-            let presets = prepend_cline_pass_models(Vec::new());
-            return finish(
-                true,
-                Some(code),
-                presets,
-                std::collections::BTreeMap::new(),
-                "Cline 在线列表不可用，已列出 ClinePass 订阅模型（也可手动输入其他模型名）".into(),
-            );
+        if code == 404
+            && let Some(fallback) = plan_fallback(Some(code))
+        {
+            return fallback;
         }
         return finish(
             false,
             Some(code),
             Vec::new(),
             std::collections::BTreeMap::new(),
-            http_error_detail(code, &bytes, Some(&resolved.api_key)),
+            http_error_detail_for_url(code, &bytes, Some(&resolved.api_key), Some(&active_url)),
         );
     }
     let value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
         Err(_) => {
-            if cline_llm {
-                let presets = prepend_cline_pass_models(Vec::new());
-                return finish(
-                    true,
-                    Some(code),
-                    presets,
-                    std::collections::BTreeMap::new(),
-                    "已列出 ClinePass 订阅模型（也可手动输入其他模型名）".into(),
-                );
+            if let Some(fallback) = plan_fallback(Some(code)) {
+                return fallback;
             }
             return finish(
                 false,
@@ -1822,16 +2158,9 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             );
         }
     };
-    let Some((models, model_sections)) = extract_models_and_sections(&value) else {
-        if cline_llm {
-            let presets = prepend_cline_pass_models(Vec::new());
-            return finish(
-                true,
-                Some(code),
-                presets,
-                std::collections::BTreeMap::new(),
-                "已列出 ClinePass 订阅模型（也可手动输入其他模型名）".into(),
-            );
+    let Some((mut models, mut model_sections)) = extract_models_and_sections(&value) else {
+        if let Some(fallback) = plan_fallback(Some(code)) {
+            return fallback;
         }
         return finish(
             false,
@@ -1841,6 +2170,70 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             "返回格式不是模型列表（该地址可能不支持 /models 查询，可直接手动填写）".into(),
         );
     };
+    // OpenAI 分页兼容：当服务返回 `has_more: true` 与 `last_id` 时继续翻页补齐（对齐 magpie `fetchOpenAI`）
+    let mut current_val = value;
+    let mut seen_ids: std::collections::HashSet<String> = models.iter().cloned().collect();
+    for _ in 1..MAX_MODELS_PAGES {
+        if models.len() >= MAX_MODELS_COUNT {
+            break;
+        }
+        let Some(remaining) = LIST_TIMEOUT
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+        else {
+            break;
+        };
+        if current_val
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            break;
+        }
+        let cursor = current_val
+            .get("last_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| models.last().cloned());
+        let Some(after_id) = cursor else { break };
+        let Some(next_url) = paginated_models_url(&active_url, &after_id) else {
+            break;
+        };
+        let Ok(page_resp) = fetch_page(&next_url, remaining) else {
+            break;
+        };
+        if !page_resp.status().is_success() {
+            break;
+        }
+        let Ok(page_bytes) = read_limited_bytes(page_resp, MAX_MODELS_RESPONSE_BYTES) else {
+            break;
+        };
+        let Ok(page_val) = serde_json::from_slice::<serde_json::Value>(&page_bytes) else {
+            break;
+        };
+        let Some((page_models, page_sections)) = extract_models_and_sections(&page_val) else {
+            break;
+        };
+        let mut added = 0usize;
+        for (k, v) in page_sections {
+            model_sections.entry(k).or_insert(v);
+        }
+        for m in page_models {
+            if models.len() >= MAX_MODELS_COUNT {
+                break;
+            }
+            if seen_ids.insert(m.clone()) {
+                models.push(m);
+                added += 1;
+            }
+        }
+        if added == 0 {
+            break;
+        }
+        current_val = page_val;
+    }
     if cline_llm {
         let models = prepend_cline_pass_models(models);
         let count = models.len();
@@ -1850,6 +2243,28 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             models,
             model_sections,
             format!("已读取 {count} 个模型（ClinePass 订阅模型已置顶）"),
+        );
+    }
+    if alibaba_plan_llm {
+        let models = prepend_preset_models(&ALIBABA_TOKEN_PLAN_MODELS, models);
+        let count = models.len();
+        return finish(
+            true,
+            Some(code),
+            models,
+            model_sections,
+            format!("已读取 {count} 个模型（Token Plan 套餐模型已置顶）"),
+        );
+    }
+    if ark_plan_llm {
+        let models = prepend_preset_models(&ARK_PLAN_MODELS, models);
+        let count = models.len();
+        return finish(
+            true,
+            Some(code),
+            models,
+            model_sections,
+            format!("已读取 {count} 个模型（方舟套餐模型已置顶）"),
         );
     }
     if models.is_empty() {
@@ -2866,6 +3281,164 @@ mod tests {
         assert!(
             !rx.recv().unwrap().contains("enable_thinking"),
             "重测去掉参数"
+        );
+    }
+
+    #[test]
+    fn qwen_maas_wrapped_urls_plan_fallbacks_pagination_and_auth_hints_work() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // 1. 多行折行地址清理、大写协议头统一与裸千问/百炼域名幂等补齐 `/compatible-mode/v1`
+        assert_eq!(
+            llm_base_url("https://maas.qianwenaiapi.com/compatible-mo\n  de/v1"),
+            "https://maas.qianwenaiapi.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            models_list_url("https://maas.qianwenaiapi.com/compatible-mo\n  de/v1"),
+            "https://maas.qianwenaiapi.com/compatible-mode/v1/models"
+        );
+        assert_eq!(
+            llm_base_url("HTTPS://maas.qianwenaiapi.com"),
+            "https://maas.qianwenaiapi.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            llm_base_url("https://maas.qianwenaiapi.com/chat/completions"),
+            "https://maas.qianwenaiapi.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            models_list_url("https://maas.qianwenaiapi.com/models"),
+            "https://maas.qianwenaiapi.com/compatible-mode/v1/models"
+        );
+        assert_eq!(
+            models_list_url("https://token-plan.maas.qianwenaiapi.com/"),
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1/models"
+        );
+        assert_eq!(
+            paginated_models_url(
+                "https://h/v1/models?foo=bar&limit=50&after_id=old",
+                "qwen3.8-max"
+            )
+            .as_deref(),
+            Some("https://h/v1/models?foo=bar&limit=1000&after_id=qwen3.8-max")
+        );
+        assert!(is_alibaba_token_plan_url(
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+        ));
+        assert!(is_alibaba_token_plan_url(
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        ));
+        assert!(!is_alibaba_token_plan_url(
+            "https://maas.qianwenaiapi.com/compatible-mode/v1"
+        ));
+        assert!(is_ark_plan_url(
+            "https://ark.cn-beijing.volces.com/api/coding/v3"
+        ));
+        assert!(is_ark_plan_url(
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        ));
+
+        // 2. sk-sp- 套餐密钥与按量地址混填诊断（绝不回显密钥）
+        let fake_plan_key = "sk-sp-fake-plan";
+        let hint_plan_on_payg = token_plan_auth_hint(
+            "https://maas.qianwenaiapi.com/compatible-mode/v1",
+            fake_plan_key,
+        )
+        .unwrap();
+        assert!(hint_plan_on_payg.contains("token-plan.maas.qianwenaiapi.com"));
+        assert!(!hint_plan_on_payg.contains(fake_plan_key));
+
+        let fake_payg_key = "fake-payg-key";
+        let hint_payg_on_plan = token_plan_auth_hint(
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+            fake_payg_key,
+        )
+        .unwrap();
+        assert!(hint_payg_on_plan.contains("maas.qianwenaiapi.com"));
+        assert!(!hint_payg_on_plan.contains(fake_payg_key));
+
+        // 3. 裸地址 `/models` 404 自动回退 `/v1/models`，并支持 `has_more` + `last_id` 分页及 `modalities` 分类
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (head_tx, head_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for step in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = head_tx.send(head);
+                let (status, body) = match step {
+                    0 => ("404 Not Found", r#"{"error":"not found"}"#),
+                    1 => (
+                        "200 OK",
+                        r#"{"object":"list","has_more":true,"last_id":"qwen3.8-max","data":[{"id":"qwen3.8-max","modalities":{"input":["text"],"output":["text"]}},{"id":"qwen-image-2.0","domain":"image"}]}"#,
+                    ),
+                    _ => (
+                        "200 OK",
+                        r#"{"object":"list","has_more":false,"data":[{"id":"qwen3.8-flash","input_modalities":["text","image","audio"],"output_modalities":["text"]},{"id":"whisper-large","input_modalities":["audio"],"output_modalities":["text"]},{"id":"decision-model-preview","kind":"decision","modalities":{"input":["text"],"output":["text"]}}]}"#,
+                    ),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        let req = resolve_list_request(
+            Section::Llm,
+            &input(&format!("http://127.0.0.1:{port}"), "fake-key", ""),
+        )
+        .unwrap();
+        let listed = list_models(&req);
+        assert!(listed.ok, "{listed:?}");
+        assert_eq!(
+            listed.models,
+            vec![
+                "qwen3.8-max",
+                "qwen-image-2.0",
+                "qwen3.8-flash",
+                "whisper-large",
+                "decision-model-preview"
+            ]
+        );
+        assert_eq!(
+            listed.model_sections.get("qwen3.8-max"),
+            Some(&vec![Section::Llm])
+        );
+        assert_eq!(listed.model_sections.get("qwen-image-2.0"), Some(&vec![]));
+        assert_eq!(
+            listed.model_sections.get("decision-model-preview"),
+            Some(&vec![])
+        );
+        // 支持音频/图片理解输入、纯文本输出的多模态对话大模型必须保留在大模型（Llm）列表，不能误判为纯 ASR
+        assert_eq!(
+            listed.model_sections.get("qwen3.8-flash"),
+            Some(&vec![Section::Llm])
+        );
+        assert_eq!(
+            listed.model_sections.get("whisper-large"),
+            Some(&vec![Section::Asr])
+        );
+        let h0 = head_rx.recv().unwrap();
+        let h1 = head_rx.recv().unwrap();
+        let h2 = head_rx.recv().unwrap();
+        assert!(h0.starts_with("GET /models "), "{h0}");
+        assert!(
+            h0.to_ascii_lowercase().contains("user-agent: moss/"),
+            "{h0}"
+        );
+        assert!(
+            h0.to_ascii_lowercase().contains("accept: application/json"),
+            "{h0}"
+        );
+        assert!(h1.starts_with("GET /v1/models "), "{h1}");
+        assert!(
+            h2.starts_with("GET /v1/models?limit=1000&after_id=qwen3.8-max "),
+            "{h2}"
         );
     }
 }

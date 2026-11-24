@@ -13,6 +13,53 @@ export function voiceCenterAvailable({ hasInvoke, desktopSession, remote }) {
   return Boolean(hasInvoke) && Boolean(desktopSession) && !remote;
 }
 
+function isAlibabaCompatHost(host) {
+  const lower = String(host || "").toLowerCase();
+  return (
+    lower === "dashscope.aliyuncs.com" ||
+    lower === "dashscope-intl.aliyuncs.com" ||
+    lower === "qianwenaiapi.com" ||
+    lower.endsWith(".qianwenaiapi.com") ||
+    lower === "qwencloudapi.com" ||
+    lower.endsWith(".qwencloudapi.com") ||
+    lower === "maas.aliyuncs.com" ||
+    lower.endsWith(".maas.aliyuncs.com")
+  );
+}
+
+function cleanSchemeAndWhitespace(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return "";
+  const cleaned =
+    /^(?:https?|wss?):\/\//i.test(trimmed) && !/[<>]/.test(trimmed)
+      ? trimmed.replace(/\s+/g, "").replace(/^(https?|wss?):\/\//i, (m) => m.toLowerCase())
+      : trimmed;
+  return cleaned.replace(/\/+$/, "");
+}
+
+function completeAlibabaBareRoot(base) {
+  if (!base || !/^https?:\/\//i.test(base)) return base;
+  try {
+    const parsed = new URL(base);
+    if (
+      (parsed.pathname === "/" || parsed.pathname === "") &&
+      !parsed.search &&
+      !parsed.hash &&
+      isAlibabaCompatHost(parsed.hostname)
+    ) {
+      return `${base}/compatible-mode/v1`;
+    }
+  } catch {
+    return base;
+  }
+  return base;
+}
+
+/** 清理多行复制粘贴带入的空白字符、统一小写协议头（保留 `<` `>` 以便拦截占位符），并为千问/百炼裸根域名自动补齐 `/compatible-mode/v1`。 */
+export function cleanUrlInput(text) {
+  return completeAlibabaBareRoot(cleanSchemeAndWhitespace(text));
+}
+
 function trimEndSlash(text) {
   return String(text || "").trim().replace(/\/+$/, "");
 }
@@ -133,12 +180,156 @@ export function switchKind(section, form, kind) {
   return next;
 }
 
+export const ALIBABA_TOKEN_PLAN_MODELS = [
+  "auto",
+  "qwen4-max",
+  "qwen4-max-preview",
+  "qwen3.8-max",
+  "qwen3.8-flash",
+  "qwen3.7-max",
+  "qwen3.7-plus",
+  "qwen3.6-flash",
+  "deepseek-v4.1-flash",
+  "deepseek-v4.1-flash-1017",
+  "deepseek-v4-pro",
+  "deepseek-v4-pro-0813",
+  "deepseek-v4-flash-0731",
+  "glm-5.3",
+  "glm-5.2",
+];
+
+export const QWEN_MAAS_PRESET_MODELS = [
+  "qwen3.8-flash",
+  "qwen3.8-max",
+  "qwen3.7-plus",
+  "qwen3.7-max",
+  "qwen3.6-flash",
+  "qwen4-max",
+  "qwen3-max",
+  "qwen-plus",
+  "qwen-turbo",
+  "qwen-max",
+  "qwen3-coder-plus",
+];
+
+export const ARK_PLAN_MODELS = [
+  "ark-code-latest",
+  "doubao-seed-evolving",
+  "doubao-seed-2.1-pro",
+  "doubao-seed-2.1-lite",
+  "doubao-seed-2.0-mini",
+  "minimax-m3",
+  "glm-5.3",
+  "glm-5.3-flash",
+  "deepseek-v4.1-flash",
+  "deepseek-v4.1-flash-economy",
+  "deepseek-v4-flash",
+  "deepseek-v4-pro",
+  "kimi-k2.8-preview",
+  "kimi-k3",
+  "kimi-k3.1-pro",
+];
+
+/**
+ * 尚未填写密钥或服务端 `/models` 不可用时，为千问开放平台 / 百炼 / Token Plan / 方舟套餐预先提供可选模型列表（对齐 `yetone/magpie` 内置目录与套餐列表）。
+ */
+export function presetModelOptionsFor(section, url) {
+  if (section !== "llm") return [];
+  const raw = cleanUrlInput(url);
+  if (!raw || !/^https?:\/\//i.test(raw)) return [];
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    const path = (parsed.pathname || "").toLowerCase();
+    if (host.startsWith("token-plan.") && isAlibabaCompatHost(host)) {
+      return ALIBABA_TOKEN_PLAN_MODELS.map((id) => ({ id, hint: "Token Plan 套餐 · 大模型", sections: ["llm"] }));
+    }
+    if (isAlibabaCompatHost(host)) {
+      return QWEN_MAAS_PRESET_MODELS.map((id) => ({ id, hint: "千问常用预设 · 大模型", sections: ["llm"] }));
+    }
+    if ((host === "volces.com" || host.endsWith(".volces.com")) && (path.includes("/api/coding") || path.includes("/api/plan"))) {
+      return ARK_PLAN_MODELS.map((id) => ({ id, hint: "方舟套餐 · 大模型", sections: ["llm"] }));
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
+
+/**
+ * 检测千问开放平台 / 百炼 / Qwen Cloud 的按量地址与 `sk-sp-` 套餐密钥混填，返回提示文案与一键修正地址（纯内存判断，绝不拼接或回显密钥）。
+ */
+export function tokenPlanEndpointMismatch(url, apiKey) {
+  const raw = cleanUrlInput(url);
+  const key = String(apiKey || "").trim();
+  if (!raw || !key || !/^https?:\/\//i.test(raw)) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!isAlibabaCompatHost(host)) return null;
+    const isPlanHost = host.startsWith("token-plan.");
+    const isPlanKey = key.startsWith("sk-sp-");
+    if (isPlanKey && !isPlanHost) {
+      if (host === "qianwenaiapi.com" || host.endsWith(".qianwenaiapi.com")) {
+        return {
+          message: "检测到 sk-sp- 开头的千问套餐（Token Plan）密钥，按量地址无法鉴权。",
+          suggestedUrl: "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+          actionLabel: "切换为千问套餐地址",
+        };
+      }
+      if (host === "qwencloudapi.com" || host.endsWith(".qwencloudapi.com")) {
+        return {
+          message: "检测到 sk-sp- 开头的 Qwen Cloud 套餐密钥，需使用套餐专属地址。",
+          suggestedUrl: "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+          actionLabel: "切换为套餐专属地址",
+        };
+      }
+      if (host === "dashscope-intl.aliyuncs.com") {
+        return {
+          message: "检测到 sk-sp- 开头的套餐密钥，国际站需使用套餐专属地址。",
+          suggestedUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+          actionLabel: "切换为国际站套餐地址",
+        };
+      }
+      return {
+        message: "检测到 sk-sp- 开头的百炼套餐（Token Plan）密钥，需使用套餐专属地址。",
+        suggestedUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        actionLabel: "切换为百炼套餐地址",
+      };
+    }
+    if (!isPlanKey && isPlanHost) {
+      if (host.endsWith(".qianwenaiapi.com")) {
+        return {
+          message: "当前为 Token Plan 套餐专属地址（需 sk-sp- 开头密钥）；按量付费密钥请用按量地址。",
+          suggestedUrl: "https://maas.qianwenaiapi.com/compatible-mode/v1",
+          actionLabel: "切换为千问按量地址",
+        };
+      }
+      if (host.endsWith(".qwencloudapi.com")) {
+        return {
+          message: "当前为 Token Plan 套餐专属地址（需 sk-sp- 开头密钥）；按量付费密钥请用地域按量地址。",
+          suggestedUrl: "https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1",
+          actionLabel: "切换为按量地址",
+        };
+      }
+      return {
+        message: "当前为 Token Plan 套餐专属地址（需 sk-sp- 开头密钥）；百炼按量付费密钥请用按量地址。",
+        suggestedUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        actionLabel: "切换为百炼按量地址",
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /**
  * 识别仅提供大模型对话接口、不提供 OpenAI `/audio/transcriptions` 与 `/audio/speech` 语音端点的网关
  * （对齐 `yetone/magpie` `internal/provider/presets.go` 的 Chat-only 服务商与 Coding/Token Plan 专属端点）。
  */
 export function chatOnlyGatewayName(url) {
-  const raw = String(url || "").trim();
+  const raw = cleanUrlInput(url);
   if (!raw || !/^https?:\/\//i.test(raw)) return "";
   try {
     const parsed = new URL(raw);
@@ -153,7 +344,14 @@ export function chatOnlyGatewayName(url) {
     if (host === "api.moonshot.cn" || host === "api.moonshot.ai" || host === "api.kimi.com" || host === "api.kimi.ai") {
       return "Kimi / Moonshot";
     }
-    if (host.startsWith("token-plan") || path.includes("/api/coding") || path.includes("/tokenplan/") || path.includes("/step_plan/")) {
+    if (
+      host.startsWith("token-plan") ||
+      path.includes("/api/coding") ||
+      path.includes("/api/plan") ||
+      path.includes("/plan/v") ||
+      path.includes("/tokenplan/") ||
+      path.includes("/step_plan/")
+    ) {
       return "该 Coding / Token Plan 专属端点";
     }
   } catch {
@@ -173,23 +371,29 @@ export function chatOnlyAudioGatewayError(section, url) {
 
 /** 与桌面端一致的最终地址规则：大模型写基础地址，语音识别 / 合成写完整接口地址；豆包留空用默认地址；仅对话网关在语音分区不拼凑虚假音频路径。 */
 export function finalUrl(section, url, kind) {
-  if (kind === "doubao") return trimEndSlash(url) || DOUBAO_DEFAULTS[section]?.url || "";
-  const base = trimEndSlash(url);
-  if (!base) return "";
-  if (section === "llm") return base.replace(/\/chat\/completions$/, "").replace(/\/+$/, "");
-  if (chatOnlyGatewayName(base)) return "";
+  const cleaned = cleanSchemeAndWhitespace(url);
+  if (kind === "doubao") return cleaned || DOUBAO_DEFAULTS[section]?.url || "";
+  if (!cleaned) return "";
+  if (section === "llm") {
+    const stripped = trimEndSlash(cleaned.replace(/\/chat\/completions$/, ""));
+    return completeAlibabaBareRoot(stripped);
+  }
+  if (chatOnlyGatewayName(cleaned)) return "";
   const suffix = section === "asr" ? "/audio/transcriptions" : "/audio/speech";
-  return base.endsWith(suffix) ? base : `${base}${suffix}`;
+  const stripped = cleaned.endsWith(suffix) ? trimEndSlash(cleaned.slice(0, -suffix.length)) : cleaned;
+  const base = completeAlibabaBareRoot(stripped);
+  return `${base}${suffix}`;
 }
 
-/** 从任意分区地址还原基础服务地址（去掉 `/chat/completions`、`/audio/transcriptions`、`/audio/speech`、`/models`）。 */
+/** 从任意分区地址还原基础服务地址（去掉 `/chat/completions`、`/audio/transcriptions`、`/audio/speech`、`/models` 后再补齐裸根）。 */
 export function baseServiceUrl(url) {
-  const trimmed = trimEndSlash(url);
-  if (!trimmed) return "";
-  return ["/chat/completions", "/audio/transcriptions", "/audio/speech", "/models"].reduce(
+  const cleaned = cleanSchemeAndWhitespace(url);
+  if (!cleaned) return "";
+  const stripped = ["/chat/completions", "/audio/transcriptions", "/audio/speech", "/models"].reduce(
     (current, suffix) => (current.endsWith(suffix) ? trimEndSlash(current.slice(0, -suffix.length)) : current),
-    trimmed,
+    cleaned,
   );
+  return completeAlibabaBareRoot(stripped);
 }
 
 /** 与桌面端 `models_list_url` 一致：从任意分区填写的地址推导 `/models` 列表查询地址。 */
@@ -235,7 +439,7 @@ export function findPeerCloudSource(section, status, formUrl = "") {
 /** 读取模型列表前的地址检查（不要求提前填写模型名与音色）。 */
 export function modelsListError(form, section = "") {
   if (isDoubao(form)) return "";
-  const url = String(form?.url || "").trim();
+  const url = cleanUrlInput(form?.url);
   if (!url) return "请先填写地址";
   if (!/^https?:\/\//i.test(url)) return "地址必须以 http:// 或 https:// 开头";
   if (/[<>\s]/.test(url)) return "地址包含空白或占位符";
@@ -247,24 +451,25 @@ export function modelsListError(form, section = "") {
 /** 是否满足自动读取模型列表的条件：OpenAI 兼容、地址有效，且已有密钥（含同源已存密钥或本机回环服务）。 */
 export function canAutoFetchModels(form, entry, status = null, section = "") {
   if (isDoubao(form) || modelsListError(form, section)) return false;
+  const cleanedUrl = cleanUrlInput(form?.url);
   if (String(form?.api_key || "").trim() || entry?.key_set) return true;
-  if (status && section && findPeerCloudSource(section, status, form?.url).sameOrigin) return true;
-  return /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(String(form?.url || "").trim());
+  if (status && section && findPeerCloudSource(section, status, cleanedUrl).sameOrigin) return true;
+  return /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(cleanedUrl);
 }
 /** 当前表单对应的模型列表缓存键（地址或密钥变动后重新读取）。 */
 export function modelsListKey(form, entry, peerKeySet = false) {
-  if (isDoubao(form)) return `doubao:${trimEndSlash(form?.url)}`;
+  if (isDoubao(form)) return `doubao:${cleanSchemeAndWhitespace(form?.url)}`;
   return JSON.stringify([modelsListUrl(form?.url), String(form?.api_key || "").trim(), Boolean(entry?.key_set || peerKeySet)]);
 }
 const SECTION_USAGE_LABEL = { llm: "大模型", asr: "语音识别", tts: "语音合成" };
 const OMNI_ALL_RE = /(?:qwen[\d.]*-omni|gpt-4o(?:-[a-z0-9]+)*-(?:audio|realtime)|gemini-[\d.]+-[a-z0-9-]*live|glm-4-voice|step-1o|minimax-omni)/i;
-const OMNI_LLM_ASR_RE = /(?:qwen2?-audio|ultravox|voxtral|salmonn|kimi-audio)/i;
+const OMNI_LLM_ASR_RE = /(?:qwen2-audio|qwen-audio-(?:turbo|chat)|ultravox|voxtral|salmonn|kimi-audio)/i;
 const ASR_MODEL_RE =
   /(?:whisper|sensevoice|sense-voice|paraformer|funasr|teleasr|telespeech|fireredasr|zipformer|transcribe|speech-to-text|audio-to-text|canary-|dolphin-asr|wenet|conformer|(?:^|[/_-])(?:x-asr|asr|stt)(?:$|[/_-]|\d)|volc\.(?:bigasr|seedasr))/i;
 const TTS_MODEL_RE =
   /(?:cosyvoice|fish-speech|fishaudio|indextts|index-tts|kokoro|matcha|f5-tts|spark-tts|chattts|melotts|vits|text-to-speech|text2speech|audio-speech|voice-clone|bark|seed-tts|volc\.service_type|(?:^|[/_-])tts(?:$|[/_-]|\d)|(?:^|[/_-])speech-(?:01|02|hd|turbo))/i;
 const NON_CHAT_VOICE_RE =
-  /(?:embed|bge-(?:large|base|small|m3|reranker)|rerank|bce-reranker|moderation|dall-e|flux[.\-_/]|stable-diffusion|sdxl|kolors|wanx|wan2\.\d|cogview|cogvideo|seedream|imagen|hidream|sora|kling|vidu|hunyuanvideo|ltx-video|mochi-1)/i;
+  /(?:embed|bge-(?:large|base|small|m3|reranker)|rerank|bce-reranker|moderation|dall-e|flux[.\-_/]|stable-diffusion|sdxl|kolors|qwen-image|wanx|wan\d\.\d|happyhorse|cogview|cogvideo|seedream|imagen|hidream|sora|kling|vidu|hunyuanvideo|ltx-video|mochi-1|decision-model|gemini-decision|typesafe\/jev-(?!router))/i;
 
 /**
  * 识别模型 ID 可用于哪些分区（`["llm" | "asr" | "tts"]`）：
@@ -353,11 +558,11 @@ export function isSectionBlank(form) {
   return !String(value.url || "").trim() && !String(value.model || "").trim() && !String(value.api_key || "").trim();
 }
 
-/** 提交给桌面端的分区内容（语速转为数字）。 */
+/** 提交给桌面端的分区内容（自动清理多行粘贴带入的空白，语速转为数字）。 */
 export function sectionPayload(section, form) {
   const value = form || {};
   const payload = {
-    url: String(value.url || "").trim(),
+    url: cleanUrlInput(value.url),
     api_key: String(value.api_key || "").trim(),
     model: String(value.model || "").trim(),
   };

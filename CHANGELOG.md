@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复语音中心千问开放平台与套餐端点看不见模型、折行地址静默失效与测试慢思考问题（2026-11-24）
+
+- **现象**：语音中心「大模型」填入千问开放平台 `maas.qianwenaiapi.com`（含多行复制带入换行空格、只填裸域名，或将 `sk-sp-` Token Plan 套餐密钥填进按量地址）时，模型下拉框不显示可选模型，自动拉取报错在未展开下拉时静默隐藏；拉回多模态模型后支持音频理解的对话模型被误筛出大模型列表，且千问新域名未附带关闭思考参数导致测试耗时偏长。
+- **根因与修复**：前后端统一清理 URL 折行空白与大写协议头并幂等补齐千问 / 百炼 / Qwen Cloud 裸域名 `/compatible-mode/v1`；对齐 `magpie` 预置千问常用模型及 Token Plan / 火山方舟套餐模型（未填密钥或 `/models` 返回 404 时直接可选，套餐密钥与按量地址混填时给出直白提示与一键切换按钮，绝不回显密钥）；`BuiltinModelGroup` 在编辑态防抖自动读取列表、在模型栏下方直显失败原因并支持跨出容器失焦收起；`moss-voice::models` 补齐 `User-Agent`、`Accept: application/json`、8 MB 上限、剩余超时内的 `has_more` 分页与裸地址 `/v1/models` 回退，修正 `modalities` 将支持音频输入的多模态对话模型保留在 `Llm`；`openai::thinking_off_params` 补齐 `qianwenaiapi.com` / `qwencloudapi.com` / `maas.aliyuncs.com`。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（新增 `qwen_maas_wrapped_urls_plan_fallbacks_pagination_and_auth_hints_work` 与 `openai::tests::urls_are_normalized` 断言）、前端 ESLint / 单测 391/391 / 构建、浏览器交互测试 18/18（`voice-center` 新增折行地址清理、预置模型可见与 `sk-sp-` 一键切换断言）及本机桌面程序快更与签名校验全部通过；未用真实云端密钥在线实测（`unverified`）。
+- **关联**：`crates/moss-voice/src/models.rs`、`crates/moss-voice-providers/src/openai.rs`、`frontend/src/voiceState/sections.js`、`frontend/src/components/voice-builtin/BuiltinModelGroup.jsx`、`frontend/src/styles/09-voice-center.css`、`docs/developer/frontend-behavior.md`。
+
 ### 断网时也能念出报错原因，快速查询失败不再念工具原文（2026-11-24）
 
 - **现象**：n116 改成按原因播报后，“连不上大模型，请检查网络”这类话术没有预合成，断网时云端合成也连不上，只能在屏幕上显示文字（原先的笼统话术是预合成的）；本地只读快答（“机器状态”等）失败时把工具原文拼进“查询失败：…”，可能念出一长串、设备地址或英文报错。
