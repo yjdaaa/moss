@@ -36,7 +36,7 @@ macro_rules! plain_head {
 macro_rules! immutable_safety_rules {
     () => {
         "回答要简短、口语化，一般不超过三句话；不要使用 Markdown、列表和代码块，句子中间不要用表情符号，因为你的回答会被直接朗读出来。\
-像面对面聊天那样说话：开口就直接回答，不要先复述问题或说客套话；句子要短，一句话超过十五个字就用逗号断开；可以自然地带一点“嗯”“好”“这样”之类的口语词，但不要每句都带；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
+像面对面聊天那样说话：开口就直接回答，不要先复述问题或说客套话；开头那句尤其要短，头几个字就用逗号断开，可以用“好，”“嗯，”“行，”这类口语承接，也可以先说结论的前半句，比如“现在空闲，……”，但不要每次都用同一个词；之后的句子也要短，一句话超过十五个字就用逗号断开；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
 内容比较多时先说最要紧的一两句，再问要不要接着听。\
 用户的话是语音识别出来的，可能有同音错字或不完整，按最可能的意思理解，不要纠正用户的用词；确实听不明白就简短地请他再说一遍。\
 可以在整段回答的最开头放一个表情（😊 开心、🤔 思考、😮 惊讶、😢 难过），它只用来切换小智屏幕上的表情、不会被读出来；没有合适的就不放。\
@@ -222,10 +222,15 @@ pub const STOP_OK_SPEECH: &str = "已发送停止请求，请确认设备状态�
 pub const STOP_ERR_SPEECH: &str = "停止请求发送失败，请使用设备急停按钮并检查连接。";
 /// 慢速外部信息查询工具（天气/新闻/联网搜索/RAGFlow 知识库）触发时的过渡垫音
 pub const SLOW_QUERY_FILLER: &str = "稍等，正在查询。";
-/// 慢速 AI 生图/刀路预览生成工具触发时的过渡垫音（仅预览生成，不涉及硬件动作）
-pub const SLOW_GENERATE_FILLER: &str = "稍等，正在生成预览。";
-/// n72 只读检查机器连接（串口 / 网络探测要几秒）时的过渡垫音
-pub const SLOW_CHECK_FILLER: &str = "稍等，我看一下机器。";
+/// 慢速 AI 生图/刀路预览生成工具触发时的过渡垫音（仅预览生成，不涉及硬件动作）。
+/// 这类工具一定要几秒，拿到调用就先应一声（n113），所以写成口头应答而不是“稍等”。
+pub const SLOW_GENERATE_FILLER: &str = "好，我生成下预览。";
+/// n72 只读检查机器连接（串口 / 网络探测要几秒）时的过渡垫音（n113 起拿到调用就说）
+pub const SLOW_CHECK_FILLER: &str = "好，我看下机器。";
+/// 小智拍照看图（设备 MCP 的 `self.camera.take_photo`：拍照、上传、视觉模型回答，要几秒）时的过渡垫音（n113）
+pub const SLOW_LOOK_FILLER: &str = "好，我看一眼。";
+/// 小智固件的拍照工具在大模型工具清单里的名字（[`DeviceTools`] 加 `device__` 前缀、`.` 换成 `_`）
+const DEVICE_CAMERA_TOOL: &str = "device__self_camera_take_photo";
 
 /// 命令词纠正只用于这么短的识别结果（n101）：停止 / 退出命令本来就短，长句以识别为准。
 const MAX_COMMAND_FUSION_CHARS: usize = 4;
@@ -293,7 +298,19 @@ pub fn background_results_text(outcomes: &[(ToolCall, ToolOutcome)]) -> String {
 }
 
 /// 慢工具垫音的起说延迟：工具在这之内返回就不说垫音（快的时候不说废话，慢的时候不冷场）。
+/// 只用于可能很快返回的查询类；一定要几秒的工具见 [`slow_tool_filler_delay`]。
 pub const SLOW_TOOL_FILLER_DELAY: Duration = Duration::from_millis(1000);
+
+/// 垫音什么时候说（n113）：生成预览、检查机器、拍照看图一定要几秒，`TurnGate` 放行、工具开跑的同时就说，
+/// 像人听到吩咐先应一声“好”再动手，省掉原来干等的 1 秒；联网搜索、天气这类查询常常 1 秒内就回，
+/// 仍等 [`SLOW_TOOL_FILLER_DELAY`] 还没回才说，快的时候不说废话。
+pub fn slow_tool_filler_delay(filler: &str) -> Duration {
+    if filler == SLOW_QUERY_FILLER {
+        SLOW_TOOL_FILLER_DELAY
+    } else {
+        Duration::ZERO
+    }
+}
 
 /// n72（2026-11-08 用户决定）：激光工具在场时附在每轮系统提示后的用法表，让模型按用户说法选对工具。
 /// 只写工具怎么选，确认与停止规则仍以 [`IMMUTABLE_SAFETY_RULES`] 为准。
@@ -329,6 +346,10 @@ fn is_slow_query_call(call: &ToolCall) -> bool {
 
 fn is_slow_check_call(call: &ToolCall) -> bool {
     call.function.name == "check_laser_connection_tool"
+}
+
+fn is_slow_look_call(call: &ToolCall) -> bool {
+    call.function.name == DEVICE_CAMERA_TOOL
 }
 
 fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
@@ -378,17 +399,22 @@ pub fn slow_tool_filler(calls: &[ToolCall]) -> Option<&'static str> {
     }
     let mut has_generate = false;
     let mut has_check = false;
+    let mut has_look = false;
     for call in calls {
         if is_slow_generate_preview_call(call) {
             has_generate = true;
         } else if is_slow_check_call(call) {
             has_check = true;
+        } else if is_slow_look_call(call) {
+            has_look = true;
         } else if !is_slow_query_call(call) {
             return None;
         }
     }
     if has_generate {
         Some(SLOW_GENERATE_FILLER)
+    } else if has_look {
+        Some(SLOW_LOOK_FILLER)
     } else if has_check {
         Some(SLOW_CHECK_FILLER)
     } else {
@@ -716,7 +742,7 @@ impl Conversation {
     }
     /// 返回需要预合成缓存的高频固定话术清单（去重、过滤空白）。
     pub fn fixed_phrases(&self) -> Vec<String> {
-        let mut phrases = Vec::with_capacity(9);
+        let mut phrases = Vec::with_capacity(12);
         let mut push_unique = |text: &str| {
             let trimmed = text.trim();
             if !trimmed.is_empty() && !phrases.iter().any(|existing| existing == trimmed) {
@@ -735,6 +761,7 @@ impl Conversation {
         push_unique(SLOW_QUERY_FILLER);
         push_unique(SLOW_GENERATE_FILLER);
         push_unique(SLOW_CHECK_FILLER);
+        push_unique(SLOW_LOOK_FILLER);
         push_unique(BACKGROUND_QUERY_FILLER);
         phrases
     }
@@ -2589,9 +2616,16 @@ impl Turn {
             {
                 let running = self.run_tools(&reply.tool_calls);
                 tokio::pin!(running);
-                match tokio::time::timeout(SLOW_TOOL_FILLER_DELAY, &mut running).await {
-                    Ok(outcomes) => outcomes,
-                    Err(_) => {
+                let delay = slow_tool_filler_delay(filler);
+                let early = if delay.is_zero() {
+                    None
+                } else {
+                    tokio::time::timeout(delay, &mut running).await.ok()
+                };
+                match early {
+                    Some(outcomes) => outcomes,
+                    None => {
+                        // 一定要几秒的工具：闸门已放行，边应一声边跑工具（n113）
                         filler_spoken = true;
                         let (_, outcomes) = tokio::join!(self.speak_fixed(filler), running);
                         outcomes

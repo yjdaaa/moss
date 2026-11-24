@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 生成预览、检查机器、拍照看图拿到调用就先应一声，提示词引导短开场白（2026-11-24）
+
+- **现象**：让小智生成预览、检查机器或拍照看图时，大模型第一轮只给工具调用不说话，垫音要等工具跑满 1 秒才说，加上识别和大模型的时间会有 2～3 秒完全安静；大模型开头那句不带逗号时，首段提速用不上。
+- **根因与修复**：新增 `slow_tool_filler_delay`：这三类一定要几秒的工具在 `TurnGate` 放行、工具开跑时就说垫音，查询类仍等 1 秒；垫音改成“好，我生成下预览。”这类口头应答，新增拍照的 `SLOW_LOOK_FILLER`。**提示词变更**：`IMMUTABLE_SAFETY_RULES` 引导开头那句在头几个字就用逗号断开。垫音门禁（R3、控制、混合调用不说）与闸门不变。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（`moss-voice-server` 391 项，新增 `known_slow_tools_answer_at_once_while_quick_queries_stay_quiet`：400 ms 的生成预览在工具跑完前就说垫音、400 ms 的查询不说），快更本机桌面程序。未用真实大模型与真机测量首声时间。
+- **关联**：`crates/moss-voice-server/src/conversation.rs`（`slow_tool_filler_delay`、`slow_tool_filler`、`SLOW_LOOK_FILLER`、`immutable_safety_rules!`）、`tests/chat/shortcut.rs`（`known_slow_tools_answer_at_once_while_quick_queries_stay_quiet`）；内置语音技术书 n113。
+
 ### 过程记录补上判停复盘数据，并提供统计抢话与白等的脚本（2026-11-24）
 
 - **现象**：要决定是否接中文文本判停模型或做自适应等待，得先知道现在的句尾规则有多少次抢话、多少次白等，但过程记录只写了“开口前等多久”，没写用户之后有没有接着说，无从统计。

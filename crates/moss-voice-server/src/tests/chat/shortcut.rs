@@ -617,6 +617,117 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     );
 }
 
+/// n113：一定要几秒的工具（生成预览、检查机器、拍照看图）放行后立刻应一声、边说边跑工具；
+/// 查询类 1 秒内返回就不说垫音。
+#[tokio::test]
+async fn known_slow_tools_answer_at_once_while_quick_queries_stay_quiet() {
+    use crate::conversation::{
+        SLOW_CHECK_FILLER, SLOW_GENERATE_FILLER, SLOW_LOOK_FILLER, SLOW_QUERY_FILLER,
+        SLOW_TOOL_FILLER_DELAY, TurnEvent, TurnInput, slow_tool_filler, slow_tool_filler_delay,
+        spawn_turn,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mk_call = |name: &str, args: &str| ToolCall::new(format!("call-{name}"), name, args);
+    assert_eq!(
+        slow_tool_filler(&[mk_call("device__self_camera_take_photo", "{}")]),
+        Some(SLOW_LOOK_FILLER)
+    );
+    assert_eq!(
+        slow_tool_filler_delay(SLOW_QUERY_FILLER),
+        SLOW_TOOL_FILLER_DELAY
+    );
+    for filler in [SLOW_GENERATE_FILLER, SLOW_CHECK_FILLER, SLOW_LOOK_FILLER] {
+        assert_eq!(slow_tool_filler_delay(filler), Duration::ZERO, "{filler}");
+    }
+
+    struct TimedTools {
+        done: Arc<AtomicBool>,
+    }
+    impl ToolExecutor for TimedTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            ["generate_text_image_tool", "web_search"]
+                .into_iter()
+                .map(|name| ToolSpec {
+                    name: name.into(),
+                    description: name.into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                })
+                .collect()
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                self.done.store(false, Ordering::SeqCst);
+                // 比 1 秒短：旧逻辑下这两个工具都不会说垫音
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                self.done.store(true, Ordering::SeqCst);
+                ToolOutcome::Reply("ok".into())
+            })
+        }
+    }
+
+    let done = Arc::new(AtomicBool::new(false));
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            call("generate_text_image_tool"),
+            say(&["预览好了。"]),
+            call("web_search"),
+            say(&["查到了。"]),
+        ])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("帮我生成一块椴木写平安喜乐的预览".into()),
+            Ok("搜一下今天天气".into()),
+        ])),
+        ..Default::default()
+    });
+    let conversation = Arc::new(Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(TimedTools { done: done.clone() }),
+        ConversationSettings::default(),
+    ));
+    let ctx = ToolContext {
+        device_id: "d-filler".into(),
+        session_id: "s-filler".into(),
+    };
+    // 两个工具都只要 400 ms：生成预览照样先应一声，查询不说垫音
+    for expect in [vec![SLOW_GENERATE_FILLER, "预览好了。"], vec!["查到了。"]] {
+        let (handle, mut rx) = spawn_turn(
+            conversation.clone(),
+            ctx.clone(),
+            TurnInput::Utterance {
+                pcm: vec![0; 960],
+                sample_rate: UP,
+                stream: None,
+            },
+            vec![],
+            None,
+        );
+        let mut spoken = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let TurnEvent::Speech { text, .. } = ev {
+                if text == SLOW_GENERATE_FILLER {
+                    assert!(
+                        !done.load(Ordering::SeqCst),
+                        "生成预览的垫音要在工具跑完之前说出来"
+                    );
+                }
+                spoken.push(text);
+            }
+        }
+        handle.await.unwrap();
+        assert_eq!(spoken, expect);
+    }
+}
+
 #[test]
 fn homophone_corrected_interim_stop_triggers_fast_stop_before_listen_stop() {
     struct HomophoneStopInterimAsr;
