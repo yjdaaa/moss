@@ -538,6 +538,10 @@ pub fn groups_of_builtin_tool(spec: &ToolSpec) -> &'static [ToolGroup] {
     }
 }
 
+/// 粗筛永远不剪的工具（n114）：急停、暂停、停止走边框都在 `laser_safe_action_tool` 里，粗筛把“暂停一下”
+/// 误判成闲聊时大模型手里也得有它。与 `laser_contracts::ALWAYS_ENABLED_TOOLS` 一致（语音域不依赖激光域，这里单写）。
+pub const NEVER_FILTERED_TOOLS: [&str; 1] = ["laser_safe_action_tool"];
+
 /// 第三方外部 MCP（`<server>__<tool>`）裁剪结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalMcpFilter {
@@ -584,7 +588,8 @@ impl JevTurnDecision {
         }
     }
 
-    /// 根据本轮筛选结果裁剪工具清单；短确认回复（如“确认”“开始”）自动保留上一轮刚调用过的工具。
+    /// 根据本轮筛选结果裁剪工具清单；短确认回复（如“确认”“开始”）自动保留上一轮刚调用过的工具，
+    /// 停止 / 暂停工具（[`NEVER_FILTERED_TOOLS`]）永远保留。
     pub fn filter_tools(
         &self,
         tools: &[ToolSpec],
@@ -598,7 +603,9 @@ impl JevTurnDecision {
         tools
             .iter()
             .filter(|spec| {
-                if recent_called.contains(spec.name.as_str()) {
+                if recent_called.contains(spec.name.as_str())
+                    || NEVER_FILTERED_TOOLS.contains(&spec.name.as_str())
+                {
                     return true;
                 }
                 if let Some(server) = external_mcp_server(&spec.name) {
@@ -1623,8 +1630,9 @@ mod tests {
         assert_eq!(d1.keep_memories, Some(vec![false, true]));
 
         let pruned = d1.filter_tools(&tools, "今天外面下不下雨", &[]);
-        assert_eq!(pruned.len(), 1);
-        assert_eq!(pruned[0].name, "get_weather");
+        // 闲聊也留着停止 / 暂停工具（n114）：接下来一句“暂停一下”大模型手里得有它
+        let names: Vec<_> = pruned.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(names, ["laser_safe_action_tool", "get_weather"]);
 
         // 校验单次请求结构：state 只包含一份 utterance，绝不重复
         {
@@ -1883,7 +1891,10 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        assert_eq!(kept1, vec!["notes__read", "notes__search"]);
+        assert_eq!(
+            kept1,
+            vec!["laser_safe_action_tool", "notes__read", "notes__search"]
+        );
         assert!(
             !kept1
                 .iter()
@@ -1893,10 +1904,15 @@ mod tests {
         let d2 = filter
             .evaluate_turn("今天心情真不错呀", &[], &tools, &[])
             .await;
-        let kept2 = d2.filter_tools(&tools, "今天心情真不错呀", &[]);
-        assert!(
-            kept2.is_empty(),
-            "纯闲聊时内置工具与外部 MCP 工具均应裁剪为 0 个"
+        let kept2: Vec<String> = d2
+            .filter_tools(&tools, "今天心情真不错呀", &[])
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            kept2,
+            vec!["laser_safe_action_tool"],
+            "纯闲聊时内置工具与外部 MCP 工具都裁掉，只留停止 / 暂停工具（n114）"
         );
     }
 
@@ -1965,6 +1981,7 @@ mod tests {
         assert_eq!(
             kept,
             vec![
+                "laser_safe_action_tool",
                 "calendar__list_events",
                 "calendar__create_event",
                 "calendar__free_slots"

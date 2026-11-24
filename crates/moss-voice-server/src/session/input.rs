@@ -43,6 +43,12 @@ impl<'a> Session<'a> {
         if !may_follow_up {
             self.listen.follow_probe = None;
         }
+        // 工具已经开跑、这时接着说不能再整轮重来，又没开实时插话：上行音频照样听着，只认“停”（n114）。
+        // 原先这段时间的音频全部丢掉，工具没跑完前说“停”没有反应
+        let stop_watch = !listening && !may_interrupt && !may_follow_up && self.watches_for_stop();
+        if !stop_watch {
+            self.listen.stop_watch = None;
+        }
         // 一段话刚说完：尾音继续送进判停流收命令词结果（确认窗口在用判停流时让给它）
         let kws_tail = !listening
             && self.listen.follow_probe.is_none()
@@ -51,7 +57,7 @@ impl<'a> Session<'a> {
                 .listen
                 .kws_tail_until
                 .is_some_and(|until| Instant::now() < until);
-        if !listening && !may_interrupt && !may_follow_up && !kws_tail {
+        if !listening && !may_interrupt && !may_follow_up && !kws_tail && !stop_watch {
             return Ok(());
         }
         let decoded = decode_frame(self.version, data).map_err(|error| error.to_string());
@@ -72,9 +78,26 @@ impl<'a> Session<'a> {
         }
         if kws_tail && let Some(worker) = self.vad_worker.as_mut() {
             worker.submit(pcm.clone(), false)?;
-            if !may_interrupt && !may_follow_up {
+            if !may_interrupt && !may_follow_up && !stop_watch {
                 return Ok(());
             }
+        }
+        if stop_watch {
+            if let Some((head, remaining)) = self.listen.stop_watch.as_mut() {
+                head.extend_from_slice(&pcm);
+                *remaining = remaining.saturating_sub(pcm.len());
+                if *remaining == 0
+                    && let Some((head, _)) = self.listen.stop_watch.take()
+                {
+                    self.listen.follow.reset();
+                    self.check_for_stop_word(head);
+                }
+            } else if let Some(head) = self.listen.follow.accept(&pcm, false) {
+                self.event("工具执行中听到人声：听听是不是“停”".to_owned());
+                let wanted = self.uplink_rate as usize * FOLLOW_CONFIRM.as_millis() as usize / 1000;
+                self.listen.stop_watch = Some((head, wanted));
+            }
+            return Ok(());
         }
         if !listening {
             let guarded = matches!(self.phase, Phase::Speaking { .. })
@@ -149,6 +172,23 @@ impl<'a> Session<'a> {
 
     /// 判停模型没认出人声的声音仍识别一遍：短促的“停”可能短于模型判开口所需的最短语音（约 250 ms），
     /// 不能因此被吞掉、让准备好的回答（与它的工具）照常执行。只在识别出停止说法时才接管。
+    /// 这一轮在执行工具、还没开口：设备自动拾音时仍在上传，这段时间要听着“停”（n114）
+    fn watches_for_stop(&self) -> bool {
+        matches!(self.phase, Phase::Thinking)
+            && self.conversation.is_some()
+            && self.turn.as_ref().is_some_and(|turn| {
+                turn.kind == TurnKind::Answer
+                    && !turn.close
+                    && !turn.fast_stop
+                    && !turn.audio_started
+                    && (turn.tools_started
+                        || turn
+                            .tool_latch
+                            .as_ref()
+                            .is_some_and(|latch| latch.tools_started()))
+            })
+    }
+
     fn check_for_stop_word(&mut self, head: Vec<i16>) {
         let Some(conversation) = self.conversation.clone() else {
             return;

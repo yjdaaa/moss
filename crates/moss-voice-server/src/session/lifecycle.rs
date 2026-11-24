@@ -152,6 +152,7 @@ impl<'a> Session<'a> {
                 barge_resumed: false,
                 follow: crate::barge::BargeIn::follow_up(uplink_rate, &shared.config.vad),
                 follow_probe: None,
+                stop_watch: None,
                 gate_next_turn: false,
                 paused: None,
                 paused_waits_for_model: false,

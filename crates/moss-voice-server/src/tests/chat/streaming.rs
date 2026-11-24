@@ -438,6 +438,178 @@ fn primary_tts_failure_automatically_falls_back_to_local_tts_without_dropping_se
     );
 }
 
+/// n114：推理模型把思考过程用 `<think>` 夹在正文里——不念、不进历史；标签被拆在两段流式文字里也一样。
+#[tokio::test]
+async fn think_blocks_in_the_reply_are_neither_spoken_nor_kept_in_history() {
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&[
+            "<thi",
+            "nk>用户想知道机器状态</think>",
+            "好，",
+            "现在空闲。",
+        ])])),
+        ..FakeLlm::default()
+    });
+    let conversation = Arc::new(Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    ));
+    let (handle, mut rx) = spawn_turn(
+        conversation,
+        ToolContext {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        },
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let (mut spoken, mut history) = (Vec::new(), Vec::new());
+    while let Some(event) = rx.recv().await {
+        match event {
+            TurnEvent::Speech { text, .. } => spoken.push(text),
+            TurnEvent::Done { messages, .. } => history = messages,
+            _ => {}
+        }
+    }
+    handle.await.unwrap();
+    assert_eq!(spoken.concat(), "好，现在空闲。");
+    let answer = history.iter().rfind(|m| m.role == Role::Assistant).unwrap();
+    assert_eq!(answer.content.as_deref(), Some("好，现在空闲。"));
+}
+
+/// n114：大模型说到一半出错——已经说出去的半句照样记进历史，下一轮它知道自己说过什么。
+#[tokio::test]
+async fn a_reply_cut_by_an_llm_error_keeps_the_spoken_half_in_history() {
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    struct BreaksMidway;
+    impl Llm for BreaksMidway {
+        fn chat<'a>(
+            &'a self,
+            _: &'a [ChatMessage],
+            _: &'a [ToolSpec],
+            deltas: tokio::sync::mpsc::UnboundedSender<String>,
+        ) -> BoxFuture<'a, Result<LlmReply, ProviderError>> {
+            Box::pin(async move {
+                let _ = deltas.send("好，激光机现在空闲。".into());
+                let _ = deltas.send("材料".into());
+                Err(ProviderError::new("连接中断"))
+            })
+        }
+    }
+    let conversation = Arc::new(Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(BreaksMidway),
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    ));
+    let (handle, mut rx) = spawn_turn(
+        conversation,
+        ToolContext {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        },
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut history = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let TurnEvent::Done { messages, .. } = event {
+            history = messages;
+        }
+    }
+    handle.await.unwrap();
+    let answer = history.iter().rfind(|m| m.role == Role::Assistant);
+    assert_eq!(
+        answer.and_then(|m| m.content.as_deref()),
+        Some("好，激光机现在空闲。材料"),
+        "{history:?}"
+    );
+}
+
+/// n114：合成失败又没有备用合成——这句至少把文字发给设备（原先设备什么都收不到，历史里却记着说过）；
+/// 前面的句子已经在播时不发 `tts stop`，不让设备丢掉排着的音频。
+#[test]
+fn a_sentence_whose_synthesis_fails_is_still_shown_as_text() {
+    for (deltas, expect) in [
+        (
+            vec!["这句合成失败了。"],
+            vec!["听:你好", "tts:start", "句:这句合成失败了。", "tts:stop"],
+        ),
+        (
+            vec!["第一句正常。", "第二句合成失败。"],
+            vec!["听:你好", "tts:start", "句:第一句正常。", "tts:stop"],
+        ),
+    ] {
+        let llm = FakeLlm {
+            rounds: Mutex::new(VecDeque::from([say(&deltas)])),
+            ..FakeLlm::default()
+        };
+        let (server, registry, _fakes) = start_chat(llm, &[], Duration::from_secs(30));
+        let mut device = chat_device(&server, &registry, 1);
+        speak_manual(&mut device, 1, 600);
+        let items = collect_items(&mut device);
+        assert_eq!(texts(&items), expect);
+        if deltas.len() == 2 {
+            assert!(
+                items.iter().any(|item| matches!(item, Item::Frame)),
+                "第一句的音频照常播完"
+            );
+        }
+    }
+}
+
+/// n114：主合成失败时备用合成出的固定话术只用这一次、不进缓存——否则启动预热时云端还连不上，
+/// 固定话术会一直是备用音色；主合成恢复后照常缓存。
+#[tokio::test]
+async fn fixed_phrases_from_the_fallback_voice_are_not_cached() {
+    struct Fallback;
+    impl Tts for Fallback {
+        fn synthesize<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Pcm, ProviderError>> {
+            Box::pin(async {
+                Ok(Pcm {
+                    samples: tone(24_000, 300.0, 240, 6000.0),
+                    sample_rate: 24_000,
+                })
+            })
+        }
+    }
+    let primary = Arc::new(FakeTts::default());
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        primary.clone(),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_fallback_tts(Arc::new(Fallback));
+    // FakeTts 对含“失败”的句子报错：这句由备用合成说出，但不缓存
+    conversation
+        .prewarm_or_speak_for_test("合成失败的固定话术")
+        .await;
+    assert_eq!(conversation.speech_cache_len_for_test(), 0);
+    conversation
+        .prewarm_or_speak_for_test("合成失败的固定话术")
+        .await;
+    assert_eq!(primary.said.lock().unwrap().len(), 2, "下次照样先试主合成");
+    conversation.prewarm_or_speak_for_test("我在").await;
+    assert_eq!(conversation.speech_cache_len_for_test(), 1);
+}
+
 #[tokio::test]
 async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence_tail() {
     use crate::audio::test_signal::{silence, tone};

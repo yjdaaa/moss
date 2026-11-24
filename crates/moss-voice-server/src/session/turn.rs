@@ -206,6 +206,7 @@ impl<'a> Session<'a> {
             close: false,
             listen_after: None,
             tools_started: false,
+            tool_rounds: Vec::new(),
             tool_latch,
             speculative: gated,
             fast_stop: is_fast_stop,
@@ -489,9 +490,19 @@ impl<'a> Session<'a> {
                     turn.person_verified = verified;
                 }
             }
-            TurnEvent::ToolsStarted => {
+            TurnEvent::ToolsStarted(calls) => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.tools_started = true;
+                    turn.tool_rounds.push((calls, Vec::new()));
+                }
+            }
+            TurnEvent::ToolsFinished(results) => {
+                if let Some((_, slot)) = self
+                    .turn
+                    .as_mut()
+                    .and_then(|turn| turn.tool_rounds.last_mut())
+                {
+                    *slot = results;
                 }
             }
             TurnEvent::Closing => {
@@ -557,8 +568,14 @@ impl<'a> Session<'a> {
             }
             TurnEvent::TextReply(text) => {
                 // 合成不可用仍给设备文字，不用静音音频冒充已播报。
-                if let Some(turn) = self.turn.as_mut() {
+                let audio_started = self.turn.as_mut().is_some_and(|turn| {
                     turn.debug_text_reply.push(text.clone());
+                    turn.audio_started
+                });
+                if audio_started {
+                    // 前面的句子还在播：这时发 tts stop 会让设备丢掉排着的音频（n114），只记事件
+                    self.event(format!("有一句合成失败，没能播出：{text}"));
+                    return Ok(());
                 }
                 self.tts(socket, TtsState::Start, None).await?;
                 self.tts(socket, TtsState::SentenceStart, Some(text))
@@ -972,6 +989,27 @@ impl<'a> Session<'a> {
         self.release_turn();
     }
 
+    /// 被打断的这一轮执行过的工具，按“调用 + 结果”补记进历史（n114）：工具在后台线程里跑、打断停不下它，
+    /// 不记的话大模型不知道预览已生成、任务已提交，用户问“开始了吗”时可能再执行一遍。
+    /// 还没拿到结果的写 [`INTERRUPTED_TOOL_RESULT`]；点歌不记（工具参数与路径不进历史，与正常结束一致）。
+    fn interrupted_tool_messages(turn: &ActiveTurn) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        for (calls, results) in &turn.tool_rounds {
+            if calls.iter().any(|call| call.function.name == "play_music") {
+                continue;
+            }
+            messages.push(ChatMessage::assistant_tools(None, calls.clone()));
+            for call in calls {
+                let result = results.iter().find(|(id, _)| *id == call.id).map_or(
+                    crate::conversation::INTERRUPTED_TOOL_RESULT,
+                    |(_, result)| result.as_str(),
+                );
+                messages.push(ChatMessage::tool(call.id.clone(), result));
+            }
+        }
+        messages
+    }
+
     /// 这一轮回答里用户实际听到的部分（按发送时间轴估算，见 [`heard`]），供打断时记入历史。
     fn heard_text(&self, turn: &ActiveTurn) -> Option<String> {
         let unplayed = match &self.phase {
@@ -1111,6 +1149,7 @@ impl<'a> Session<'a> {
             && let Some(user) = paused.user.clone()
         {
             history.push(ChatMessage::user(user));
+            history.extend(Self::interrupted_tool_messages(paused));
             if let Some(heard) = self.heard_text(paused) {
                 history.push(ChatMessage::assistant(heard));
             }
@@ -1244,6 +1283,7 @@ impl<'a> Session<'a> {
                     messages.push(photo.clone());
                 }
                 messages.push(ChatMessage::user(user));
+                messages.extend(Self::interrupted_tool_messages(&turn));
                 // 只记用户实际听到的部分，没说出口的另外标出（n100）
                 if let Some(heard) = self.heard_text(&turn) {
                     messages.push(ChatMessage::assistant(heard));

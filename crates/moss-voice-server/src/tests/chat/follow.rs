@@ -564,6 +564,63 @@ fn a_stop_word_heard_by_the_keyword_model_while_thinking_stops_at_once() {
     );
 }
 
+/// n114：刚说完那句的尾音里命令词模型才报出“停”（“别停”的尾音里也有“停”）：不再直接急停，
+/// 由识别出的文字决定——“别停”照常回答；听错成“挺”的仍按停止处理。
+#[test]
+fn a_stop_word_in_the_tail_of_the_utterance_is_judged_by_the_recognized_text() {
+    use moss_voice_providers::local::CommandKeyword;
+    for (heard, stops) in [("别停", false), ("挺", true)] {
+        let llm = FakeLlm {
+            rounds: Mutex::new(VecDeque::from([say(&["好的。"])])),
+            ..FakeLlm::default()
+        };
+        // 噪声后约 1.1 秒才报：已经过了判停说完，落在这句话的尾音里
+        let (server, registry) = start_with_keyword_vad_delayed(
+            CommandKeyword::Stop,
+            UP as usize * 11 / 10,
+            llm,
+            &[heard],
+        );
+        let mut device = chat_device(&server, &registry, 1);
+        send_json(
+            &mut device,
+            r#"{"type":"listen","state":"start","mode":"auto"}"#,
+        );
+        send_audio(&mut device, 1, &uplink(&command_in_noise()));
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(60));
+            send_audio(&mut device, 1, &uplink(&silence(UP, 60)));
+        }
+        let items = texts(&collect_items(&mut device));
+        let stopped = items.iter().any(|text| {
+            text.starts_with("句:已发送停止请求") || text.starts_with("句:停止请求发送失败")
+        });
+        assert_eq!(stopped, stops, "{heard}: {items:?}");
+        if !stops {
+            assert!(items.contains(&format!("听:{heard}")), "{items:?}");
+            assert!(items.contains(&"句:好的。".to_owned()), "{items:?}");
+        }
+    }
+}
+
+/// 判停事件里命令词事件排在最后时，“还在说”看的是最后一个开始 / 结束事件（n114）。
+#[test]
+fn a_keyword_event_after_speech_start_still_counts_as_speaking() {
+    use crate::audio::VadEvent;
+    use crate::session::still_speaking;
+    use moss_voice_providers::local::CommandKeyword::Stop;
+    assert!(still_speaking(&[
+        VadEvent::SpeechStart,
+        VadEvent::Keyword(Stop)
+    ]));
+    assert!(!still_speaking(&[
+        VadEvent::SpeechStart,
+        VadEvent::SpeechEnd,
+        VadEvent::Keyword(Stop)
+    ]));
+    assert!(!still_speaking(&[VadEvent::Keyword(Stop)]));
+}
+
 /// 命令词纠正的条件：实测的听错说法都纠正，常见的短回答（“好的”“挺好”“嗯”）在命令词模型误报时也不改成命令。
 #[test]
 fn only_misheard_commands_are_corrected_by_the_keyword_hint() {
@@ -587,6 +644,10 @@ fn only_misheard_commands_are_corrected_by_the_keyword_hint() {
     for normal in ["好的", "挺好", "可以", "对对", "谢谢你", "好", "嗯", "对"] {
         assert!(!command_hint_fits(Stop, normal), "{normal}");
         assert!(!command_hint_fits(Exit, normal), "{normal}");
+    }
+    // 停止类会走急停：带否定或“暂 / 等”的说法一律不纠正（n114）
+    for negated in ["别停", "不要停", "没停", "暂停", "先暂停", "等一下"] {
+        assert!(!command_hint_fits(Stop, negated), "{negated}");
     }
     // 长句一律以识别为准
     assert!(!command_hint_fits(Exit, "帮我问一下今天天气"));

@@ -58,6 +58,8 @@ mod playback;
 mod screen;
 mod trace;
 #[cfg(test)]
+pub(crate) use listen::still_speaking;
+#[cfg(test)]
 pub(crate) use trace::voice_step_text;
 pub(crate) use trace::{
     device_flow, event_flow, event_step_text, scrub_trace_value, timing_step_text, turn_flow,
@@ -380,6 +382,8 @@ struct ActiveTurn {
     listen_after: Option<bool>,
     /// 这一轮已开始执行工具（之后不再因用户接着说话而整轮重来）
     tools_started: bool,
+    /// 这一轮执行过的每批工具调用与已收到的结果（调用 id → 结果文字），被打断时补记进历史（n114）
+    tool_rounds: Vec<(Vec<moss_voice_providers::ToolCall>, Vec<(String, String)>)>,
     /// 与对话任务共享的工具执行闩（没有闸门的轮次为空）
     tool_latch: Option<std::sync::Arc<crate::conversation::ToolLatch>>,
     /// 这一轮是抢跑开始的（识别出文字后要按句子是否说完决定还要等多久才开口）
@@ -836,6 +840,9 @@ struct ListenAndBargeState {
     /// 用了本地判停模型时，能量检测的“接着说”候选要等模型也听到人声才算（2026-11-15 整链实测：
     /// 突发噪声下每次敲击都会放弃已备好的回答）
     follow_probe: Option<FollowProbe>,
+    /// 工具执行中只听“停”（n114）：能量检测听到一阵人声后再收 [`FOLLOW_CONFIRM`] 长的音频
+    /// （开头、还差多少个采样），收够了交给识别看是不是停止说法
+    stop_watch: Option<(Vec<i16>, usize)>,
     /// 下一轮由静音判停触发（不是设备 listen stop）：可以抢跑
     gate_next_turn: bool,
     /// 思考期间最近一次听到明显人声的时刻

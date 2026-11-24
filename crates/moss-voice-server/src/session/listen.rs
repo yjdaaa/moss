@@ -658,9 +658,11 @@ impl<'a> Session<'a> {
                 }
             }
         }
-        // 思考中命令词模型听到了“停”（不论是刚说完的尾音里还是新的一阵声音里）：不用等识别，
-        // 直接打断、执行停止（n101；停止说法绝不吞掉）
-        if matches!(self.phase, Phase::Thinking)
+        // 思考中新的一阵声音里命令词模型听到了“停”：不用等识别，直接打断、执行停止（n101；停止说法绝不吞掉）。
+        // 刚说完那句的尾音里听到的不在这里急停（n114）：“别停”“不要停止”“加工怎么暂停”的尾音里也有“停”，
+        // 它补写给这一轮，由识别出的文字决定要不要按停止处理（`command_hint_fits`，长句与否定说法不算）
+        if frame.prime
+            && matches!(self.phase, Phase::Thinking)
             && frame.events.contains(&VadEvent::Keyword(
                 moss_voice_providers::local::CommandKeyword::Stop,
             ))
@@ -688,7 +690,6 @@ impl<'a> Session<'a> {
         {
             for event in &frame.events {
                 if let VadEvent::Keyword(kind) = event
-                    && *kind != moss_voice_providers::local::CommandKeyword::Stop
                     && let Ok(mut hint) = slot.lock()
                 {
                     *hint = Some(*kind);
@@ -726,10 +727,7 @@ impl<'a> Session<'a> {
         // 插话 / 接着说补送开头后判停模型的结论：此刻不在说话（只是噪声，或一句短话已说完）就立刻收尾识别，
         // 不再等一个永远不会来的“说完”（此前在突发噪声下会一直等到 30 秒上限）
         if frame.prime && matches!(self.phase, Phase::Listening(_)) && !self.listen.listen_manual {
-            let in_speech = frame
-                .events
-                .iter()
-                .fold(false, |_, event| matches!(event, VadEvent::SpeechStart));
+            let in_speech = still_speaking(&frame.events);
             if !in_speech
                 && let Some((pcm, end)) = self.hear(&[], Some((vec![VadEvent::SpeechEnd], None)))
             {
@@ -816,4 +814,14 @@ fn keyword_label(kind: moss_voice_providers::local::CommandKeyword) -> &'static 
         moss_voice_providers::local::CommandKeyword::Stop => "停止",
         moss_voice_providers::local::CommandKeyword::Exit => "退出",
     }
+}
+
+/// 这批判停事件之后用户还在不在说：只看最后一个开始 / 结束事件。命令词事件排在它们后面，
+/// 不能把“还在说”算成“说完了”（n114：原先只看最后一个事件，插话“停下来，先把……”会被截成两段）。
+pub(crate) fn still_speaking(events: &[VadEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| matches!(event, VadEvent::SpeechStart | VadEvent::SpeechEnd))
+        .is_some_and(|event| matches!(event, VadEvent::SpeechStart))
 }

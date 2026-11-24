@@ -823,7 +823,7 @@ pub const CATALOG: [ModelSpec; 27] = [
         kind: ModelKind::Kws,
         engine: Engine::Kws,
         label: "命令词抗噪",
-        note: "监听“停 / 急停 / 暂停 / 退下 / 退一下 / 再见”，噪声大听错短命令时纠偏；长句仍以识别为准。",
+        note: "监听“停 / 停下 / 急停 / 退下 / 退一下 / 再见”，噪声大听错短命令时纠偏；长句仍以识别为准。",
         path: "kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2",
         // 2026-11-15 实际下载核对
         sha256: "b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f",

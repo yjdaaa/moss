@@ -283,6 +283,64 @@ pub fn subtitle_segments(text: &str, max_units: usize) -> Vec<String> {
     out
 }
 
+/// 推理模型把思考过程用 `<think>…</think>` 夹在正文里（经 Ollama 等 OpenAI 兼容服务、关不掉思考时常见）：
+/// 流式去掉，不念出来、不进历史（n114）。标签可能被拆在两段流式文字里，结尾像半个标签的部分先留着。
+#[derive(Debug, Default)]
+pub struct ThinkFilter {
+    inside: bool,
+    pending: String,
+}
+
+impl ThinkFilter {
+    const OPEN: &'static str = "<think>";
+    const CLOSE: &'static str = "</think>";
+
+    /// 送入一段流式文字，返回去掉思考内容后能放出去的部分。
+    pub fn push(&mut self, delta: &str) -> String {
+        self.pending.push_str(delta);
+        let mut out = String::new();
+        loop {
+            let tag = if self.inside { Self::CLOSE } else { Self::OPEN };
+            if let Some(at) = self.pending.find(tag) {
+                if !self.inside {
+                    out.push_str(&self.pending[..at]);
+                }
+                self.pending.drain(..at + tag.len());
+                self.inside = !self.inside;
+                continue;
+            }
+            // 结尾可能是半个标签（标签全是 ASCII，按字节切不会切坏汉字）
+            let keep = (1..tag.len())
+                .rev()
+                .find(|&n| self.pending.ends_with(&tag[..n]))
+                .unwrap_or(0);
+            let split = self.pending.len() - keep;
+            if !self.inside {
+                out.push_str(&self.pending[..split]);
+            }
+            self.pending.drain(..split);
+            return out;
+        }
+    }
+
+    /// 流结束：留着的半个标签其实是正文就放出来；没闭合的思考内容丢掉。
+    pub fn finish(&mut self) -> String {
+        let rest = std::mem::take(&mut self.pending);
+        if self.inside { String::new() } else { rest }
+    }
+}
+
+/// 一次性去掉整段文字里的 `<think>…</think>`（见 [`ThinkFilter`]）。
+pub fn strip_think(text: &str) -> String {
+    if !text.contains(ThinkFilter::OPEN) {
+        return text.to_owned();
+    }
+    let mut filter = ThinkFilter::default();
+    let mut out = filter.push(text);
+    out.push_str(&filter.finish());
+    out.trim_start().to_owned()
+}
+
 /// 首个表情对应的设备表情名（固件支持的名称）。
 pub fn emotion_of(text: &str) -> Option<&'static str> {
     text.chars()
@@ -735,5 +793,33 @@ mod tests {
             clean_for_speech("查看 [材料库说明](https://example.com/docs) 中的 *3cm* 焦距。"),
             "查看 材料库说明 中的 3厘米 焦距。"
         );
+    }
+
+    #[test]
+    fn think_blocks_are_removed_even_when_tags_are_split_across_chunks() {
+        let mut filter = ThinkFilter::default();
+        let mut out = String::new();
+        for chunk in [
+            "<th",
+            "ink>用户想",
+            "知道状态</thi",
+            "nk>好，",
+            "现在空闲。",
+        ] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "好，现在空闲。");
+        // 没有标签的正文原样放出，结尾的“<”不是标签时流结束照样放出
+        let mut plain = ThinkFilter::default();
+        assert_eq!(plain.push("一加一等于二，"), "一加一等于二，");
+        assert_eq!(plain.push("a<"), "a");
+        assert_eq!(plain.finish(), "<");
+        // 没闭合的思考内容不念
+        let mut open = ThinkFilter::default();
+        assert_eq!(open.push("<think>还在想"), "");
+        assert_eq!(open.finish(), "");
+        assert_eq!(strip_think("<think>想一想</think>\n好的。"), "好的。");
+        assert_eq!(strip_think("好的。"), "好的。");
     }
 }

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 命令词不再把“暂停”“别停”当急停，打断工具与说“停”不再丢失（2026-11-24）
+
+- **现象**：开着命令词抗噪（新安装默认开）时，走边框说“暂停”或说“别停”会急停复位；工具跑到一半被打断后大模型不知道工具已执行，可能再执行一遍；自动拾音时工具执行中说“停”没反应；另有合成失败设备什么都收不到、`<think>` 推理内容被念出来、粗筛可能剪掉停止工具等问题。
+- **根因与修复**：“暂停”移出停止类命令词，尾音里的停止词改由识别文字判断（否定说法不算），只有思考中新的一阵声音才直接急停；打断时按“调用 + 结果”补记已开跑的工具；工具执行中用能量检测 + 识别只听“停”；粗筛永远保留 `laser_safe_action_tool`；另修合成失败给文字、备用音色不缓存、去掉 `<think>`、命令词事件截断插话、出错半句进历史。**安全门禁变更**：停止快路径只认整句停止，见安全规范 §4.1。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（`moss-voice-server` 407 项，新增 `a_stop_word_in_the_tail_of_the_utterance_is_judged_by_the_recognized_text`（去掉修复时“别停”确实被急停）、`a_turn_interrupted_while_its_tool_runs_still_records_the_tool_call`、`saying_stop_while_a_tool_runs_stops_even_without_realtime_barge_in`、`think_blocks_in_the_reply_are_neither_spoken_nor_kept_in_history` 等 9 项）、前端检查与浏览器测试、快更本机桌面程序。未在真机与真实命令词模型上复测。
+- **关联**：`crates/moss-voice-server/src/session/{listen,input,turn}.rs`（`still_speaking`、`watches_for_stop`、`interrupted_tool_messages`）、`conversation.rs`（`command_hint_fits`、`generate`、`cached_speech`、`INTERRUPTED_TOOL_RESULT`）、`jev.rs`（`NEVER_FILTERED_TOOLS`）、`moss-voice-providers/src/text.rs`（`ThinkFilter`）、`moss-voice-local-proto`（`COMMAND_KEYWORDS`）；内置语音技术书 n114。
+
 ### 生成预览、检查机器、拍照看图拿到调用就先应一声，提示词引导短开场白（2026-11-24）
 
 - **现象**：让小智生成预览、检查机器或拍照看图时，大模型第一轮只给工具调用不说话，垫音要等工具跑满 1 秒才说，加上识别和大模型的时间会有 2～3 秒完全安静；大模型开头那句不带逗号时，首段提速用不上。

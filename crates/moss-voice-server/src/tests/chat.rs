@@ -20,6 +20,7 @@ mod context;
 mod device_mcp;
 mod follow;
 mod guide;
+mod interrupt;
 mod jev;
 mod local;
 mod mqtt;

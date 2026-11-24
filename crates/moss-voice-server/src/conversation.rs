@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moss_voice_providers::text::{Segmenter, emotion_of};
+use moss_voice_providers::text::{Segmenter, ThinkFilter, emotion_of, strip_think};
 use moss_voice_providers::{
     Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, ProviderError, StreamingAsr, ToolCall,
     ToolSpec, Tts, compact_stale_tool_results, truncate_history,
@@ -240,6 +240,7 @@ const COMMAND_HINT_WAIT: Duration = Duration::from_millis(500);
 /// 识别结果像不像被听错的命令词（n101）：没识别出字；或者不超过 4 个字、且和这类命令词有相同的字
 /// （噪声里实测的错法：“跪下 / 会一下 / 不理下 / 看一下”之于“退下 / 退一下”，“待见”之于“再见”，“天下”之于“停下”）；
 /// 停止类再放过“停”的单个同音 / 近音字（“听 / 挺”）。“好的”“挺好”这类说法与命令词没有相同的字，命令词模型误报时也不会被改成命令。
+/// 停止类会走急停，所以带否定或“暂 / 等”的说法（“别停”“不要停”“暂停”“等一下”）一律不纠正（n114）。
 pub(crate) fn command_hint_fits(
     kind: moss_voice_providers::local::CommandKeyword,
     normalized: &str,
@@ -249,6 +250,11 @@ pub(crate) fn command_hint_fits(
         return true;
     }
     if length > MAX_COMMAND_FUSION_CHARS {
+        return false;
+    }
+    if kind == moss_voice_providers::local::CommandKeyword::Stop
+        && normalized.chars().any(|c| "别不没勿莫甭暂等".contains(c))
+    {
         return false;
     }
     // 单个字只放过“停”的同音 / 近音字：“好 / 嗯 / 对”这类单字回答不能被命令词模型误报改成急停
@@ -266,6 +272,11 @@ pub(crate) fn command_hint_fits(
 
 /// 只读慢查询转到后台时说的话（n100）
 pub const BACKGROUND_QUERY_FILLER: &str = "我在后台查着，查好了告诉你。";
+/// 转到后台的查询写给大模型的工具结果
+const BACKGROUND_TOOL_RESULT: &str = "已转到后台查询，结果出来后会主动告诉用户";
+/// 这一轮被打断时还没拿到结果的工具，补记进历史时写的结果（n114）：工具可能已经执行，大模型不能当它没发生
+pub const INTERRUPTED_TOOL_RESULT: &str =
+    "用户打断时这个工具已经开始执行，结果没有收到：不要直接再执行一遍，需要时先查状态再告诉用户";
 
 /// 后台查询结果出来、会话主动播报时附在系统提示词后的说明（n100）。
 const BACKGROUND_REPORT_GUIDE: &str = "现在是你主动开口：刚才转到后台查的结果出来了。用一两句口语告诉用户结论；用户这期间如果已经在聊别的，先说一句“刚才查的……有结果了”再说。";
@@ -698,11 +709,16 @@ impl Conversation {
         {
             return Ok(pcm.clone());
         }
-        let mut pcm = match self.tts.synthesize(text).await {
-            Ok(pcm) => pcm,
+        // 备用合成出的音色和主合成不同，只用这一次、不进缓存（n114）：启动预热时云端还连不上，
+        // 否则固定话术会一直是本地音色，直到重启
+        let (mut pcm, from_fallback) = match self.tts.synthesize(text).await {
+            Ok(pcm) => (pcm, false),
             Err(primary_err) => {
                 if let Some(fallback) = &self.fallback_tts {
-                    fallback.synthesize(text).await.map_err(|_| primary_err)?
+                    (
+                        fallback.synthesize(text).await.map_err(|_| primary_err)?,
+                        true,
+                    )
                 } else {
                     return Err(primary_err);
                 }
@@ -725,7 +741,8 @@ impl Conversation {
             crate::audio::BOUNDARY_FADE_MS,
         );
         const MAX_SPEECH_CACHE_ENTRIES: usize = 32;
-        if let Ok(mut cache) = self.cache.lock()
+        if !from_fallback
+            && let Ok(mut cache) = self.cache.lock()
             && !cache.iter().any(|(key, _)| key == text)
         {
             if cache.len() >= MAX_SPEECH_CACHE_ENTRIES {
@@ -972,8 +989,11 @@ pub enum TurnEvent {
         kind: &'static str,
         data: Value,
     },
-    /// 这一轮开始执行工具：此后用户接着说话不再整轮重来（工具可能有副作用，不能执行两遍）
-    ToolsStarted,
+    /// 这一轮开始执行这批工具：此后用户接着说话不再整轮重来（工具可能有副作用，不能执行两遍）。
+    /// 会话记下这批调用，这一轮被打断时补记进历史（n114）
+    ToolsStarted(Vec<ToolCall>),
+    /// 上一批工具的结果（调用 id、写给大模型的结果文字），会话据此补记被打断那一轮的历史（n114）
+    ToolsFinished(Vec<(String, String)>),
     Timing {
         stage: &'static str,
         ms: u64,
@@ -1723,6 +1743,12 @@ impl Turn {
                 .await;
             }
             self.send(TurnEvent::Failed(error));
+            if let Some(text) = pending_text.take() {
+                // 这句一点声音都没合成出来、也没有备用合成：至少把文字给设备（与 speak_fixed / fast_answer 一致，n114），
+                // 不让用户什么都收不到，历史里却记着说过
+                self.send(TurnEvent::TextReply(text));
+                return false;
+            }
         }
         let emitted = pending_text.is_none();
         if emitted {
@@ -1765,13 +1791,18 @@ impl Turn {
         self.conversation.asr.transcribe(pcm, sample_rate).await
     }
 
-    /// 让模型生成一轮回复，边生成边切句合成。返回（回复，是否已朗读过内容）或错误。
+    /// 让模型生成一轮回复，边生成边切句合成。返回（回复或错误，是否已朗读过内容，送去朗读的正文）。
+    /// 正文已去掉 `<think>` 思考内容（n114）；大模型中途出错时，调用方用它把已经说出去的半句记进历史。
     async fn generate(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
         emotion_sent: &mut bool,
-    ) -> (Result<moss_voice_providers::LlmReply, ProviderError>, bool) {
+    ) -> (
+        Result<moss_voice_providers::LlmReply, ProviderError>,
+        bool,
+        String,
+    ) {
         let (delta_tx, mut delta_rx) = unbounded_channel::<String>();
         let llm = self.conversation.llm.clone();
         let round = self
@@ -1821,7 +1852,9 @@ impl Turn {
             let feeder = async {
                 let sentence_tx = sentence_tx;
                 let mut segmenter = Segmenter::new();
-                while let Some(delta) = delta_rx.recv().await {
+                let mut think = ThinkFilter::default();
+                let mut streamed = String::new();
+                while let Some(raw) = delta_rx.recv().await {
                     self.timing("first_llm_delta");
                     let _ = first_delta.compare_exchange(
                         u64::MAX,
@@ -1829,6 +1862,11 @@ impl Turn {
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
                     );
+                    let delta = think.push(&raw);
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    streamed.push_str(&delta);
                     if !*emotion_sent && let Some(emotion) = emotion_of(&delta) {
                         *emotion_sent = true;
                         self.send(TurnEvent::Emotion(emotion));
@@ -1836,7 +1874,16 @@ impl Turn {
                     for sentence in segmenter.push(&delta, Instant::now().into_std()) {
                         self.timing("first_sentence");
                         if sentence_tx.send(sentence).await.is_err() {
-                            return;
+                            return streamed;
+                        }
+                    }
+                }
+                let tail = think.finish();
+                if !tail.is_empty() {
+                    streamed.push_str(&tail);
+                    for sentence in segmenter.push(&tail, Instant::now().into_std()) {
+                        if sentence_tx.send(sentence).await.is_err() {
+                            return streamed;
                         }
                     }
                 }
@@ -1844,6 +1891,7 @@ impl Turn {
                     self.timing("first_sentence");
                     let _ = sentence_tx.send(rest).await;
                 }
+                streamed
             };
             let tts_consumer = async {
                 let mut spoke = false;
@@ -1878,11 +1926,14 @@ impl Turn {
                 }
                 spoke
             };
-            let (_, spoke) = tokio::join!(feeder, tts_consumer);
-            spoke
+            tokio::join!(feeder, tts_consumer)
         };
-        let (reply, spoke) = tokio::join!(generation, speaking);
-        (reply, spoke)
+        let (reply, (streamed, spoke)) = tokio::join!(generation, speaking);
+        let reply = reply.map(|mut reply| {
+            reply.text = strip_think(&reply.text);
+            reply
+        });
+        (reply, spoke, streamed)
     }
 
     async fn run_tools(&self, calls: &[ToolCall]) -> Vec<(ToolCall, ToolOutcome)> {
@@ -2057,7 +2108,7 @@ impl Turn {
             "后台查询完成。用户之前问：{question}\n查询结果：\n{results}"
         )));
         let mut emotion_sent = false;
-        let (reply, _) = self.generate(&messages, &[], &mut emotion_sent).await;
+        let (reply, _, _) = self.generate(&messages, &[], &mut emotion_sent).await;
         let messages = match reply {
             Ok(reply) if !reply.text.trim().is_empty() => vec![ChatMessage::assistant(reply.text)],
             Ok(_) => Vec::new(),
@@ -2445,7 +2496,8 @@ impl Turn {
                 });
                 return;
             }
-            let (reply, spoke) = self.generate(&messages, &tools, &mut emotion_sent).await;
+            let (reply, spoke, streamed) =
+                self.generate(&messages, &tools, &mut emotion_sent).await;
             spoke_any |= spoke;
             let mut reply = match reply {
                 Ok(reply) => reply,
@@ -2453,6 +2505,9 @@ impl Turn {
                     self.send(TurnEvent::Failed(error));
                     if !spoke_any {
                         self.speak_fixed(&settings.error_reply).await;
+                    } else if spoke && !streamed.trim().is_empty() {
+                        // 大模型说到一半出错：已经说出去的半句照样记进历史（n114），下一轮它才知道自己说过什么
+                        messages.push(ChatMessage::assistant(streamed));
                     }
                     break;
                 }
@@ -2565,7 +2620,7 @@ impl Turn {
                 // 会话已把这一轮作废、合并到新一轮重来：一个工具都不能执行，等任务被中止
                 std::future::pending::<()>().await;
             }
-            self.send(TurnEvent::ToolsStarted);
+            self.send(TurnEvent::ToolsStarted(reply.tool_calls.clone()));
             let mut direct = Vec::new();
             let mut music = None;
             let background = self.gate.as_ref().is_some_and(|gate| gate.allow_background)
@@ -2598,12 +2653,17 @@ impl Turn {
                     }),
                     Err(_) => {
                         self.send(TurnEvent::Background(running));
+                        self.send(TurnEvent::ToolsFinished(
+                            reply
+                                .tool_calls
+                                .iter()
+                                .map(|call| (call.id.clone(), BACKGROUND_TOOL_RESULT.to_owned()))
+                                .collect(),
+                        ));
                         self.speak_fixed(BACKGROUND_QUERY_FILLER).await;
                         for call in &reply.tool_calls {
-                            messages.push(ChatMessage::tool(
-                                call.id.clone(),
-                                "已转到后台查询，结果出来后会主动告诉用户",
-                            ));
+                            messages
+                                .push(ChatMessage::tool(call.id.clone(), BACKGROUND_TOOL_RESULT));
                         }
                         messages.push(ChatMessage::assistant(BACKGROUND_QUERY_FILLER));
                         break;
@@ -2634,6 +2694,7 @@ impl Turn {
             } else {
                 self.run_tools(&reply.tool_calls).await
             };
+            let mut finished = Vec::with_capacity(tool_outcomes.len());
             for (call, outcome) in tool_outcomes {
                 let content = match outcome {
                     ToolOutcome::Reply(content) => content,
@@ -2646,8 +2707,10 @@ impl Turn {
                         "歌曲已由设备会话接管，等待开始播放".into()
                     }
                 };
+                finished.push((call.id.clone(), content.clone()));
                 messages.push(ChatMessage::tool(call.id, content));
             }
+            self.send(TurnEvent::ToolsFinished(finished));
             if let Some((track_id, title)) = music {
                 self.send(TurnEvent::PlayMusic { track_id, title });
                 // Music is an independent playback source, not a spoken LLM answer.

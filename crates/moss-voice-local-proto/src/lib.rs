@@ -492,6 +492,7 @@ pub enum CommandKeyword {
 }
 
 /// 命令词表（协议 7，n101）：拼音按关键词模型的建模单元（声母 + 带调韵母）写，“一”按变调写。
+/// 表由客户端随 `LoadKws` 送给辅助程序，增删条目不改协议号。
 /// 只收短促、在噪声里通用识别容易听错、又必须可靠的说法（同一说法可写多种读音）；显示文字与 `fast::is_stop` /
 /// 退出词表里的说法一致，会话据此把识别结果纠正回命令。
 pub const COMMAND_KEYWORDS: &[(&str, &str, CommandKeyword)] = &[
@@ -499,7 +500,7 @@ pub const COMMAND_KEYWORDS: &[(&str, &str, CommandKeyword)] = &[
     ("t íng x ià", "停下", CommandKeyword::Stop),
     ("t íng zh ǐ", "停止", CommandKeyword::Stop),
     ("j í t íng", "急停", CommandKeyword::Stop),
-    ("z àn t íng", "暂停", CommandKeyword::Stop),
+    // “暂停”不收（n114）：它的本意是可恢复的暂停，停止类命中会走急停（0x18 复位），交给大模型用 pause
     ("t uì x ià", "退下", CommandKeyword::Exit),
     // “一”按字典读音（yī）与变调（yí）各写一条：模型按 wenetspeech 的字典读音训练，实测只写变调认不出
     ("t uì y ī x ià", "退一下", CommandKeyword::Exit),
@@ -720,6 +721,8 @@ mod tests {
         assert_eq!(command_keyword_kind("急停"), Some(CommandKeyword::Stop));
         assert_eq!(command_keyword_kind("再见"), Some(CommandKeyword::Exit));
         assert_eq!(command_keyword_kind("问一下"), None);
+        // “暂停”是可恢复的暂停，不能当停止类命令词走急停（n114）
+        assert_eq!(command_keyword_kind("暂停"), None);
         // 协议 8：打开判停 / 识别流时说明降噪情况；没出错时不带 error 字段
         let opened = serde_json::to_value(Response {
             id: 4,
