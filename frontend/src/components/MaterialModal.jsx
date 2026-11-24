@@ -31,10 +31,19 @@ function findExistingThickness(existingThicknesses, thickNum, laserMode, engravi
   return { matchedKey, cell };
 }
 
+export function formatFeedRateHint(feedRate) {
+  const num = Number(feedRate);
+  if (feedRate === "" || feedRate === null || feedRate === undefined || !Number.isFinite(num) || num <= 0) {
+    return "约 — mm/s";
+  }
+  return `约 ${Number((num / 60).toFixed(1))} mm/s`;
+}
+
 export function buildMaterialSavePayload({
   material,
   thickList,
   power,
+  feedRate: feedRateInput,
   speed,
   laserMode = "engrave",
   engravingMode = "raster",
@@ -50,7 +59,10 @@ export function buildMaterialSavePayload({
   const laserMaxPower = Math.round((Number(power) / 100) * 1000);
   const feedRate = Number.isFinite(Number(feedRateOverride)) && Number(feedRateOverride) > 0
     ? Math.round(Number(feedRateOverride))
-    : Math.round(Number(speed) * 60);
+    : Number.isFinite(Number(feedRateInput)) && Number(feedRateInput) > 0
+      ? Math.round(Number(feedRateInput))
+      : Math.round(Number(speed) * 60);
+  const speedMms = Number((feedRate / 60).toFixed(2));
   const defaultPasses = Number.isInteger(Number(passesOverride)) && Number(passesOverride) >= 1
     ? Number(passesOverride)
     : 1;
@@ -105,7 +117,7 @@ export function buildMaterialSavePayload({
     material,
     thicknesses,
     power_percent: Number(power),
-    speed_mms: Number(speed),
+    speed_mms: speedMms,
     laser_mode: normalizedLaserMode,
     engraving_mode: normalizedLaserMode === "cut" ? "" : normalizedEngravingMode,
     // 兼容单厚度字段
@@ -133,12 +145,47 @@ export function MaterialModal({ visible, ...props }) {
   return visible ? <MaterialModalDialog {...props} /> : null;
 }
 
+function resolveInitialFeedRate(initialData) {
+  const direct = Number(initialData?.feed_rate);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
+  const fromMms = Number(initialData?.speed_mms) * 60;
+  if (Number.isFinite(fromMms) && fromMms > 0) return Math.round(fromMms);
+  return 1500;
+}
+
+function resolveInitialModalForm(initialData) {
+  if (!initialData) {
+    return {
+      name: "",
+      thicknessStr: "3",
+      power: 50,
+      feedRate: 1500,
+    };
+  }
+  // 过滤“表面通用”非数字键（"surface"），避免把字面量塞进数字厚度输入框导致校验失败
+  const numericList = Array.isArray(initialData.thicknesses)
+    ? initialData.thicknesses.filter((t) => Number.isFinite(Number(t)) && Number(t) > 0)
+    : [];
+  const thicknessStr = numericList.length > 0
+    ? numericList.join(", ")
+    : (Number.isFinite(Number(initialData.thickness_mm)) && Number(initialData.thickness_mm) > 0
+      ? String(initialData.thickness_mm)
+      : "3");
+  return {
+    name: initialData.name || "",
+    thicknessStr,
+    power: Number(initialData.power_percent || 50),
+    feedRate: resolveInitialFeedRate(initialData),
+  };
+}
+
 function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   const isEditing = Boolean(initialData && initialData.name);
-  const [name, setName] = useState("");
-  const [thicknessStr, setThicknessStr] = useState("");
-  const [power, setPower] = useState(50);
-  const [speed, setSpeed] = useState(100);
+  const initialForm = resolveInitialModalForm(initialData);
+  const [name, setName] = useState(initialForm.name);
+  const [thicknessStr, setThicknessStr] = useState(initialForm.thicknessStr);
+  const [power, setPower] = useState(initialForm.power);
+  const [feedRate, setFeedRate] = useState(initialForm.feedRate);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const backdropRef = useRef(null);
@@ -159,26 +206,11 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   }, [busy, onClose]);
 
   useEffect(() => {
-    if (initialData) {
-      setName(initialData.name || "");
-      // 过滤“表面通用”非数字键（"surface"），避免把字面量塞进数字厚度输入框导致校验失败
-      const numericList = Array.isArray(initialData.thicknesses)
-        ? initialData.thicknesses.filter((t) => Number.isFinite(Number(t)) && Number(t) > 0)
-        : [];
-      const thicks = numericList.length > 0
-        ? numericList.join(", ")
-        : (Number.isFinite(Number(initialData.thickness_mm)) && Number(initialData.thickness_mm) > 0
-          ? String(initialData.thickness_mm)
-          : "3");
-      setThicknessStr(thicks);
-      setPower(Number(initialData.power_percent || 50));
-      setSpeed(Number(initialData.speed_mms || 100));
-    } else {
-      setName("");
-      setThicknessStr("3");
-      setPower(50);
-      setSpeed(100);
-    }
+    const next = resolveInitialModalForm(initialData);
+    setName(next.name);
+    setThicknessStr(next.thicknessStr);
+    setPower(next.power);
+    setFeedRate(next.feedRate);
     setError("");
     setBusy(false);
   }, [initialData]);
@@ -196,13 +228,13 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
     }
 
     const powerNum = Number(power);
-    const speedNum = Number(speed);
+    const feedNum = Number(feedRate);
     if (!Number.isFinite(powerNum) || powerNum <= 0 || powerNum > 100) {
       setError("推荐功率须在 1 ~ 100% 之间");
       return;
     }
-    if (!Number.isFinite(speedNum) || speedNum <= 0 || speedNum > 600) {
-      setError("推荐速度须在 1 ~ 600 mm/s 之间");
+    if (!Number.isFinite(feedNum) || feedNum < 60 || feedNum > 36000) {
+      setError("推荐速度须在 60 ~ 36000 mm/min 之间");
       return;
     }
 
@@ -210,12 +242,9 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
     setError("");
 
     const initialPower = Number(initialData?.power_percent || 50);
-    const initialSpeed = Number(initialData?.speed_mms || 100);
-    const paramsChanged = !isEditing || powerNum !== initialPower || speedNum !== initialSpeed;
-    const feedRateOverride =
-      !paramsChanged && Number.isFinite(Number(initialData?.feed_rate))
-        ? Number(initialData.feed_rate)
-        : undefined;
+    const initialFeed = resolveInitialFeedRate(initialData);
+    const roundedFeed = Math.round(feedNum);
+    const paramsChanged = !isEditing || powerNum !== initialPower || roundedFeed !== initialFeed;
 
     let resolvedExistingThicknesses = isEditing ? initialData?.existing_thicknesses : undefined;
     if (isEditing && !resolvedExistingThicknesses) {
@@ -240,10 +269,9 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       material: trimmedName,
       thickList,
       power: powerNum,
-      speed: speedNum,
+      feedRate: roundedFeed,
       laserMode: initialData?.laser_mode,
       engravingMode: initialData?.engraving_mode,
-      feedRateOverride,
       passesOverride: initialData?.passes,
       existingThicknesses: resolvedExistingThicknesses,
       targetThickness: isEditing ? initialData?.target_thickness : undefined,
@@ -376,18 +404,21 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
               />
             </div>
             <div className="mat-field">
-              <label htmlFor="mat-f-speed">推荐速度（mm/s）</label>
+              <label htmlFor="mat-f-speed">推荐速度（mm/min）</label>
               <input
                 id="mat-f-speed"
                 className="text-input"
                 type="number"
-                min="1"
-                max="600"
-                step="1"
-                value={speed}
-                onChange={(e) => setSpeed(e.target.value)}
-                placeholder="10 - 200"
+                min="60"
+                max="36000"
+                step="10"
+                value={feedRate}
+                onChange={(e) => setFeedRate(e.target.value)}
+                placeholder="300 - 6000"
               />
+              <small className="lab-s-hint" id="mat-f-speed-hint">
+                {formatFeedRateHint(feedRate)}
+              </small>
             </div>
           </div>
 

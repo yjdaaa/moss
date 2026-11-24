@@ -65,6 +65,7 @@ test("VoiceAgentCard 5 秒轮询保脏、VoicePage 链路提示、HomePage 预�
     const { loadWorkbenchPreviewUrl } = await server.ssrLoadModule("/src/pages/HomePage.jsx");
     const {
       parseThicknessList,
+      formatFeedRateHint,
       buildMaterialSavePayload,
       buildMaterialDeletePayload,
     } = await server.ssrLoadModule("/src/components/MaterialModal.jsx");
@@ -292,6 +293,21 @@ test("VoiceAgentCard 5 秒轮询保脏、VoicePage 链路提示、HomePage 预�
     assert.deepEqual(partialModeAndCanonicalKey.thicknesses["4.0"], {}, "仅存了光栅的非目标厚度 4.0 不得被捏造 cut 参数，且保留原键名防重复");
     assert.equal(partialModeAndCanonicalKey.thicknesses["4"], undefined, "不得额外生成数值重复的 '4' 键");
     assert.equal(partialModeAndCanonicalKey.thicknesses["6"].cut.laser_max_power, 600, "新增厚度 6 正常写入新参数");
+
+    // 弹窗直接输入 mm/min (feedRate) 时，非 60 整倍数（如 1000 mm/min）往返零漂移
+    const exactFeedSave = buildMaterialSavePayload({
+      material: "椴木",
+      thickList: [3],
+      power: 45,
+      feedRate: 1000,
+      laserMode: "engrave",
+      engravingMode: "raster",
+    });
+    assert.equal(exactFeedSave.feed_rate, 1000, "直接传入 mm/min 不经过 mm/s 取整漂移");
+    assert.equal(exactFeedSave.thicknesses["3"].engrave.raster.feed_rate, 1000);
+    assert.equal(formatFeedRateHint(1800), "约 30 mm/s");
+    assert.equal(formatFeedRateHint(1000), "约 16.7 mm/s");
+    assert.equal(formatFeedRateHint(""), "约 — mm/s");
   } finally {
     await server.close();
   }

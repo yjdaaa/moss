@@ -63,8 +63,12 @@ export function SendOverlay({
         {badge && <span className="send-badge">{badge}</span>}
       </div>
 
-      <div className="send-desc">
-        STATUS <span className="pct" id="send-pct">{stage.normalized.toUpperCase()}</span> · 请勿关闭页面
+      <div className="send-desc" id="send-status-desc" data-status={stage.normalized}>
+        {stage.terminal
+          ? stage.isSuccess
+            ? "本次刀路已全部下发完成"
+            : "下发已停止，请在机器旁核实实际状态"
+          : "正在与控制器通信，请勿关闭页面"}
       </div>
       {progress && progress.total > 0 && (
         <div className="send-desc send-overlay-box">

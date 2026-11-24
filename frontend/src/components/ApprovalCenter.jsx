@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { HOME_APPROVALS, requestVoiceFocus } from "../voiceFocus.js";
-import { ShieldAlert } from "lucide-react";
+import { ShieldAlert, X } from "lucide-react";
 import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert } from "../appDialog.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 import { onEmergencyStop } from "../estopBus.js";
 import { claimEstopContext, estopTargetFromDescription, stopPageTarget } from "../globalEstop.js";
 import { sendEstopRequest } from "../usePageEstop.js";
@@ -54,6 +56,8 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
   const seenRef = useRef(new Set());
   const dismissedRef = useRef(new Set());
   const targetsSigRef = useRef(null);
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
   const jobRef = useRef(null);
   jobRef.current = job;
   const enabled = hasDesktopSession();
@@ -291,9 +295,32 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     [handleEmergencyStop],
   );
 
+  const approvalOpen = enabled && Boolean(open && shown);
+  const dismissApproval = useCallback(() => {
+    if (busy || !shown) return;
+    if (failure) {
+      removeShown(shown.approval_id);
+    } else {
+      onOpenChange?.(false);
+    }
+  }, [busy, shown, failure, removeShown, onOpenChange]);
+
+  useEffect(() => {
+    if (!approvalOpen) return undefined;
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        dismissApproval();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [approvalOpen, dismissApproval]);
+
   if (!enabled) return null;
 
-  const approvalOpen = open && shown;
   const percent = shown && ttl > 0 ? Math.max(0, Math.min(100, (remaining / ttl) * 100)) : 0;
   const isWorkflow = shown?.kind === "workflow_confirm_send";
   const privateOnly = approvedInPrivateWindow(shown?.kind);
@@ -307,18 +334,44 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     onOpenChange?.(false);
   };
 
-  return (
-    <>
-      {approvalOpen && (
-        <div className="mat-modal-backdrop approval-backdrop approval-center-box approval-center-modal">
-          <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="approval-title" id="approval-card">
-            <div className="mat-modal-head">
-              <h3 id="approval-title" className="approval-title">
-                <ShieldAlert size={18} aria-hidden="true" />
-                <span>{SOURCE_SHORT[shown.source] || "远程"}请求{kindLabel(shown.kind)}</span>
-              </h3>
-              <span className="approval-tag">{approvalTagText(shown.kind)}</span>
-            </div>
+  const content = approvalOpen ? (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop approval-backdrop approval-center-box approval-center-modal"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !busy) {
+          dismissApproval();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="approval-title" id="approval-card">
+        <div className="mat-modal-head">
+          <h3 id="approval-title" className="approval-title">
+            <ShieldAlert size={18} aria-hidden="true" />
+            <span>{SOURCE_SHORT[shown.source] || "远程"}请求{kindLabel(shown.kind)}</span>
+          </h3>
+          <div className="approval-head-actions">
+            <span className="approval-tag">{approvalTagText(shown.kind)}</span>
+            <button
+              type="button"
+              className="mat-modal-close"
+              id="approval-dismiss"
+              onClick={dismissApproval}
+              disabled={busy}
+              title={failure ? "关闭" : "稍后处理"}
+              aria-label={failure ? "关闭" : "稍后处理"}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
             <div className="mat-modal-body">
               {pending.length > 1 && (
                 <div className="approval-queue">还有 {pending.length - 1} 个请求等待处理</div>
@@ -429,9 +482,17 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
                 </>
               )}
             </div>
-          </div>
-        </div>
-      )}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      {content
+        ? typeof document !== "undefined" && document.body
+          ? createPortal(content, document.body)
+          : content
+        : null}
       <SendOverlay
         visible={Boolean(job)}
         status={job?.status}

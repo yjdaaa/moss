@@ -521,19 +521,7 @@ function SettingsModalBody({
 
             {/* 动态端口与降级状态指示 */}
             {systemInfo && (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  fontSize: "11px",
-                  padding: "6px 10px",
-                  borderRadius: "4px",
-                  background: systemInfo.is_fallback ? "rgba(255, 170, 0, 0.1)" : "rgba(52, 211, 153, 0.08)",
-                  border: `1px solid ${systemInfo.is_fallback ? "rgba(255, 170, 0, 0.3)" : "rgba(52, 211, 153, 0.25)"}`,
-                  color: systemInfo.is_fallback ? "var(--gold)" : "var(--green)",
-                }}
-              >
+              <div className={`settings-port-banner${systemInfo.is_fallback ? " is-fallback" : ""}`}>
                 {systemInfo.is_fallback ? <AlertCircle size={13} /> : <CheckCircle2 size={13} />}
                 <span>
                   {systemInfo.is_fallback
@@ -720,22 +708,13 @@ function SettingsModalBody({
                 )}
               </div>
               {updateReport?.has_update && (
-                <div
-                  style={{
-                    marginTop: "10px",
-                    padding: "8px 10px",
-                    borderRadius: "6px",
-                    background: "rgba(251, 191, 36, 0.08)",
-                    border: "1px solid rgba(251, 191, 36, 0.35)",
-                    fontSize: "12px",
-                  }}
-                >
+                <div className="settings-update-card">
                   <div>
                     最新版本：<strong className="mono">v{updateReport.latest_version}</strong>
                     {updateReport.published_at ? ` · 发布于 ${updateReport.published_at.slice(0, 10)}` : ""}
                   </div>
                   {updateReport.notes && (
-                    <div style={{ marginTop: "4px", color: "var(--ink-dim)", whiteSpace: "pre-wrap" }}>
+                    <div className="settings-update-notes">
                       {updateReport.notes}
                     </div>
                   )}
@@ -791,18 +770,7 @@ function SettingsModalBody({
             </div>
 
             <div className="settings-row-6">
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: "10px",
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  background: closeAction === "ask" ? "rgba(139, 123, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                  border: `1px solid ${closeAction === "ask" ? "rgba(139, 123, 255, 0.4)" : "var(--line)"}`,
-                  cursor: "pointer"
-                }}
-              >
+              <label className={`close-confirm-option${closeAction === "ask" ? " is-active" : ""}`}>
                 <input
                   type="radio"
                   name="settingCloseAction"
@@ -821,18 +789,7 @@ function SettingsModalBody({
                 </div>
               </label>
 
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: "10px",
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  background: closeAction === "tray" ? "rgba(139, 123, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                  border: `1px solid ${closeAction === "tray" ? "rgba(139, 123, 255, 0.4)" : "var(--line)"}`,
-                  cursor: "pointer"
-                }}
-              >
+              <label className={`close-confirm-option${closeAction === "tray" ? " is-active" : ""}`}>
                 <input
                   type="radio"
                   name="settingCloseAction"
@@ -851,18 +808,7 @@ function SettingsModalBody({
                 </div>
               </label>
 
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: "10px",
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  background: closeAction === "exit" ? "rgba(255, 59, 92, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                  border: `1px solid ${closeAction === "exit" ? "rgba(255, 59, 92, 0.4)" : "var(--line)"}`,
-                  cursor: "pointer"
-                }}
-              >
+              <label className={`close-confirm-option is-danger${closeAction === "exit" ? " is-active" : ""}`}>
                 <input
                   type="radio"
                   name="settingCloseAction"

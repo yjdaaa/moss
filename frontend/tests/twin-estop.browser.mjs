@@ -113,7 +113,11 @@ try {
   await connModal.waitFor({ state: "detached", timeout: 5_000 });
   assert.equal(await page.evaluate(() => document.activeElement?.id || ""), "twin-open-connection");
 
-  // 3. 拖动板材起点与雕刻位置滑块：只平移对象，不报错
+  // 3. 3D 摆位面板默认收起以免挤出遥测与安全卡，点开后拖动板材起点滑块照常平移对象且不报错
+  const layoutFold = page.locator("#twin-scene-layout");
+  assert.equal(await layoutFold.evaluate((el) => el.open), false, "3D 摆位预览默认收起");
+  await layoutFold.locator("summary").click();
+  assert.equal(await layoutFold.evaluate((el) => el.open), true, "点击标题可展开 3D 摆位预览");
   for (const label of ["拖动调节 X0 坐标", "拖动调节 Y0 坐标"]) {
     const slider = page.getByLabel(label);
     assert.equal(await slider.count(), 1, `${label} 滑块应存在`);

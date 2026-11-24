@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 统一材料编辑弹窗速度单位，折叠数字孪生 3D 摆位并收口弹窗与标签细节（2026-11-24）
+
+- **现象**：① 添加/编辑材料弹窗用 `mm/s`（新建默认 `100` 折算达 `6000 mm/min`），与全站 `mm/min` 割裂且非 60 整倍数速度编辑往返有取整漂移；② 数字孪生首屏平铺两块仅改本页 3D 视角的摆位控件，挤出遥测与行程安全卡且易误导为真实对刀，另残留 `$CD`、裸 `workflow_id`、写死机型名与 `LINE`；③ 关闭窗口确认框残留“杀死进程”与错误的“右上角设置”指引，AI 预览窗与审批卡缺 `Esc` 收起，多处仍带重复英文小标并遗留两个零引用文件。
+- **根因与修复**：① `MaterialModal` 速度统一改为 `mm/min`（新建默认 `1500 mm/min`，旁注 `mm/s`）并惰性初始化首帧表单，直写 `feed_rate` 零漂移；② `TwinPage` 将 3D 摆位收进默认折叠的 `#twin-scene-layout` 并注明不改实际刀路，新增 `formatTwinWorkflowLabel` 展示内容与材质摘要替代裸 `workflow_id`，清掉 `$CD`、写死机型名与 `LINE`；③ 修正 `CloseConfirmModal` 与 `SideNav` 文案并收拢静态内联样式；④ `ApprovalCenter` 与 `AiPreviewCenter` 补齐 `createPortal`、右上角关闭钮、`Escape`（经 `isTopmostModalBackdrop`）及遮罩收起为稍后处理；⑤ 清理顶栏、工具卡、实验室、提示框与发送覆盖层的重复英文小标，画板根改为 `<div>`，删除零引用的 `LogPanel.jsx` 与 `forgeDrawEntry.js`。后端契约与安全门禁不变。
+- **验证**：`verify.mjs --finish` 通过：分层与仓库规范检查、脚本单测 75/75、前端 ESLint、前端单测 390/390（`targetedFixes`、`uiModalAndScrollFixes`、`uiPolishB` 补齐速度无损回显、Portal/`Esc` 与标签断言）、生产构建、浏览器测试 18/18（`twin-estop`、`ai-preview` 补折叠展开与栈顶 `Esc` 收起）及本机桌面程序快更全部通过；未连真实激光硬件实测（`unverified`）。
+- **关联**：`frontend/src/components/{MaterialModal,ApprovalCenter,AiPreviewCenter,CloseConfirmModal,SettingsModal,Navbar,SideNav,AppDialog,SendOverlay}.jsx`、`frontend/src/components/{workbench/WorkbenchMaterialCard,material-lab/LabParamsPanel}.jsx`、`frontend/src/pages/{TwinPage,HomePage,DrawPage}.jsx`、`frontend/src/styles/15-addenda-2026-11.css`、`docs/developer/frontend-behavior.md`。
+
 ### 命令词不再把“暂停”“别停”当急停，打断工具与说“停”不再丢失（2026-11-24）
 
 - **现象**：开着命令词抗噪（新安装默认开）时，走边框说“暂停”或说“别停”会急停复位；工具跑到一半被打断后大模型不知道工具已执行，可能再执行一遍；自动拾音时工具执行中说“停”没反应；另有合成失败设备什么都收不到、`<think>` 推理内容被念出来、粗筛可能剪掉停止工具等问题。

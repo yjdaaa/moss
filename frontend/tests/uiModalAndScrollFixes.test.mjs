@@ -79,6 +79,8 @@ test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖�
     "components/AuthModal.jsx",
     "components/CloseConfirmModal.jsx",
     "components/LocalTtsVoicesModal.jsx",
+    "components/ApprovalCenter.jsx",
+    "components/AiPreviewCenter.jsx",
   ]) {
     const src = fs.readFileSync(path.join(SRC_DIR, rel), "utf8");
     assert.match(src, /createPortal\(content,\s*document\.body\)/, `${rel} 须通过 createPortal 挂载到 document.body，逃逸 .main-content-viewport 层叠上下文`);

@@ -160,7 +160,13 @@ try {
   });
   setStatus("wf-ai-1", "completed");
   await page.locator("#send-overlay.show").waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
-  await page.waitForFunction(() => !document.querySelector("#send-overlay.show") || /COMPLETED/.test(document.querySelector("#send-pct")?.textContent || ""), null, { timeout: 15_000 });
+  await page.waitForFunction(
+    () =>
+      !document.querySelector("#send-overlay.show")
+      || document.querySelector("#send-status-desc")?.getAttribute("data-status") === "completed",
+    null,
+    { timeout: 15_000 },
+  );
   const close = page.locator("#send-overlay.show button", { hasText: "关闭" });
   if (await close.count()) await close.first().click();
 
@@ -216,6 +222,14 @@ try {
   await connModal.waitFor({ state: "detached", timeout: 5_000 });
   assert.equal(await page.locator("#ai-preview-card").count(), 1, "按 Escape 只关闭栈顶连接弹窗，AI 预览窗保持打开");
   assert.equal(await page.locator("#ai-preview-target").innerText(), "192.0.2.55:23", "配置完成后 AI 预览窗目标设备即时同步");
+  // 再按一次 Escape：AI 预览窗作为当前栈顶模态框按“稍后再看”收起（不取消任务），来新预览或重开后可逐条处理完
+  await page.keyboard.press("Escape");
+  await page.locator("#ai-preview-card").waitFor({ state: "detached", timeout: 5_000 });
+  assert.equal(posts.filter((item) => item.body.action === "cancel" && item.body.workflow_id === "wf-ai-5").length, 0, "Escape 仅收起预览窗，不直接取消任务");
+  state.workflows = [aiRecord("wf-ai-6", { origin: "voice", created_at: now + 5 }), ...state.workflows];
+  await page.locator("#ai-preview-card").waitFor({ timeout: 10_000 });
+  await page.locator("#ai-preview-discard").click();
+  await page.locator("#ai-preview-card").filter({ hasText: "还有" }).waitFor({ state: "detached", timeout: 5_000 });
   await page.locator("#ai-preview-discard").click();
   await page.locator("#ai-preview-card").waitFor({ state: "detached", timeout: 10_000 });
 

@@ -38,6 +38,7 @@ import {
   twinEstopContext,
 } from "../twinState.js";
 import { TERMINAL_STATUSES, normalizeWorkflowStatus } from "../state/statusNormalize.js";
+import { workflowDetails } from "../approvalState.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { connectionSummaryView, readUnifiedConnection } from "../deviceConnection.js";
@@ -59,6 +60,20 @@ const TWIN_STATUS_LABELS = {
 function twinStatusLabel(status) {
   const normalized = normalizeWorkflowStatus(status);
   return TWIN_STATUS_LABELS[normalized] || String(status || "预览就绪");
+}
+
+export function formatTwinWorkflowLabel(wf, { includeStatus = false } = {}) {
+  if (!wf || typeof wf !== "object") return "内置演示刀路 (60×60mm)";
+  const details = workflowDetails(wf);
+  const mat = wf.artifacts?.material || wf.material || wf.input?.material || wf.confirmation_snapshot?.material || "";
+  const thick = wf.artifacts?.thickness_mm ?? wf.thickness_mm ?? wf.input?.thickness_mm ?? wf.confirmation_snapshot?.thickness_mm ?? "";
+  const matText = mat ? `${mat}${thick !== "" && thick != null ? ` ${thick}mm` : ""}` : "";
+  const contentText = details.content || (wf.source_type === "gcode" ? "导入刀路" : "");
+  const parts = [contentText, matText || (!contentText ? "激光任务" : "")].filter(Boolean);
+  if (includeStatus) {
+    parts.push(twinStatusLabel(wf.status));
+  }
+  return parts.join(" · ") || "激光任务";
 }
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
@@ -179,7 +194,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
   const [activeWorkflow, setActiveWorkflow] = useState(null);
   const [gcodeText, setGcodeText] = useState(DEMO_GCODE);
-  const [gcodeSourceLabel, setGcodeSourceLabel] = useState("翼宿 V1.0 演示刀路 (100×100mm)");
+  const [gcodeSourceLabel, setGcodeSourceLabel] = useState("内置演示刀路 (60×60mm)");
   const [loadingWorkflow, setLoadingWorkflow] = useState(false);
 
   // 仿真播放器状态（严格 1:1 对应 G-code 真实雕刻时长；默认不开启循环推演）
@@ -357,9 +372,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       const text = res.ok ? res.text : "";
       if (text && text.trim().length > 0) {
         setGcodeText(text);
-        const mat = wf.artifacts?.material || wf.material || "未知材质";
-        const thick = wf.artifacts?.thickness_mm || wf.thickness_mm || "";
-        setGcodeSourceLabel(`任务 ${wf.workflow_id} · ${mat} ${thick ? `${thick}mm` : ""}`);
+        setGcodeSourceLabel(formatTwinWorkflowLabel(wf));
         setSimProgress(0);
         setSimPlaying(true);
       }
@@ -559,7 +572,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
         }
         if (r.features) setMachineFeatures(r.features);
       } else {
-        const msg = (typeof res.data?.result === "string" && res.data.result) || "同步控制器 $CD 能力失败，请检查设备连接";
+        const msg = (typeof res.data?.result === "string" && res.data.result) || "读取实机行程失败，请检查设备连接";
         setConnectionStatus?.({
           connected: false,
           summary: msg,
@@ -569,7 +582,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       }
     } catch (err) {
       if (!mountedRef.current) return;
-      const msg = err?.message || "同步控制器 $CD 能力异常";
+      const msg = err?.message || "读取实机行程异常";
       setConnectionStatus?.({
         connected: false,
         summary: msg,
@@ -1006,7 +1019,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
 
                   <div className="twin-gcode-ticker">
                     <span className="twin-gcode-line-badge">
-                      LINE {activePose.lineNumber || 0} / {toolpath.totalLines}
+                      第 {activePose.lineNumber || 0} / {toolpath.totalLines} 行
                     </span>
                     <code className="twin-gcode-code">
                       {activePose.rawLine || "G0 X0.000 Y0.000 ; 等待刀路指令"}
@@ -1028,7 +1041,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     </span>
                     <span>·</span>
                     <span>
-                      LINE {activePose.lineNumber || 0} / {toolpath.totalLines}
+                      第 {activePose.lineNumber || 0} / {toolpath.totalLines} 行
                     </span>
                     <span>·</span>
                     <span style={{ color: simLoop ? "var(--ob-green-2, #34d399)" : "var(--ob-ink-3)" }}>
@@ -1077,7 +1090,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   </option>
                   {recentWorkflows.map((wf) => (
                     <option key={wf.workflow_id} value={wf.workflow_id}>
-                      {wf.artifacts?.material || wf.material || "激光任务"} · {twinStatusLabel(wf.status)}（{wf.workflow_id}）
+                      {formatTwinWorkflowLabel(wf, { includeStatus: true })}
                     </option>
                   ))}
                 </select>
@@ -1131,20 +1144,31 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 </div>
               </div>
 
-              {/* 材料外框尺寸与摆放位置坐标 (X0, Y0) —— 修改后材料、刀路与激光头实时同步移动 */}
-              <div className="twin-pins-box" style={{ marginTop: "6px" }}>
-                <div className="twin-telemetry-head" style={{ marginBottom: "8px" }}>
-                  <span className="twin-field-label">
-                    材料外框尺寸与位置坐标（激光头跟随移动）
-                  </span>
-                  <span className="ob-pill ob-pill--info">
-                    <span>
-                      {workspace.material.autoSize ? "1:1 同步 G-code" : "自定义外框"} · 起点 ({workspace.offsetX}, {workspace.offsetY})
-                    </span>
-                  </span>
-                </div>
+              {/* 3D 场景摆位预览（默认收起，避免把遥测卡与行程安全卡挤出首屏，且标明不影响实际 G-code） */}
+              <details className="fill-options twin-layout-fold" id="twin-scene-layout">
+                <summary className="twin-layout-fold-summary">
+                  <span>3D 摆位预览（仅影响仿真画面）</span>
+                  <small className="twin-layout-fold-meta">
+                    {workspace.material.autoSize ? "1:1 贴合刀路" : `${workspace.material.widthMm}×${workspace.material.heightMm}mm`} · 起点 ({workspace.offsetX}, {workspace.offsetY})
+                  </small>
+                </summary>
+                <p className="wb-hint twin-layout-note">
+                  这里只调整本页 3D 画面里的材料尺寸与摆放位置，不改动实际 G-code 刀路；真机对刀请用工作台的「对刀起点」或「现场移头」。
+                </p>
 
-                <div className="twin-row-actions" style={{ marginBottom: "8px" }}>
+                <div className="twin-pins-box twin-layout-group">
+                  <div className="twin-telemetry-head twin-layout-group-head">
+                    <span className="twin-field-label">
+                      材料外框尺寸与台面起点
+                    </span>
+                    <span className="ob-pill ob-pill--info">
+                      <span>
+                        {workspace.material.autoSize ? "1:1 同步 G-code" : "自定义外框"} · 起点 ({workspace.offsetX}, {workspace.offsetY})
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="twin-row-actions twin-layout-group-actions">
                   <button
                     type="button"
                     className={`btn btn-ghost twin-speed-btn ${workspace.material.autoSize ? "active" : ""}`}
@@ -1357,11 +1381,11 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 </div>
               </div>
 
-              {/* 激光雕刻文字/刀路在材料内部的位置调整 —— 严格钳制在材料四周边距内，绝不超出材料外框 */}
-              <div className="twin-pins-box" style={{ marginTop: "6px" }}>
-                <div className="twin-telemetry-head" style={{ marginBottom: "8px" }}>
+              {/* 激光雕刻刀路在材料内部的位置预览 —— 严格钳制在材料四周边距内 */}
+              <div className="twin-pins-box twin-layout-group">
+                <div className="twin-telemetry-head twin-layout-group-head">
                   <span className="twin-field-label">
-                    激光雕刻文字在材料内位置（始终在材料内）
+                    刀路在材料内的预览位置
                   </span>
                   <span className="ob-pill ob-pill--ok">
                     <span>
@@ -1370,7 +1394,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   </span>
                 </div>
 
-                <div className="twin-row-actions" style={{ marginBottom: "8px" }}>
+                <div className="twin-row-actions twin-layout-group-actions">
                   <button
                     type="button"
                     className={`btn btn-ghost twin-speed-btn ${workspace.material.textOffsetX === workspace.material.minTextOffsetX && workspace.material.textOffsetY === workspace.material.minTextOffsetY ? "active" : ""}`}
@@ -1466,6 +1490,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   </label>
                 </div>
               </div>
+              </details>
               {driveMode === "job" && (
                 <div className="twin-job-sync-box">
                   <div className="twin-job-sync-head">

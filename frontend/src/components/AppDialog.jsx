@@ -5,10 +5,10 @@ import { resolveDialog, subscribe } from "../appDialog.js";
 import { OriginBadge } from "./OriginBadge.jsx";
 
 const TONE_META = {
-  info: { Icon: Info, label: "INFO" },
-  success: { Icon: CheckCircle2, label: "OK" },
-  warning: { Icon: AlertTriangle, label: "WARN" },
-  error: { Icon: ShieldAlert, label: "ERROR" },
+  info: { Icon: Info },
+  success: { Icon: CheckCircle2 },
+  warning: { Icon: AlertTriangle },
+  error: { Icon: ShieldAlert },
 };
 
 /**
@@ -119,7 +119,6 @@ export function AppDialogHost() {
               <Icon size={18} />
             </span>
             <span className="app-dialog-title-text">{dialog.title}</span>
-            <span className="app-dialog-tag">{meta.label}</span>
           </h3>
           <button
             type="button"

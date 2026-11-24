@@ -64,23 +64,11 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
 
         <div className="mat-modal-body">
           <p className="close-confirm-note">
-            您点击了关闭窗口，请选择您期望的操作：
+            请选择关闭主窗口时的操作：
           </p>
 
           <div className="close-confirm-row">
-            <label
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "10px",
-                padding: "10px 12px",
-                borderRadius: "8px",
-                background: selectedAction === "tray" ? "rgba(139, 123, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                border: `1px solid ${selectedAction === "tray" ? "rgba(139, 123, 255, 0.3)" : "var(--line, #242b35)"}`,
-                cursor: "pointer",
-                transition: "all 0.15s ease"
-              }}
-            >
+            <label className={`close-confirm-option${selectedAction === "tray" ? " is-active" : ""}`}>
               <input
                 type="radio"
                 name="closeAction"
@@ -99,19 +87,7 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
               </div>
             </label>
 
-            <label
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "10px",
-                padding: "10px 12px",
-                borderRadius: "8px",
-                background: selectedAction === "exit" ? "rgba(239, 68, 68, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                border: `1px solid ${selectedAction === "exit" ? "rgba(239, 68, 68, 0.3)" : "var(--line, #242b35)"}`,
-                cursor: "pointer",
-                transition: "all 0.15s ease"
-              }}
-            >
+            <label className={`close-confirm-option is-danger${selectedAction === "exit" ? " is-active" : ""}`}>
               <input
                 type="radio"
                 name="closeAction"
@@ -125,7 +101,7 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
                   完全退出程序
                 </div>
                 <div className="close-confirm-box-4">
-                  停止激光加工任务，触发安全急停软复位并彻底杀死进程
+                  停止激光任务与语音服务并直接退出程序
                 </div>
               </div>
             </label>
@@ -138,7 +114,7 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
                 checked={remember}
                 onChange={(e) => setRemember(e.target.checked)}
               />
-              <span>记住我的选择，以后不再询问（可在右上角设置中更改）</span>
+              <span>记住我的选择，以后不再询问（可在左侧栏底部的「偏好设置」中更改）</span>
             </label>
           </div>
         </div>

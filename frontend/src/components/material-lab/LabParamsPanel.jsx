@@ -82,7 +82,6 @@ export function LabParamsPanel({
                   name: selectedMaterial,
                   thicknesses: thicks,
                   power_percent: Math.max(1, Math.min(100, Math.round(maxPower / 10))),
-                  speed_mms: Math.max(1, Math.round(feedRate / 60)),
                   feed_rate: feedRate,
                   passes,
                   laser_mode: activeMode === "cut" ? "cut" : "engrave",
@@ -113,7 +112,6 @@ export function LabParamsPanel({
             className={`lab-mode-tab ${activeMode === m.id ? "active" : ""}`}
           >
             <span>{m.label}</span>
-            <small>{m.code}</small>
           </button>
         ))}
       </div>
@@ -182,7 +180,7 @@ export function LabParamsPanel({
 
         <div>
           <label className="lab-label-2">
-            加工循环次数 (Passes)
+            加工遍数
           </label>
           <input
             type="number"

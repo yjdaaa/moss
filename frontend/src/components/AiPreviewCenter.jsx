@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Sparkles, X } from "lucide-react";
 import { DEFAULT_READ_TIMEOUT_MS, fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert, showConfirm } from "../appDialog.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 import { onEmergencyStop } from "../estopBus.js";
 import { claimEstopContext, estopTargetFromDescription, stopPageTarget } from "../globalEstop.js";
 import { sendEstopRequest } from "../usePageEstop.js";
@@ -62,6 +64,8 @@ export function AiPreviewCenter({
   const sinceRef = useRef(Math.floor(Date.now() / 1000) - AI_PREVIEW_LOOKBACK_SECONDS);
   const externalTargetsRef = useRef(pendingApprovalTargets);
   externalTargetsRef.current = pendingApprovalTargets;
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
   const jobRef = useRef(null);
   jobRef.current = job;
   const enabled = hasDesktopSession();
@@ -387,25 +391,66 @@ export function AiPreviewCenter({
     if (reopenNonce > 0) setHidden(false);
   }, [reopenNonce]);
 
+  const visible = enabled && Boolean(shown) && !hidden && !job;
+  useEffect(() => {
+    if (!visible) return undefined;
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        if (busy) return;
+        setHidden(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, busy]);
+
   if (!enabled) return null;
   const details = shown ? workflowDetails(shown) : null;
   const notes = shown ? aiPreviewNotes(shown) : [];
   const origin = shown ? originNote(shown) : "";
   const canFrame = Boolean(shown && framingRequest(shown, connection.payload));
-  const visible = Boolean(shown) && !hidden && !job;
 
-  return (
-    <>
-      {visible && (
-        <div className="mat-modal-backdrop approval-backdrop approval-center-box">
-          <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="ai-preview-title" id="ai-preview-card">
-            <div className="mat-modal-head">
-              <h3 id="ai-preview-title" className="approval-title">
-                <Sparkles size={18} aria-hidden="true" />
-                <span>{aiOriginLabel(shown.origin)}生成了雕刻预览</span>
-              </h3>
-              <span className="approval-tag">AI 生成 · 待你确认</span>
-            </div>
+  const content = visible ? (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop approval-backdrop approval-center-box"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !busy) {
+          setHidden(true);
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="ai-preview-title" id="ai-preview-card">
+        <div className="mat-modal-head">
+          <h3 id="ai-preview-title" className="approval-title">
+            <Sparkles size={18} aria-hidden="true" />
+            <span>{aiOriginLabel(shown.origin)}生成了雕刻预览</span>
+          </h3>
+          <div className="approval-head-actions">
+            <span className="approval-tag">AI 生成 · 待你确认</span>
+            <button
+              type="button"
+              className="mat-modal-close"
+              id="ai-preview-close"
+              onClick={() => setHidden(true)}
+              disabled={busy}
+              title="稍后再看"
+              aria-label="稍后再看"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
             <div className="mat-modal-body">
               {pending.length > 1 && <div className="approval-queue">还有 {pending.length - 1} 个 AI 预览等待处理</div>}
               <div className="approval-grid">
@@ -504,9 +549,17 @@ export function AiPreviewCenter({
                 {busy ? "正在处理…" : "同意开刻"}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      {content
+        ? typeof document !== "undefined" && document.body
+          ? createPortal(content, document.body)
+          : content
+        : null}
       <SendOverlay
         visible={Boolean(job)}
         status={job?.status}

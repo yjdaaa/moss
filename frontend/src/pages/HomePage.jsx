@@ -201,7 +201,6 @@ export function HomePage({
     () => readLocal("laser-forge-thick", "3") || "3"
   );
   const [powerPercent, setPowerPercent] = useState(50);
-  const [speedMms, setSpeedMms] = useState(30);
   const [recommendedFeedRate, setRecommendedFeedRate] = useState(1800);
   const [recommendedPasses, setRecommendedPasses] = useState(1);
   const [hasRecommendation, setHasRecommendation] = useState(true);
@@ -459,7 +458,6 @@ export function HomePage({
         }
         if (rec.feed_rate != null) {
           setRecommendedFeedRate(Math.round(rec.feed_rate));
-          setSpeedMms(Math.max(1, Math.round(rec.feed_rate / 60)));
         }
         setRecommendedPasses(Math.max(1, Math.round(rec.passes || 1)));
         setHasRecommendation(true);
@@ -1208,9 +1206,9 @@ export function HomePage({
             {/* Tool selection cards */}
             <div className="wb-grid">
               {[
-                { id: "text", label: "矢量文字", sub: "TEXT", icon: Type },
-                { id: "image", label: "图片处理", sub: "RASTER", icon: ImageIcon },
-                { id: "gcode", label: "已有G码", sub: "G-CODE", icon: FileCode },
+                { id: "text", label: "矢量文字", icon: Type },
+                { id: "image", label: "图片处理", icon: ImageIcon },
+                { id: "gcode", label: "已有G码", icon: FileCode },
                 { id: "draw", label: "创意画板", sub: "跳转 ↗", icon: PenTool, jump: "/draw" },
               ].map((t) => {
                 const Icon = t.icon;
@@ -1225,7 +1223,7 @@ export function HomePage({
                   >
                     <Icon size={18} className="tool-icon" aria-hidden="true" />
                     <span className="hud-tool-label">{t.label}</span>
-                    <span className="hud-tool-sub">{t.sub}</span>
+                    {t.sub ? <span className="hud-tool-sub">{t.sub}</span> : null}
                   </button>
                 );
               })}
@@ -1301,7 +1299,6 @@ export function HomePage({
           setSelectedThickness={setSelectedThickness}
           availableThicknesses={availableThicknesses}
           powerPercent={powerPercent}
-          speedMms={speedMms}
           recommendedFeedRate={recommendedFeedRate}
           recommendedPasses={recommendedPasses}
           hasRecommendation={hasRecommendation}

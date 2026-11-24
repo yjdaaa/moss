@@ -6,12 +6,12 @@ import { hardwarePillView } from "../state/hardwareStatus.js";
 // 顶栏（技术书 §9.5.5 B）：页面标题 + 硬件状态 + 小智四态 + 审批（仅桌面端）+ 常驻急停。
 
 const PAGE_TITLES = {
-  "/": { title: "雕刻工作台", sub: "LASER FORGE" },
-  "/draw": { title: "创作画板", sub: "CANVAS" },
-  "/material-lab": { title: "材料实验室", sub: "MATERIAL LAB" },
-  "/twin": { title: "数字孪生舱", sub: "DIGITAL TWIN 3D" },
-  "/camera": { title: "摄像头", sub: "CAMERA VIEW" },
-  "/voice": { title: "语音中心", sub: "VOICE CENTER" },
+  "/": "雕刻工作台",
+  "/draw": "创作画板",
+  "/material-lab": "材料实验室",
+  "/twin": "数字孪生舱",
+  "/camera": "摄像头",
+  "/voice": "语音中心",
 };
 
 const MCP_PILL_CLASS = {
@@ -38,7 +38,7 @@ export function Navbar({
   compact = false,
   onToggleCompact,
 }) {
-  const page = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
+  const pageTitle = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
   const pillClass = MCP_PILL_CLASS[mcpPill.key];
   const hardware = hardwarePillView(connectionStatus);
@@ -88,10 +88,7 @@ export function Navbar({
 
   return (
     <header className={`ob-top${compact ? " ob-top--compact" : ""}`} ref={headerRef} data-compact={compact ? "true" : "false"}>
-      <h1 className="ob-title">
-        {page.title}
-        <small>{page.sub}</small>
-      </h1>
+      <h1 className="ob-title">{pageTitle}</h1>
       <div className="ob-top-spacer" />
       {updateNotice}
       <div className="ob-top-page-actions" id="ob-top-page-actions" />

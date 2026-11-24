@@ -423,9 +423,79 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
       assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(AppDialogHost)));
       const appDialogSrc = readFileSync(path.join(srcRoot, "components/AppDialog.jsx"), "utf8");
       assert.match(appDialogSrc, /app-dialog-origin-line[\s\S]*?<OriginBadge origin=\{dialog\.origin\}/);
+      assert.doesNotMatch(appDialogSrc, /app-dialog-tag/, "提示框标题旁不再叠加重复的英文状态徽章");
     } finally {
       resetDialogs();
       unsubscribe();
     }
+
+    // ---------- 2026-11-24 界面细节与单位收口 ----------
+    const { MaterialModal } = await server.ssrLoadModule("/src/components/MaterialModal.jsx");
+    const { CloseConfirmModal } = await server.ssrLoadModule("/src/components/CloseConfirmModal.jsx");
+    const { Navbar } = await server.ssrLoadModule("/src/components/Navbar.jsx");
+    const { SendOverlay } = await server.ssrLoadModule("/src/components/SendOverlay.jsx");
+    const { formatTwinWorkflowLabel } = await server.ssrLoadModule("/src/pages/TwinPage.jsx");
+
+    // 1. MaterialModal 统一使用 mm/min，默认 1500 mm/min，附 mm/s 旁注
+    const newMatHtml = renderToStaticMarkup(
+      React.createElement(MaterialModal, { visible: true, initialData: null, onClose: () => {} }),
+    );
+    assert.match(newMatHtml, /推荐速度（mm\/min）/);
+    assert.doesNotMatch(newMatHtml, /推荐速度（mm\/s）/);
+    assert.match(newMatHtml, /id="mat-f-speed"[^>]*value="1500"/);
+    assert.match(newMatHtml, /id="mat-f-speed-hint"[^>]*>约 25 mm\/s</);
+
+    const editMatHtml = renderToStaticMarkup(
+      React.createElement(MaterialModal, {
+        visible: true,
+        initialData: { name: "椴木", thicknesses: ["3"], power_percent: 42, feed_rate: 1000 },
+        onClose: () => {},
+      }),
+    );
+    assert.match(editMatHtml, /id="mat-f-speed"[^>]*value="1000"/, "非 60 整倍数的进给速度直接无损回显");
+    assert.match(editMatHtml, /约 16\.7 mm\/s/);
+
+    // 2. 数字孪生：3D 摆位默认收起并注明不影响实际 G-code；任务标签展示内容摘要且不裸露 workflow_id；无 $CD 与 LINE 残留
+    assert.match(twinHtml, /<details class="fill-options twin-layout-fold" id="twin-scene-layout">/);
+    assert.doesNotMatch(twinHtml, /id="twin-scene-layout"[^>]*open/);
+    assert.match(twinHtml, /3D 摆位预览（仅影响仿真画面）/);
+    assert.match(twinHtml, /不改动实际 G-code 刀路/);
+    assert.doesNotMatch(twinHtml, /翼宿 V1\.0 演示刀路|\$CD|LINE \d+/);
+    assert.doesNotMatch(twinSrc, /\$CD/);
+    assert.equal(
+      formatTwinWorkflowLabel(
+        { workflow_id: "wf_secret_uuid_123", status: "preview_ready", input: { text: "平安喜乐", material: "椴木", thickness_mm: 3 } },
+        { includeStatus: true },
+      ),
+      "文字“平安喜乐” · 椴木 3mm · 预览就绪",
+    );
+    assert.equal(
+      formatTwinWorkflowLabel({ workflow_id: "wf_secret_uuid_456", source_type: "draw", artifacts: { material: "亚克力", thickness_mm: 2 } }),
+      "画板图形 · 亚克力 2mm",
+    );
+
+    // 3. 关闭窗口弹窗：去“杀死进程”黑话，偏好设置位置指明左侧栏底部
+    const closeModalHtml = renderToStaticMarkup(
+      React.createElement(CloseConfirmModal, { visible: true, onClose: () => {}, onConfirm: () => {} }),
+    );
+    assert.doesNotMatch(closeModalHtml, /杀死进程|右上角设置/);
+    assert.match(closeModalHtml, /停止激光任务与语音服务并直接退出程序/);
+    assert.match(closeModalHtml, /左侧栏底部的「偏好设置」/);
+    assert.doesNotMatch(navHtml, /窗口右上角/);
+
+    // 4. 顶栏、实验室与发送覆盖层去掉重复英文小标，画板根节点不再嵌套 <main>
+    const topHtml = renderToStaticMarkup(
+      React.createElement(Navbar, { currentPath: "/twin", onNavigate: () => {}, onEmergencyStop: () => {} }),
+    );
+    assert.match(topHtml, /<h1 class="ob-title">数字孪生舱<\/h1>/);
+    assert.doesNotMatch(topHtml, /DIGITAL TWIN 3D|LASER FORGE/);
+    assert.doesNotMatch(paramsHtml, />(Raster|Outline|Cut)<\/small>|Passes/);
+    assert.match(paramsHtml, /加工遍数/);
+    const overlaySendingHtml = renderToStaticMarkup(
+      React.createElement(SendOverlay, { visible: true, status: "sending", onCancel: () => {}, onClose: () => {} }),
+    );
+    assert.doesNotMatch(overlaySendingHtml, /STATUS SENDING/);
+    assert.match(overlaySendingHtml, /正在与控制器通信，请勿关闭页面/);
+    assert.doesNotMatch(drawSrc, /<main\s+className="app-shell/);
   });
 });

@@ -119,7 +119,7 @@ export function SideNav({
         type="button"
         className="ob-logo"
         onClick={() => onNavigate("/")}
-        title={`返回雕刻工作台 · ${eye.label}（关闭程序请使用窗口右上角 ×）`}
+        title={`返回雕刻工作台 · ${eye.label}`}
       >
         <span
           ref={eyeRef}
