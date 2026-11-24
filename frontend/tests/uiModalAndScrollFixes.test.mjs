@@ -119,7 +119,7 @@ test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖�
   const sideNavSrc = fs.readFileSync(path.join(SRC_DIR, "components/SideNav.jsx"), "utf8");
   assert.match(
     sideNavSrc,
-    /aria-label=\{collapsed \? item\.label : undefined\}/,
+    /aria-label=\{collapsed \? (?:collapsedLabel|item\.label) : undefined\}/,
     "侧栏收起隐藏文字后须保留按钮无障碍名称",
   );
 });

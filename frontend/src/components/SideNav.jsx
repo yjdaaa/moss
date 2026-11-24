@@ -143,6 +143,8 @@ export function SideNav({
         {visibleNavItems(showVoice).map((item) => {
           const Icon = item.icon;
           const active = currentPath === item.path;
+          const voiceApprovals = item.path === "/voice" && approvalCount > 0 ? approvalCount : 0;
+          const collapsedLabel = voiceApprovals > 0 ? `${item.label}（${voiceApprovals} 项待审批）` : item.label;
           return (
             <button
               key={item.path}
@@ -153,11 +155,16 @@ export function SideNav({
               onPointerDown={() => onPreload?.(item.path)}
               className={`ob-nav-item nav-tab${active ? " on active" : ""}`}
               aria-current={active ? "page" : undefined}
-              aria-label={collapsed ? item.label : undefined}
-              title={collapsed ? item.label : undefined}
+              aria-label={collapsed ? collapsedLabel : undefined}
+              title={collapsed ? collapsedLabel : voiceApprovals > 0 ? `${voiceApprovals} 项操作等待审批` : undefined}
             >
               <Icon size={18} aria-hidden="true" />
               <span>{item.label}</span>
+              {voiceApprovals > 0 ? (
+                <span className="ob-nav-badge" aria-label={`${voiceApprovals} 项待审批`}>
+                  {voiceApprovals > 99 ? "99+" : voiceApprovals}
+                </span>
+              ) : null}
             </button>
           );
         })}

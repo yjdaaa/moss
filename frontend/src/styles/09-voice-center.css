@@ -161,8 +161,8 @@
 }
 .voice-mix-test { font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .voice-mix-recommend { font-size: 11.5px; line-height: 1.45; justify-self: start; text-align: left; white-space: normal; }
-/* 按场景推荐的整套模型：每行左边说明、右边“用这套” */
-.voice-combo-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+/* 按场景推荐的整套模型：每行左边说明、右边“用这套”（独立类名，避免与上方模型下拉菜单 .voice-combo-list 冲突） */
+.voice-preset-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
 .voice-combo-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--ob-line, rgba(255, 255, 255, 0.08)); }
 .voice-combo-row:last-child { border-bottom: 0; }
 .voice-combo-row > div { min-width: 0; }

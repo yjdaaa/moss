@@ -389,7 +389,10 @@ export function WorkbenchCanvas({
     if (!box) return;
     const isCollapsed = cardElement.dataset.wbCollapsed === "true" || box.h <= ROWS_COLLAPSED;
     const rect = cardElement.getBoundingClientRect();
-    const inHeader = event.clientY - rect.top < 58;
+    const headerEl = cardElement.querySelector(".ob-card-h");
+    const inHeader = headerEl
+      ? headerEl.contains(event.target) || event.clientY <= headerEl.getBoundingClientRect().bottom + 4
+      : event.clientY - rect.top < 58;
     const mode = handle ? handle.dataset.wbResize : inHeader ? "move" : "";
     if (!mode) return;
     // 窄窗口两栏：位置与宽度由自动排布决定，只允许拖上下边框改高度（2026-11-07 用户反馈画板拉不动上下边框）

@@ -497,5 +497,36 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.doesNotMatch(overlaySendingHtml, /STATUS SENDING/);
     assert.match(overlaySendingHtml, /正在与控制器通信，请勿关闭页面/);
     assert.doesNotMatch(drawSrc, /<main\s+className="app-shell/);
+
+    // 5. 选择框、侧栏待审批徽标、底部抽屉可折叠与加工内容按钮对齐
+    const { ModelPairingGuide } = await server.ssrLoadModule("/src/components/voice-builtin/ModelPairingGuide.jsx");
+    const consoleSrc = readFileSync(path.join(srcRoot, "components/ConsoleDrawer.jsx"), "utf8");
+
+    const guideHtml = renderToStaticMarkup(
+      React.createElement(ModelPairingGuide, { settings: {}, models: [], busy: false, onApply: async () => null }),
+    );
+    assert.match(guideHtml, /class="voice-preset-list"/, "场景推荐模型列表使用独立类名避免与下拉菜单冲突");
+    assert.doesNotMatch(guideHtml, /class="voice-combo-list"/);
+
+    const sideBadgeHtml = renderToStaticMarkup(
+      React.createElement(SideNav, {
+        currentPath: "/",
+        onNavigate: () => {},
+        showVoice: true,
+        approvalCount: 3,
+        collapsed: true,
+      }),
+    );
+    assert.match(sideBadgeHtml, /class="ob-nav-badge"[^>]*>3</, "侧栏语音中心展示待审批徽标");
+    assert.match(sideBadgeHtml, /语音中心（3 项待审批）/, "收起侧栏时悬停标题附带待审批数量");
+
+    const drawerTabsHtml = renderToStaticMarkup(
+      React.createElement(ConsoleDrawer, { logs: [], onClear: () => {}, mcpStatus: { configured: true, connected: true } }),
+    );
+    assert.match(drawerTabsHtml, /role="tablist"[\s\S]*?<button[^>]*role="tab"[^>]*id="tab-console-feed"/);
+    assert.match(drawerTabsHtml, /id="drawer-fold-toggle"[^>]*aria-expanded="true"/);
+    assert.doesNotMatch(consoleSrc, /borderRadius:\s*"50%"|var\(--laser-green/, "网关状态点与文字颜色已迁入样式表");
+    assert.doesNotMatch(homeSrc, /hud-tool-sub/, "工作台加工内容四个按钮统一两元素结构");
+    assert.match(homeSrc, /hud-tool-jump-icon/, "创意画板按钮保留内联外跳箭头提示");
   });
 });

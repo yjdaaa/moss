@@ -2,7 +2,7 @@
    UI-2 页面版面：通用卡片头、雕刻工作台三栏（技术书 §9.5.5 B）
    ============================================================ */
 .main-content-viewport {
-  padding: 18px 28px 72px;
+  padding: 18px 28px var(--ob-dock-clearance, 72px);
 }
 .ob-page {
   display: flex;
@@ -82,7 +82,7 @@
 }
 @media (max-width: 900px) {
   .main-content-viewport {
-    padding: 18px 16px 56px;
+    padding: 18px 16px var(--ob-dock-clearance, 56px);
   }
   .ob-wb {
     grid-template-columns: minmax(0, 1fr);
@@ -142,6 +142,12 @@
   padding: 6px;
   background: rgba(255, 255, 255, 0.025);
   border-bottom: 1px solid var(--ob-line);
+}
+.ob-rail .drawer-tabs {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 .ob-rail .drawer-tab {
   border-radius: 7px;

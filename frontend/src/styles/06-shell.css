@@ -27,6 +27,7 @@
   top: 0;
   z-index: 20;
   height: 100vh;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -49,6 +50,8 @@
   border-bottom: 1px solid var(--ob-line);
   background: transparent;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
 }
 .ob-eye.moss-eye-sensor {
@@ -159,6 +162,9 @@
   letter-spacing: 2.2px;
   color: var(--ob-ink-3);
   padding: 12px 10px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ob-nav {
   display: flex;
@@ -179,8 +185,17 @@
   color: var(--ob-ink-2);
   font-size: 14px;
   font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
   transition: background 0.25s var(--ob-ease), color 0.25s;
+}
+.ob-nav-item > svg {
+  flex: none;
+}
+.ob-nav-item > span:not(.ob-nav-badge) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ob-nav-item:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -198,13 +213,31 @@
 .ob-nav-item.on::before {
   content: "";
   position: absolute;
-  left: -13px;
+  left: -12px;
   top: 9px;
   bottom: 9px;
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--ob-grad);
-  box-shadow: 0 0 12px rgba(139, 123, 255, 0.8);
+  box-shadow: 2px 0 12px rgba(139, 123, 255, 0.85);
+}
+.ob-nav-badge {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-family: var(--ob-mono);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ob-amber);
+  background: var(--ob-amber-bg);
+  border: 1px solid var(--ob-amber-bd);
 }
 .ob-nav-item--ok {
   color: var(--ob-green);
@@ -360,12 +393,22 @@
   .ob-side.is-collapsed .ob-logo-text,
   .ob-side.is-collapsed .ob-nav-label,
   .ob-side.is-collapsed .ob-nav-tag,
-  .ob-side.is-collapsed .ob-nav-item > span {
+  .ob-side.is-collapsed .ob-nav-item > span:not(.ob-nav-badge) {
     display: none;
   }
   .ob-side.is-collapsed .ob-nav-item {
     justify-content: center;
     padding: 10px 0;
+  }
+  .ob-side.is-collapsed .ob-nav-badge {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    margin-left: 0;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    font-size: 10px;
   }
   .ob-side.is-collapsed .ob-nav {
     margin-top: 10px;
@@ -447,49 +490,80 @@ button.ob-pill {
   box-shadow: 0 12px 30px -6px rgba(255, 59, 92, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
-/* 窄屏：导航折叠为顶部横排 */
+/* 窄屏：导航收成单行紧凑横排（超出可横向滑动，不再折成多行挤占首屏高度） */
 @media (max-width: 900px) {
   .ob-shell {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
   }
   .ob-side {
     position: static;
     height: auto;
+    min-width: 0;
+    max-width: 100%;
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     border-right: 0;
     border-bottom: 1px solid var(--ob-line);
-    padding: 10px 16px;
+    padding: 8px 14px;
+  }
+  .ob-side::-webkit-scrollbar {
+    display: none;
   }
   .ob-nav {
+    flex: none;
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    gap: 4px;
   }
   .ob-side-grow,
   .ob-nav-label,
-  .ob-nav-tag {
+  .ob-nav-tag,
+  .ob-logo-sub {
     display: none;
   }
   .ob-logo {
+    flex: none;
     border: 0;
     padding: 0;
-    margin: 0 8px 0 0;
+    margin: 0 4px 0 0;
+    gap: 8px;
+  }
+  .ob-logo .ob-eye.moss-eye-sensor,
+  .ob-logo .ob-eye-svg {
+    width: 32px;
+    height: 32px;
+  }
+  .ob-logo-text b {
+    font-size: 16px;
+    letter-spacing: 2.5px;
   }
   .ob-nav-item {
+    flex: none;
     width: auto;
-    padding: 8px 10px;
+    padding: 7px 10px;
+    gap: 7px;
+    font-size: 13px;
   }
   .ob-nav-item.on::before {
     display: none;
   }
   .ob-side-foot {
     flex-direction: row;
+    flex-wrap: nowrap;
+    flex: none;
+    margin-left: auto;
     border: 0;
     padding: 0;
+    gap: 4px;
   }
   .ob-top {
-    padding: 12px 16px;
+    padding: 10px 16px;
   }
 }
 @media (max-width: 760px) {

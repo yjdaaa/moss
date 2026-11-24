@@ -4,6 +4,7 @@ import {
   FileCode,
   Image as ImageIcon,
   PenTool,
+  ArrowUpRight,
 } from "lucide-react";
 import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode, readAuthToken } from "../authSession.js";
@@ -1209,7 +1210,7 @@ export function HomePage({
                 { id: "text", label: "矢量文字", icon: Type },
                 { id: "image", label: "图片处理", icon: ImageIcon },
                 { id: "gcode", label: "已有G码", icon: FileCode },
-                { id: "draw", label: "创意画板", sub: "跳转 ↗", icon: PenTool, jump: "/draw" },
+                { id: "draw", label: "创意画板", icon: PenTool, jump: "/draw" },
               ].map((t) => {
                 const Icon = t.icon;
                 const active = !t.jump && activeTool === t.id;
@@ -1220,10 +1221,13 @@ export function HomePage({
                     onClick={() => (t.jump ? onNavigate(t.jump) : setActiveTool(t.id))}
                     className={`hud-tool-card ${active ? "active" : ""}`}
                     aria-pressed={t.jump ? undefined : active}
+                    title={t.jump ? "跳转到创作画板" : undefined}
                   >
                     <Icon size={18} className="tool-icon" aria-hidden="true" />
-                    <span className="hud-tool-label">{t.label}</span>
-                    {t.sub ? <span className="hud-tool-sub">{t.sub}</span> : null}
+                    <span className="hud-tool-label">
+                      {t.label}
+                      {t.jump ? <ArrowUpRight size={12} className="hud-tool-jump-icon" aria-hidden="true" /> : null}
+                    </span>
                   </button>
                 );
               })}

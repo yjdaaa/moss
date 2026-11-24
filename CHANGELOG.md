@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复语音模型列表样式冲突，打磨曜石下拉框、侧边栏过渡与工作台卡片布局（2026-11-24）
+
+- **现象**：① 语音中心模型下拉列表与场景推荐套系重用 `.voice-combo-list` 导致内边距清零与 `220px` 限高互相串台；点 `<label>` 文字打不开曜石下拉浮层、长选项折成多行且向上弹出动画方向相反；② 侧边栏展开动画期间文字竖排挤成多行跳动、左侧激活竖条越界被裁切、窄屏折成多行且短页面纵向拉伸导航高度、隐藏顶栏胶囊后侧栏无待审批提示；③ 工作台底部控制台不可收起且标签无法键盘聚焦，加工内容四按钮宽窄状态高度不一，自由网格解锁态缺 `grab` 光标且右下浮窗展开易挡底部控件。
+- **根因与修复**：① `ModelPairingGuide` 拆出 `.voice-preset-list` 解除样式冲突；`ObsidianSelectHost` 支持关联 `<label>` 点击开合、`Home`/`End` 跳首尾、窗口失焦收起、`data-upward` 向上动画与长选项单行省略（全文挂 `title`）；② `SideNav` 与 `06-shell.css` 补齐文字单行裁切、激活竖条内收防截断、`≤ 900px` 单行可横滑紧凑导航（配 `grid-template-rows: auto minmax(0, 1fr)`）及「语音中心」`.ob-nav-badge` 待审批计数；③ `ConsoleDrawer` 接入 `foldState` 收起记忆（`moss_ui_fold_wb-console-drawer`，默认展开，保留 G-code 虚拟列表偏移恢复）并将标签改为标准 `role="tablist"` / `<button role="tab">` / `role="tabpanel"`；`HomePage` 统一加工内容四按钮两元素居中结构与内联外跳图标，`WorkbenchCanvas` 按实际 `.ob-card-h` 判定拖拽并补齐 `grab` 光标与浮窗展开底部留白。后端接口与安全门禁不变。
+- **验证**：`verify.mjs --finish` 通过：分层与仓库规范检查、脚本单测 75/75、前端 ESLint、前端单测 390/390（`uiPolishB`、`uiModalAndScrollFixes` 新增类名隔离、侧栏待审批徽标、`tablist` 与四按钮对齐断言）、生产构建、浏览器测试 18/18（`shell-chrome` 新增侧栏过渡不折行、左沿不裁切、`<label>` 唤起下拉、`Home`/`End`、底部抽屉折叠展开及 820px/600px 单行导航不重叠断言）及本机桌面程序快更全部通过；未连真实激光硬件实测（`unverified`）。
+- **关联**：`frontend/src/components/{ObsidianSelectHost,SideNav,ConsoleDrawer,WorkbenchCanvas}.jsx`、`frontend/src/components/voice-builtin/ModelPairingGuide.jsx`、`frontend/src/pages/HomePage.jsx`、`frontend/src/styles/{02-controls,05-console,06-shell,07-pages,09-voice-center,10-component-inline,15-addenda-2026-11}.css`、`docs/developer/frontend-behavior.md`。
+
 ### Windows 上过程记录默认保存位置不再显示 `\\?\` 前缀，资源管理器能打开（2026-11-24）
 
 - **现象**：Windows 上“完整过程记录”的默认保存位置显示成 `\\?\C:\Users\…\moss\logs\process-trace`，点“打开文件夹”时资源管理器不认这种写法，可能打不开或打开别处；自选目录不受影响。

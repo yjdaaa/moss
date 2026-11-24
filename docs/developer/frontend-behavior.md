@@ -87,12 +87,12 @@
 | `moss_draw_layout_v2` | 画板 | 创作画板四张卡片（`board` / `draw-material` / `draw-device` / `draw-send`）自由画布位置、宽高与锁定状态 |
 | `moss_close_action` | 全局 | 桌面端关闭行为（`ask` / `tray` / `exit`；存储不可用时按 `ask`，2026-11-05） |
 | `moss_hide_top_pills` | 全局 | 顶栏右上角状态胶囊（硬件 / 小智 / 审批）是否隐藏（`1` 隐藏，`0` 或未设置时默认显示） |
-| `moss_side_collapsed`、`moss_top_compact` | 全局 | 左侧导航收起为图标栏（`#side-collapse-toggle`）、宽屏（`> 900px`）顶栏精简为右上角悬浮胶囊（`#top-compact-toggle`，急停保持完整；`≤ 900px` 窄屏隐藏切换按钮并自动退回常规顶栏防遮挡急停）；`1` 收起，未设置或存储不可用时默认展开（`foldState.js`，2026-11-09 融合 r30） |
+| `moss_side_collapsed`、`moss_top_compact` | 全局 | 左侧导航收起为图标栏（`#side-collapse-toggle`，`SideNav` 在展开与收起态均对 `approvalCount > 0` 的「语音中心」项显示 `.ob-nav-badge` 待审批计数；`≤ 900px` 窄屏收为单行横向可滚导航条并隐藏收起按钮）、宽屏（`> 900px`）顶栏精简为右上角悬浮胶囊（`#top-compact-toggle`，急停保持完整；`≤ 900px` 窄屏隐藏切换按钮并自动退回常规顶栏防遮挡急停）；`1` 收起，未设置或存储不可用时默认展开（`foldState.js`，2026-11-09 融合 r30） |
 | `moss_yisu_workspace_limits_v1`、`moss_yisu_material_config_v1`、`moss_yisu_hud_collapsed_v1`、`moss_yisu_stage_height_v1` | 数字孪生 | 翼宿 V1.0 有效工作区范围、材料外框/材料内文字位置配置、3D 视口浮层收起状态与视口高度 |
 | `moss_wb_layout_v3` | 主页 | 雕刻工作台五张卡片自由画布位置、宽高与锁定状态 |
 | `moss_job_dock_minimized` | 全局 | 激光任务进度浮层是否收成胶囊 |
 | `moss_voice_tab`、`moss_voice_dismissed_hints` | 语音中心 | 上次打开的标签（`normalizeVoiceTab` 读回）与已单独关闭的顶部提示键列表（`readDismissedVoiceHints` / `dismissVoiceHint` / `restoreVoiceHint`，开启严格模式时自动清除 `strict_off` 以便再次关闭严格模式时重新提示）；跳转目标 `moss_voice_focus` 存在 `sessionStorage` |
-| `moss_ui_fold_wb-head-jog` | 主页 | 雕刻工作台加工监视舱内「现场移头与对刀原点」面板折叠状态（`open` / `closed`，经 `foldState.js` 读写，未设置或存储不可用时默认收起 `false`，2026-11-23 r60） |
+| `moss_ui_fold_wb-head-jog`、`moss_ui_fold_wb-console-drawer` | 主页 | 雕刻工作台加工监视舱内「现场移头与对刀原点」面板折叠状态（默认收起 `false`），以及底部控制台抽屉 `ConsoleDrawer` 展开/收起状态（默认展开 `true`，点 `#drawer-fold-toggle` 收成单行顶栏，点任一 `role="tab"` 标签自动重新展开；均经 `foldState.js` 读写 `open` / `closed`） |
 | `moss_ui_fold_lab-wizard` | 材料实验室 | 首次标定向导整体展开/收起偏好（`open` / `closed`；六步全完成时自动收起但不写全局 `closed`、回看展开显示「收起」，点未完成时的「稍后」才记 `closed`，切换未标定新材料仍自动展开，读写均 `try/catch`） |
 | `moss_camera_view_prefs` | 摄像头 | 画面水平镜像 / 旋转 180° |
 

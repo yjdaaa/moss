@@ -7,7 +7,11 @@ import {
   Cpu,
   Wifi,
   WifiOff,
+  ChevronDown,
 } from "lucide-react";
+import { readFoldOpen, writeFoldOpen } from "../foldState.js";
+
+const DRAWER_FOLD_ID = "wb-console-drawer";
 
 export function ConsoleDrawer({
   logs = [],
@@ -19,10 +23,27 @@ export function ConsoleDrawer({
   mcpStatus = null,
 }) {
   const [activeTab, setActiveTab] = useState("console"); // console | mcp | gcode
+  const [open, setOpen] = useState(() => readFoldOpen(DRAWER_FOLD_ID, true));
   const [gcodeScrollTop, setGcodeScrollTop] = useState(0);
   const consoleFeedRef = useRef(null);
   const gcodeViewerRef = useRef(null);
   const isAutoScrollRef = useRef(true);
+
+  const selectTab = (nextTab) => {
+    setActiveTab(nextTab);
+    if (!open) {
+      setOpen(true);
+      writeFoldOpen(DRAWER_FOLD_ID, true);
+    }
+  };
+
+  const toggleOpen = () => {
+    setOpen((prev) => {
+      const next = !prev;
+      writeFoldOpen(DRAWER_FOLD_ID, next);
+      return next;
+    });
+  };
 
   const GCODE_ROW_HEIGHT = 22;
   const GCODE_OVERSCAN = 20;
@@ -48,14 +69,14 @@ export function ConsoleDrawer({
 
   // 控制台自动吸底
   useEffect(() => {
-    if (activeTab === "console" && consoleFeedRef.current && isAutoScrollRef.current) {
+    if (open && activeTab === "console" && consoleFeedRef.current && isAutoScrollRef.current) {
       consoleFeedRef.current.scrollTop = consoleFeedRef.current.scrollHeight;
     }
-  }, [logs, activeTab]);
+  }, [logs, activeTab, open]);
 
   // G-code 实时行高亮滚动跟随；切回 G 码标签页且未在跟随时恢复上次手动滚动偏移，避免新挂载容器 scrollTop=0 与虚拟窗口错位
   useEffect(() => {
-    if (activeTab !== "gcode" || !gcodeViewerRef.current) return;
+    if (!open || activeTab !== "gcode" || !gcodeViewerRef.current) return;
     if (currentLine > 0) {
       const targetScrollTop = Math.max(0, (currentLine - 5) * GCODE_ROW_HEIGHT);
       setGcodeScrollTop(targetScrollTop);
@@ -66,7 +87,7 @@ export function ConsoleDrawer({
     } else if (gcodeViewerRef.current.scrollTop !== gcodeScrollTop) {
       gcodeViewerRef.current.scrollTop = gcodeScrollTop;
     }
-  }, [currentLine, activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentLine, activeTab, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const gcodeStartIdx = Math.max(
     0,
@@ -97,89 +118,105 @@ export function ConsoleDrawer({
   };
 
   return (
-    <div className="bottom-drawer" id="bottomDrawer">
+    <div className="bottom-drawer" id="bottomDrawer" data-collapsed={open ? "false" : "true"}>
       {/* 抽屉导航 Tab 栏 */}
       <div className="drawer-nav">
-        <div
-          className={`drawer-tab ${activeTab === "console" ? "active" : ""}`}
-          onClick={() => setActiveTab("console")}
-          id="tab-console-feed"
-        >
-          <Terminal size={13} className="drawer-icon" />
-          <span title="通信终端与状态监控">终端</span>
+        <div className="drawer-tabs" role="tablist" aria-label="底部控制台视图">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={open && activeTab === "console"}
+            aria-controls="consoleFeed"
+            className={`drawer-tab ${open && activeTab === "console" ? "active" : ""}`}
+            onClick={() => selectTab("console")}
+            id="tab-console-feed"
+          >
+            <Terminal size={13} className="drawer-icon" aria-hidden="true" />
+            <span title="通信终端与状态监控">终端</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={open && activeTab === "mcp"}
+            aria-controls="drawer-mcp-panel"
+            className={`drawer-tab ${open && activeTab === "mcp" ? "active" : ""}`}
+            onClick={() => selectTab("mcp")}
+            id="tab-mcp-bridge"
+          >
+            <Radio size={13} className="drawer-icon" aria-hidden="true" />
+            <span title={`小智 MCP 桥接状态（${isMcpOnline ? "已连接" : "未连接"}）`}>小智网关</span>
+            <span className={`drawer-mcp-dot${isMcpOnline ? " is-online" : ""}`} aria-hidden="true" />
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={open && activeTab === "gcode"}
+            aria-controls="drawer-gcode-panel"
+            className={`drawer-tab ${open && activeTab === "gcode" ? "active" : ""}`}
+            onClick={() => selectTab("gcode")}
+            id="tab-gcode-view"
+          >
+            <FileCode size={13} className="drawer-icon" aria-hidden="true" />
+            <span title="G-CODE 实时行视图">G 码行视图</span>
+            {gcodeLines.length > 0 && (
+              <span className="drawer-text">
+                [{currentLine}/{gcodeLines.length} 行]
+              </span>
+            )}
+          </button>
         </div>
 
-        <div
-          className={`drawer-tab ${activeTab === "mcp" ? "active" : ""}`}
-          onClick={() => setActiveTab("mcp")}
-          id="tab-mcp-bridge"
-        >
-          <Radio size={13} className="drawer-icon" />
-          <span title={`小智 MCP 桥接状态（${isMcpOnline ? "已连接" : "未连接"}）`}>小智网关</span>
-          <span
-            style={{
-              display: "inline-block",
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: isMcpOnline ? "var(--laser-green, #34d399)" : "var(--laser-red, #ff3b5c)",
-              marginLeft: 6,
-              boxShadow: isMcpOnline ? "0 0 6px var(--laser-green, #34d399)" : "none",
-            }}
-          />
-        </div>
-
-        <div
-          className={`drawer-tab ${activeTab === "gcode" ? "active" : ""}`}
-          onClick={() => setActiveTab("gcode")}
-          id="tab-gcode-view"
-        >
-          <FileCode size={13} className="drawer-icon" />
-          <span title="G-CODE 实时行视图">G 码行视图</span>
-          {gcodeLines.length > 0 && (
-            <span
-              className="drawer-text"
-            >
-              [{currentLine}/{gcodeLines.length} 行]
-            </span>
-          )}
-        </div>
-
-        {/* 辅助工具：清空控制台日志 */}
-        {activeTab === "console" && onClear && (
-          <div className="drawer-row">
+        <div className="drawer-row">
+          {/* 辅助工具：清空控制台日志 */}
+          {open && activeTab === "console" && onClear && (
             <button
+              type="button"
               className="btn btn-ghost drawer-btn"
               onClick={onClear}
               title="清空控制台日志"
             >
-              <Trash2 size={12} className="drawer-icon-2" />
+              <Trash2 size={12} className="drawer-icon-2" aria-hidden="true" />
               清空终端
             </button>
-          </div>
-        )}
+          )}
 
-        {/* 辅助工具：清空 G-code 刀路视图 */}
-        {activeTab === "gcode" && onClearGcode && gcodeLines.length > 0 && (
-          <div className="drawer-row">
+          {/* 辅助工具：清空 G-code 刀路视图 */}
+          {open && activeTab === "gcode" && onClearGcode && gcodeLines.length > 0 && (
             <button
+              type="button"
               className="btn btn-ghost drawer-btn-2"
               onClick={onClearGcode}
               title="清空当前 G-code 刀路视图"
               id="btn-clear-gcode"
             >
-              <Trash2 size={12} className="drawer-icon-2" />
+              <Trash2 size={12} className="drawer-icon-2" aria-hidden="true" />
               清空视图 ({gcodeLines.length} 行)
             </button>
-          </div>
-        )}
+          )}
+
+          <button
+            type="button"
+            className="btn btn-ghost drawer-fold-btn"
+            id="drawer-fold-toggle"
+            aria-expanded={open}
+            onClick={toggleOpen}
+            title={open ? "收起底部控制台" : "展开底部控制台"}
+          >
+            <ChevronDown size={13} className="drawer-fold-chevron" aria-hidden="true" />
+            <span>{open ? "收起" : "展开"}</span>
+          </button>
+        </div>
       </div>
 
       {/* Tab 1: 通信终端与状态监控 */}
-      {activeTab === "console" && (
+      {open && activeTab === "console" && (
         <div
           className="console-feed"
           id="consoleFeed"
+          role="tabpanel"
+          aria-labelledby="tab-console-feed"
           ref={consoleFeedRef}
           onScroll={(e) => {
             const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -208,8 +245,8 @@ export function ConsoleDrawer({
       )}
 
       {/* Tab 2: 小智 MCP 桥接状态 */}
-      {activeTab === "mcp" && (
-        <div className="mcp-bridge-panel">
+      {open && activeTab === "mcp" && (
+        <div className="mcp-bridge-panel" id="drawer-mcp-panel" role="tabpanel" aria-labelledby="tab-mcp-bridge">
           <div className="drawer-grid">
             <div className="mcp-card">
               <div className="mcp-card-header">
@@ -242,7 +279,7 @@ export function ConsoleDrawer({
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">连接状态</span>
-                  <span className="mcp-val" style={{ color: isMcpOnline ? "var(--laser-green, #34d399)" : "var(--ink-dim, #94a3b8)" }}>
+                  <span className={`mcp-val ${isMcpOnline ? "mcp-val--online" : "mcp-val--offline"}`}>
                     {isMcpOnline ? "已连接接入点" : isMcpConfigured ? "未连接（正在重连或接入点不可达）" : "未配置"}
                   </span>
                 </div>
@@ -314,9 +351,12 @@ export function ConsoleDrawer({
       )}
 
       {/* Tab 3: G-CODE 实时行视图（虚拟滚动，10 万行光栅刀路只挂载可视区行） */}
-      {activeTab === "gcode" && (
+      {open && activeTab === "gcode" && (
         <div
           className="gcode-viewer-container"
+          id="drawer-gcode-panel"
+          role="tabpanel"
+          aria-labelledby="tab-gcode-view"
           ref={gcodeViewerRef}
           onScroll={(e) => setGcodeScrollTop(e.currentTarget.scrollTop)}
         >

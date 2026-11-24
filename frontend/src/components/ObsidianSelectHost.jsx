@@ -42,6 +42,25 @@ function isEligibleSelect(el) {
   );
 }
 
+function resolveSelectFromTarget(target) {
+  const direct = target?.closest?.("select");
+  if (direct) return { selectEl: direct, viaLabel: false };
+  if (target?.closest?.("button, input, textarea, a, [role='button'], [role='tab']")) {
+    return { selectEl: null, viaLabel: false };
+  }
+  const labelEl = target?.closest?.("label");
+  if (!labelEl) return { selectEl: null, viaLabel: false };
+  const control =
+    labelEl.control ||
+    (labelEl.htmlFor && typeof document !== "undefined"
+      ? document.getElementById(labelEl.htmlFor)
+      : labelEl.querySelector("select"));
+  if (control?.tagName === "SELECT") {
+    return { selectEl: control, viaLabel: true };
+  }
+  return { selectEl: null, viaLabel: false };
+}
+
 function triggerSelectValue(selectEl, nextValue) {
   if (!selectEl || selectEl.value === nextValue) return;
   const descriptor = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value");
@@ -66,7 +85,19 @@ export function ObsidianSelectHost() {
   const activeSelectRef = useRef(null);
 
   useEffect(() => {
+    let labelMouseHandled = false;
+    let labelResetTimer = 0;
+
+    const clearLabelGuard = () => {
+      labelMouseHandled = false;
+      if (labelResetTimer) {
+        window.clearTimeout(labelResetTimer);
+        labelResetTimer = 0;
+      }
+    };
+
     const closeMenu = () => {
+      clearLabelGuard();
       if (activeSelectRef.current) {
         activeSelectRef.current.removeAttribute("data-ob-open");
         activeSelectRef.current = null;
@@ -100,6 +131,7 @@ export function ObsidianSelectHost() {
         options,
         value: selectEl.value,
         activeIndex: selectedIdx,
+        upward: openUpward,
         left,
         width,
         top: openUpward ? undefined : rect.bottom + 6,
@@ -109,19 +141,51 @@ export function ObsidianSelectHost() {
     };
 
     const handleMouseDown = (event) => {
+      clearLabelGuard();
       if (event.button !== 0) return;
       if (popoverRef.current && popoverRef.current.contains(event.target)) {
         return;
       }
-      const selectEl = event.target?.closest?.("select");
-      if (!selectEl) {
+      const { selectEl, viaLabel } = resolveSelectFromTarget(event.target);
+      if (!selectEl || !isEligibleSelect(selectEl)) {
         if (activeSelectRef.current) closeMenu();
         return;
       }
-      if (!isEligibleSelect(selectEl)) {
+      if (viaLabel) {
+        labelMouseHandled = true;
+      }
+      event.preventDefault();
+      selectEl.focus();
+      if (activeSelectRef.current === selectEl) {
+        closeMenu();
+      } else {
+        openForSelect(selectEl);
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (!labelMouseHandled) return;
+      if (labelResetTimer) window.clearTimeout(labelResetTimer);
+      labelResetTimer = window.setTimeout(() => {
+        labelMouseHandled = false;
+        labelResetTimer = 0;
+      }, 0);
+    };
+
+    const handleClick = (event) => {
+      if (popoverRef.current && popoverRef.current.contains(event.target)) {
+        return;
+      }
+      const { selectEl, viaLabel } = resolveSelectFromTarget(event.target);
+      if (!viaLabel || !isEligibleSelect(selectEl)) {
+        clearLabelGuard();
         return;
       }
       event.preventDefault();
+      if (labelMouseHandled) {
+        clearLabelGuard();
+        return;
+      }
       selectEl.focus();
       if (activeSelectRef.current === selectEl) {
         closeMenu();
@@ -153,6 +217,21 @@ export function ObsidianSelectHost() {
       }
       if (event.key === "Tab") {
         closeMenu();
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        setMenu((prev) => {
+          if (!prev || prev.options.length === 0) return prev;
+          if (event.key === "Home") {
+            const firstIdx = prev.options.findIndex((o) => !o.disabled);
+            return firstIdx >= 0 ? { ...prev, activeIndex: firstIdx } : prev;
+          }
+          for (let i = prev.options.length - 1; i >= 0; i -= 1) {
+            if (!prev.options[i].disabled) return { ...prev, activeIndex: i };
+          }
+          return prev;
+        });
         return;
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -201,15 +280,22 @@ export function ObsidianSelectHost() {
     };
 
     document.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mouseup", handleMouseUp, true);
+    document.addEventListener("click", handleClick, true);
     document.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("scroll", handleScrollOrResize, true);
     window.addEventListener("resize", handleScrollOrResize);
+    window.addEventListener("blur", closeMenu);
     document.addEventListener("change", handleExternalChange, true);
     return () => {
+      clearLabelGuard();
       document.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mouseup", handleMouseUp, true);
+      document.removeEventListener("click", handleClick, true);
       document.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("scroll", handleScrollOrResize, true);
       window.removeEventListener("resize", handleScrollOrResize);
+      window.removeEventListener("blur", closeMenu);
       document.removeEventListener("change", handleExternalChange, true);
     };
   }, []);
@@ -266,6 +352,7 @@ export function ObsidianSelectHost() {
     <div
       ref={popoverRef}
       className="ob-select-popover"
+      data-upward={menu.upward ? "true" : undefined}
       role="listbox"
       style={{
         left: `${menu.left}px`,
@@ -287,6 +374,7 @@ export function ObsidianSelectHost() {
               data-ob-idx={idx}
               aria-selected={selected}
               disabled={opt.disabled}
+              title={opt.label}
               className={`ob-select-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}`}
               onMouseEnter={() => setMenu((prev) => (prev ? { ...prev, activeIndex: idx } : prev))}
               onMouseDown={(e) => {

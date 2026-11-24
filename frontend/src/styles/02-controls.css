@@ -164,6 +164,8 @@ select.text-input,
   line-height: 1.35;
   cursor: pointer;
   outline: none;
+  min-width: 0;
+  max-width: 100%;
   text-overflow: ellipsis;
   white-space: nowrap;
   overflow: hidden;
@@ -243,6 +245,16 @@ input[type="radio"] {
     transform: translateY(0) scale(1);
   }
 }
+@keyframes obSelectPopInUp {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 .ob-select-popover {
   position: fixed;
   z-index: 9999;
@@ -259,6 +271,9 @@ input[type="radio"] {
     0 0 28px rgba(139, 123, 255, 0.14);
   overflow: hidden;
   animation: obSelectPopIn 0.14s var(--ob-ease);
+}
+.ob-select-popover[data-upward="true"] {
+  animation-name: obSelectPopInUp;
 }
 .ob-select-popover-list {
   display: flex;
@@ -303,17 +318,19 @@ input[type="radio"] {
 }
 .ob-select-option-main {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
   flex: 1;
 }
 .ob-select-option-title {
+  min-width: 0;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ob-select-option-badge {
+  flex: none;
   display: inline-flex;
   align-items: center;
   padding: 1px 7px;
@@ -362,6 +379,7 @@ input[type="radio"] {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 10px 8px;
   background: rgba(30, 30, 33, 0.65);
@@ -386,17 +404,19 @@ input[type="radio"] {
   outline-offset: 2px;
 }
 .hud-tool-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
-.hud-tool-sub {
-  font-size: 9px;
-  font-family: var(--font-mono);
-  color: var(--ink-faint);
+.hud-tool-jump-icon {
+  flex: none;
+  opacity: 0.72;
 }
 .hud-tool-card.active { color: var(--ink); }
-.hud-tool-card.active .hud-tool-sub { color: var(--laser); }
+.hud-tool-card:hover .hud-tool-jump-icon { color: var(--laser-2); opacity: 1; }
 .hud-tool-card .tool-icon { color: var(--ink-dim); }
 .hud-tool-card.active .tool-icon {
   color: var(--laser-2);

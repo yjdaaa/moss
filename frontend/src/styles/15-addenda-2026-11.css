@@ -1138,5 +1138,33 @@ button.conn-pill:hover {
   margin-bottom: 8px;
 }
 
+/* 2026-11-24 选择框、侧栏与卡片布局细节收口：
+   - 自由网格解锁态标题栏显式显示 grab / grabbing 光标（标题栏内其他独立按钮或链接保持 pointer）；
+   - 右下角常驻浮窗展开时自动加大主内容区底部留白，避免滚到底部时控件被遮挡。 */
+@media (min-width: 761px) {
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card] .ob-card-h,
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card] .ob-fold-toggle {
+    cursor: grab;
+  }
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card] .ob-card-h button:not(.ob-fold-toggle),
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card] .ob-card-h a {
+    cursor: pointer;
+  }
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card].wb-dragging,
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card].wb-dragging .ob-card-h,
+  .ob-canvas:not(.ob-canvas--locked) > [data-wb-card].wb-dragging .ob-fold-toggle {
+    cursor: grabbing !important;
+  }
+}
+
+.ob-shell:has(.float-dock-stack .job-dock:not(.job-dock--pill)),
+.ob-shell:has(.float-dock-stack .voice-dock:not(.voice-dock--pill)) {
+  --ob-dock-clearance: 210px;
+}
+.ob-shell:has(.float-dock-stack .job-dock:not(.job-dock--pill)):has(.float-dock-stack .voice-dock:not(.voice-dock--pill)) {
+  --ob-dock-clearance: 310px;
+}
+
+
 
 

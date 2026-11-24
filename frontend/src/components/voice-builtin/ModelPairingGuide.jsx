@@ -17,7 +17,7 @@ export function ModelPairingGuide({ settings, models, busy, onApply, onDownload 
   return (
     <details className="voice-fold" id="voice-model-pairing-guide">
       <summary>按场景选一套模型（整条链路实测）</summary>
-      <ul className="voice-combo-list">
+      <ul className="voice-preset-list">
         {MODEL_COMBOS.map((combo) => {
           const active = comboActive(combo, settings);
           const missing = active ? comboMissingModels(combo, models) : [];

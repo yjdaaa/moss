@@ -58,13 +58,38 @@ try {
       return alphas.length ? Math.max(...alphas) : 1;
     });
 
-  // 默认：侧栏展开、顶栏完整，且都是半透明
+  // 默认：侧栏展开、顶栏完整，且都是半透明；左侧当前页指示条不被侧栏左边界裁切，展开过渡中段文字不竖排折行
   assert.ok((await sideWidth()) >= 200, "默认侧栏展开");
   assert.equal(await side.getAttribute("data-collapsed"), "false");
   assert.equal(await top.getAttribute("data-compact"), "false");
   assert.ok((await alphaOf(side)) <= 0.55, "侧栏半透明");
   assert.ok((await alphaOf(top)) <= 0.55, "顶栏半透明");
   assert.match(await page.locator("#nav-hardware-status").innerText(), /\S/, "顶栏状态胶囊带文字");
+  const activeBarGeometry = await page.evaluate(() => {
+    const sideEl = document.querySelector("aside.ob-side");
+    const activeEl = document.querySelector(".ob-nav-item.on");
+    const sideLeft = sideEl.getBoundingClientRect().left;
+    const barLeft = activeEl.getBoundingClientRect().left + parseFloat(getComputedStyle(activeEl, "::before").left);
+    const shell = document.querySelector(".ob-shell");
+    shell.style.transition = "none";
+    shell.style.gridTemplateColumns = "95px minmax(0, 1fr)";
+    const maxMidHeight = Math.max(...[...document.querySelectorAll(".ob-nav .ob-nav-item")].map((el) => el.getBoundingClientRect().height));
+    shell.style.gridTemplateColumns = "";
+    shell.style.transition = "";
+    return { sideLeft, barLeft, maxMidHeight };
+  });
+  assert.ok(activeBarGeometry.barLeft >= activeBarGeometry.sideLeft, `当前页指示条不应越过侧栏左边界被裁切 (${activeBarGeometry.barLeft} < ${activeBarGeometry.sideLeft})`);
+  assert.ok(activeBarGeometry.maxMidHeight <= 48, `侧栏宽度过渡中段导航文字不应竖排折成多行，实测最大高度 ${activeBarGeometry.maxMidHeight}px`);
+
+  // 工作台底部控制台抽屉：支持收起成单行并跨刷新记忆，点击任一 role="tab" 标签自动重新展开
+  assert.equal(await page.locator("#bottomDrawer").getAttribute("data-collapsed"), "false");
+  await page.locator("#drawer-fold-toggle").click();
+  assert.equal(await page.locator("#bottomDrawer").getAttribute("data-collapsed"), "true", "点击收起后底部抽屉收成单行顶栏");
+  assert.equal(await page.locator("#consoleFeed").count(), 0, "收起后隐藏终端内容区");
+  await page.locator("#tab-mcp-bridge").click();
+  assert.equal(await page.locator("#bottomDrawer").getAttribute("data-collapsed"), "false", "收起态点击标签自动重新展开");
+  await page.locator("#tab-console-feed").click();
+
   if (shotDir) await page.screenshot({ path: path.join(shotDir, "shell-default.png") });
 
   // 收起侧栏：只留图标，名称放到悬停提示，内容区跟着变宽
@@ -95,15 +120,32 @@ try {
   assert.ok(await page.locator("#nav-estop").isVisible());
   if (shotDir) await page.screenshot({ path: path.join(shotDir, "shell-collapsed.png") });
 
-  // 键盘聚焦 <select> 按空格弹出曜石毛玻璃浮层，按 Escape 收起
+  // 键盘聚焦 <select> 按空格弹出曜石毛玻璃浮层，Home / End 切换首尾项，按 Escape 收起；点击外层 <label> 文字同样弹出浮层
   const firstSelect = page.locator("select").first();
   if (await firstSelect.count()) {
     await firstSelect.focus();
     await page.keyboard.press(" ");
     await page.locator(".ob-select-popover").waitFor({ timeout: 5_000 });
+    await page.keyboard.press("End");
+    const lastIdx = await page.locator(".ob-select-option").count() - 1;
+    assert.equal(await page.locator(".ob-select-option.is-active").getAttribute("data-ob-idx"), String(lastIdx), "End 键跳至末项");
+    await page.keyboard.press("Home");
+    assert.equal(await page.locator(".ob-select-option.is-active").getAttribute("data-ob-idx"), "0", "Home 键跳至首项");
     await page.keyboard.press("Escape");
     await page.locator(".ob-select-popover").waitFor({ state: "detached", timeout: 5_000 });
   }
+  await page.locator('.ob-nav-item[title="创作画板"], .ob-nav-item:has-text("创作画板")').first().click();
+  await settle();
+  const drawLabel = page.locator(".ob-draw-page label").filter({ has: page.locator("select") }).first();
+  await drawLabel.scrollIntoViewIfNeeded();
+  const drawLabelBox = await drawLabel.boundingBox();
+  await page.mouse.click(drawLabelBox.x + 8, drawLabelBox.y + 6);
+  await page.locator(".ob-select-popover").waitFor({ timeout: 5_000 });
+  await page.keyboard.press("Escape");
+  await page.locator(".ob-select-popover").waitFor({ state: "detached", timeout: 5_000 });
+  await page.locator('.ob-nav-item[title="雕刻工作台"], .ob-nav-item:has-text("雕刻工作台")').first().click();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await settle();
 
   // 点击顶栏小智状态胶囊可直达语音中心，再点硬件状态胶囊打开统一设备连接面板（按 Escape 关闭）
   await page.locator("#nav-mcp-status").click();
@@ -129,10 +171,26 @@ try {
   assert.ok((await sideWidth()) >= 200, "展开后恢复原宽度");
   assert.equal(await page.locator("#nav-hardware-status span").isVisible(), true);
 
-  // 窄屏：侧栏本来就是横排，不显示收起按钮
+  // 窄屏：侧栏收成单行紧凑横排（不再折成多行），不显示收起按钮，更窄屏内层横滑时不挤压重叠且不产生整页横向溢出
   await page.setViewportSize({ width: 820, height: 900 });
   await settle();
   assert.equal(await page.locator("#side-collapse-toggle").isVisible(), false, "窄屏不显示收起按钮");
+  const narrowSideBox = await side.boundingBox();
+  assert.ok(narrowSideBox.height <= 64, `窄屏顶部导航应保持单行紧凑高度，实测 ${narrowSideBox.height}px`);
+  await page.setViewportSize({ width: 600, height: 900 });
+  await settle();
+  const mobileNavMetrics = await page.evaluate(() => {
+    const navEl = document.querySelector(".ob-nav");
+    const footEl = document.querySelector(".ob-side-foot");
+    return {
+      navShrunk: navEl.scrollWidth > navEl.clientWidth + 1,
+      footOverlap: navEl.offsetLeft + navEl.offsetWidth > footEl.offsetLeft + 1,
+      docOverflow: document.scrollingElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+  assert.equal(mobileNavMetrics.navShrunk, false, "极窄屏下 .ob-nav 不被压缩截断，整体交给 .ob-side 横向滚动");
+  assert.equal(mobileNavMetrics.footOverlap, false, "极窄屏下导航项与右侧偏好设置按钮不重叠");
+  assert.equal(mobileNavMetrics.docOverflow, false, "极窄屏导航不撑出整页横向滚动");
 
   assert.deepEqual(errors, [], "页面无脚本错误");
   console.log("SHELL_CHROME_BROWSER_TEST=PASS");
