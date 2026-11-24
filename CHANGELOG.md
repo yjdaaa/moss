@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 读模型列表不再边打字边请求，裸域名提示改用 /v1，多模态模型回到语音分区（2026-11-24）
+
+- **现象**：上一条改动后，在地址或密钥框打字停顿 0.35 秒就读一次模型列表，密钥没输完先报一次鉴权失败；只填裸域名时 `/models` 404 后改读 `/v1/models` 能列出模型，但对话不补 `/v1` 会失败；能听音频的多模态对话模型只剩在“大模型”列表，原先在语音识别里选过的要改成手填。
+- **根因与修复**：自动读取改为停手 1 秒（`MODELS_AUTO_FETCH_DEBOUNCE_MS`）；`list_models` 走 `/v1` 回退时在结果里带 `suggested_url`，前端显示 `#voice-builtin-use-v1-*`“改用 …/v1”一键改地址；`extract_item_sections` 让“文本进文本出”的模型归大模型，同时“能听音频出文本”的也留在语音识别、“能出音频”的也留在语音合成（纯识别 / 纯合成模型不进大模型）。
+- **验证**：`qwen_maas_wrapped_urls_plan_fallbacks_pagination_and_auth_hints_work` 补 `suggested_url` 与多模态分区断言，`voice-center` 浏览器测试补裸域名一键改用 `/v1`；`verify.mjs --finish` 通过（全工作区 clippy / Rust 测试、前端单测 391/391 与构建、浏览器测试 18/18、本机桌面程序快更与签名校验）。未用真实服务商实测（`unverified`）。
+- **关联**：`crates/moss-voice/src/models.rs`（`ModelsListResult::suggested_url`、`list_models`、`extract_item_sections`）、`frontend/src/components/voice-builtin/BuiltinModelGroup.jsx`。
+
 ### 修复语音中心千问开放平台与套餐端点看不见模型、折行地址静默失效与测试慢思考问题（2026-11-24）
 
 - **现象**：语音中心「大模型」填入千问开放平台 `maas.qianwenaiapi.com`（含多行复制带入换行空格、只填裸域名，或将 `sk-sp-` Token Plan 套餐密钥填进按量地址）时，模型下拉框不显示可选模型，自动拉取报错在未展开下拉时静默隐藏；拉回多模态模型后支持音频理解的对话模型被误筛出大模型列表，且千问新域名未附带关闭思考参数导致测试耗时偏长。

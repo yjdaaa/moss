@@ -780,6 +780,10 @@ pub struct ModelsListResult {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_sections: std::collections::BTreeMap<String, Vec<Section>>,
     pub detail: String,
+    /// 只填了裸域名、`/models` 404 而 `/v1/models` 读通时，建议改填的基础地址（`<域名>/v1`）：
+    /// 对话与语音接口不会自动补 `/v1`，不改的话列表读得出来、对话却会 404（前端给一键改用按钮）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_url: Option<String>,
 }
 
 pub fn encode_base64(bytes: &[u8]) -> String {
@@ -1648,20 +1652,16 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
         let out_text = has(&outs, "text");
         let in_audio = has(&ins, "audio");
         let out_audio = has(&outs, "audio");
-        // 纯音频转文本标为 ASR，纯文本转音频标为 TTS；凡支持文本进、文本出（含支持图片/音频理解输入的多模态对话模型）且未被显式排除的均归入 LLM
-        if !in_text && in_audio && out_text {
+        // 文本进、文本出（含能听音频 / 看图的多模态对话模型）且未被显式排除的归入 LLM；
+        // 能听音频出文本的同时也留在 ASR、能出音频的同时也留在 TTS（与 n116 前一致，选过这类模型的人不用改成手填）
+        if in_text && out_text && !explicit_non_voice {
+            push_unique_section(&mut sections, Section::Llm);
+        }
+        if in_audio && out_text {
             push_unique_section(&mut sections, Section::Asr);
         }
-        if !out_text && out_audio {
+        if out_audio {
             push_unique_section(&mut sections, Section::Tts);
-        }
-        if in_text
-            && out_text
-            && !explicit_non_voice
-            && !sections.contains(&Section::Asr)
-            && !sections.contains(&Section::Tts)
-        {
-            push_unique_section(&mut sections, Section::Llm);
         }
         if (has(&outs, "image") || has(&outs, "video")) && !out_text && !out_audio {
             explicit_non_voice = true;
@@ -1678,19 +1678,14 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
             let out_text = outs.contains("text");
             let in_audio = ins.contains("audio");
             let out_audio = outs.contains("audio");
-            if !in_text && in_audio && out_text {
+            if in_text && out_text && !explicit_non_voice {
+                push_unique_section(&mut sections, Section::Llm);
+            }
+            if in_audio && out_text {
                 push_unique_section(&mut sections, Section::Asr);
             }
-            if !out_text && out_audio {
+            if out_audio {
                 push_unique_section(&mut sections, Section::Tts);
-            }
-            if in_text
-                && out_text
-                && !explicit_non_voice
-                && !sections.contains(&Section::Asr)
-                && !sections.contains(&Section::Tts)
-            {
-                push_unique_section(&mut sections, Section::Llm);
             }
             if (outs.contains("image") || outs.contains("video")) && !out_text && !out_audio {
                 explicit_non_voice = true;
@@ -1986,11 +1981,17 @@ pub fn list_jev_models(models_url: &str, api_key: Option<&str>) -> serde_json::V
 pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
     let started = Instant::now();
     let section = resolved.section;
+    let v1_hint = std::cell::OnceCell::<String>::new();
     let finish = |ok: bool,
                   http_status: Option<u16>,
                   models: Vec<String>,
                   model_sections: std::collections::BTreeMap<String, Vec<Section>>,
                   detail: String| {
+        let suggested_url = v1_hint.get().filter(|_| ok).cloned();
+        let detail = match &suggested_url {
+            Some(url) => format!("{detail}；这个服务的接口在 /v1 下，对话也要用 {url}"),
+            None => detail,
+        };
         let detail = if resolved.api_key.is_empty() {
             detail
         } else {
@@ -2004,6 +2005,7 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             models,
             model_sections,
             detail,
+            suggested_url,
         }
     };
     if resolved.kind == ProviderKind::Doubao {
@@ -2103,6 +2105,9 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
         && let Ok(retry_resp) = fetch_page(&v1_url, remaining)
         && retry_resp.status().is_success()
     {
+        if let Some(base) = v1_url.strip_suffix("/models") {
+            let _ = v1_hint.set(base.to_owned());
+        }
         active_url = v1_url;
         response = retry_resp;
     }
@@ -3414,11 +3419,17 @@ mod tests {
             listed.model_sections.get("decision-model-preview"),
             Some(&vec![])
         );
-        // 支持音频/图片理解输入、纯文本输出的多模态对话大模型必须保留在大模型（Llm）列表，不能误判为纯 ASR
+        // 能听音频 / 看图、出文本的多模态对话模型：留在大模型（Llm）列表，同时也留在语音识别（与原先一致）
         assert_eq!(
             listed.model_sections.get("qwen3.8-flash"),
-            Some(&vec![Section::Llm])
+            Some(&vec![Section::Llm, Section::Asr])
         );
+        // 只填了裸地址、靠 /v1/models 读到列表：提示改用带 /v1 的地址，否则对话会 404
+        assert_eq!(
+            listed.suggested_url.as_deref(),
+            Some(format!("http://127.0.0.1:{port}/v1").as_str())
+        );
+        assert!(listed.detail.contains("/v1"), "{}", listed.detail);
         assert_eq!(
             listed.model_sections.get("whisper-large"),
             Some(&vec![Section::Asr])

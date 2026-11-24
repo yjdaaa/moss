@@ -266,6 +266,8 @@ try {
             elapsed_ms: 85,
             models: ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
             detail: "已读取 3 个模型",
+            // 只填裸域名、后端靠 /v1/models 读到列表时会建议改用带 /v1 的地址
+            ...(input?.url === "https://bare.example.test" ? { suggested_url: "https://bare.example.test/v1" } : {}),
           }
     ),
     voice_builtin_models_save: ({ input, clear }) => {
@@ -588,6 +590,16 @@ try {
     "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
     "一键切换为千问 Token Plan 套餐专属地址",
   );
+  // 只填裸域名：列表在 /v1 下读到时提示一键改用带 /v1 的地址（停手 1 秒后自动读取）
+  await page.locator("#voice-builtin-model-url-llm").fill("https://bare.example.test");
+  await page.locator("#voice-builtin-model-key-llm").fill("fake-llm-key");
+  await page.locator("#voice-builtin-use-v1-llm").click();
+  assert.equal(
+    await page.locator("#voice-builtin-model-url-llm").inputValue(),
+    "https://bare.example.test/v1",
+    "一键改用带 /v1 的地址",
+  );
+  await page.locator("#voice-builtin-v1-suggestion-llm").waitFor({ state: "detached" });
   await page.locator("#voice-builtin-model-url-llm").fill("https://llm.example.test/v1");
   await page.locator("#voice-builtin-model-key-llm").fill("fake-llm-key");
   await page.locator("#voice-builtin-model-name-llm").fill("fake-model");

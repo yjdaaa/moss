@@ -35,6 +35,9 @@ import {
 import { restartEffect } from "./shared.js";
 import { remoteCacheKey, REMOTE_MODELS_CACHE } from "./remoteModelsCache.js";
 
+/** 编辑地址 / 密钥时自动读取模型列表前的停手时间 */
+const MODELS_AUTO_FETCH_DEBOUNCE_MS = 1000;
+
 /** 内置服务的一项云端模型（大模型 / 语音识别 / 语音合成）：支持拉取全量模型下拉筛选或手填；先测试、后保存；密钥只提交、不回显。 */
 function BuiltinModelGroup({ section, builtin }) {
   const { status, setStatus, busy } = builtin;
@@ -185,6 +188,7 @@ function BuiltinModelGroup({ section, builtin }) {
           key: reqKey,
           items: hit.items,
           modelSections: hit.modelSections || null,
+          suggestedUrl: hit.suggestedUrl || "",
           detail: hit.detail,
           ok: true,
           loading: false,
@@ -208,13 +212,15 @@ function BuiltinModelGroup({ section, builtin }) {
       const metaSections = outcome?.model_sections && typeof outcome.model_sections === "object" ? outcome.model_sections : null;
       const detail = outcome?.detail || (outcome?.ok ? `已读取 ${items.length} 个模型` : "读取模型列表失败");
       const ok = Boolean(outcome?.ok);
+      const suggestedUrl = ok && typeof outcome?.suggested_url === "string" ? outcome.suggested_url : "";
       if (ok && items.length > 0) {
-        REMOTE_MODELS_CACHE.set(cacheKey, { items, modelSections: metaSections, detail });
+        REMOTE_MODELS_CACHE.set(cacheKey, { items, modelSections: metaSections, detail, suggestedUrl });
       }
       setRemoteModels({
         key: reqKey,
         items,
         modelSections: metaSections,
+        suggestedUrl,
         detail,
         ok,
         loading: false,
@@ -236,12 +242,27 @@ function BuiltinModelGroup({ section, builtin }) {
     // 仅在用户当前编辑表单（dirty）时防抖自动拉取，避免后台隐藏标签/折叠分组挂载时静默并发请求 `/models`
     if (!dirty || doubao || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
     if (remoteModels.key === currentListKey && (remoteModels.loading || remoteModels.ok !== null)) return undefined;
+    // 停手 1 秒再读：地址、密钥还没输完时不发请求，免得先报一次鉴权失败
     const timer = setTimeout(() => {
       fetchModels({ auto: true, nextForm: form });
-    }, 350);
+    }, MODELS_AUTO_FETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty, doubao, Boolean(endpointMismatch), currentListKey]);
+
+  // 裸域名只在 /v1 下读到列表：对话不会自动补 /v1，提示一键改用（后端 `suggested_url`）
+  const v1Suggestion =
+    !doubao && remoteModels.key === currentListKey && remoteModels.suggestedUrl
+      ? remoteModels.suggestedUrl
+      : "";
+  const applyV1Suggestion = () => {
+    if (!v1Suggestion) return;
+    const nextForm = { ...form, url: v1Suggestion };
+    setForm(nextForm);
+    setResult(null);
+    setTest(null);
+    fetchModels({ auto: true, nextForm });
+  };
 
   const applySuggestedEndpoint = () => {
     if (!endpointMismatch) return;
@@ -725,6 +746,20 @@ function BuiltinModelGroup({ section, builtin }) {
             id={n("fix-endpoint")}
           >
             {endpointMismatch.actionLabel}
+          </button>
+        </div>
+      )}
+      {v1Suggestion && !endpointMismatch && (
+        <div className="voice-hint voice-hint--warn" id={n("v1-suggestion")}>
+          <span>这个服务的接口在 /v1 下：只填域名时模型列表读得到，但对话和测试会失败。</span>
+          <button
+            type="button"
+            className="btn btn-ghost voice-inline-btn"
+            onClick={applyV1Suggestion}
+            disabled={sectionBusy}
+            id={n("use-v1")}
+          >
+            改用 {v1Suggestion}
           </button>
         </div>
       )}
