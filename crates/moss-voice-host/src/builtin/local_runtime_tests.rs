@@ -757,6 +757,16 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
         assert_eq!(out["steps"][step]["ok"], true, "step {step} failed: {out}");
     }
     assert_eq!(out["steps"]["jev"]["skipped"], true);
+    // n111：新安装默认选着本地判停 / 识别 / 合成，但都还没下载——和实际对话一样退回能量判停与云端，并如实写明
+    assert_eq!(
+        builtin.settings().builtin_local.tts_model,
+        "kokoro",
+        "临时目录没有设置文件，按新安装默认组合"
+    );
+    assert!(
+        out.to_string().contains("还没下载，和实际对话一样先用它"),
+        "退回时要写明本地模型还没下载：{out}"
+    );
 
     // 3. 单飞互斥锁生效：占住 chain_test_lock 期间再次调用立即返回 409 chain_test_busy
     {
@@ -971,7 +981,7 @@ fn local_tts_voices_list_and_preview_serve_cached_wav_and_clean_on_delete() {
     );
 }
 
-/// n101：命令词抗噪（默认关、只认命令词类模型）与“旁人说话不接话”（默认开）都能保存并读回。
+/// n101：命令词抗噪（只认命令词类模型；n111 起新安装默认开，老用户默认值仍是关）与“旁人说话不接话”（默认开）都能保存并读回。
 #[test]
 fn command_keywords_and_bystander_settings_save_and_persist() {
     let temp = tempfile::tempdir().unwrap();
@@ -979,7 +989,14 @@ fn command_keywords_and_bystander_settings_save_and_persist() {
         Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
     let builtin = init(Some(host)).0.unwrap();
     let defaults = &builtin.settings().builtin_local;
-    assert!(!defaults.kws, "命令词抗噪默认关闭");
+    assert!(
+        defaults.kws,
+        "n111：没有设置文件按新安装默认组合，命令词抗噪开"
+    );
+    assert!(
+        !moss_voice::settings::BuiltinLocal::default().kws,
+        "老用户没写 builtin_local 时仍按原默认值关闭"
+    );
     assert_eq!(defaults.kws_model, "kws_zipformer_zh");
     assert!(defaults.ignore_bystanders, "旁人说话不接话默认开");
     assert!(
@@ -990,16 +1007,19 @@ fn command_keywords_and_bystander_settings_save_and_persist() {
     );
     let saved = builtin
         .local_save(&serde_json::json!({
-            "kws": true,
+            "kws": false,
             "kws_model": "kws_zipformer_zh",
             "ignore_bystanders": false,
         }))
         .unwrap();
     let local = &saved["local"]["settings"];
-    assert_eq!(local["kws"], true);
+    assert_eq!(local["kws"], false);
     assert_eq!(local["kws_model"], "kws_zipformer_zh");
     assert_eq!(local["ignore_bystanders"], false);
-    assert!(builtin.settings().builtin_local.kws);
+    assert!(
+        !builtin.settings().builtin_local.kws,
+        "用户关掉后按用户的来"
+    );
     assert!(!builtin.settings().builtin_local.ignore_bystanders);
 }
 

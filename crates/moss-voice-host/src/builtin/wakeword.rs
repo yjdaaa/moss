@@ -139,45 +139,27 @@ impl BuiltinVoice {
         }
     }
 
-    pub(super) fn full_font_dismissed_marker(&self) -> std::path::PathBuf {
-        self.models
-            .write_root_for(local_models::XIAOZHI_NOTO_V1_FULL_ID)
-            .join(".noto_v1_full_dismissed")
-    }
-
-    fn is_full_font_dismissed(&self) -> bool {
-        self.models
-            .all_roots()
-            .into_iter()
-            .any(|root| root.join(".noto_v1_full_dismissed").exists())
-    }
-
-    pub(super) fn mark_full_font_dismissed(&self) {
-        let marker = self.full_font_dismissed_marker();
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(marker, b"1");
-    }
-
-    pub(super) fn clear_full_font_dismissed(&self) {
+    /// n111（2026-11-24 用户决定）：补字库不再是可选模型，界面不列出也不能取消；
+    /// 删掉 n83 留下的“用户取消 / 删除后不再自动下载”标记，让它照常自动补齐。
+    fn clear_legacy_full_font_dismissed(&self) {
         for root in self.models.all_roots() {
             let _ = std::fs::remove_file(root.join(".noto_v1_full_dismissed"));
         }
     }
 
-    /// n83：内置语音服务启动后，若小智官方全量补字库（`noto-v1-full`，16.6 MB）尚未安装且用户未手动取消/删除，
-    /// 自动在后台校验下载并解压；未下完或断网时完全不阻塞服务启动，下载就位后热生效。
+    /// n83：内置语音服务启动后，若小智官方全量补字库（`noto-v1-full`，16.6 MB）尚未安装，
+    /// 自动在后台校验下载并解压；未下完或断网时完全不阻塞服务启动，下载就位后热生效，没下成下次启动再试。
+    /// n111 起不再理会旧的“已取消”标记（界面已不列出补字库）。
     #[cfg_attr(test, allow(dead_code))]
     pub(super) fn ensure_full_font_ready_with_base(&self, base_override: Option<&str>) -> bool {
         if self
             .models
             .path_if_installed(local_models::XIAOZHI_NOTO_V1_FULL_ID)
             .is_some()
-            || self.is_full_font_dismissed()
         {
             return false;
         }
+        self.clear_legacy_full_font_dismissed();
         let mirror = self.settings().builtin_local.mirror;
         let base = base_override
             .or(mirror.as_deref())

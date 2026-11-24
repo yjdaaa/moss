@@ -775,7 +775,9 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
     name: "Silero v6.2",
     why: "噪声下不误触发、听得最准",
   });
-  assert.equal(recommendationState("asr", "local:sense_voice").chosen, true);
+  // n111：推荐识别与新安装默认组合一致，改为 Qwen3-ASR
+  assert.equal(recommendationState("asr", "local:qwen3_asr_0_6b").chosen, true);
+  assert.equal(recommendationState("asr", "local:sense_voice").chosen, false);
   assert.equal(recommendationState("tts", "local:kokoro_v11").chosen, false);
   // 五栏都有推荐行（上下对齐）：大模型推荐云端，Jev 只给中性提示
   assert.equal(recommendationState("llm", "cloud").chosen, true);
@@ -1976,6 +1978,27 @@ test("按场景推荐的整套模型：一次保存、缺什么提示什么、�
     { id: picked.tts, label: "合成", installed: true },
   ];
   assert.deepEqual(comboMissing(picked, models), ["判停包"]);
+  // n111：第一套就是新安装默认组合（与后端 BuiltinLocal::new_install 一致）
+  const { comboMissingModels } = await import("../src/voiceState.js");
+  assert.deepEqual(
+    comboPatch(MODEL_COMBOS[0]),
+    {
+      vad: true, vad_model: "silero_vad_v6", kws: true, kws_model: "kws_zipformer_zh",
+      denoise: false, turn: false, asr: true, asr_model: "qwen3_asr_0_6b", tts: true, tts_model: "kokoro",
+    },
+  );
+  // 正在用但还没下载：列出缺的模型，下载中的标出来，不算“已经能用”
+  assert.deepEqual(
+    comboMissingModels(MODEL_COMBOS[0], [
+      { id: "silero_vad_v6", label: "Silero v6.2", installed: true },
+      { id: "qwen3_asr_0_6b", label: "Qwen3-ASR", installed: false, progress: { state: "downloading", downloaded: 1, total: 2 } },
+    ]),
+    [
+      { id: "kws_zipformer_zh", label: "kws_zipformer_zh", downloading: false },
+      { id: "qwen3_asr_0_6b", label: "Qwen3-ASR", downloading: true },
+      { id: "kokoro", label: "kokoro", downloading: false },
+    ],
+  );
   assert.equal(comboMissing(picked, []).length, [picked.vad, picked.kws, picked.turn, picked.asr, picked.tts].filter(Boolean).length);
   // n101：带命令词抗噪的组合一并打开它；不带的组合显式关掉
   const withKws = MODEL_COMBOS.find((combo) => combo.kws);

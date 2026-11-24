@@ -750,8 +750,8 @@ try {
   await page.locator("#voice-local-colab-bridge > summary").click();
   await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === false);
   assert.equal(await page.locator("#voice-colab-enabled").isVisible(), false, "再次点击收起 Colab 联动");
-  assert.match(await page.locator("#voice-local-group-font").innerText(), /48,662 字/, "n83：本地模型区展示小智屏幕全量补字库");
-  assert.equal(await page.locator("#voice-local-delete-xiaozhi_noto_v1_full").count(), 1, "已装补字库可按需删除");
+  // n111：补字库自动下载、下好即生效，不是可选模型——界面不列出
+  assert.equal(await page.locator("#voice-local-group-font").count(), 0, "补字库不在本地模型区显示");
   // n109：命令词抗噪并进“拾音判停”；降噪、语义判停与老版判停收进“更多 / 实验”，正在用收起区的模型时自动展开
   const vadGroup = page.locator("#voice-local-group-vad");
   await vadGroup.locator("#voice-local-group-kws #voice-local-kws-toggle").waitFor();
@@ -763,6 +763,20 @@ try {
   await page.locator("#voice-local-vad-more > summary").click();
   await page.locator("#voice-local-vad-more #voice-local-group-denoise #voice-local-denoise-toggle").waitFor();
   await page.locator("#voice-local-vad-more #voice-local-group-turn #voice-local-turn-toggle").waitFor();
+  // n111：判停模型标“几选一”（替换），命令词抗噪 / 降噪 / 语义判停标“叠加，可同时开”，并写明能和谁一起用
+  assert.match(await page.locator("#voice-local-vad-legend").innerText(), /判停模型几选一.*可以同时开/);
+  const roles = await page.locator("#voice-local-group-vad .voice-role-tag").evaluateAll((tags) =>
+    tags.map((tag) => [tag.closest("[id^=voice-local-group-]").id, tag.dataset.role]));
+  assert.deepEqual(roles, [
+    ["voice-local-group-vad", "replace"],
+    ["voice-local-group-kws", "addon"],
+    ["voice-local-group-vad-more", "replace"],
+    ["voice-local-group-denoise", "addon"],
+    ["voice-local-group-turn", "addon"],
+  ]);
+  assert.match(await page.locator("#voice-local-kws-note").innerText(), /要先在顶部选本地判停/);
+  assert.match(await page.locator("#voice-local-denoise-note").innerText(), /可与任何本地判停、本地识别同时开/);
+  assert.match(await page.locator("#voice-local-turn-note").innerText(), /包括能量判停/);
   assert.equal(await page.locator("#voice-local-pick-gtcrn_simple").count(), 0, "没下载的降噪模型不能选用");
   await page.locator("#voice-local-pick-dpdfnet_baseline").click();
   await page.locator("#voice-local-group-denoise tr").filter({ hasText: "DPDFNet" }).getByText("已选，开启后使用").waitFor();
@@ -1255,7 +1269,7 @@ try {
   await autoKeep.click();
   await page.waitForFunction(() => document.querySelector("#voice-screen-pack-auto-keep")?.checked === false);
   assert.deepEqual(last("voice_local_save").args, { settings: { screen_pack_auto_keep: false } }, "关闭不用确认");
-  await botCard.locator("#voice-screen-full-font-tip").getByText(/三层字库已齐备.*48,662 字/).waitFor();
+  assert.equal(await botCard.locator("#voice-screen-full-font-tip").count(), 0, "n111：补字库自动加载，副屏预览也不再提示");
   // 8d. n67 / n69：唤醒词卡在“设备”标签就地显示（原“唤醒词与音量”标签已并入）
   const wakeGroup = page.locator("#voice-group-wake-word");
   await wakeGroup.locator("#voice-wakeword-card").waitFor();

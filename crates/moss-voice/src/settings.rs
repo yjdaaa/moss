@@ -863,6 +863,27 @@ impl Default for BuiltinLocal {
 }
 
 impl BuiltinLocal {
+    /// 新安装（`settings.json` 里还没有 `voice` 分区）时本地模型的默认组合（2026-11-24 n111 用户决定）：
+    /// 判停 Silero v6.2 + 识别 Qwen3-ASR + 合成 Kokoro v1.0 + 命令词抗噪，即整链实测（n99 / n101）里
+    /// “车间噪声大 / 要听得最准”那一套；降噪与语义判停实测无提升，不开。模型要下载后才生效，
+    /// 没下载时判停退回能量判停、识别与合成用已配置的云端（`local_parts` 只加载已安装的模型）。
+    ///
+    /// 只用于全新的 `voice` 分区：[`Default`] 不变——`builtin_local` 等于默认值时不写进设置文件，
+    /// 改它会让没动过本地模型设置的老用户升级后被悄悄换掉。
+    pub fn new_install() -> Self {
+        Self {
+            vad: true,
+            vad_model: "silero_vad_v6".into(),
+            asr: true,
+            asr_model: "qwen3_asr_0_6b".into(),
+            tts: true,
+            tts_model: "kokoro".into(),
+            kws: true,
+            kws_model: default_kws_model(),
+            ..Self::default()
+        }
+    }
+
     pub fn any(&self) -> bool {
         self.asr || self.tts || self.vad || self.denoise || self.turn || self.kws
     }
@@ -1233,6 +1254,16 @@ pub struct VoiceSettings {
     pub builtin_device_prefs: std::collections::BTreeMap<String, DeviceHardwarePrefs>,
 }
 
+impl VoiceSettings {
+    /// 全新的语音设置：其余同默认值，本地模型用新安装默认组合（[`BuiltinLocal::new_install`]，n111）。
+    pub fn new_install() -> Self {
+        Self {
+            builtin_local: BuiltinLocal::new_install(),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
@@ -1357,7 +1388,7 @@ fn parse_voice_section_checked(
     root: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<VoiceSettings, String> {
     match root.get("voice") {
-        None | Some(serde_json::Value::Null) => Ok(VoiceSettings::default()),
+        None | Some(serde_json::Value::Null) => Ok(VoiceSettings::new_install()),
         Some(value) => serde_json::from_value::<VoiceSettings>(value.clone())
             .map_err(|error| format!("语音配置 voice 分区格式已损坏，已拒绝覆盖写盘: {error}")),
     }
@@ -1410,11 +1441,17 @@ pub fn update_voice_with_jev_feedback<R>(
 
 /// 读取语音设置；文件缺失、损坏或旧版本没有 `voice` 时返回默认值。
 pub fn load(settings_file: &Path) -> VoiceSettings {
-    let mut voice: VoiceSettings = read_root(settings_file)
-        .get("voice")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
+    let mut voice: VoiceSettings = match laser_runtime::settings_store::read_checked(settings_file)
+    {
+        Ok(root) => match root.get("voice") {
+            // 全新安装（设置文件不存在，或旧版本从没写过语音设置）：用新安装默认组合（n111）
+            None | Some(serde_json::Value::Null) => VoiceSettings::new_install(),
+            // 已有语音设置但读不出来：保持原有行为退回默认值，不套用新安装组合
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or_default(),
+        },
+        // 设置文件损坏：不当成新安装
+        Err(_) => VoiceSettings::default(),
+    };
     migrate_personas(&mut voice.builtin_local);
     voice
 }
@@ -2218,10 +2255,58 @@ mod tests {
     }
 
     #[test]
+    fn new_install_picks_the_measured_combo_but_existing_users_keep_theirs() {
+        let combo = BuiltinLocal::new_install();
+        assert!(combo.vad && combo.asr && combo.tts && combo.kws);
+        assert!(
+            !combo.denoise && !combo.turn,
+            "降噪与语义判停实测无提升，不开"
+        );
+        for (kind, id) in [
+            (ModelKind::Vad, "silero_vad_v6"),
+            (ModelKind::Asr, "qwen3_asr_0_6b"),
+            (ModelKind::Tts, "kokoro"),
+            (ModelKind::Kws, "kws_zipformer_zh"),
+        ] {
+            assert_eq!(combo.selected(kind).map(|spec| spec.id), Some(id));
+        }
+        assert_ne!(
+            combo,
+            BuiltinLocal::default(),
+            "不等于默认值，第一次保存就会写进设置文件"
+        );
+        assert!(
+            !BuiltinLocal::default().any(),
+            "Default 不变：老用户没写进文件的本地设置仍按全关读取"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // 已有 voice 分区但从没改过本地模型（builtin_local 等于默认值时不写入文件）：保持全关
+        std::fs::write(&file, br#"{"voice": {"mode": "builtin"}}"#).unwrap();
+        assert_eq!(load(&file).builtin_local, BuiltinLocal::default());
+        // 新安装第一次保存其他设置时，默认组合随之落盘，之后按文件读取
+        std::fs::remove_file(&file).unwrap();
+        update_voice(&file, |voice| {
+            voice.mode = VoiceMode::Builtin;
+            Ok(())
+        })
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            saved["voice"]["builtin_local"]["asr_model"],
+            "qwen3_asr_0_6b"
+        );
+        assert_eq!(load(&file).builtin_local, BuiltinLocal::new_install());
+    }
+
+    #[test]
     fn old_settings_without_voice_load_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        assert_eq!(load(&file), VoiceSettings::default());
+        // n111：全新安装（没有设置文件，或从没写过 voice 分区）用新安装默认组合
+        assert_eq!(load(&file), VoiceSettings::new_install());
         std::fs::write(
             &file,
             br#"{"web_port": 9666, "mcp_endpoint": "wss://example.test/mcp/?token=t"}"#,
@@ -2229,6 +2314,8 @@ mod tests {
         .unwrap();
         let voice = load(&file);
         assert_eq!(voice.mode, VoiceMode::Official);
+        assert_eq!(voice.builtin_local, BuiltinLocal::new_install());
+        // 设置文件损坏时不当成新安装
         std::fs::write(&file, b"{broken").unwrap();
         assert_eq!(load(&file), VoiceSettings::default());
         // voice 字段部分缺失也能读

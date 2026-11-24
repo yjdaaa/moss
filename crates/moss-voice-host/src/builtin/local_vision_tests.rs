@@ -369,7 +369,7 @@ fn n80_colab_bridge_defaults_off_and_restores_on_disable() {
 }
 
 #[test]
-fn n83_full_font_pack_dismissal_and_delete_while_running() {
+fn n111_full_font_pack_always_auto_loads_even_after_old_dismissal() {
     let temp = tempfile::tempdir().unwrap();
     let host =
         Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
@@ -394,16 +394,16 @@ fn n83_full_font_pack_dismissal_and_delete_while_running() {
         "已安装时不重复触发后台下载"
     );
 
-    // 用户手动删除后写入忽略标记：不会在重启后背着用户自动重下
+    // 2026-11-24 n111：补字库不再是可选模型。删掉后（或 n83 旧版留下“已取消”标记时）下次启动照样自动补齐，
+    // 并清掉旧标记。对接本机假 HTTP 服务，不访问真实外网；返回 404 也算已发起下载。
     builtin.model_delete(font_id).unwrap();
     assert!(builtin.models.path_if_installed(font_id).is_none());
-    assert!(builtin.full_font_dismissed_marker().exists());
-    assert!(
-        !builtin.ensure_full_font_ready_with_base(Some("http://127.0.0.1:1")),
-        "用户手动删除后尊重选择，不再自动重下"
-    );
-
-    // 用户主动在界面点“下载”时清除忽略标记（对接本机假 HTTP 服务，不访问真实外网）
+    let legacy = builtin
+        .models
+        .write_root_for(font_id)
+        .join(".noto_v1_full_dismissed");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"1").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mock_base = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -414,17 +414,10 @@ fn n83_full_font_pack_dismissal_and_delete_while_running() {
             );
         }
     });
-    builtin
-        .local_save(&serde_json::json!({ "mirror": mock_base }))
-        .unwrap();
-    builtin.model_download(font_id).unwrap();
     assert!(
-        !builtin.full_font_dismissed_marker().exists(),
-        "手动点击下载应清除忽略标记"
+        builtin.ensure_full_font_ready_with_base(Some(&mock_base)),
+        "删过或旧版取消过的补字库仍要自动重新下载"
     );
+    assert!(!legacy.exists(), "旧的“已取消”标记要清掉");
     builtin.model_cancel(font_id);
-    assert!(
-        builtin.full_font_dismissed_marker().exists(),
-        "手动取消下载同样写入忽略标记"
-    );
 }

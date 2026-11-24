@@ -165,12 +165,27 @@ export function LocalModelsGroup({ builtin }) {
     if (item.kind === "tts" && fallbackTtsModel) return `顶部使用：云端（异常兜底：${fallbackTtsModel.label}）`;
     return "顶部使用：云端模型";
   };
-  const renderHead = (item, title, showStatus = true) => (
+  // 2026-11-24 n111：区分“替换”（判停模型几选一）与“叠加”（降噪 / 语义判停 / 命令词抗噪，可同时开）
+  const ROLE_TAG = { replace: "几选一", addon: "叠加，可同时开" };
+  const ROLE_NOTE = {
+    kws: "跑在本地判停的音频上，专门听“停 / 退下”这类短命令；要先在顶部选本地判停，可与降噪、语义判停同时开。",
+    denoise: "先把音频降噪，再交给本地判停和本地识别；可与任何本地判停、本地识别同时开。GTCRN 与 DPDFNet 二选一（表里点“选用”）。",
+    turn: "判停说“停了”之后，再按语气判断是不是真说完，没说完就多等一会儿；可与任何判停同时开（包括能量判停）。",
+  };
+  const renderHead = (item, title, showStatus = true, role = null) => (
     <div className="voice-field-head">
-      <b>{title}</b>
+      <b>
+        {title}
+        {role && (
+          <span className={`ob-pill ${role === "replace" ? "ob-pill--info" : "ob-pill--off"} voice-tag voice-role-tag`} data-role={role}>
+            {ROLE_TAG[role]}
+          </span>
+        )}
+      </b>
       {showStatus && item.models.length > 0 && <span className="voice-muted">{groupStatus(item)}</span>}
     </div>
   );
+  const renderNote = (kind) => ROLE_NOTE[kind] && <p className="voice-muted voice-role-note" id={`voice-local-${kind}-note`}>{ROLE_NOTE[kind]}</p>;
   const renderToggle = (item) => (
     <label className="voice-check">
       <input type="checkbox" id={`voice-local-${item.kind}-toggle`} checked={Boolean(form[item.kind])} onChange={(e) => update(item.kind, e.target.checked)} />
@@ -295,33 +310,45 @@ export function LocalModelsGroup({ builtin }) {
         <p className="voice-muted">
           断网可用的本地模型在这里下载和管理，启用哪个模型请在上方「当前语音链路」下拉框切换。
         </p>
-        <ModelPairingGuide settings={baseline} busy={builtin.busy} onApply={applyCombo} />
+        <ModelPairingGuide
+          settings={baseline}
+          models={models}
+          busy={builtin.busy}
+          onApply={applyCombo}
+          onDownload={(ids) => Promise.all(ids.map((id) => modelAct(id, "下载模型", () => voiceApi.localDownload(id))))}
+        />
         <ColabBridgeSection builtin={builtin} />
         {/* 2026-11-23 n109：命令词抗噪 / 降噪 / 语义判停并入“拾音判停”，实测没提升的收进“更多 / 实验” */}
         <div className="voice-local-group" id="voice-local-group-vad">
-          {renderHead(layout.vadMain, "拾音判停模型包")}
+          {renderHead(layout.vadMain, "拾音判停模型包", true, "replace")}
+          <p className="voice-muted voice-role-note" id="voice-local-vad-legend">
+            判停模型几选一：同时只用一个，在顶部“拾音判停”下拉里换，都不选就是能量判停。命令词抗噪、前端降噪、语义判停是叠加在判停上的功能，可以同时开。
+          </p>
           {renderTable(layout.vadMain)}
           {layout.addons.map((item) => (
             <div className="voice-local-addon" key={item.kind} id={`voice-local-group-${item.kind}`}>
-              {renderHead(item, `判停增强 · ${item.title}`)}
+              {renderHead(item, item.title, true, "addon")}
+              {renderNote(item.kind)}
               {renderToggle(item)}
               {renderTable(item)}
             </div>
           ))}
           <details className="voice-local-more" id="voice-local-vad-more" open={moreOpen} onToggle={(e) => setMoreOverride(e.currentTarget.open)}>
             <summary>
-              更多判停模型与实验功能
-              <small>旧版判停、前端降噪、语义判停：实测无明显提升，一般不用开</small>
+              更多：其他判停模型（替换）与叠加功能（实测无明显提升）
+              <small>旧版判停、TEN-VAD 与上面的判停模型几选一；前端降噪、语义判停叠加在判停上，一般不用开</small>
             </summary>
             {layout.vadMore.models.length > 0 && (
               <div className="voice-local-addon" id="voice-local-group-vad-more">
-                {renderHead(layout.vadMore, "其他判停模型（在顶部“拾音判停”下拉里选用）", false)}
+                {renderHead(layout.vadMore, "其他判停模型", false, "replace")}
+                <p className="voice-muted voice-role-note">与上面的 Silero v6.2 几选一，同时只用一个；在顶部“拾音判停”下拉里换。</p>
                 {renderTable(layout.vadMore)}
               </div>
             )}
             {layout.experiments.map((item) => (
               <div className="voice-local-addon" key={item.kind} id={`voice-local-group-${item.kind}`}>
-                {renderHead(item, `实验 · ${item.title}`)}
+                {renderHead(item, item.title, true, "addon")}
+                {renderNote(item.kind)}
                 {renderToggle(item)}
                 {renderTable(item)}
               </div>
@@ -541,58 +568,7 @@ export function LocalModelsGroup({ builtin }) {
             </div>
           );
         })}
-        {models.filter((model) => model.kind === "font").map((model) => {
-          const view = localModelView(model);
-          return (
-            <div className="voice-local-group" key={model.id} id="voice-local-group-font">
-              <b>{model.label}</b>
-              <p className="voice-muted">
-                {model.note} {formatBytes(model.size)} · {view.text}
-                {view.detail ? ` · ${view.detail}` : ""}
-              </p>
-              {view.percent !== null && (
-                <div className="voice-progress" aria-hidden="true">
-                  <span style={{ width: `${view.percent}%` }} />
-                </div>
-              )}
-              <span className="voice-actions">
-                {view.canDownload && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={modelLocked(model.id)}
-                    id={`voice-local-download-${model.id}`}
-                    onClick={() => modelAct(model.id, "下载全量补字库", () => voiceApi.localDownload(model.id))}
-                  >
-                    <Download size={13} /> 下载补字库
-                  </button>
-                )}
-                {view.canCancel && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={modelLocked(model.id)}
-                    id={`voice-local-cancel-${model.id}`}
-                    onClick={() => modelAct(model.id, "取消补字库下载", () => voiceApi.localCancel(model.id))}
-                  >
-                    <X size={13} /> 取消下载
-                  </button>
-                )}
-                {view.canDelete && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={modelLocked(model.id)}
-                    id={`voice-local-delete-${model.id}`}
-                    onClick={() => remove(model)}
-                  >
-                    <Trash2 size={13} /> 删除补字库
-                  </button>
-                )}
-              </span>
-            </div>
-          );
-        })}
+        {/* 2026-11-24 n111：小智全量补字库不是可选模型，内置服务启动后自动下载、下好即生效，界面不列出（用户决定） */}
         <div className="voice-form-grid">
           {voices ? (
             <label>

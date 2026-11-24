@@ -7,8 +7,6 @@ import {
   GOGGLE_BOT_POSES,
   SCREEN_CARD_STYLE_OPTIONS,
   builtinDeviceView,
-  formatBytes,
-  localModelView,
   voiceErrorText,
 } from "../../voiceState.js";
 
@@ -46,8 +44,6 @@ export function BuiltinScreenPreview({ builtin }) {
   const onlinePackReady = Boolean(onlineColorDevice) && sessions.some((s) => s.device_id === onlineColorDevice.device_id && s.screen_pack === true);
   const autoKeep = status.local?.settings?.screen_pack_auto_keep === true;
   const alwaysOnline = status.mqtt_port != null;
-  const fullFontModel = (Array.isArray(status.local?.models) ? status.local.models : []).find((m) => m.kind === "font") || null;
-  const fullFontView = fullFontModel ? localModelView(fullFontModel) : null;
 
   // 2026-11-09 用户决定：自动保持全屏画风（默认关）。开启时确认一次，之后 MOSS 自动给没装好的彩屏小智推送画风包
   const toggleAutoKeep = async (on) => {
@@ -187,26 +183,6 @@ export function BuiltinScreenPreview({ builtin }) {
             <p className="voice-muted" id="voice-screen-pack-auto-mqtt-tip">
               建议同时打开“服务 › 常连模式（实验）”：小智开机就连上 MOSS，不用先唤醒，打开 MOSS 后马上就能检查补刷。
               <button type="button" className="voice-link-btn" onClick={() => gotoVoiceGroup("service", "settings-builtinMqtt")}>去打开</button>
-            </p>
-          )}
-          {fullFontModel && fullFontView && (
-            <p className="voice-muted" id="voice-screen-full-font-tip">
-              {fullFontModel.installed
-                ? "三层字库已齐备：日常 6,845 字随资源包内置，生僻字、繁体与日韩泰阿共 48,662 字由服务端按句动态补齐。"
-                : fullFontView.canCancel
-                  ? `正在后台准备小智全量补字库（${fullFontView.text}），完成后生僻字与多语种字幕自动热生效。`
-                  : "小智全量补字库尚未就绪（当前由内置 6,845 日常字库兜底）："}
-              {fullFontView.canDownload && (
-                <button
-                  type="button"
-                  className="voice-link-btn"
-                  disabled={Boolean(busy)}
-                  id="voice-screen-full-font-download"
-                  onClick={() => act("下载小智全量补字库", () => voiceApi.localDownload(fullFontModel.id))}
-                >
-                  立即下载（{formatBytes(fullFontModel.size)}）
-                </button>
-              )}
             </p>
           )}
         </div>

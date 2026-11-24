@@ -1,6 +1,6 @@
 // 内置服务模型来源：混搭环节、推荐本地模型、模型搭配与来源切换。
 
-import { localSettingsForm, localSettingsPayload, selectLocalModel } from "./localModels.js";
+import { localModelView, localSettingsForm, localSettingsPayload, selectLocalModel } from "./localModels.js";
 import { DEFAULT_JEV_MODEL, JEV_PRESET_MODELS, LOCAL_JEV_FALLBACK_MODELS, canonicalLocalJevModel, isSpecificLocalJevInstalled, jevModelError } from "./jev.js";
 
 /**
@@ -27,12 +27,13 @@ export const MIX_SECTIONS = [
  * 机器噪声下识别最准）、识别 SenseVoice 2024（最准最快）、合成 Kokoro v1.0（整段回答不停顿）。
  * 只用于在界面上标“推荐”，不改任何默认值。
  */
-export const RECOMMENDED_LOCAL_MODELS = { vad: "silero_vad_v6", asr: "sense_voice", tts: "kokoro" };
+// 2026-11-24 n111：与新安装默认组合一致（识别由 SenseVoice 改为整链实测更准的 Qwen3-ASR）
+export const RECOMMENDED_LOCAL_MODELS = { vad: "silero_vad_v6", asr: "qwen3_asr_0_6b", tts: "kokoro" };
 
 /** “当前语音链路”下拉框下方的一句推荐（短名 + 为什么），依据 n95 / n99 本机实测。 */
 export const RECOMMENDED_LOCAL_NOTES = {
   vad: { name: "Silero v6.2", why: "噪声下不误触发、听得最准" },
-  asr: { name: "SenseVoice 2024", why: "实测最准最快" },
+  asr: { name: "Qwen3-ASR", why: "整链实测最准，机器噪声下错字少一半" },
   tts: { name: "Kokoro v1.0", why: "回答不卡顿" },
 };
 
@@ -68,29 +69,31 @@ export function isRecommendedLocalModel(kind, id) {
  * `vad: null` 表示内置能量判停（不用本地判停模型）；`kws` / `denoise` / `turn` 为 null 或不写表示不开
  * （实测前端降噪没有提升识别、语义判停没有可见差别，所以推荐的组合都不开；命令词抗噪经小智上行 Opus 后
  * 认不出的正好也是通用识别听错的那几句，只多救回一两条、普通说话 0 次误执行，n101 起只放进“车间噪声大”）。
+ * 2026-11-24 n111：第一套（`noisy`）即新安装默认组合（`BuiltinLocal::new_install`），标题改为“推荐”；
+ * 原“推荐”（`balanced`，SenseVoice）改为“要回得更快”。
  */
 export const MODEL_COMBOS = [
   {
-    id: "balanced",
-    title: "推荐",
-    fit: "大多数情况",
-    result: "说完约 1.4 秒听到回答，敲击声、机器噪声都不误触发",
-    vad: "silero_vad_v6",
-    denoise: null,
-    turn: null,
-    asr: "sense_voice",
-    tts: "kokoro",
-  },
-  {
     id: "noisy",
-    title: "车间噪声大 / 要听得最准",
-    fit: "风扇、气泵一直响，或口音重、专业词多",
-    result: "机器噪声下错字少一半，回答慢约 0.5 秒",
+    title: "推荐（新安装默认）",
+    fit: "大多数情况，车间里风扇、气泵一直响也听得准",
+    result: "整链实测错字最少（机器噪声下少一半），说完约 2.4 秒听到回答",
     vad: "silero_vad_v6",
     kws: "kws_zipformer_zh",
     denoise: null,
     turn: null,
     asr: "qwen3_asr_0_6b",
+    tts: "kokoro",
+  },
+  {
+    id: "balanced",
+    title: "要回得更快",
+    fit: "环境较安静，或电脑较慢",
+    result: "说完约 1.4 秒听到回答，持续机器噪声下错字多一些",
+    vad: "silero_vad_v6",
+    denoise: null,
+    turn: null,
+    asr: "sense_voice",
     tts: "kokoro",
   },
   {
@@ -158,13 +161,22 @@ export function comboModelIds(combo) {
   return [combo?.vad, combo?.kws, combo?.denoise, combo?.turn, combo?.asr, combo?.tts].filter(Boolean);
 }
 
-/** 这套组合里还没下载的模型名称。 */
-export function comboMissing(combo, models) {
+/** 这套组合里还没下载的模型（`{id, label, downloading}`；清单里没有的也算缺）。 */
+export function comboMissingModels(combo, models) {
   const list = Array.isArray(models) ? models : [];
   return comboModelIds(combo)
     .map((id) => list.find((model) => model.id === id) || { id, label: id, installed: false })
     .filter((model) => !model.installed)
-    .map((model) => model.label || model.id);
+    .map((model) => ({
+      id: model.id,
+      label: model.label || model.id,
+      downloading: localModelView(model).canCancel,
+    }));
+}
+
+/** 这套组合里还没下载的模型名称。 */
+export function comboMissing(combo, models) {
+  return comboMissingModels(combo, models).map((model) => model.label);
 }
 
 /** 一次保存整套组合的本地模型设置（合成音色由后端随模型换成该模型的默认音色）。 */

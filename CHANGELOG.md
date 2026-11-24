@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新安装默认选用整链实测最准的本地语音组合，本地模型页区分判停模型与叠加功能（2026-11-24）
+
+- **现象**：新安装的本地模型全部关着，顶部推荐识别还是 SenseVoice，与整链实测“机器噪声下 Qwen3-ASR 错字少一半”的结论不一致；“按场景选一套”在模型没下载时也会显示“✓ 正在用”。
+- **根因与修复**：新增 `BuiltinLocal::new_install` / `VoiceSettings::new_install`，只在设置文件不存在或没有 `voice` 分区时使用，`BuiltinLocal::default()` 不变，**老用户（含没写 `builtin_local` 的）与损坏的设置文件行为不变**；没下载前判停退回能量判停、识别与合成用云端，“全链路连贯试跑”也照此退回并写明“本地××还没下载”（原先直接报未下载失败，和实际对话不一致）。前端推荐识别改为 Qwen3-ASR，组合第一套改名“推荐（新安装默认）”，正在用但缺模型时列出缺什么并给“下载缺的模型”。另外“拾音判停”组区分“几选一”（判停模型）与“叠加，可同时开”（命令词抗噪、前端降噪、语义判停）并写明能和谁一起用；小智全量补字库不再在界面显示，也不再记“用户取消过就不自动下载”的标记，内置服务每次启动时没装就在后台自动补齐。
+- **验证**：`verify.mjs --finish`：全工作区 clippy / Rust 测试（`moss-voice-host` 53 项，含 `new_install_picks_the_measured_combo_but_existing_users_keep_theirs`、`n111_full_font_pack_always_auto_loads_even_after_old_dismissal`、全链路试跑退回断言）、前端 lint / 单测 390/390（新增 `modelPairingGuide.test.mjs`）/ 构建、浏览器测试 17/18 通过，`twin-render.browser.mjs` 为改动前就偶发失败的用例、单独重跑 2 次均通过；快更本机桌面程序通过。未在真机与真实下载上验证。
+- **关联**：`crates/moss-voice/src/settings.rs`（`new_install`、`load`、`parse_voice_section_checked`）、`frontend/src/voiceState/modelSources.js`（`RECOMMENDED_LOCAL_MODELS`、`MODEL_COMBOS`、`comboMissingModels`）、`frontend/src/components/voice-builtin/{ModelPairingGuide,LocalModelsGroup,BuiltinScreenPreview}.jsx`、`crates/moss-voice-host/src/builtin/{wakeword,models}.rs`（`ensure_full_font_ready_with_base`）、`crates/moss-voice-host/src/builtin/chain_test.rs`、`frontend/tests/modelPairingGuide.test.mjs`；内置语音技术书 n111。
+
 ### 优化数字孪生、创作画板确认框及全站提示文案（2026-11-23）
 
 - **现象**：① 数字孪生 3D 视口把滚轮缩放挂在 React 合成 `onWheel`（passive 监听），缩放时会连带滚动整页；历史任务与实时下发状态直接裸打英文（`preview_ready`、`SENDING`），底部推演栏重复展示循环与时长，右侧卡片堆满 `?` / `Bf` / `RX` / `Pn` / `$CD` 黑话并写死翼宿 V1.0 硬件规格；② 创作画板「确认开始雕刻」弹窗缺少 `Esc` / 遮罩关闭与 Portal 顶层挂载；③ 任务进度浮层、材料实验室、配对弹窗、顶栏提示、底部控制台与语音中心扩展卡仍残留 `job_id` / `workflow_id` / `calibration_id` / `Token` / `HashFS` / `moss-host` / `ONLINE` / 顶栏本地路径等研发词与重复长段。

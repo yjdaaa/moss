@@ -118,6 +118,22 @@ impl BuiltinVoice {
                 .map_err(|e| e.message)
         };
 
+        // n111：选了但还没下载的本地模型，实际对话会退回能量判停 / 云端（见 `local_models_report`），试跑跟它一致，
+        // 只在退回后的那一项也不可用时报错，并写明本地模型还没下载
+        let missing_local = |on: bool, id: &str, kind: ModelKind| -> Option<String> {
+            let spec = local_models::spec_of(id, kind)?;
+            (on && self.models.path_if_installed(spec.id).is_none()).then(|| spec.label.to_owned())
+        };
+        let missing_vad = missing_local(experience.vad, &experience.vad_model, ModelKind::Vad);
+        let missing_asr = missing_local(experience.asr, &experience.asr_model, ModelKind::Asr);
+        let missing_tts = missing_local(experience.tts, &experience.tts_model, ModelKind::Tts);
+        let fallback_note = |missing: &Option<String>| {
+            missing
+                .as_ref()
+                .map(|label| format!("（本地“{label}”还没下载，和实际对话一样先用它）"))
+                .unwrap_or_default()
+        };
+
         // 提前构造主 TTS（第 5 棒必用；免麦模式下第 0 棒也可借它生成真实中文人声种子录音）
         let local_tts_taken = local_parts.tts.take();
         let build_main_tts = || -> Result<(Arc<dyn Tts>, String), String> {
@@ -126,7 +142,7 @@ impl BuiltinVoice {
                     .map_err(|e| e.to_string())?;
                 return Ok((Arc::new(tts), format!("Colab {}", c.tts_model)));
             }
-            if experience.tts {
+            if experience.tts && missing_tts.is_none() {
                 let spec = local_models::spec_of(&experience.tts_model, ModelKind::Tts);
                 let label = spec
                     .map(|s| s.label)
@@ -139,17 +155,28 @@ impl BuiltinVoice {
                 return Ok((t.clone(), format!("本地 {label}")));
             }
             let Some(cloud) = models.tts.as_ref() else {
+                if let Some(label) = &missing_tts {
+                    return Err(format!(
+                        "本地语音合成模型“{label}”尚未下载，云端语音合成也未配置：请到下方“本地模型”下载，或填写云端语音合成"
+                    ));
+                }
                 return Err("云端语音合成尚未配置：请到下方“语音合成”卡片填写并保存，或在顶部切换为本地模型".into());
             };
             let key = secret_of(Section::Tts)?;
             if cloud.kind == ProviderKind::Doubao {
                 let tts = DoubaoTts::new(&cloud.url, &key, &cloud.model, &cloud.voice, cloud.speed)
                     .map_err(|e| e.to_string())?;
-                Ok((Arc::new(tts), format!("豆包 {}", cloud.model)))
+                Ok((
+                    Arc::new(tts),
+                    format!("豆包 {}{}", cloud.model, fallback_note(&missing_tts)),
+                ))
             } else {
                 let tts = OpenAiTts::new(&cloud.url, &key, &cloud.model, &cloud.voice, cloud.speed)
                     .map_err(|e| e.to_string())?;
-                Ok((Arc::new(tts), format!("云端 {}", cloud.model)))
+                Ok((
+                    Arc::new(tts),
+                    format!("云端 {}{}", cloud.model, fallback_note(&missing_tts)),
+                ))
             }
         };
         let main_tts = build_main_tts();
@@ -310,7 +337,9 @@ impl BuiltinVoice {
 
         // ---------------- 第 1 棒：1. 拾音判停 (VAD) ----------------
         let vad_started = std::time::Instant::now();
-        let (mut vad, vad_label): (Box<dyn Vad>, String) = if experience.vad {
+        let (mut vad, vad_label): (Box<dyn Vad>, String) = if experience.vad
+            && missing_vad.is_none()
+        {
             let spec = local_models::spec_of(&experience.vad_model, ModelKind::Vad);
             let label = spec
                 .map(|s| s.label)
@@ -359,7 +388,7 @@ impl BuiltinVoice {
         } else {
             (
                 Box::new(EnergyVad::new(16_000, VadConfig::default())),
-                "内置能量判停".to_owned(),
+                format!("内置能量判停{}", fallback_note(&missing_vad)),
             )
         };
 
@@ -452,7 +481,9 @@ impl BuiltinVoice {
         // ---------------- 第 2 棒：2. 语音识别 (ASR) ----------------
         let asr_started = std::time::Instant::now();
         let hotwords = self.hotwords(experience);
-        let (asr_provider, asr_label): (Arc<dyn Asr>, String) = if experience.asr {
+        let (asr_provider, asr_label): (Arc<dyn Asr>, String) = if experience.asr
+            && missing_asr.is_none()
+        {
             let spec = local_models::spec_of(&experience.asr_model, ModelKind::Asr);
             let label = spec
                 .map(|s| s.label)
@@ -481,7 +512,12 @@ impl BuiltinVoice {
             (Arc::new(local_asr), format!("本地 {label}"))
         } else {
             let Some(cloud) = models.asr.as_ref() else {
-                let msg = "云端语音识别尚未配置：请到下方“语音识别”卡片填写并保存，或在顶部切换为本地模型".to_owned();
+                let msg = match &missing_asr {
+                    Some(label) => format!(
+                        "本地语音识别模型“{label}”尚未下载，云端语音识别也未配置：请到下方“本地模型”下载，或填写云端语音识别"
+                    ),
+                    None => "云端语音识别尚未配置：请到下方“语音识别”卡片填写并保存，或在顶部切换为本地模型".to_owned(),
+                };
                 steps.insert(
                         "asr".into(),
                         serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": 0, "detail": msg }),
@@ -526,7 +562,7 @@ impl BuiltinVoice {
                         .map(|d| {
                             (
                                 Arc::new(d.with_hotwords(&hotwords)) as Arc<dyn Asr>,
-                                format!("豆包 {}", cloud.model),
+                                format!("豆包 {}{}", cloud.model, fallback_note(&missing_asr)),
                             )
                         })
                         .map_err(|e| e.to_string())
@@ -535,7 +571,7 @@ impl BuiltinVoice {
                         .map(|o| {
                             (
                                 Arc::new(o.with_hotwords(&hotwords)) as Arc<dyn Asr>,
-                                format!("云端 {}", cloud.model),
+                                format!("云端 {}{}", cloud.model, fallback_note(&missing_asr)),
                             )
                         })
                         .map_err(|e| e.to_string())
