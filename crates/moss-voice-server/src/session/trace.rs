@@ -416,6 +416,26 @@ pub(crate) fn voice_step_text(kind: &str, data: &Value) -> String {
                 format!("判定这句话已说完（{basis}），马上处理")
             }
         }
+        "user_continued" => {
+            let wait = match data["total_wait_ms"].as_u64() {
+                Some(total) => format!("当时判停等了 {total} ms"),
+                None => "当时不是静音判停抢跑".to_owned(),
+            };
+            let pause = ms_of(data, "pause_estimate_ms");
+            let what = if data["phase"].as_str() == Some("speaking") {
+                match data["since_playback_ms"].as_u64() {
+                    Some(ms) => format!("回答开播 {ms} ms 后用户又出声"),
+                    None => "回答期间用户又出声".to_owned(),
+                }
+            } else if data["merged"].as_bool() == Some(true) {
+                "还没开口用户就接着说，与前半句合并重新识别".to_owned()
+            } else if data["too_late"].as_bool() == Some(true) {
+                "还没开口用户就接着说，但已开始执行工具，按新的一句处理".to_owned()
+            } else {
+                "思考中用户又出声".to_owned()
+            };
+            format!("判停复盘：{what}（{wait}，用户停顿约 {pause} ms）")
+        }
         "user_audio" => {
             let seconds = data["duration_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
             match data["file"].as_str() {
@@ -1268,6 +1288,22 @@ mod tests {
                 "smart_turn_prob": null, "extra_wait_ms": 0})
             ),
             "判定这句话已说完（句尾规则要等 250 ms，没有语义判停结果），马上处理"
+        );
+        assert_eq!(
+            text(
+                "user_continued",
+                serde_json::json!({"phase": "thinking", "merged": true, "too_late": false,
+                "total_wait_ms": 400, "pause_estimate_ms": 520})
+            ),
+            "判停复盘：还没开口用户就接着说，与前半句合并重新识别（当时判停等了 400 ms，用户停顿约 520 ms）"
+        );
+        assert_eq!(
+            text(
+                "user_continued",
+                serde_json::json!({"phase": "speaking", "merged": false, "too_late": false,
+                "total_wait_ms": 250, "since_playback_ms": 900, "pause_estimate_ms": 1400})
+            ),
+            "判停复盘：回答开播 900 ms 后用户又出声（当时判停等了 250 ms，用户停顿约 1400 ms）"
         );
         assert_eq!(
             text(

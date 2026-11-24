@@ -191,6 +191,58 @@ impl<'a> Session<'a> {
     }
 
     /// 播放中插话或思考中接着说：接管这一轮，带着开头（思考中还拼上前半句）回到聆听。
+    /// n112 判停复盘：上一句已被判停、还没开口或已经在回答时用户又出声了，记下当时的判停结论与停顿长短。
+    /// 停顿 = 判停静音 [`BASE_SILENCE_MS`] + 抢跑开始到现在 − 开头里已经是人声的部分（开头带最多 1 秒的预录，
+    /// 前面安静的那段不算），是估算值。
+    fn trace_user_continued(
+        &self,
+        head: &[i16],
+        thinking: bool,
+        may_follow_up: bool,
+        merged: bool,
+        since_playback_ms: Option<u128>,
+    ) {
+        let Some(turn) = self
+            .turn
+            .as_ref()
+            .filter(|turn| turn.kind == TurnKind::Answer && !turn.report)
+        else {
+            return;
+        };
+        if self.trace_handle().is_none() {
+            return;
+        }
+        let rate = u64::from(self.uplink_rate.max(1));
+        let head_ms = head.len() as u64 * 1000 / rate;
+        let window = (self.uplink_rate as usize / 50).max(1);
+        let start_rms = self.shared.config.vad.start_rms;
+        let quiet = head
+            .chunks(window)
+            .take_while(|w| frame_rms(w) < start_rms)
+            .map(<[i16]>::len)
+            .sum::<usize>();
+        let voiced_ms = head.len().saturating_sub(quiet) as u64 * 1000 / rate;
+        let since_turn_ms = turn.started.elapsed().as_millis() as u64;
+        let (text_wait_ms, total_wait_ms) = turn.endpoint_wait.unzip();
+        self.trace_record(
+            "user_continued",
+            serde_json::json!({
+                "phase": if thinking { "thinking" } else { "speaking" },
+                "merged": merged,
+                "too_late": may_follow_up && !merged,
+                "text": turn.user,
+                "text_wait_ms": text_wait_ms,
+                "total_wait_ms": total_wait_ms,
+                "released": turn.released_at.is_some(),
+                "since_release_ms": turn.released_at.map(|at| at.elapsed().as_millis() as u64),
+                "since_playback_ms": since_playback_ms.map(|ms| ms as u64),
+                "head_ms": head_ms,
+                "voiced_head_ms": voiced_ms,
+                "pause_estimate_ms": (BASE_SILENCE_MS + since_turn_ms).saturating_sub(voiced_ms),
+            }),
+        );
+    }
+
     pub(super) async fn take_over(
         &mut self,
         socket: &mut crate::link::Link,
@@ -211,6 +263,7 @@ impl<'a> Session<'a> {
                 .as_ref()
                 .and_then(|turn| turn.tool_latch.as_ref())
                 .is_none_or(|latch| latch.try_abandon());
+        self.trace_user_continued(&head, thinking, may_follow_up, abandoned, elapsed);
         if may_follow_up && !abandoned {
             return Ok(());
         }

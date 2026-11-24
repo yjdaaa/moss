@@ -212,6 +212,8 @@ impl<'a> Session<'a> {
             release,
             fresh_history,
             hold: None,
+            endpoint_wait: None,
+            released_at: None,
         }) && !replaced.close
         {
             self.stash_uncommitted_photo(&mut replaced);
@@ -577,6 +579,7 @@ impl<'a> Session<'a> {
                         // 抢跑：任务在静音 BASE_SILENCE_MS 时就开始了；结合句尾词与尾音语义概率决定还要等多久才开口
                         let total =
                             crate::fast::endpoint_wait_ms_with_prosody(&text, turn.smart_turn_prob);
+                        turn.endpoint_wait = Some((crate::fast::endpoint_wait_ms(&text), total));
                         let wait = total.saturating_sub(BASE_SILENCE_MS);
                         let now = Instant::now();
                         let until = turn.started + Duration::from_millis(wait);
@@ -936,6 +939,9 @@ impl<'a> Session<'a> {
     /// 认定用户这句话说完了：放行对话任务的工具调用，并开始处理它的输出。
     fn release_turn(&mut self) {
         if let Some(turn) = self.turn.as_mut() {
+            if turn.speculative {
+                turn.released_at = Some(Instant::now());
+            }
             turn.hold = None;
             turn.speculative = false;
             if let Some(release) = &turn.release {

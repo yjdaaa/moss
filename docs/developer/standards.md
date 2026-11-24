@@ -36,7 +36,7 @@
 | `scripts/voice-helper/` | 带语音 helper 的专用安装包构建、包内容核查、原生依赖许可审计与源码收集（NV18） |
 | `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
 | `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |
-| `scripts/voice-bench/` | 整条语音链路实测的说话片段生成与结果汇总（配合 `moss-voice-server` 的 `real_local_chain_matrix`） |
+| `scripts/voice-bench/` | 整条语音链路实测的说话片段生成与结果汇总（配合 `moss-voice-server` 的 `real_local_chain_matrix`）；`endpoint-review.mjs` 从完整过程记录统计判停抢话与白等（n112） |
 | `scripts/tests/` | 脚本单测，CI 以 `node --test scripts/tests/*.test.mjs` 运行 |
 | `.githooks/` | 受管本地 Git 钩子（`pre-commit`、`commit-msg`），通过 `node scripts/verify.mjs --install-hooks` 启用 |
 

@@ -393,6 +393,10 @@ struct ActiveTurn {
     /// 抢跑中：到这个时刻（且用户没在出声）才认定这句话说完、开始处理对话任务的输出；
     /// 第二项是最晚放行时刻。期间任务照常识别、请求大模型、合成，但不开口、不执行工具。
     hold: Option<(Instant, Instant)>,
+    /// 抢跑轮次识别出文字时的判停结论（句尾规则等待、最终等待，毫秒），供“用户接着说”时一并记下（n112 判停复盘）
+    endpoint_wait: Option<(u64, u64)>,
+    /// 抢跑轮次被认定说完、放行开口的时刻
+    released_at: Option<Instant>,
 }
 
 impl Drop for ActiveTurn {

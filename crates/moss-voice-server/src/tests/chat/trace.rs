@@ -944,3 +944,80 @@ async fn failed_stream_does_not_claim_denoise() {
         "整段识别后照常对话"
     );
 }
+
+/// n112 判停复盘：话说一半被判停、还没开口用户就接着说，过程记录写下当时的判停结论、是否合并和用户停顿长短，
+/// 供 `scripts/voice-bench/endpoint-review.mjs` 统计抢话与白等。
+#[test]
+fn process_trace_records_user_continuing_after_an_endpoint_decision() {
+    let runtime = tempfile::tempdir().unwrap();
+    set_switch(runtime.path(), true);
+    let trace_dir = runtime.path().join(laser_runtime::process_trace::TRACE_DIR);
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: vec!["只听到半句的回答。"],
+                calls: Vec::new(),
+                delay_ms: 3000,
+            },
+            say(&["完整的回答。"]),
+        ])),
+        ..FakeLlm::default()
+    };
+    let (conversation, trace) = traced_conversation(
+        runtime.path(),
+        &["帮我把功率", "帮我把功率调到八十"],
+        llm,
+        ConversationSettings::default(),
+    );
+    let (server, registry) = start_traced_server(conversation, trace, None);
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut first = tone(UP, 300.0, 600, 8000.0);
+    first.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&first));
+    assert_eq!(read_json(&mut device)["text"], "帮我把功率");
+    let mut second = tone(UP, 300.0, 600, 8000.0);
+    second.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&second));
+    assert!(texts(&collect_items(&mut device)).contains(&"句:完整的回答。".to_owned()));
+
+    let lines = wait_for_kind(&trace_dir, "user_continued");
+    let kinds: Vec<&str> = lines.iter().filter_map(|l| l["kind"].as_str()).collect();
+    let decision = lines
+        .iter()
+        .find(|l| l["kind"] == "hold_decision")
+        .unwrap_or_else(|| panic!("{kinds:?}"));
+    let continued = lines
+        .iter()
+        .find(|l| l["kind"] == "user_continued")
+        .unwrap();
+    assert_eq!(
+        continued["turn"], decision["turn"],
+        "和判停结论记在同一轮，复盘脚本按轮次对上"
+    );
+    assert_eq!(continued["phase"], "thinking");
+    assert_eq!(continued["merged"], true);
+    assert_eq!(continued["too_late"], false);
+    assert_eq!(continued["text"], "帮我把功率");
+    assert_eq!(continued["text_wait_ms"], decision["text_wait_ms"]);
+    // 句尾词表认不出“把功率”这种没说完的结构，按“拿不准”只多等 150 ms；测试里音频比实时快，
+    // 接着说时是否已放行取决于时序，只核对两项一致
+    assert_eq!(continued["text_wait_ms"], 400);
+    let released = continued["released"].as_bool().unwrap();
+    assert_eq!(continued["since_release_ms"].as_u64().is_some(), released);
+    assert!(continued["since_playback_ms"].is_null(), "还没开播");
+    // 停顿按真实时间估算；测试里音频比实时快，只核对开头里人声部分不超过整个开头
+    assert!(continued["pause_estimate_ms"].as_u64().is_some());
+    assert!(continued["voiced_head_ms"].as_u64() <= continued["head_ms"].as_u64());
+    assert!(
+        continued["step"]
+            .as_str()
+            .unwrap()
+            .starts_with("判停复盘：还没开口用户就接着说，与前半句合并重新识别"),
+        "{}",
+        continued["step"]
+    );
+}

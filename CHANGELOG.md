@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 过程记录补上判停复盘数据，并提供统计抢话与白等的脚本（2026-11-24）
+
+- **现象**：要决定是否接中文文本判停模型或做自适应等待，得先知道现在的句尾规则有多少次抢话、多少次白等，但过程记录只写了“开口前等多久”，没写用户之后有没有接着说，无从统计。
+- **根因与修复**：过程记录新增 `user_continued`（判停后用户又出声时的阶段、是否合并、句尾规则与最终等待、距放行与开播的时间、估算停顿，与 `hold_decision` 同一轮次）；新增 `scripts/voice-bench/endpoint-review.mjs` 按三档统计疑似抢话、接住的接着说、白等与停顿分布，样本少于 30 轮不下结论。只加记录，判停与回答行为不变。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（新增 `process_trace_records_user_continuing_after_an_endpoint_decision`，`step_texts_say_what_each_step_does` 增加两条）、脚本单测 75/75（新增 `endpoint-review.test.mjs` 4 项）、快更本机桌面程序；本机还没有真实过程记录，统计结论待实际使用后再跑，未在真机上验证。
+- **关联**：`crates/moss-voice-server/src/session/input.rs`（`trace_user_continued`）、`session/turn.rs`（`endpoint_wait`、`released_at`）、`session/trace.rs`、`scripts/voice-bench/endpoint-review.mjs`；内置语音技术书 n112。
+
 ### 新安装默认选用整链实测最准的本地语音组合，本地模型页区分判停模型与叠加功能（2026-11-24）
 
 - **现象**：新安装的本地模型全部关着，顶部推荐识别还是 SenseVoice，与整链实测“机器噪声下 Qwen3-ASR 错字少一半”的结论不一致；“按场景选一套”在模型没下载时也会显示“✓ 正在用”。
