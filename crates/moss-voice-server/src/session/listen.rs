@@ -719,6 +719,12 @@ impl<'a> Session<'a> {
                 && let Some(probe) = self.listen.follow_probe.take()
             {
                 self.listen.follow.reset();
+                if probe.checking
+                    && let Some(task) = self.listen.stop_check.take()
+                {
+                    // 判停模型确认是人声、要整句合并重识别：提前送的“停”复核作废（n115），与原先一致
+                    task.abort();
+                }
                 self.trace_record("follow_probe", serde_json::json!({"phase": "confirmed"}));
                 return self.take_over(socket, probe.head, true).await;
             }

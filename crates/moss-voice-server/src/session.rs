@@ -133,7 +133,12 @@ enum Phase {
 impl Phase {
     /// 刚发出 `tts start`：首帧不早于保护间隔结束。
     fn speaking_after_tts_start() -> Self {
-        let not_before = Instant::now() + TTS_START_GUARD;
+        Self::speaking_after_tts_start_at(Instant::now())
+    }
+
+    /// `tts start` 在 `at` 时刻已提前发出（n115）：首帧不早于那时加保护间隔，已过了就立即起播。
+    fn speaking_after_tts_start_at(at: Instant) -> Self {
+        let not_before = (at + TTS_START_GUARD).max(Instant::now());
         Phase::Speaking {
             next: not_before,
             not_before,
@@ -294,7 +299,15 @@ enum UtteranceEnd {
 struct FollowProbe {
     head: Vec<i16>,
     until: Instant,
+    /// 这阵声音之后已经安静了多少个采样（n115：安静够了就提前送识别复核“停”）
+    quiet: usize,
+    /// 已经按眼下的开头送去复核“停”了（之后又出声就作废，到点按完整开头重新复核）
+    checking: bool,
 }
+
+/// 确认窗口里这阵声音之后安静了这么久，就当它说完了，先送识别复核是不是“停”（n115）：
+/// “停”这类短词说完不必等满 [`FOLLOW_CONFIRM`]
+const STOP_RECHECK_QUIET: Duration = Duration::from_millis(250);
 
 /// 候选交给本地判停模型确认的最长时间：人声通常 200–400 ms 内确认，气泵咔嗒、敲击始终确认不了。
 const FOLLOW_CONFIRM: Duration = Duration::from_millis(700);
@@ -382,6 +395,9 @@ struct ActiveTurn {
     listen_after: Option<bool>,
     /// 这一轮已开始执行工具（之后不再因用户接着说话而整轮重来）
     tools_started: bool,
+    /// 音频还没到就先发了 `tts start` 的时刻（n115，见 [`TurnEvent::SpeechSoon`]）：首帧不早于它加保护间隔；
+    /// 这一轮最后没出声时要补发 `tts stop`
+    tts_started_at: Option<Instant>,
     /// 这一轮执行过的每批工具调用与已收到的结果（调用 id → 结果文字），被打断时补记进历史（n114）
     tool_rounds: Vec<(Vec<moss_voice_providers::ToolCall>, Vec<(String, String)>)>,
     /// 与对话任务共享的工具执行闩（没有闸门的轮次为空）
@@ -840,9 +856,10 @@ struct ListenAndBargeState {
     /// 用了本地判停模型时，能量检测的“接着说”候选要等模型也听到人声才算（2026-11-15 整链实测：
     /// 突发噪声下每次敲击都会放弃已备好的回答）
     follow_probe: Option<FollowProbe>,
-    /// 工具执行中只听“停”（n114）：能量检测听到一阵人声后再收 [`FOLLOW_CONFIRM`] 长的音频
-    /// （开头、还差多少个采样），收够了交给识别看是不是停止说法
-    stop_watch: Option<(Vec<i16>, usize)>,
+    /// 工具执行中只听“停”（n114）：能量检测听到一阵人声后最多再收 [`FOLLOW_CONFIRM`] 长的音频，
+    /// 收够了或之后安静了 [`STOP_RECHECK_QUIET`]（n115）就交给识别看是不是停止说法。
+    /// `until` 不用：按收到的音频时长算（`quiet` 之外另用 `head` 长度）
+    stop_watch: Option<(FollowProbe, usize)>,
     /// 下一轮由静音判停触发（不是设备 listen stop）：可以抢跑
     gate_next_turn: bool,
     /// 思考期间最近一次听到明显人声的时刻

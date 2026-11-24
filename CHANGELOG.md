@@ -11,6 +11,13 @@
 - **验证**：`verify.mjs --finish` 通过：分层与仓库规范检查、脚本单测 75/75、前端 ESLint、前端单测 390/390（`targetedFixes`、`uiModalAndScrollFixes`、`uiPolishB` 补齐速度无损回显、Portal/`Esc` 与标签断言）、生产构建、浏览器测试 18/18（`twin-estop`、`ai-preview` 补折叠展开与栈顶 `Esc` 收起）及本机桌面程序快更全部通过；未连真实激光硬件实测（`unverified`）。
 - **关联**：`frontend/src/components/{MaterialModal,ApprovalCenter,AiPreviewCenter,CloseConfirmModal,SettingsModal,Navbar,SideNav,AppDialog,SendOverlay}.jsx`、`frontend/src/components/{workbench/WorkbenchMaterialCard,material-lab/LabParamsPanel}.jsx`、`frontend/src/pages/{TwinPage,HomePage,DrawPage}.jsx`、`frontend/src/styles/15-addenda-2026-11.css`、`docs/developer/frontend-behavior.md`。
 
+### 语音链路四处提速：工具不等开场白、“停”早复核、`tts start` 提前、命令词短回答少等（2026-11-24）
+
+- **现象**：大模型先说开场白再调工具时工具要等开场白合成完才跑；思考中一声“停”要等 700 ms 确认窗口才送识别；每轮首段音频到了才发 `tts start`、再等 180 ms 才起播；开着命令词抗噪时“第一个”“再来一次”这类短回答要多等最多 500 ms。
+- **根因与修复**：`Turn::generate_split` 让工具与开场白合成并行（门禁不变）；确认窗口里声音之后安静 250 ms 就提前复核“停”；新增 `TurnEvent::SpeechSoon`，第一句交给合成时先发 `tts start`，没出声时补发 `tts stop`；命令词退出类不再只凭“一 / 再”就等，最多等到尾音送完。**行为变更**：自动拾音下“思考中接着说”的窗口早结束一个首句合成时间。
+- **验证**：`verify.mjs --finish` 通过：全工作区 clippy / Rust 测试（`moss-voice-server` 410 项，新增 `tools_start_without_waiting_for_the_preamble_to_be_synthesized`、`tts_start_goes_out_while_the_first_sentence_is_still_synthesizing`、`a_short_stop_is_rechecked_as_soon_as_it_is_followed_by_quiet`，命令词测试补“第一个”等 4 例；时间相关的用例连跑 3 遍均通过），快更本机桌面程序。收益为估算，未在真机上测首声时间。
+- **关联**：`crates/moss-voice-server/src/conversation.rs`（`generate_split`、`PendingSpeech`、`SpeechSoon`、`command_hint_fits`、`COMMAND_HINT_IPC_MARGIN`）、`session/input.rs`（`track_quiet`、`STOP_RECHECK_QUIET`）、`session/turn.rs`（`tts_started_at`）、`session.rs`（`speaking_after_tts_start_at`）；内置语音技术书 n115。
+
 ### 命令词不再把“暂停”“别停”当急停，打断工具与说“停”不再丢失（2026-11-24）
 
 - **现象**：开着命令词抗噪（新安装默认开）时，走边框说“暂停”或说“别停”会急停复位；工具跑到一半被打断后大模型不知道工具已执行，可能再执行一遍；自动拾音时工具执行中说“停”没反应；另有合成失败设备什么都收不到、`<think>` 推理内容被念出来、粗筛可能剪掉停止工具等问题。

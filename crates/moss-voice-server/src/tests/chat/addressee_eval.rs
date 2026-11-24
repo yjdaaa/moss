@@ -96,6 +96,7 @@ fn real_llm_addressee_eval() {
                     allow_silent: true,
                     allow_background: false,
                     command_hint: Arc::default(),
+                    command_hint_until: None,
                 }),
             );
             let mut silent = None;

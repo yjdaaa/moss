@@ -47,6 +47,7 @@ impl<'a> Session<'a> {
                     // 声纹按人记忆开启时历史按人提交，后台结果不知道该记给谁：不转后台
                     allow_background: conversation.personal_context.is_none(),
                     command_hint: command_hint.clone(),
+                    command_hint_until: self.listen.kws_tail_until.map(Instant::into_std),
                 }),
             )
         } else {
@@ -206,6 +207,7 @@ impl<'a> Session<'a> {
             close: false,
             listen_after: None,
             tools_started: false,
+            tts_started_at: None,
             tool_rounds: Vec::new(),
             tool_latch,
             speculative: gated,
@@ -433,6 +435,7 @@ impl<'a> Session<'a> {
                     | TurnEvent::Timing { .. }
                     | TurnEvent::PersonResolved { .. }
                     | TurnEvent::Trace { .. }
+                    | TurnEvent::SpeechSoon
                     | TurnEvent::Warning(_),
                 ) => {}
                 Some(TurnEvent::Heard(text)) if self.can_ask_whether_addressed() => {
@@ -494,6 +497,21 @@ impl<'a> Session<'a> {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.tools_started = true;
                     turn.tool_rounds.push((calls, Vec::new()));
+                }
+            }
+            TurnEvent::SpeechSoon => {
+                // 已放行（等待期间会话不取事件）、还在思考、没被插话暂停：先发 `tts start`（n115）
+                let early = matches!(self.phase, Phase::Thinking)
+                    && self.listen.paused.is_none()
+                    && !self.music.as_ref().is_some_and(|music| music.active())
+                    && self.turn.as_ref().is_some_and(|turn| {
+                        !turn.audio_started && !turn.close && turn.tts_started_at.is_none()
+                    });
+                if early {
+                    if let Some(turn) = self.turn.as_mut() {
+                        turn.tts_started_at = Some(Instant::now());
+                    }
+                    self.tts(socket, TtsState::Start, None).await?;
                 }
             }
             TurnEvent::ToolsFinished(results) => {
@@ -568,16 +586,22 @@ impl<'a> Session<'a> {
             }
             TurnEvent::TextReply(text) => {
                 // 合成不可用仍给设备文字，不用静音音频冒充已播报。
-                let audio_started = self.turn.as_mut().is_some_and(|turn| {
-                    turn.debug_text_reply.push(text.clone());
-                    turn.audio_started
-                });
+                let (audio_started, early_start) =
+                    self.turn.as_mut().map_or((false, false), |turn| {
+                        turn.debug_text_reply.push(text.clone());
+                        (turn.audio_started, turn.tts_started_at.is_some())
+                    });
                 if audio_started {
                     // 前面的句子还在播：这时发 tts stop 会让设备丢掉排着的音频（n114），只记事件
                     self.event(format!("有一句合成失败，没能播出：{text}"));
                     return Ok(());
                 }
-                self.tts(socket, TtsState::Start, None).await?;
+                if !early_start {
+                    self.tts(socket, TtsState::Start, None).await?;
+                }
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.tts_started_at = None;
+                }
                 self.tts(socket, TtsState::SentenceStart, Some(text))
                     .await?;
                 self.tts(socket, TtsState::Stop, None).await?;
@@ -736,6 +760,7 @@ impl<'a> Session<'a> {
                 };
                 let first = !turn.audio_started;
                 turn.audio_started = true;
+                let early_start = turn.tts_started_at;
                 if first
                     && self
                         .bg
@@ -753,8 +778,13 @@ impl<'a> Session<'a> {
                 if first {
                     self.listen.playback_started = None;
                     self.pump.begin();
-                    self.tts(socket, TtsState::Start, None).await?;
-                    self.phase = Phase::speaking_after_tts_start();
+                    self.phase = match early_start {
+                        Some(at) => Phase::speaking_after_tts_start_at(at),
+                        None => {
+                            self.tts(socket, TtsState::Start, None).await?;
+                            Phase::speaking_after_tts_start()
+                        }
+                    };
                     self.set_state("speaking");
                 }
                 let downlink = self.shared.config.downlink_sample_rate;
@@ -858,7 +888,12 @@ impl<'a> Session<'a> {
                         *next = Instant::now();
                     }
                 } else {
-                    return self.end_turn(false).await;
+                    // 提前发了 `tts start` 却没出声（合成都失败了）：补发 `tts stop`，设备回到聆听（n115）
+                    let early_start = turn.tts_started_at.is_some();
+                    if early_start {
+                        self.tts(socket, TtsState::Stop, None).await?;
+                    }
+                    return self.end_turn(early_start).await;
                 }
             }
         }
@@ -1244,6 +1279,11 @@ impl<'a> Session<'a> {
         if self.turn.is_some() {
             self.trace_record("interrupt", serde_json::json!({"reason": reason}));
         }
+        // 提前发了 `tts start`、还没出声就被打断：设备已切到说话状态，要补发 `tts stop`（n115）
+        let early_start = self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.tts_started_at.is_some() && !turn.audio_started);
         self.finish_timing("interrupted");
         self.screen.preview_hold = None;
         self.screen.pending_oled_preview = None;
@@ -1332,6 +1372,9 @@ impl<'a> Session<'a> {
                 self.event(format!("对话被打断（{reason}）"));
                 self.phase = Phase::Idle;
                 self.set_state("idle");
+                if early_start {
+                    self.tts(socket, TtsState::Stop, None).await?;
+                }
                 Ok(())
             }
             _ => Ok(()),

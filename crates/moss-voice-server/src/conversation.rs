@@ -234,8 +234,14 @@ const DEVICE_CAMERA_TOOL: &str = "device__self_camera_take_photo";
 
 /// 命令词纠正只用于这么短的识别结果（n101）：停止 / 退出命令本来就短，长句以识别为准。
 const MAX_COMMAND_FUSION_CHARS: usize = 4;
-/// 识别结果像被听错的命令、命令词结果还没到时最多等这么久（n101）
+/// 识别结果像被听错的命令、命令词结果还没到时最多等这么久（n101）；尾音送完后结果不会再来，
+/// 最多只等到那时（[`TurnGate::command_hint_until`]，n115）
 const COMMAND_HINT_WAIT: Duration = Duration::from_millis(500);
+/// 尾音最后一段送进判停流后，命令词结果经辅助程序回来的余量
+const COMMAND_HINT_IPC_MARGIN: Duration = Duration::from_millis(100);
+/// 退出类“相同的字”只认这几个（n115）：“一 / 再”太常见，“第一个”“再来一次”不能因此等命令词结果；
+/// 实测的听错说法（跪下、看一下、问一下、待见……）都含“下 / 见”
+const EXIT_HINT_CHARS: &str = "退下见";
 
 /// 识别结果像不像被听错的命令词（n101）：没识别出字；或者不超过 4 个字、且和这类命令词有相同的字
 /// （噪声里实测的错法：“跪下 / 会一下 / 不理下 / 看一下”之于“退下 / 退一下”，“待见”之于“再见”，“天下”之于“停下”）；
@@ -267,7 +273,13 @@ pub(crate) fn command_hint_fits(
     moss_voice_providers::local::COMMAND_KEYWORDS
         .iter()
         .filter(|(_, _, of)| *of == kind)
-        .any(|(_, label, _)| label.chars().any(|c| normalized.contains(c)))
+        .any(|(_, label, _)| {
+            label.chars().any(|c| {
+                normalized.contains(c)
+                    && (kind != moss_voice_providers::local::CommandKeyword::Exit
+                        || EXIT_HINT_CHARS.contains(c))
+            })
+        })
 }
 
 /// 只读慢查询转到后台时说的话（n100）
@@ -806,6 +818,10 @@ impl Conversation {
     }
 }
 
+/// 还在合成、送往会话的这一轮回答（送去朗读的正文，是否已朗读过内容），见 [`Turn::generate_split`]（n115）
+type PendingSpeech<'s> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = (String, bool)> + Send + 's>>;
+
 /// 任务取消守卫：对话被打断丢弃时，自动 abort 后台正在预合成的 TTS 任务。
 struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
 
@@ -992,6 +1008,9 @@ pub enum TurnEvent {
     /// 这一轮开始执行这批工具：此后用户接着说话不再整轮重来（工具可能有副作用，不能执行两遍）。
     /// 会话记下这批调用，这一轮被打断时补记进历史（n114）
     ToolsStarted(Vec<ToolCall>),
+    /// 大模型的第一句交给合成了，音频马上就到（n115）：会话（已放行时）先发 `tts start`，让固件切到说话状态
+    /// 要的保护间隔和合成时间重叠，不再等音频到了才发
+    SpeechSoon,
     /// 上一批工具的结果（调用 id、写给大模型的结果文字），会话据此补记被打断那一轮的历史（n114）
     ToolsFinished(Vec<(String, String)>),
     Timing {
@@ -1791,8 +1810,8 @@ impl Turn {
         self.conversation.asr.transcribe(pcm, sample_rate).await
     }
 
-    /// 让模型生成一轮回复，边生成边切句合成。返回（回复或错误，是否已朗读过内容，送去朗读的正文）。
-    /// 正文已去掉 `<think>` 思考内容（n114）；大模型中途出错时，调用方用它把已经说出去的半句记进历史。
+    /// 让模型生成一轮回复，边生成边切句合成，等句子都合成完才返回。返回（回复或错误，是否已朗读过内容，
+    /// 送去朗读的正文）。正文已去掉 `<think>` 思考内容（n114）；大模型中途出错时，调用方用它把已经说出去的半句记进历史。
     async fn generate(
         &self,
         messages: &[ChatMessage],
@@ -1802,6 +1821,23 @@ impl Turn {
         Result<moss_voice_providers::LlmReply, ProviderError>,
         bool,
         String,
+    ) {
+        let (reply, speaking) = self.generate_split(messages, tools, emotion_sent).await;
+        let (streamed, spoke) = speaking.await;
+        (reply, spoke, streamed)
+    }
+
+    /// 同 [`Self::generate`]，但大模型一回完就返回（n115）：还没合成完的句子作为 [`PendingSpeech`] 交给调用方，
+    /// 回复带工具调用时可以先开跑工具、再一起等它，不用等开场白合成完。调用方必须在这一轮发出下一件事
+    /// （下一次请求大模型、固定话术、结束）之前等完它。
+    async fn generate_split<'s>(
+        &'s self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        emotion_sent: &'s mut bool,
+    ) -> (
+        Result<moss_voice_providers::LlmReply, ProviderError>,
+        PendingSpeech<'s>,
     ) {
         let (delta_tx, mut delta_rx) = unbounded_channel::<String>();
         let llm = self.conversation.llm.clone();
@@ -1825,8 +1861,9 @@ impl Turn {
         }
         let trace_began = Instant::now();
         // 这一轮大模型吐出第一个字的时刻（毫秒，从请求发出算起）；没吐字为 u64::MAX
-        let first_delta_ms = std::sync::atomic::AtomicU64::new(u64::MAX);
-        let first_delta = &first_delta_ms;
+        let first_delta_ms = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let first_delta = &*first_delta_ms;
+        let speaking_first_delta = first_delta_ms.clone();
         let generation = async move {
             let reply = llm.chat(messages, tools, delta_tx).await;
             if trace_on {
@@ -1847,13 +1884,15 @@ impl Turn {
             }
             reply
         };
-        let speaking = async {
+        let speaking = async move {
+            let first_delta = &*speaking_first_delta;
             let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(4);
             let feeder = async {
                 let sentence_tx = sentence_tx;
                 let mut segmenter = Segmenter::new();
                 let mut think = ThinkFilter::default();
                 let mut streamed = String::new();
+                let mut announced = false;
                 while let Some(raw) = delta_rx.recv().await {
                     self.timing("first_llm_delta");
                     let _ = first_delta.compare_exchange(
@@ -1873,6 +1912,9 @@ impl Turn {
                     }
                     for sentence in segmenter.push(&delta, Instant::now().into_std()) {
                         self.timing("first_sentence");
+                        if !std::mem::replace(&mut announced, true) {
+                            self.send(TurnEvent::SpeechSoon);
+                        }
                         if sentence_tx.send(sentence).await.is_err() {
                             return streamed;
                         }
@@ -1889,6 +1931,9 @@ impl Turn {
                 }
                 if let Some(rest) = segmenter.finish() {
                     self.timing("first_sentence");
+                    if !announced {
+                        self.send(TurnEvent::SpeechSoon);
+                    }
                     let _ = sentence_tx.send(rest).await;
                 }
                 streamed
@@ -1928,12 +1973,24 @@ impl Turn {
             };
             tokio::join!(feeder, tts_consumer)
         };
-        let (reply, (streamed, spoke)) = tokio::join!(generation, speaking);
+        let mut speaking: PendingSpeech<'s> = Box::pin(speaking);
+        tokio::pin!(generation);
+        let mut finished = None;
+        let reply = loop {
+            tokio::select! {
+                reply = &mut generation => break reply,
+                out = &mut speaking, if finished.is_none() => finished = Some(out),
+            }
+        };
         let reply = reply.map(|mut reply| {
             reply.text = strip_think(&reply.text);
             reply
         });
-        (reply, spoke, streamed)
+        let rest = match finished {
+            Some(out) => Box::pin(std::future::ready(out)),
+            None => speaking,
+        };
+        (reply, rest)
     }
 
     async fn run_tools(&self, calls: &[ToolCall]) -> Vec<(ToolCall, ToolOutcome)> {
@@ -2073,7 +2130,10 @@ impl Turn {
             && (command_hint_fits(CommandKeyword::Stop, &normalized)
                 || command_hint_fits(CommandKeyword::Exit, &normalized))
         {
-            let deadline = std::time::Instant::now() + COMMAND_HINT_WAIT;
+            let mut deadline = std::time::Instant::now() + COMMAND_HINT_WAIT;
+            if let Some(tail_end) = gate.command_hint_until {
+                deadline = deadline.min(tail_end + COMMAND_HINT_IPC_MARGIN);
+            }
             while hint.is_none() && std::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 hint = read();
@@ -2496,8 +2556,22 @@ impl Turn {
                 });
                 return;
             }
-            let (reply, spoke, streamed) =
-                self.generate(&messages, &tools, &mut emotion_sent).await;
+            let (reply, speaking) = self
+                .generate_split(&messages, &tools, &mut emotion_sent)
+                .await;
+            // 回复里既有要说的开场白又有工具调用：工具不等开场白合成完就开跑，执行工具时再一起等（n115）。
+            // 有开场白就算这一轮已经开口（原先合成完才知道；只有开场白整句合成失败时两者不同）
+            let overlap = reply.as_ref().is_ok_and(|reply| {
+                !reply.tool_calls.is_empty() && moss_voice_providers::text::speakable(&reply.text)
+            });
+            let mut pending = None;
+            let (spoke, streamed) = if overlap {
+                pending = Some(speaking);
+                (true, String::new())
+            } else {
+                let (streamed, spoke) = speaking.await;
+                (spoke, streamed)
+            };
             spoke_any |= spoke;
             let mut reply = match reply {
                 Ok(reply) => reply,
@@ -2523,6 +2597,20 @@ impl Turn {
             ));
             // 抢跑：这一轮可能在用户话还没说完时就开始了，工具调用与退出工具都可能有副作用，等会话确认说完再执行
             self.wait_release().await;
+            // 不正常执行工具的几种情况（超过轮数、不接话、结束对话、点歌混调）：先把开场白说完，与原先一致
+            let special = rounds > settings.max_tool_rounds
+                || reply.tool_calls.iter().any(|call| {
+                    call.function.name == STAY_SILENT_TOOL
+                        || call.function.name == END_CONVERSATION_TOOL
+                })
+                || (reply.tool_calls.len() != 1
+                    && reply
+                        .tool_calls
+                        .iter()
+                        .any(|call| call.function.name == "play_music"));
+            if special && let Some(speech) = pending.take() {
+                speech.await;
+            }
             if rounds > settings.max_tool_rounds {
                 // 不执行这一轮的工具；补上结果，保证历史中每个调用都有对应结果
                 for call in &reply.tool_calls {
@@ -2691,9 +2779,14 @@ impl Turn {
                         outcomes
                     }
                 }
+            } else if let Some(speech) = pending.take() {
+                // 开场白边合成边播，工具同时跑（n115）
+                let (_, outcomes) = tokio::join!(speech, self.run_tools(&reply.tool_calls));
+                outcomes
             } else {
                 self.run_tools(&reply.tool_calls).await
             };
+            debug_assert!(pending.is_none(), "开场白必须在执行工具时等完");
             let mut finished = Vec::with_capacity(tool_outcomes.len());
             for (call, outcome) in tool_outcomes {
                 let content = match outcome {
@@ -2857,6 +2950,8 @@ pub struct TurnGate {
     /// 别的短话（如“问一下”“跪下”）时，按命令词纠正。判停流是异步的、这一轮还可能抢跑开始，
     /// 命令词结果常比“这段话结束”晚一点到，会话收到后补写进来；任务在识别完成后才读
     pub command_hint: Arc<Mutex<Option<moss_voice_providers::local::CommandKeyword>>>,
+    /// 这句话的尾音什么时候送完（之后命令词结果不会再来）；没有尾音窗口时为空（n115）
+    pub command_hint_until: Option<std::time::Instant>,
 }
 
 /// 一轮对话的工具执行闩：任务开始执行工具与会话把这一轮作废重来（思考中用户接着说）互斥，

@@ -232,6 +232,32 @@ fn a_short_stop_while_thinking_is_not_lost_when_the_model_vad_misses_it() {
     );
 }
 
+/// n115：思考中一声判停模型不认的“停”说完、安静了 250 ms 就送去复核，不等 700 ms 确认窗口到点——
+/// 这里之后再没有音频，原先要等下一帧、窗口到点才复核，这声“停”就丢了。
+#[test]
+fn a_short_stop_is_rechecked_as_soon_as_it_is_followed_by_quiet() {
+    let (server, registry, asr) = start_with_model_vad(thinking_llm(), &["帮我看看状态", "停"]);
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut first = tone(UP, 300.0, 600, 8000.0);
+    first.extend(silence(UP, 700));
+    send_audio(&mut device, 1, &uplink(&first));
+    assert_eq!(read_json(&mut device)["text"], "帮我看看状态");
+    // 冲击声的拖尾占掉一帧（60 ms），之后再安静约 340 ms
+    let mut stop = bang(300);
+    stop.extend(silence(UP, 400));
+    send_audio(&mut device, 1, &uplink(&stop));
+    let items = texts(&collect_items(&mut device));
+    assert!(
+        !items.contains(&"句:第一轮的回答。".into()),
+        "准备好的回答不能照常播出：{items:?}"
+    );
+    assert_eq!(asr.heard.lock().unwrap().len(), 2, "那阵声音送去识别了");
+}
+
 /// 实时模式下说话中一声敲击触发了插话暂停：补送开头后判停模型没听到人声，直接收尾识别
 /// （识别不出内容就接着说），不会卡在“等说完”。
 #[test]
@@ -651,6 +677,10 @@ fn only_misheard_commands_are_corrected_by_the_keyword_hint() {
     }
     // 长句一律以识别为准
     assert!(!command_hint_fits(Exit, "帮我问一下今天天气"));
+    // “一 / 再”太常见：只因为有它不算像退出命令，不等命令词结果（n115）
+    for normal in ["第一个", "再来一次", "一百", "再说"] {
+        assert!(!command_hint_fits(Exit, normal), "{normal}");
+    }
 }
 
 /// 命令词结果晚于“这段话说完”才到（真实命令词模型要在词后再听一小段）：说完后尾音接着送进同一路判停流，

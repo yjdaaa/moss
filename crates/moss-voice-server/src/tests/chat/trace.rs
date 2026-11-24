@@ -858,6 +858,7 @@ async fn smart_turn_llm_request_reply_and_denoise_are_traced_in_order() {
         allow_silent: false,
         allow_background: false,
         command_hint: Default::default(),
+        command_hint_until: None,
     };
     let stream = DenoisedAsr.start();
     let events = turn_events(conversation, utterance(Some(stream)), Some(gate)).await;

@@ -83,19 +83,27 @@ impl<'a> Session<'a> {
             }
         }
         if stop_watch {
-            if let Some((head, remaining)) = self.listen.stop_watch.as_mut() {
-                head.extend_from_slice(&pcm);
+            let quiet_needed = self.samples_for(STOP_RECHECK_QUIET);
+            let start_rms = self.shared.config.vad.start_rms;
+            if let Some((probe, remaining)) = self.listen.stop_watch.as_mut() {
+                probe.head.extend_from_slice(&pcm);
                 *remaining = remaining.saturating_sub(pcm.len());
-                if *remaining == 0
-                    && let Some((head, _)) = self.listen.stop_watch.take()
+                let early = track_quiet(probe, &pcm, start_rms, quiet_needed).is_some();
+                if (early || *remaining == 0)
+                    && let Some((probe, _)) = self.listen.stop_watch.take()
                 {
                     self.listen.follow.reset();
-                    self.check_for_stop_word(head);
+                    self.check_for_stop_word(probe.head);
                 }
             } else if let Some(head) = self.listen.follow.accept(&pcm, false) {
                 self.event("工具执行中听到人声：听听是不是“停”".to_owned());
-                let wanted = self.uplink_rate as usize * FOLLOW_CONFIRM.as_millis() as usize / 1000;
-                self.listen.stop_watch = Some((head, wanted));
+                let probe = FollowProbe {
+                    head,
+                    until: Instant::now(),
+                    quiet: 0,
+                    checking: false,
+                };
+                self.listen.stop_watch = Some((probe, self.samples_for(FOLLOW_CONFIRM)));
             }
             return Ok(());
         }
@@ -109,12 +117,19 @@ impl<'a> Session<'a> {
                 if frame_rms(&pcm) >= self.shared.config.vad.start_rms {
                     self.listen.last_loud = Some(Instant::now());
                 }
+                let quiet_needed = self.samples_for(STOP_RECHECK_QUIET);
+                let start_rms = self.shared.config.vad.start_rms;
                 if let Some(probe) = self.listen.follow_probe.as_mut() {
                     // 确认中：后续帧接着交给判停模型，结果在 on_vad_result 里看
                     probe.head.extend_from_slice(&pcm);
+                    let early = track_quiet(probe, &pcm, start_rms, quiet_needed);
                     let expired = Instant::now() >= probe.until;
                     if let Some(worker) = self.vad_worker.as_mut() {
                         worker.submit(pcm, true)?;
+                    }
+                    if let Some(head) = early {
+                        // 这阵声音说完了：不等确认窗口到点，先复核是不是“停”（n115）
+                        self.check_for_stop_word(head);
                     }
                     if expired && let Some(probe) = self.listen.follow_probe.take() {
                         self.listen.follow.reset();
@@ -123,7 +138,9 @@ impl<'a> Session<'a> {
                             serde_json::json!({"phase": "not_voice"}),
                         );
                         self.event("思考中听到的声响，判停模型认为不是人声：照常回答".to_owned());
-                        self.check_for_stop_word(probe.head);
+                        if !probe.checking {
+                            self.check_for_stop_word(probe.head);
+                        }
                     }
                     return Ok(());
                 }
@@ -137,6 +154,8 @@ impl<'a> Session<'a> {
                     self.listen.follow_probe = Some(FollowProbe {
                         head: head.clone(),
                         until: Instant::now() + FOLLOW_CONFIRM,
+                        quiet: 0,
+                        checking: false,
                     });
                     self.trace_record(
                         "follow_probe",
@@ -172,6 +191,11 @@ impl<'a> Session<'a> {
 
     /// 判停模型没认出人声的声音仍识别一遍：短促的“停”可能短于模型判开口所需的最短语音（约 250 ms），
     /// 不能因此被吞掉、让准备好的回答（与它的工具）照常执行。只在识别出停止说法时才接管。
+    /// 上行采样率下这段时长有多少个采样
+    fn samples_for(&self, duration: Duration) -> usize {
+        self.uplink_rate as usize * duration.as_millis() as usize / 1000
+    }
+
     /// 这一轮在执行工具、还没开口：设备自动拾音时仍在上传，这段时间要听着“停”（n114）
     fn watches_for_stop(&self) -> bool {
         matches!(self.phase, Phase::Thinking)
@@ -604,4 +628,25 @@ impl<'a> Session<'a> {
             _ => Err(format!("{idle} 秒无语音或消息")),
         }
     }
+}
+
+/// 跟踪确认窗口里这阵声音之后的安静（n115）：又出声就清零、作废已送的复核；安静够了且还没复核时
+/// 返回此刻的开头，调用方拿去复核是不是“停”。
+fn track_quiet(
+    probe: &mut FollowProbe,
+    pcm: &[i16],
+    start_rms: f64,
+    quiet_needed: usize,
+) -> Option<Vec<i16>> {
+    if frame_rms(pcm) >= start_rms {
+        probe.quiet = 0;
+        probe.checking = false;
+        return None;
+    }
+    probe.quiet += pcm.len();
+    if probe.checking || probe.quiet < quiet_needed {
+        return None;
+    }
+    probe.checking = true;
+    Some(probe.head.clone())
 }

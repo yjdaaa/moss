@@ -438,6 +438,166 @@ fn primary_tts_failure_automatically_falls_back_to_local_tts_without_dropping_se
     );
 }
 
+/// 一句合成要 400 ms 的合成（模拟慢一点的本地 / 云端合成）
+struct SlowTts;
+impl Tts for SlowTts {
+    fn synthesize<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Pcm, ProviderError>> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            Ok(Pcm {
+                samples: tone(24_000, 300.0, 400, 6000.0),
+                sample_rate: 24_000,
+            })
+        })
+    }
+}
+
+/// n115：大模型先说开场白、同时调工具——工具不等开场白合成完就开跑；开场白照样先于回答播出。
+#[tokio::test]
+async fn tools_start_without_waiting_for_the_preamble_to_be_synthesized() {
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    #[derive(Default)]
+    struct StampTools {
+        started: Mutex<Option<std::time::Instant>>,
+    }
+    impl ToolExecutor for StampTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "get_time".into(),
+                description: "查询时间".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                *self.started.lock().unwrap() = Some(std::time::Instant::now());
+                ToolOutcome::Reply("12:00".into())
+            })
+        }
+    }
+    let tools = Arc::new(StampTools::default());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: vec!["好，我查一下。"],
+                calls: vec![ToolCall::new("call-time", "get_time", "{}")],
+                delay_ms: 0,
+            },
+            say(&["现在十二点。"]),
+        ])),
+        ..FakeLlm::default()
+    });
+    let conversation = Arc::new(Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm,
+        Arc::new(SlowTts),
+        tools.clone(),
+        ConversationSettings::default(),
+    ));
+    let (handle, mut rx) = spawn_turn(
+        conversation,
+        ToolContext {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        },
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut spoken = Vec::new();
+    let mut preamble_ready = None;
+    let mut history = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            TurnEvent::Speech { text, .. } => {
+                if spoken.is_empty() {
+                    preamble_ready = Some(std::time::Instant::now());
+                }
+                spoken.push(text);
+            }
+            TurnEvent::Done { messages, .. } => history = messages,
+            _ => {}
+        }
+    }
+    handle.await.unwrap();
+    assert_eq!(spoken, ["好，我查一下。", "现在十二点。"]);
+    let started = tools.started.lock().unwrap().expect("工具执行了");
+    assert!(
+        started < preamble_ready.unwrap(),
+        "工具应在开场白合成完之前就开跑"
+    );
+    // 历史照常：开场白随工具调用记下，工具结果配对，最后是回答
+    let roles: Vec<_> = history.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [Role::User, Role::Assistant, Role::Tool, Role::Assistant],
+        "{history:?}"
+    );
+}
+
+/// n115：音频还没到就先发 `tts start`，固件切到说话状态的保护间隔和合成时间重叠——
+/// 音频一合成好就能起播，不用再等 180 ms。
+#[test]
+fn tts_start_goes_out_while_the_first_sentence_is_still_synthesizing() {
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["好的。"])])),
+        ..FakeLlm::default()
+    });
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm,
+        Arc::new(SlowTts),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    let mut start_at = None;
+    let mut first_frame_at = None;
+    loop {
+        match device.read().unwrap() {
+            Message::Text(text) => {
+                let value: Value = serde_json::from_str(text.as_str()).unwrap();
+                if value["type"] == "tts" && value["state"] == "start" {
+                    start_at.get_or_insert_with(Instant::now);
+                }
+                if value["type"] == "tts" && value["state"] == "stop" {
+                    break;
+                }
+            }
+            Message::Binary(_) => {
+                first_frame_at.get_or_insert_with(Instant::now);
+            }
+            _ => {}
+        }
+    }
+    let gap = first_frame_at.unwrap() - start_at.unwrap();
+    // 合成要 400 ms：`tts start` 在合成开始时就发出，首帧约 400 ms 后到；原先音频到了才发 start，间隔只有 180 ms
+    assert!(gap >= Duration::from_millis(300), "{gap:?}");
+}
+
 /// n114：推理模型把思考过程用 `<think>` 夹在正文里——不念、不进历史；标签被拆在两段流式文字里也一样。
 #[tokio::test]
 async fn think_blocks_in_the_reply_are_neither_spoken_nor_kept_in_history() {
