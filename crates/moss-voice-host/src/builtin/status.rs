@@ -168,9 +168,8 @@ impl BuiltinVoice {
                     false,
                 ))
                 .unwrap_or(Value::Null);
-                let speech_env = moss_voice::speech_cpp::detect_speech_env(
-                    self.models.root_for("qwen3_tts_0_6b"),
-                );
+                let speech_env =
+                    moss_voice::speech_cpp::detect_speech_env(self.models.speech_runtime_root());
                 let laya_env = serde_json::to_value(Self::detect_laya_env_with_probe(false))
                     .unwrap_or(Value::Null);
                 let mut detected_ips: Vec<String> = moss_voice_server::lan_ipv4_addrs()

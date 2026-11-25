@@ -40,6 +40,11 @@ pub const DEFAULT_QWEN3_VL_4B_BASE: &str =
 /// 本地语音合成 Qwen3-TTS 0.6B CustomVoice GGUF（Apache-2.0；speech.cpp 原生推理，n87）
 pub const DEFAULT_QWEN3_TTS_0_6B_BASE: &str =
     "https://huggingface.co/sakasegawa/Qwen3-TTS-12Hz-0.6B-CustomVoice-GGUF/resolve/main";
+/// 本地语音合成 Qwen3-TTS 1.7B CustomVoice GGUF（Apache-2.0；同一 speech.cpp 运行时，接受说话指令，n126）
+pub const DEFAULT_QWEN3_TTS_1_7B_BASE: &str =
+    "https://huggingface.co/sakasegawa/Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/resolve/main";
+/// 按说话指令调语速的合成模型（speech.cpp 的 `instructions` 只有 Qwen3-TTS 1.7B 接受，n126）
+pub const QWEN3_TTS_1_7B_ID: &str = "qwen3_tts_1_7b";
 /// 新一代本地视觉模型 Qwen3.5（Unsloth GGUF，Apache-2.0；n87），与 OneJev 共用 llama.cpp 推理引擎
 pub const DEFAULT_QWEN3_5_2B_BASE: &str =
     "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main";
@@ -189,6 +194,19 @@ impl ModelSpec {
     /// 需要下载的总字节数（含附加文件）。
     pub fn download_size(&self) -> u64 {
         self.size + self.extras.iter().map(|extra| extra.size).sum::<u64>()
+    }
+
+    /// 合成模型能否按“本地合成语速”调速（非合成模型为 `None`，2026-11-25 n126）。
+    /// `speech.cpp` 上的 Qwen3-TTS 0.6B 拒收 `speed` 也不接受说话指令，界面不显示语速框；
+    /// 1.7B 同样拒收 `speed`，但能按说话指令粗调（见 [`Self::tts_speed_by_instructions`]）。
+    pub fn tts_speed_adjustable(&self) -> Option<bool> {
+        (self.kind == ModelKind::Tts)
+            .then(|| !self.engine.uses_speech_runtime() || self.tts_speed_by_instructions())
+    }
+
+    /// 语速是否靠说话指令粗调（Qwen3-TTS 1.7B，n126）。
+    pub fn tts_speed_by_instructions(&self) -> bool {
+        self.id == QWEN3_TTS_1_7B_ID
     }
 }
 
@@ -367,7 +385,7 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 28] = [
+pub const CATALOG: [ModelSpec; 29] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -701,7 +719,29 @@ pub const CATALOG: [ModelSpec; 28] = [
         voices: Some(Voices {
             default: 0,
             max: 8,
-            hint: "0 Vivian 女声（默认），1 Serena 女声，2 Uncle_Fu 老傅男声，3 Dylan 北京男声，4 Eric 四川男声；5 Ryan / 6 Aiden 英文男声；7 Ono_Anna 日语女声；8 Sohee 韩语女声",
+            hint: "0 Vivian 女声（默认），1 Serena 女声，2 Uncle_Fu 老傅男声；方言：3 Dylan 北京口音，4 Eric 四川话；5 Ryan / 6 Aiden 英文男声；7 Ono_Anna 日语女声；8 Sohee 韩语女声",
+        }),
+    },
+    // 2026-11-25 n126：同一 speech.cpp 运行时，比 0.6B 更自然，且接受说话指令，语速靠指令粗调
+    ModelSpec {
+        id: QWEN3_TTS_1_7B_ID,
+        kind: ModelKind::Tts,
+        engine: Engine::SpeechCppTts,
+        label: "Qwen3-TTS 1.7B（高自然度中文，可调语速）",
+        note: "比 0.6B 更自然，9 个原生音色；语速靠说话指令粗调（约 0.55x～1.2x，不精确）；体积约 0.6B 的两倍、合成更慢，免装 Python。",
+        path: "Qwen3-TTS-12Hz-1.7B-CustomVoice-Q8_0.gguf",
+        sha256: "1bc0ef69547c003507b6536639a6080c8856382f4d0963b15d4475528330592d",
+        size: 2_287_780_352,
+        archive: Archive::Directory {
+            dir: "qwen3-tts-1.7b-customvoice",
+            base_url: DEFAULT_QWEN3_TTS_1_7B_BASE,
+        },
+        required: &["Qwen3-TTS-12Hz-1.7B-CustomVoice-Q8_0.gguf"],
+        extras: &[],
+        voices: Some(Voices {
+            default: 0,
+            max: 8,
+            hint: "0 Vivian 女声（默认），1 Serena 女声，2 Uncle_Fu 老傅男声；方言：3 Dylan 北京口音，4 Eric 四川话；5 Ryan / 6 Aiden 英文男声；7 Ono_Anna 日语女声；8 Sohee 韩语女声",
         }),
     },
     ModelSpec {
@@ -1045,6 +1085,9 @@ pub struct ModelStatus {
     pub streaming: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voices: Option<Voices>,
+    /// 合成模型能否调语速（仅合成模型有此字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_adjustable: Option<bool>,
     pub installed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
@@ -1154,6 +1197,16 @@ impl ModelManager {
             .unwrap_or_else(|| self.write_root_for(id))
     }
 
+    /// `speech.cpp` 运行时所在的模型根目录：优先已安装的 Qwen3-TTS（0.6B / 1.7B）所在根目录，
+    /// 都没装时为 0.6B 的写入根目录（n126 起两档共用同一运行时）。
+    pub fn speech_runtime_root(&self) -> &Path {
+        CATALOG
+            .iter()
+            .filter(|spec| spec.engine.uses_speech_runtime())
+            .find_map(|spec| self.installed_root_for_spec(spec))
+            .unwrap_or_else(|| self.write_root_for("qwen3_tts_0_6b"))
+    }
+
     pub fn path_if_installed(&self, id: &str) -> Option<PathBuf> {
         let spec = spec(id)?;
         let root = self.installed_root_for_spec(spec)?;
@@ -1182,6 +1235,7 @@ impl ModelManager {
                         | Engine::FireRedAsr2Ctc
                 ),
                 voices: spec.voices,
+                speed_adjustable: spec.tts_speed_adjustable(),
                 installed: self.installed_root_for_spec(spec).is_some(),
                 progress: tasks.get(spec.id).map(|task| task.progress.clone()),
             })
@@ -2975,6 +3029,44 @@ mod local_vision_catalog_tests {
         assert!(qwen_tts.engine.uses_speech_runtime());
         assert!(!qwen_tts.engine.uses_llama_runtime());
         assert_eq!(qwen_tts.voices.unwrap().max, 8);
+        assert_eq!(
+            qwen_tts.tts_speed_adjustable(),
+            Some(false),
+            "0.6B 不支持调语速"
+        );
+        assert!(!qwen_tts.tts_speed_by_instructions());
+        let qwen_tts_17 = spec_of(QWEN3_TTS_1_7B_ID, ModelKind::Tts).unwrap();
+        assert!(
+            qwen_tts_17.engine.uses_speech_runtime(),
+            "1.7B 与 0.6B 共用 speech.cpp 运行时"
+        );
+        assert_eq!(
+            qwen_tts_17.voices, qwen_tts.voices,
+            "1.7B 与 0.6B 同一套 9 个音色"
+        );
+        assert!(qwen_tts_17.tts_speed_by_instructions());
+        assert_eq!(
+            qwen_tts_17.tts_speed_adjustable(),
+            Some(true),
+            "1.7B 靠说话指令调语速"
+        );
+        assert_eq!(qwen_tts_17.download_size(), 2_287_780_352);
+        for id in [
+            "kokoro",
+            "kokoro_v11",
+            "matcha_zh_en",
+            "zipvoice_distill",
+            "moss_vits",
+        ] {
+            let spec = spec_of(id, ModelKind::Tts).unwrap();
+            assert_eq!(spec.tts_speed_adjustable(), Some(true), "{id} 支持调语速");
+        }
+        assert_eq!(
+            spec_of("silero_vad", ModelKind::Vad)
+                .unwrap()
+                .tts_speed_adjustable(),
+            None
+        );
 
         let zipvoice = spec_of("zipvoice_distill", ModelKind::Tts).unwrap();
         assert_eq!(zipvoice.engine, Engine::ZipVoice);

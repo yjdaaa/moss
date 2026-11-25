@@ -743,6 +743,7 @@
   | `kokoro` | 合成 | Kokoro v1.0 | 334 MB | 合成 1 秒语音约 0.5 秒；音色 45–48 中文女声、49–52 中文男声 |
   | `kokoro_v11` | 合成 | Kokoro v1.1 int8 | 140 MB | 合成 1 秒语音约 1 秒（int8 在本机 CPU 上比 v1.0 慢）；103 个音色，按基频实测 0–2 英文、3–57 中文女声（180–264 Hz）、58–102 中文男声（126–162 Hz），默认 3 |
   | `matcha_zh_en` | 合成 | Matcha（`model-steps-3.onnx` + `vocos-16khz-univ.onnx`） | 79 + 54 MB | 合成 1 秒语音约 0.04 秒；单音色女声，16 kHz |
+  | `qwen3_tts_1_7b`（n126 补记） | 合成 | Qwen3-TTS 1.7B CustomVoice（`speech.cpp v0.10.1`，与 0.6B 共用运行时） | 2.29 GB | Apple 芯片 Mac 合成 10 秒语音约 4 秒；9 个原生音色、24 kHz；语速经说话指令 `instructions` 粗调，实测约 0.54x / 0.74x / 1.0x / 1.13x / 1.19x 五档，加速最多约 1.2 倍 |
   | `moss_vits`（n122 补记） | 合成 | 中文 VITS（`moss.onnx` + sherpa-onnx 官方注音词表与读法规则，两个 Hugging Face 仓库各钉一个提交） | 109 + 2.6 MB | Apple 芯片 Mac 2 线程合成 1 秒语音约 0.1–0.2 秒；电影 MOSS 单音色，16 kHz，只念中文；权重仅限非商用 |
 
   SHA-256 均取自 GitHub 发布页的资产摘要，并与实际下载文件逐一核对一致。Matcha 的声码器在另一个发布标签（`vocoder-models`），作为**附加文件**（`ExtraFile`）与压缩包一起下载：总进度按两者大小合计，各自校验，解压后放进模型目录再整体就位；任何一个校验失败都不安装。许可证：TEN-VAD 为 Apache-2.0 附加条款（不得用于与声网竞争的产品）；X-ASR、Kokoro v1.1、Matcha 中英为 Apache-2.0。

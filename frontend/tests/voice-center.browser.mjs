@@ -913,7 +913,7 @@ try {
   await speakerSelect.locator("option", { hasText: "45 · 晓北（女声）" }).waitFor({ state: "attached" });
   assert.equal(await speakerSelect.inputValue(), "50", "下拉不悄悄换掉当前音色");
   assert.equal(await speakerSelect.locator("optgroup").count(), 3, "按语种分组，外加当前值");
-  assert.equal(await page.locator("#voice-local-speed").isDisabled(), false, "Kokoro 可以调语速");
+  assert.equal(await page.locator("#voice-local-speed").count(), 1, "Kokoro 支持调语速，显示语速框");
   await speakerSelect.selectOption("45");
   await page.locator("#voice-local-tts-try").click();
   await page.waitForFunction(() => !/合成中/.test(document.querySelector("#voice-local-tts-try")?.textContent || ""));

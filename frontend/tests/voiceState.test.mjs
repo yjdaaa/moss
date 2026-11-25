@@ -2189,4 +2189,11 @@ test("本地合成音色下拉按语种分组，当前值不在音色表里时�
   assert.equal(localTtsSpeedFixed({ id: "qwen3_tts_0_6b", engine: "speech_cpp_tts" }), true);
   assert.equal(localTtsSpeedFixed({ id: "moss_vits", engine: "vits" }), false);
   assert.equal(localTtsSpeedFixed(null), false);
+  assert.equal(localTtsSpeedFixed({ id: "qwen3_tts_1_7b", engine: "speech_cpp_tts", speed_adjustable: true }), false, "以后端 speed_adjustable 为准");
+  assert.equal(localTtsSpeedFixed({ id: "kokoro", engine: "kokoro", speed_adjustable: false }), true);
+  // n126：0.6B 与 1.7B 共用 speech 运行时，另一档还在时删除不提“会删推理引擎”
+  const small = { id: "qwen3_tts_0_6b", kind: "tts", engine: "speech_cpp_tts", label: "Qwen3-TTS 0.6B", installed: true };
+  const big = { id: "qwen3_tts_1_7b", kind: "tts", engine: "speech_cpp_tts", label: "Qwen3-TTS 1.7B", installed: true };
+  assert.doesNotMatch(localModelDeleteText(small, [small, big], {}), /speech/);
+  assert.match(localModelDeleteText(big, [small, { ...big }].map((m) => (m.id === small.id ? { ...m, installed: false } : m)), {}), /speech/);
 });

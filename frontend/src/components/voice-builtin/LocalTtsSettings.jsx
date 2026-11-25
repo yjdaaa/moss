@@ -5,7 +5,7 @@ import { localModelSettingsError, localTtsSpeedFixed, localTtsSpeakerGroups, voi
 
 /**
  * 5. 语音合成模型包下方的本地合成音色与语速（2026-11-25）。
- * 音色按名称下拉选择（读该模型的音色表，读不到时退回编号输入框）；所选模型不支持调语速时语速框置灰；
+ * 音色按名称下拉选择（读该模型的音色表，读不到时退回编号输入框）；所选模型不支持调语速时不显示语速框（n126）；
  * “按当前音色和语速试一句”用未保存的草稿当场合成，保存后才影响对话与连贯试跑。
  */
 export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
@@ -66,7 +66,7 @@ export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
     }
     const seq = ++trialSeqRef.current;
     stopAudio();
-    setTrial({ state: "loading", text: "正在按当前音色和语速合成…" });
+    setTrial({ state: "loading", text: speedFixed ? "正在按当前音色合成…" : "正在按当前音色和语速合成…" });
     try {
       const speed = speedFixed ? 1 : Number(form.tts_speed);
       const res = await voiceApi.localTtsPreview(form.tts_model, voices ? Number(form.tts_speaker) : 0, speed);
@@ -80,7 +80,8 @@ export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
       };
       audio.onended = done;
       audio.onerror = done;
-      setTrial({ state: "playing", text: `正在播放：“${res.sample_text || ""}”（${Number(res.speed ?? speed).toFixed(2).replace(/0$/, "")}x）` });
+      const rate = speedFixed ? "" : `（${Number(res.speed ?? speed).toFixed(2).replace(/0$/, "")}x）`;
+      setTrial({ state: "playing", text: `正在播放：“${res.sample_text || ""}”${rate}` });
       await audio.play();
     } catch (err) {
       if (seq !== trialSeqRef.current) return;
@@ -127,26 +128,23 @@ export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
           </>
         )}
       </label>
-      <label>
-        <span>本地合成语速（0.5 ~ 2.0）</span>
-        <input className="text-input" inputMode="decimal" value={form.tts_speed} disabled={speedFixed} onChange={(e) => update("tts_speed", e.target.value)} id="voice-local-speed" />
-        {speedFixed && (
-          <small className="voice-muted" id="voice-local-speed-fixed">
-            {model.label} 不支持调语速，固定自然语速（1.0x）；换成 Kokoro / Matcha / ZipVoice / MOSS 原声才生效
-          </small>
-        )}
-      </label>
+      {!speedFixed && (
+        <label>
+          <span>本地合成语速（0.5 ~ 2.0）</span>
+          <input className="text-input" inputMode="decimal" value={form.tts_speed} onChange={(e) => update("tts_speed", e.target.value)} id="voice-local-speed" />
+        </label>
+      )}
       <div className="voice-wide voice-local-tts-trial">
         <button
           type="button"
           className="btn btn-ghost voice-inline-btn"
           disabled={Boolean(trialBlocked) || trial.state === "loading"}
-          title={trialBlocked || "用当前（未保存的）音色和语速合成一句试听"}
+          title={trialBlocked || (speedFixed ? "用当前（未保存的）音色合成一句试听" : "用当前（未保存的）音色和语速合成一句试听")}
           onClick={tryVoice}
           id="voice-local-tts-try"
         >
           {trial.state === "playing" ? <Square size={13} /> : <Play size={13} />}
-          {trial.state === "playing" ? "停止" : trial.state === "loading" ? "合成中…" : "按当前音色和语速试一句"}
+          {trial.state === "playing" ? "停止" : trial.state === "loading" ? "合成中…" : speedFixed ? "按当前音色试一句" : "按当前音色和语速试一句"}
         </button>
         <small className={trial.state === "error" ? "voice-local-tts-trial-bad" : "voice-muted"} id="voice-local-tts-try-note" role="status">
           {trial.text || trialBlocked || "试听不用先保存；要让对话和连贯试跑用上，改完点下方“保存”"}

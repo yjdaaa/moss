@@ -657,7 +657,8 @@ impl BuiltinVoice {
     /// 试听指定本地合成模型的单个音色：优先直接秒读本机 WAV 缓存；尚未缓存时当场合成并落盘缓存。
     ///
     /// 可选 `speed`（0.5 ~ 2.0，2026-11-25）：设置页“按当前音色和语速试一句”用未保存的语速试听。
-    /// 非 1.0 的语速当场合成、不读也不写缓存（缓存只存 1.0x 的试听）；Qwen3-TTS 不支持调语速，固定按 1.0x。
+    /// 非 1.0 的语速当场合成、不读也不写缓存（缓存只存 1.0x 的试听）；不支持调语速的模型（Qwen3-TTS 0.6B）
+    /// 固定按 1.0x，Qwen3-TTS 1.7B 把语速换成说话指令（n126）。
     pub fn local_tts_preview(&self, input: &Value) -> Result<Value, CenterError> {
         let started = std::time::Instant::now();
         let model_id = input
@@ -687,11 +688,12 @@ impl BuiltinVoice {
         };
         let spec = local_models::spec_of(model_id, ModelKind::Tts)
             .ok_or_else(|| CenterError::new("model_input_invalid", 400, "不支持的本地合成模型"))?;
-        let speed = if spec.engine.uses_speech_runtime() {
-            1.0
-        } else {
+        let speed = if spec.tts_speed_adjustable() == Some(true) {
             speed
+        } else {
+            1.0
         };
+        let instructions = moss_voice::tts_voices::speech_tts_instructions(spec, speed);
         let custom_speed = (speed - 1.0).abs() > 1e-3;
         let meta = moss_voice::tts_voices::tts_speaker_meta(spec.id, speaker).ok_or_else(|| {
             CenterError::new("model_input_invalid", 400, "音色编号超出该模型支持范围")
@@ -741,7 +743,7 @@ impl BuiltinVoice {
             });
             if let Some(worker) = reusable_worker {
                 worker
-                    .synthesize_blocking(meta.sample_text, voice)
+                    .synthesize_blocking_with(meta.sample_text, voice, instructions)
                     .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
             } else {
                 let speech_exe =
@@ -763,7 +765,7 @@ impl BuiltinVoice {
                         })?;
                 preview_guard.attach_helper(PreviewRunner::SpeechCpp(worker.clone()))?;
                 worker
-                    .synthesize_blocking(meta.sample_text, voice)
+                    .synthesize_blocking_with(meta.sample_text, voice, instructions)
                     .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
             }
         } else {

@@ -225,6 +225,8 @@ enum LoadedFallbackTts {
     SpeechCpp {
         worker: SpeechCppWorker,
         voice: String,
+        /// Qwen3-TTS 1.7B 按语速选的说话指令（其他为空，n126）
+        instructions: String,
     },
 }
 
@@ -268,9 +270,14 @@ impl LoadedFallbackTts {
                 speaker: tts.speaker,
                 speed: tts.speed,
             }),
-            Self::SpeechCpp { worker, voice } => Arc::new(SpeechCppTts {
+            Self::SpeechCpp {
+                worker,
+                voice,
+                instructions,
+            } => Arc::new(SpeechCppTts {
                 worker: worker.clone(),
                 voice: voice.clone(),
+                instructions: instructions.clone(),
             }),
         }
     }
@@ -438,7 +445,20 @@ impl LazyLocalFallbackTts {
                                     cand.preferred_speaker,
                                 )
                                 .to_owned();
-                                let entry = LoadedFallbackTts::SpeechCpp { worker, voice };
+                                let instructions =
+                                    moss_voice::local_models::spec_of(cand.id, ModelKind::Tts)
+                                        .map(|spec| {
+                                            moss_voice::tts_voices::speech_tts_instructions(
+                                                spec, speed,
+                                            )
+                                        })
+                                        .unwrap_or_default()
+                                        .to_owned();
+                                let entry = LoadedFallbackTts::SpeechCpp {
+                                    worker,
+                                    voice,
+                                    instructions,
+                                };
                                 let tts = entry.to_arc_tts();
                                 guard.loaded = Some((idx, entry));
                                 return Ok((idx, tts));
@@ -647,7 +667,7 @@ impl BuiltinVoice {
         }
         let helper_exe = helper_path().filter(|path| path.is_file());
         let speech_exe =
-            moss_voice::speech_cpp::resolve_speech_binary(self.models.root_for("qwen3_tts_0_6b"));
+            moss_voice::speech_cpp::resolve_speech_binary(self.models.speech_runtime_root());
         let candidates: Vec<_> =
             ordered_local_tts_candidates(&local.tts_model, local.tts_speaker, |id| {
                 self.models.path_if_installed(id)
@@ -752,9 +772,12 @@ impl BuiltinVoice {
             let worker = SpeechCppWorker::spawn(&speech_exe, &model_file)
                 .map_err(|error| start_error(format!("本地合成（{}）：{}", spec.label, error)))?;
             let voice = moss_voice::tts_voices::qwen3_tts_voice_slug(local.tts_speaker).to_owned();
+            let instructions =
+                moss_voice::tts_voices::speech_tts_instructions(spec, local.tts_speed).to_owned();
             parts.tts = Some(Arc::new(SpeechCppTts {
                 worker: worker.clone(),
                 voice,
+                instructions,
             }));
             speech_guard.0 = Some(worker);
         }
@@ -1064,7 +1087,14 @@ impl BuiltinVoice {
                 };
                 let voice =
                     moss_voice::tts_voices::qwen3_tts_voice_slug(local.tts_speaker).to_owned();
-                parts.tts = Some(Arc::new(SpeechCppTts { worker, voice }));
+                let instructions =
+                    moss_voice::tts_voices::speech_tts_instructions(spec, local.tts_speed)
+                        .to_owned();
+                parts.tts = Some(Arc::new(SpeechCppTts {
+                    worker,
+                    voice,
+                    instructions,
+                }));
             } else if parts.tts.is_none() {
                 // 兜底合成不向常驻运行中的 helper 发 LoadTts（避免覆盖线上兜底槽位或永久滞留 ONNX 会话）；
                 // 主云端 TTS 可用时惰性不拉起任何进程，真触发兜底时单独拉起临时进程并在试跑结束后自动回收。

@@ -2,6 +2,7 @@
 
 import { builtinModelForm, sectionInputError, sectionPayload } from "./sections.js";
 import { MIX_SECTIONS, builtinSectionSourceView } from "./modelSources.js";
+import { isSpeechTtsModel } from "./localModels.js";
 
 /**
  * “测试全部环节”（2026-11-08 用户要求：链路栏右上角一键测试，哪个环节不通就在哪里报错）。
@@ -18,7 +19,7 @@ export function pipelineTestPlan(status) {
     if (!model?.installed) {
       return { key, kind: "static", ok: false, detail: `本地${label}模型“${model?.label || "未选择"}”还没下载：到下方“本地模型”下载，或在上方改回${key === "vad" ? "内置能量判停" : "云端"}` };
     }
-    if (model.id === "qwen3_tts_0_6b" && status?.local?.speech_env?.ready === false) {
+    if (isSpeechTtsModel(model) && status?.local?.speech_env?.ready === false) {
       const summary = String(status?.local?.speech_env?.summary || "").trim();
       return {
         key,
@@ -27,7 +28,7 @@ export function pipelineTestPlan(status) {
         detail: summary ? `Qwen3-TTS 本地运行时尚未就绪：${summary}` : "找不到 Qwen3-TTS 本地运行时 speech，本地合成无法运行",
       };
     }
-    if (!helperFound && model.id !== "qwen3_tts_0_6b") {
+    if (!helperFound && !isSpeechTtsModel(model)) {
       return { key, kind: "static", ok: false, detail: "找不到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录），本地模型无法运行" };
     }
     return { key, kind: "static", ok: true, detail: `本地 ${model.label} 已下载（本地模型只检查是否就绪，不做试跑）` };

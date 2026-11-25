@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::local_models::{ModelKind, spec_of};
+use crate::local_models::{ModelKind, ModelSpec, spec_of};
 
 /// 试听缓存协议版本：调整默认试听句或底层韵律词表时递增目录号，无感失效旧缓存。
 pub const PREVIEW_CACHE_VERSION: &str = "v2";
@@ -255,6 +255,26 @@ pub fn qwen3_tts_voice_slug(speaker: i32) -> &'static str {
         .unwrap_or("vivian")
 }
 
+/// Qwen3-TTS 1.7B 按“本地合成语速”选用的说话指令（n126）。`speech.cpp` 的 Qwen3-TTS 拒收 `speed`，
+/// 1.7B 只能靠 `instructions` 粗调：实测同一句约 0.54x / 0.74x / 1.0x / 1.13x / 1.19x，加速最多约 1.2 倍。
+/// 不靠指令调速的模型（含 0.6B，它对非空指令报 `unsupported`）一律返回空串，请求里不带该字段。
+pub fn speech_tts_instructions(spec: &ModelSpec, speed: f32) -> &'static str {
+    if !spec.tts_speed_by_instructions() || !speed.is_finite() {
+        return "";
+    }
+    if speed <= 0.65 {
+        "请用很慢的语速，一字一句地说。"
+    } else if speed <= 0.9 {
+        "请用比平时稍慢的语速说话。"
+    } else if speed < 1.1 {
+        ""
+    } else if speed < 1.35 {
+        "请用比平时稍快的语速说话。"
+    } else {
+        "用非常快的语速，像赶时间一样快速说完。"
+    }
+}
+
 fn build_qwen3_tts_speaker(idx: usize) -> TtsSpeakerMeta {
     let (slug, display, gender, lang) = QWEN3_TTS_SPEAKERS[idx];
     let (gender_label, lang_label, sample_text, recommended_for_zh) = match (gender, lang) {
@@ -276,7 +296,7 @@ fn build_qwen3_tts_speaker(idx: usize) -> TtsSpeakerMeta {
     }
 }
 
-/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en` / `qwen3_tts_0_6b` / `zipvoice_distill` / `moss_vits`）的语言包与全量音色目录。
+/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en` / `qwen3_tts_0_6b` / `qwen3_tts_1_7b` / `zipvoice_distill` / `moss_vits`）的语言包与全量音色目录。
 pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
     let spec = spec_of(model_id, ModelKind::Tts)?;
     let default_speaker = spec.voices.map(|v| v.default).unwrap_or(0);
@@ -302,7 +322,7 @@ pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
             sample_text: SAMPLE_ZH,
             recommended_for_zh: true,
         }],
-        "qwen3_tts_0_6b" => (0..QWEN3_TTS_SPEAKERS.len())
+        "qwen3_tts_0_6b" | "qwen3_tts_1_7b" => (0..QWEN3_TTS_SPEAKERS.len())
             .map(build_qwen3_tts_speaker)
             .collect(),
         "zipvoice_distill" => vec![
@@ -506,6 +526,27 @@ pub fn remove_model_previews(models_root: &Path, model_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen3_tts_1_7b_maps_speed_to_coarse_instructions_and_0_6b_never_gets_any() {
+        let big = crate::local_models::spec_of("qwen3_tts_1_7b", ModelKind::Tts).unwrap();
+        let small = crate::local_models::spec_of("qwen3_tts_0_6b", ModelKind::Tts).unwrap();
+        assert_eq!(speech_tts_instructions(big, 1.0), "", "默认语速不加指令");
+        assert_eq!(speech_tts_instructions(big, 0.95), "");
+        assert!(speech_tts_instructions(big, 0.8).contains("稍慢"));
+        assert!(speech_tts_instructions(big, 0.5).contains("很慢"));
+        assert!(speech_tts_instructions(big, 1.2).contains("稍快"));
+        assert!(speech_tts_instructions(big, 2.0).contains("非常快"));
+        for speed in [0.5, 0.8, 1.0, 1.2, 2.0] {
+            assert_eq!(
+                speech_tts_instructions(small, speed),
+                "",
+                "0.6B 拒收非空指令"
+            );
+        }
+        let catalog = tts_voice_catalog("qwen3_tts_1_7b").unwrap();
+        assert_eq!(catalog.speakers.len(), 9, "1.7B 与 0.6B 同一套 9 个音色");
+    }
+
     use super::*;
     use crate::local_models::{CATALOG, ModelKind};
 

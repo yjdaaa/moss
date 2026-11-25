@@ -3,7 +3,8 @@
 //! - MOSS 懒加载 `speech worker <gguf>` 常驻子进程，避免每次合成重新加载 1.2 GB 权重；
 //! - 输出严格按 24 kHz i16le 单声道 base64 `chunk` 流式推送；打断或取消时立即下发
 //!   `cancel` 并抽空终态消息以保持管道对齐，异常时直接终止子进程避免半帧错位；
-//! - Qwen3-TTS 不支持 `speed` 参数（`speech.cpp v0.10.1` 传入 `speed` 会报错拒绝），请求体严禁附带 `speed`。
+//! - Qwen3-TTS 不支持 `speed` 参数（`speech.cpp v0.10.1` 传入 `speed` 会报错拒绝），请求体严禁附带 `speed`；
+//!   1.7B 另接受说话指令 `instructions`（语速靠它粗调，n126），0.6B 对非空指令报 `unsupported`，空指令不发送。
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -422,8 +423,18 @@ impl SpeechCppWorker {
     }
 
     pub fn synthesize_blocking(&self, text: &str, voice: &str) -> Result<Pcm, ProviderError> {
+        self.synthesize_blocking_with(text, voice, "")
+    }
+
+    /// 带说话指令合成（`instructions` 为空时请求里不带该字段，n126）。
+    pub fn synthesize_blocking_with(
+        &self,
+        text: &str,
+        voice: &str,
+        instructions: &str,
+    ) -> Result<Pcm, ProviderError> {
         let mut samples = Vec::new();
-        self.run_synthesize(text, voice, ChunkSink::Collect(&mut samples))?;
+        self.run_synthesize(text, voice, instructions, ChunkSink::Collect(&mut samples))?;
         Ok(Pcm {
             samples,
             sample_rate: SPEECH_CPP_SAMPLE_RATE,
@@ -434,15 +445,17 @@ impl SpeechCppWorker {
         &self,
         text: &str,
         voice: &str,
+        instructions: &str,
         chunks: UnboundedSender<Pcm>,
     ) -> Result<(), ProviderError> {
-        self.run_synthesize(text, voice, ChunkSink::Stream(&chunks))
+        self.run_synthesize(text, voice, instructions, ChunkSink::Stream(&chunks))
     }
 
     fn run_synthesize(
         &self,
         text: &str,
         voice: &str,
+        instructions: &str,
         mut sink: ChunkSink<'_>,
     ) -> Result<(), ProviderError> {
         if text.trim().is_empty() {
@@ -465,13 +478,18 @@ impl SpeechCppWorker {
             .next_id
             .fetch_add(1, Ordering::SeqCst)
             .to_string();
-        // speech.cpp v0.10.1 的 Qwen3-TTS 不支持 speed 字段，传入会被 worker 拒绝
-        let req = json!({
+        // speech.cpp v0.10.1 的 Qwen3-TTS 不支持 speed 字段，传入会被 worker 拒绝；
+        // 说话指令只有 1.7B 接受，空串不发送（0.6B 对非空指令报 unsupported）
+        let mut req = json!({
             "type": "synthesize",
             "id": id,
             "text": text,
             "voice": voice,
         });
+        let instructions = instructions.trim();
+        if !instructions.is_empty() {
+            req["instructions"] = Value::String(instructions.to_owned());
+        }
         let mut line = serde_json::to_string(&req)
             .map_err(|err| model_err(format!("序列化 Qwen3-TTS 请求失败：{err}")))?;
         line.push('\n');
@@ -640,10 +658,12 @@ impl SpeechCppWorker {
     }
 }
 
-/// 基于 `speech.cpp`（Qwen3-TTS 0.6B CustomVoice）的本地语音合成提供方。
+/// 基于 `speech.cpp`（Qwen3-TTS 0.6B / 1.7B CustomVoice）的本地语音合成提供方。
 pub struct SpeechCppTts {
     pub worker: SpeechCppWorker,
     pub voice: String,
+    /// 说话指令（1.7B 靠它粗调语速；空串表示不带，n126）
+    pub instructions: String,
 }
 
 impl Tts for SpeechCppTts {
@@ -651,10 +671,13 @@ impl Tts for SpeechCppTts {
         let worker = self.worker.clone();
         let text = text.to_owned();
         let voice = self.voice.clone();
+        let instructions = self.instructions.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || worker.synthesize_blocking(&text, &voice))
-                .await
-                .map_err(|_| model_err("Qwen3-TTS 合成任务异常结束"))?
+            tokio::task::spawn_blocking(move || {
+                worker.synthesize_blocking_with(&text, &voice, &instructions)
+            })
+            .await
+            .map_err(|_| model_err("Qwen3-TTS 合成任务异常结束"))?
         })
     }
 
@@ -666,9 +689,10 @@ impl Tts for SpeechCppTts {
         let worker = self.worker.clone();
         let text = text.to_owned();
         let voice = self.voice.clone();
+        let instructions = self.instructions.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                worker.synthesize_stream_blocking(&text, &voice, chunks)
+                worker.synthesize_stream_blocking(&text, &voice, &instructions, chunks)
             })
             .await
             .map_err(|_| model_err("Qwen3-TTS 流式合成任务异常结束"))?
@@ -758,6 +782,10 @@ mod tests {
                 req.get("speed").is_none(),
                 "Qwen3-TTS 不得传入 speed 字段：{req}"
             );
+            assert!(
+                req.get("instructions").is_none(),
+                "空说话指令不发送（0.6B 拒收非空指令）：{req}"
+            );
             let id = req["id"].as_str().unwrap();
             writeln!(
                 server_out_w,
@@ -800,6 +828,7 @@ mod tests {
         let tts = SpeechCppTts {
             worker: worker.clone(),
             voice: "vivian".into(),
+            instructions: "  ".into(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         rt.block_on(tts.synthesize_stream("你好，工作台已就绪", tx))
@@ -810,6 +839,55 @@ mod tests {
             received.extend(chunk.samples);
         }
         assert_eq!(received, vec![100, -200, 300]);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn worker_sends_speaking_instructions_for_qwen3_tts_1_7b() {
+        let (client_in_r, mut server_out_w) = memory_pipe();
+        let (mut server_in_r, client_out_w) = memory_pipe();
+
+        let server = std::thread::spawn(move || {
+            writeln!(server_out_w, "{}", json!({"type": "ready", "protocol": 4})).unwrap();
+            let mut reader = BufReader::new(&mut server_in_r);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["voice"], "serena");
+            assert_eq!(req["instructions"], "请用比平时稍慢的语速说话。");
+            assert!(req.get("speed").is_none(), "仍不发送 speed：{req}");
+            let id = req["id"].as_str().unwrap();
+            writeln!(
+                server_out_w,
+                "{}",
+                json!({"type": "chunk", "id": id, "seq": 0, "pcm": encode_samples(&[7])})
+            )
+            .unwrap();
+            writeln!(
+                server_out_w,
+                "{}",
+                json!({"type": "end", "id": id, "samples": 1, "stop": "complete"})
+            )
+            .unwrap();
+        });
+
+        let worker = SpeechCppWorker::from_streams(
+            Box::new(client_in_r),
+            Box::new(client_out_w),
+            PathBuf::from("qwen3-1.7b.gguf"),
+        )
+        .unwrap();
+        let tts = SpeechCppTts {
+            worker,
+            voice: "serena".into(),
+            instructions: "请用比平时稍慢的语速说话。".into(),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pcm = rt.block_on(tts.synthesize("慢一点")).unwrap();
+        assert_eq!(pcm.samples, vec![7]);
         server.join().unwrap();
     }
 
@@ -865,7 +943,7 @@ mod tests {
         let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
         drop(rx1);
         worker
-            .synthesize_stream_blocking("被打断的句子", "vivian", tx1)
+            .synthesize_stream_blocking("被打断的句子", "vivian", "", tx1)
             .unwrap();
 
         let next = worker.synthesize_blocking("恢复下一句", "serena").unwrap();

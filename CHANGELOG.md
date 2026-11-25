@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增本地合成模型 Qwen3-TTS 1.7B 并按说话指令调语速，不支持调语速的模型不再显示语速框（2026-11-25）
+
+- **现象**：Qwen3-TTS 0.6B 不支持调语速，语速框却仍显示（上一版是置灰）；想要 Qwen3 的音色又想调语速没有办法。
+- **根因与修复**：`speech.cpp v0.10.1` 的 Qwen3-TTS 拒收 `speed`，只有 1.7B 接受说话指令 `instructions`。`CATALOG` 新增第 29 项 `qwen3_tts_1_7b`（Q8_0 2.29 GB，Apache-2.0，与 0.6B 共用运行时与 9 个音色），`speech_tts_instructions` 把语速分五档换成指令（实测约 0.54x～1.19x，加速最多约 1.2 倍）；模型状态新增 `speed_adjustable`，为 `false` 时前端不显示语速框。默认合成模型不变。
+- **验证**：真实 1.7B 模型经 `speech` 实测五档指令时长（同句 3 个种子），新增 `worker_sends_speaking_instructions_for_qwen3_tts_1_7b`、`qwen3_tts_1_7b_maps_speed_to_coarse_instructions_and_0_6b_never_gets_any` 与目录、前端分组 / 删除提示单测；`verify.mjs --finish` 通过。未在真实小智设备上收听（`unverified`）。
+- **关联**：`crates/moss-voice/src/local_models.rs`（`qwen3_tts_1_7b`、`tts_speed_adjustable`、`speech_runtime_root`）、`crates/moss-voice/src/tts_voices.rs`（`speech_tts_instructions`）、`crates/moss-voice-providers/src/speech_cpp.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`、`frontend/src/components/voice-builtin/LocalTtsSettings.jsx`、内置语音技术书 n126。
+
 ### 本地合成音色改为按名称下拉，Qwen3-TTS 语速框置灰，新增按当前音色和语速试一句（2026-11-25）
 
 - **现象**：“5. 语音合成模型包”下的音色是编号输入框，Qwen3-TTS 的标签塞进 9 个音色说明、把两栏撑歪；Qwen3-TTS 不支持调语速但语速框照样能改；想听新语速只能先保存再跑连贯试跑，语言包与试听弹窗的试听固定 1.0x。

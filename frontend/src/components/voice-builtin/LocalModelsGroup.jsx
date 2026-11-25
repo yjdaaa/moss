@@ -12,6 +12,7 @@ import {
   formatBytes,
   isLocalJevModel,
   isRecommendedLocalModel,
+  isSpeechTtsModel,
   localModelGroups,
   localModelLayout,
   localModelSettingsError,
@@ -311,7 +312,7 @@ export function LocalModelsGroup({ builtin }) {
       <div className="voice-local-group" id={`voice-local-group-${item.kind}`}>
         {renderHead(item, `${order}${item.title}模型包`)}
         {item.kind === "tts" &&
-          (form.tts_model === "qwen3_tts_0_6b" || item.models.some((m) => m.id === "qwen3_tts_0_6b" && m.installed)) &&
+          (item.models.some((m) => isSpeechTtsModel(m) && (m.id === form.tts_model || m.installed))) &&
           local.speech_env?.summary && (
             <div className="voice-hint" id="voice-local-speech-env-hint">
               Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}

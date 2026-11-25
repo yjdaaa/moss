@@ -92,14 +92,22 @@ export function localJevRuntimeView(runtime) {
 
 const LOCAL_BUSY_STATES = new Set(["downloading", "preparing_runtime", "waiting_runtime", "verifying", "installing"]);
 
+/** 跑在 speech.cpp 上的 Qwen3-TTS（0.6B / 1.7B 共用同一运行时，n126）。 */
+export function isSpeechTtsModel(model) {
+  return model?.engine === "speech_cpp_tts" || /^qwen3_tts_/.test(String(model?.id || ""));
+}
+
 /** 删除本地模型前的确认文字：说明会一并删除的附带文件（2026-11-07）。 */
 export function localModelDeleteText(model, models, local) {
   const label = model?.label || model?.id || "";
   let extra = "";
   if (model?.id === "laya_multilingual" && local?.laya_env?.managed) {
     extra = "会同时删除 MOSS 自动创建的 Laya Python 运行环境（含 PyTorch，可能有几 GB），下次使用时重新准备。";
-  } else if (model?.id === "qwen3_tts_0_6b") {
-    extra = "会同时删除 MOSS 自动下载的语音推理引擎 speech。";
+  } else if (isSpeechTtsModel(model)) {
+    const otherSpeech = (Array.isArray(models) ? models : []).some(
+      (item) => isSpeechTtsModel(item) && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
+    );
+    if (!otherSpeech) extra = "会同时删除 MOSS 自动下载的语音推理引擎 speech。";
   } else if (model?.kind === "jev" && model?.id !== "laya_multilingual") {
     const otherOneJev = (Array.isArray(models) ? models : []).some(
       (item) => item.kind === "jev" && item.id !== "laya_multilingual" && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
@@ -236,9 +244,14 @@ export function selectedVoices(form, models) {
   return model?.voices || null;
 }
 
-/** 所选本地合成模型是否不支持调语速（Qwen3-TTS 跑在 speech.cpp 上，固定 1.0x；2026-11-25）。 */
+/**
+ * 所选本地合成模型是否不支持调语速（2026-11-25 n126）：以后端 `speed_adjustable` 为准，
+ * 没有该字段的旧状态只把 Qwen3-TTS 0.6B 当作不能调（它拒收语速也不接受说话指令；1.7B 靠指令粗调）。
+ */
 export function localTtsSpeedFixed(model) {
-  return model?.engine === "speech_cpp_tts" || model?.id === "qwen3_tts_0_6b";
+  if (!model) return false;
+  if (typeof model.speed_adjustable === "boolean") return !model.speed_adjustable;
+  return model.id === "qwen3_tts_0_6b";
 }
 
 /**
