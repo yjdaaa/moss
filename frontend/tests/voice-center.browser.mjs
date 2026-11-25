@@ -241,8 +241,11 @@ try {
             ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
           }
     ),
-    voice_builtin_models_list: ({ section, input }) => (
-      section === "local_tts"
+    voice_builtin_models_list: async ({ section, input }) => {
+      if (section === "llm" && String(input?.url || "").includes("slow-list.example.test")) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return section === "local_tts"
         ? {
             model_id: input?.model_id || "kokoro",
             label: "Kokoro 合成 v1.0（中英，多音色）",
@@ -264,12 +267,14 @@ try {
         : {
             ok: true,
             elapsed_ms: 85,
-            models: ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
-            detail: "已读取 3 个模型",
+            models: String(input?.url || "").includes("bare.example.test")
+              ? ["BareOnly/Model-7B"]
+              : ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
+            detail: "已读取模型",
             // 只填裸域名、后端靠 /v1/models 读到列表时会建议改用带 /v1 的地址
             ...(input?.url === "https://bare.example.test" ? { suggested_url: "https://bare.example.test/v1" } : {}),
-          }
-    ),
+          };
+    },
     voice_builtin_models_save: ({ input, clear }) => {
       if (Array.isArray(clear) && clear.includes("jev")) {
         state.builtin.jev = { ...state.builtin.jev, key_set: false, voice_enabled: false, feedback_enabled: false, model: "typesafe/jev-1.14" };
@@ -600,6 +605,20 @@ try {
     "一键改用带 /v1 的地址",
   );
   await page.locator("#voice-builtin-v1-suggestion-llm").waitFor({ state: "detached" });
+  // 在慢速 `/models` 请求尚未返回期间完成测试与保存，读取按钮不得永久卡在 loading 禁用态
+  await page.locator("#voice-builtin-model-url-llm").fill("https://slow-list.example.test/v1");
+  await page.locator("#voice-builtin-model-key-llm").fill("fake-llm-key");
+  await page.locator("#voice-builtin-model-name-llm").fill("fake-model");
+  await page.locator("#voice-builtin-model-fetch-llm").click();
+  await page.locator("#voice-builtin-model-test-llm").click();
+  await page.locator("#voice-builtin-model-result-llm").filter({ hasText: "测试通过" }).waitFor();
+  await llmSave.click();
+  await page.locator("#voice-group-builtin-model-llm [role=status]").filter({ hasText: "已保存大模型设置" }).waitFor();
+  assert.equal(
+    await page.locator("#voice-builtin-model-fetch-llm").isDisabled(),
+    false,
+    "在途 /models 请求被保存打断后不得残留孤立 loading 禁用态",
+  );
   await page.locator("#voice-builtin-model-url-llm").fill("https://llm.example.test/v1");
   await page.locator("#voice-builtin-model-key-llm").fill("fake-llm-key");
   await page.locator("#voice-builtin-model-name-llm").fill("fake-model");
@@ -610,6 +629,12 @@ try {
   await page.locator("#voice-group-builtin-model-llm [role=status]").filter({ hasText: "已保存大模型设置" }).waitFor();
   assert.deepEqual(Object.keys(last("voice_builtin_models_save").args.input), ["llm"]);
   assert.equal(await page.locator("#voice-builtin-model-key-llm").inputValue(), "", "保存后清空密钥");
+  await page.locator("#voice-builtin-model-name-llm").click();
+  assert.equal(
+    await page.locator("#voice-builtin-model-options-llm").getByRole("option", { name: /BareOnly\/Model-7B/ }).count(),
+    0,
+    "切换端点保存后不得把旧端点的模型列表串进新端点缓存",
+  );
 
   // 5b. 内置语音识别：一键复用大模型地址与密钥，自动读取并筛选出可用于语音识别的模型
   await openGroup("builtin-model-asr");

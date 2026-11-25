@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 补齐五步连贯试跑 Jev 快路径与完整工具组评估，修复切换云端地址时的模型列表串缓存（2026-11-25）
+
+- **现象**：「连贯试跑 / 录真话测」在开启 Jev 时对“退下 / 再见”退出词与“机器状态”等本地只读快答未像真机一样 0ms 跳过 Jev，Jev 工具剪枝评估只带激光与外部工具而漏掉角色/信息/家居/音乐 4 个工具组，且仅勾选尾音续听与只读快答遇到含逗号句子时会因 `evaluate_turn` 本地直通而漏调 `check_unfinished_hold`；语音中心切换云端地址后未重新拉取列表即保存时，会把旧端点的模型列表写进新端点缓存。
+- **根因与修复**：`BuiltinVoice::chain_test` 同步豁免默认退出短令（`is_default_exit_phrase`）与本地只读快答（`fast::read_intent`），抽取出与真机一致的 `jev_tool_specs` 六大工具组规格清单，并在 `decision.local_bypass && jev_options.unfinished_hold` 时继续执行 `check_unfinished_hold` 实测 Jev 连通性；`BuiltinModelGroup.jsx` 的 `save()` 仅在 `prev.key === savedFromListKey` 时写入新缓存键并保留 `suggestedUrl`，切换端点未重拉时清空旧列表并递增请求序号。
+- **验证**：扩展 `chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage`（覆盖退出词与只读快答免 Jev 直通及完整工具组断言）与 `voice-center` 浏览器交互测试（覆盖跨端点保存不串模型缓存）；`verify.mjs --finish` 通过并快更本机桌面程序。未连接真机与真实云端实测（`unverified`）。
+- **关联**：`crates/moss-voice-host/src/builtin/chain_test.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`、`crates/moss-voice-server/src/conversation.rs`、`crates/moss-voice-server/src/music/tools.rs`、`frontend/src/components/voice-builtin/BuiltinModelGroup.jsx`。
+
 ### 消除语音对话客服腔与碎顿，五步连贯试跑对齐真机全链路处理（2026-11-24）
 
 - **现象**：运行语音中心「连贯试跑」时，测试句“你好，汇报一下当前待命状态。”被识别成“一号。”，大模型回复“😊 好，我在，请说指令。”并带出屏幕专用表情，听感机械生硬；真机系统提示词也引导用“好，”“嗯，”拆成两三字碎顿，容易诱发对讲机口令腔。

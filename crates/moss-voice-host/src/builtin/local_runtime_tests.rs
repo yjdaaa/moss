@@ -856,9 +856,12 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
         let addr2 = listener2.local_addr().unwrap();
         let handle2 = std::thread::spawn(move || {
             // 第 1 次：ASR 返回纯标点“。。。” -> 应在 asr 结束，不请求后续环节
-            // 第 2 次：ASR 返回“停” -> 应保护“停”不被同音纠偏改写、Jev skipped 直通，再完成 LLM + TTS（共 1 + 3 = 4 次连接）
+            // 第 2 次：ASR 返回“停机” -> 保护“停机”不被同音纠偏改写、Jev skipped 直通，再完成 LLM + TTS（3 次连接）
+            // 第 3 次：ASR 返回“退下” -> 退出短令按真机快路径免 Jev 直通，再完成 LLM + TTS（3 次连接）
+            // 第 4 次：ASR 返回“加工进度” -> 本地只读快答按真机快路径免 Jev 直通，再完成 LLM + TTS（3 次连接）
+            // 第 5 次：ASR 返回带逗号的“你好，看看激光参数”且仅开 unfinished_hold + fast_route（未配 Jev 密钥） -> 不可静默跳过，应在 jev 报错停止（1 次连接）
             let mut asr_turn = 0usize;
-            for _ in 0..4 {
+            for _ in 0..11 {
                 let Ok((mut stream, _)) = listener2.accept() else {
                     break;
                 };
@@ -901,12 +904,14 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
                     .unwrap_or("")
                     .to_owned();
                 if first_line.contains("/audio/transcriptions") {
-                    let body = if asr_turn == 0 {
-                        asr_turn += 1;
-                        r#"{"text":"。。。"}"#.as_bytes()
-                    } else {
-                        r#"{"text":"停机"}"#.as_bytes()
+                    let body = match asr_turn {
+                        0 => r#"{"text":"。。。"}"#.as_bytes(),
+                        1 => r#"{"text":"停机"}"#.as_bytes(),
+                        2 => r#"{"text":"退下"}"#.as_bytes(),
+                        3 => r#"{"text":"加工进度"}"#.as_bytes(),
+                        _ => r#"{"text":"你好，看看激光参数"}"#.as_bytes(),
                     };
+                    asr_turn += 1;
                     let head = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
@@ -915,7 +920,7 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
                     let _ = stream.write_all(body);
                 } else if first_line.contains("/chat/completions") {
                     let sse = concat!(
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"已停下。\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"收到。\"}}]}\n\n",
                         "data: [DONE]\n\n"
                     );
                     let head = format!(
@@ -952,9 +957,21 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
         builtin
             .local_save(&serde_json::json!({
                 "jev_filter_enabled": true,
+                "jev_unfinished_hold": true,
+                "jev_fast_route": true,
+                "jev_tool_prune": false,
+                "jev_memory_filter": false,
                 "custom_asr_corrections": ["机=鸡"]
             }))
             .unwrap();
+
+        let full_specs = builtin
+            .jev_tool_specs(&builtin.settings().builtin_music)
+            .unwrap();
+        assert!(
+            full_specs.iter().any(|s| s.name == "voice_persona_tool"),
+            "Jev 评估工具清单应包含 PersonaTools"
+        );
 
         let punct_out = builtin
             .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
@@ -965,10 +982,31 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
         let stop_out = builtin
             .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
             .unwrap();
-        let _ = handle2.join();
         assert_eq!(stop_out["ok"], true, "{stop_out}");
         assert_eq!(stop_out["recognized_text"], "停机");
         assert_eq!(stop_out["steps"]["jev"]["skipped"], true);
+
+        let exit_out = builtin
+            .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
+            .unwrap();
+        assert_eq!(exit_out["ok"], true, "{exit_out}");
+        assert_eq!(exit_out["recognized_text"], "退下");
+        assert_eq!(exit_out["steps"]["jev"]["skipped"], true);
+
+        let read_out = builtin
+            .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
+            .unwrap();
+        assert_eq!(read_out["ok"], true, "{read_out}");
+        assert_eq!(read_out["recognized_text"], "加工进度");
+        assert_eq!(read_out["steps"]["jev"]["skipped"], true);
+
+        // 带逗号的句子在仅开 unfinished_hold + fast_route 时不得静默跳过 Jev：未配密钥应报 jev 失败，配了不可达本地 Jev 也应报 jev 失败
+        let comma_no_key = builtin
+            .chain_test(&serde_json::json!({ "audio_wav_base64": mic_b64 }))
+            .unwrap();
+        let _ = handle2.join();
+        assert_eq!(comma_no_key["ok"], false, "{comma_no_key}");
+        assert_eq!(comma_no_key["failed_step"], "jev", "{comma_no_key}");
     }
 
     // 3. 单飞互斥锁生效：占住 chain_test_lock 期间再次调用立即返回 409 chain_test_busy

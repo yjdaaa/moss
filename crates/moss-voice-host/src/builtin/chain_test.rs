@@ -803,6 +803,28 @@ impl BuiltinVoice {
                     "detail": "命中急停短令，按真机快路径免 Jev 直通",
                 }),
             );
+        } else if moss_voice_server::conversation::is_default_exit_phrase(&recognized_text) {
+            steps.insert(
+                "jev".into(),
+                serde_json::json!({
+                    "ok": true,
+                    "skipped": true,
+                    "elapsed_ms": 0,
+                    "detail": "命中退出短令，按真机快路径免 Jev 直通",
+                }),
+            );
+        } else if experience.read_only_shortcuts
+            && moss_voice_server::fast::read_intent(&recognized_text).is_some()
+        {
+            steps.insert(
+                "jev".into(),
+                serde_json::json!({
+                    "ok": true,
+                    "skipped": true,
+                    "elapsed_ms": 0,
+                    "detail": "命中本地只读快答，按真机快路径免 Jev 直通",
+                }),
+            );
         } else {
             let jev_started = std::time::Instant::now();
             let filter_res: Result<VoiceJevFilter, String> = if let Some(local_id) = local_jev_id {
@@ -864,27 +886,26 @@ impl BuiltinVoice {
                     ));
                 }
             };
-            let host_tools = HostTools::new(Arc::new(DesktopToolHost {
-                host: self.host.clone(),
-            }));
-            let specs = host_tools.specs();
+            let specs = self.jev_tool_specs(&settings.builtin_music)?;
             let total_specs = specs.len();
-            if !jev_options.tool_prune && !jev_options.fast_route && !jev_options.memory_filter {
-                if moss_voice_server::fast::normalized(&recognized_text)
-                    .chars()
-                    .count()
-                    < 2
-                {
-                    steps.insert(
-                        "jev".into(),
-                        serde_json::json!({
-                            "ok": true,
-                            "skipped": true,
-                            "elapsed_ms": 0,
-                            "detail": "单字短句按真机规则免查尾音续听",
-                        }),
-                    );
-                } else {
+            let run_unfinished_hold_probe =
+                |steps: &mut serde_json::Map<String, Value>| -> Result<(), String> {
+                    if moss_voice_server::fast::normalized(&recognized_text)
+                        .chars()
+                        .count()
+                        < 2
+                    {
+                        steps.insert(
+                            "jev".into(),
+                            serde_json::json!({
+                                "ok": true,
+                                "skipped": true,
+                                "elapsed_ms": 0,
+                                "detail": "单字短句按真机规则免查尾音续听",
+                            }),
+                        );
+                        return Ok(());
+                    }
                     let hold = crate::block_on(filter.check_unfinished_hold(
                         &recognized_text,
                         &[],
@@ -896,21 +917,10 @@ impl BuiltinVoice {
                             "Jev（{jev_model}）请求超时或未返回有效判断，请检查密钥、余额或本地进程状态"
                         );
                         steps.insert(
-                                "jev".into(),
-                                serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": jev_ms, "detail": msg }),
-                            );
-                        return Ok(make_response(
-                            false,
-                            Some("jev"),
-                            started_all.elapsed().as_millis() as u64,
-                            &seed_source,
-                            input_audio_url,
-                            Some(recognized_text),
-                            None,
-                            None,
-                            &steps,
-                            msg,
-                        ));
+                            "jev".into(),
+                            serde_json::json!({ "ok": false, "skipped": false, "elapsed_ms": jev_ms, "detail": msg }),
+                        );
+                        return Err(msg);
                     }
                     let state_label = if hold.unfinished {
                         "未说完续听"
@@ -926,6 +936,22 @@ impl BuiltinVoice {
                             "detail": format!("尾音续听检测：{state_label}（{jev_ms} ms）"),
                         }),
                     );
+                    Ok(())
+                };
+            if !jev_options.tool_prune && !jev_options.fast_route && !jev_options.memory_filter {
+                if let Err(msg) = run_unfinished_hold_probe(&mut steps) {
+                    return Ok(make_response(
+                        false,
+                        Some("jev"),
+                        started_all.elapsed().as_millis() as u64,
+                        &seed_source,
+                        input_audio_url,
+                        Some(recognized_text),
+                        None,
+                        None,
+                        &steps,
+                        msg,
+                    ));
                 }
             } else {
                 let sample_memories = if jev_options.memory_filter {
@@ -941,15 +967,32 @@ impl BuiltinVoice {
                 ));
                 let jev_ms = jev_started.elapsed().as_millis() as u64;
                 if decision.local_bypass {
-                    steps.insert(
-                        "jev".into(),
-                        serde_json::json!({
-                            "ok": true,
-                            "skipped": true,
-                            "elapsed_ms": jev_ms,
-                            "detail": "当前句式按真机规则本地直通大模型",
-                        }),
-                    );
+                    if jev_options.unfinished_hold {
+                        if let Err(msg) = run_unfinished_hold_probe(&mut steps) {
+                            return Ok(make_response(
+                                false,
+                                Some("jev"),
+                                started_all.elapsed().as_millis() as u64,
+                                &seed_source,
+                                input_audio_url,
+                                Some(recognized_text),
+                                None,
+                                None,
+                                &steps,
+                                msg,
+                            ));
+                        }
+                    } else {
+                        steps.insert(
+                            "jev".into(),
+                            serde_json::json!({
+                                "ok": true,
+                                "skipped": true,
+                                "elapsed_ms": jev_ms,
+                                "detail": "当前句式按真机规则本地直通大模型",
+                            }),
+                        );
+                    }
                 } else if !decision.applied {
                     let msg = format!(
                         "Jev（{jev_model}）请求超时或未返回有效判断，请检查密钥、余额或本地进程状态"

@@ -19,6 +19,21 @@ impl MusicTools {
         Self { underlying, index }
     }
 }
+pub fn play_music_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: PLAY.into(),
+        description:
+            "播放用户明确配置的本地音乐目录中的一首歌曲。按歌名匹配或随机选择，遇到重名时先向用户澄清。不接受路径或网址。"
+                .into(),
+        parameters: json!({
+            "type":"object","properties":{
+                "query":{"type":"string","description":"歌名，随机播放时省略"},
+                "random":{"type":"boolean","description":"设为 true 随机播放"}
+            },"additionalProperties":false
+        }),
+    }
+}
+
 impl ToolExecutor for MusicTools {
     fn trusted_read_only(&self, name: &str) -> bool {
         name != PLAY && self.underlying.trusted_read_only(name)
@@ -27,16 +42,7 @@ impl ToolExecutor for MusicTools {
     fn tools(&self) -> Vec<ToolSpec> {
         let mut list = self.underlying.tools();
         list.retain(|tool| tool.name != PLAY);
-        list.push(ToolSpec {
-            name:PLAY.into(),
-            description:"播放用户明确配置的本地音乐目录中的一首歌曲。按歌名匹配或随机选择，遇到重名时先向用户澄清。不接受路径或网址。".into(),
-            parameters:json!({
-                "type":"object","properties":{
-                    "query":{"type":"string","description":"歌名，随机播放时省略"},
-                    "random":{"type":"boolean","description":"设为 true 随机播放"}
-                },"additionalProperties":false
-            }),
-        });
+        list.push(play_music_tool_spec());
         list
     }
     fn call_raw<'a>(

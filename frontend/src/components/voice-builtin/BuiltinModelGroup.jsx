@@ -239,8 +239,8 @@ function BuiltinModelGroup({ section, builtin }) {
   };
 
   useEffect(() => {
-    // 仅在用户当前编辑表单（dirty）时防抖自动拉取，避免后台隐藏标签/折叠分组挂载时静默并发请求 `/models`
-    if (!dirty || doubao || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
+    // 仅在用户当前编辑表单（dirty）且空闲时防抖自动拉取，避免后台隐藏标签或测试/保存中途并发触发 `/models`
+    if (!dirty || sectionBusy || doubao || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
     if (remoteModels.key === currentListKey && (remoteModels.loading || remoteModels.ok !== null)) return undefined;
     // 停手 1 秒再读：地址、密钥还没输完时不发请求，免得先报一次鉴权失败
     const timer = setTimeout(() => {
@@ -248,7 +248,7 @@ function BuiltinModelGroup({ section, builtin }) {
     }, MODELS_AUTO_FETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, doubao, Boolean(endpointMismatch), currentListKey]);
+  }, [dirty, sectionBusy, doubao, Boolean(endpointMismatch), currentListKey]);
 
   // 裸域名只在 /v1 下读到列表：对话不会自动补 /v1，提示一键改用（后端 `suggested_url`）
   const v1Suggestion =
@@ -379,7 +379,14 @@ function BuiltinModelGroup({ section, builtin }) {
     }
   };
 
+  const cancelInflightFetch = () => {
+    fetchSeq.current += 1;
+    setRemoteModels((prev) => (prev.loading ? { ...prev, loading: false } : prev));
+  };
+
   const save = async () => {
+    const savedFromListKey = currentListKey;
+    cancelInflightFetch();
     setMenuOpen(false);
     setVoiceMenuOpen(false);
     stopAudioPreview();
@@ -393,12 +400,20 @@ function BuiltinModelGroup({ section, builtin }) {
       const nextPeer = findPeerCloudSource(section, next, nextForm.url);
       const nextListKey = modelsListKey(nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
       const nextCacheKey = remoteCacheKey(section, nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
+      fetchSeq.current += 1;
       setRemoteModels((prev) => {
-        if (prev.items.length > 0) {
-          REMOTE_MODELS_CACHE.set(nextCacheKey, { items: prev.items, modelSections: prev.modelSections || null, detail: prev.detail });
-          return { ...prev, key: nextListKey };
+        if (prev.key === savedFromListKey && prev.items.length > 0) {
+          REMOTE_MODELS_CACHE.set(nextCacheKey, {
+            items: prev.items,
+            modelSections: prev.modelSections || null,
+            suggestedUrl: prev.suggestedUrl || "",
+            detail: prev.detail,
+          });
+          return { ...prev, key: nextListKey, loading: false };
         }
-        return prev;
+        return prev.key === savedFromListKey
+          ? { ...prev, key: nextListKey, loading: false }
+          : { key: "", items: [], modelSections: null, suggestedUrl: "", detail: "", ok: null, loading: false };
       });
       setTest(null);
       setResult({ ok: true, text: savedNoteText(`${current.label}设置`, `密钥存本机、不显示 · ${restartEffect(next)}`) });
@@ -412,14 +427,16 @@ function BuiltinModelGroup({ section, builtin }) {
   const clear = async () => {
     const message = `删除内置服务的“${current.label}”设置与已保存的密钥？删除后内置服务回到回声测试模式。`;
     if (!(await showConfirm(message, { title: "删除设置？", tone: "warning", danger: true, confirmText: "删除" }))) return;
+    cancelInflightFetch();
     setMenuOpen(false);
     setLocalBusy(`builtin-clear-${section}`);
     try {
       const next = await voiceApi.builtinModelsSave({}, [section]);
+      fetchSeq.current += 1;
       REMOTE_MODELS_CACHE.delete(currentCacheKey);
       setStatus(next);
       setForm(builtinModelForm(section, next.models?.[section]));
-      setRemoteModels({ key: "", items: [], detail: "", ok: null, loading: false });
+      setRemoteModels({ key: "", items: [], modelSections: null, suggestedUrl: "", detail: "", ok: null, loading: false });
       setTest(null);
       setResult({ ok: true, text: `已删除${current.label}设置与密钥 · ${restartEffect(next)}` });
     } catch (error) {

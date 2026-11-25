@@ -5,7 +5,7 @@ mod decode;
 pub use decode::{DecodeJob, MusicDecodeError, MusicDecodeEvent, start_decode};
 mod index;
 mod tools;
-pub use tools::MusicTools;
+pub use tools::{MusicTools, play_music_tool_spec};
 pub(crate) mod playback;
 pub use index::{MusicChoice, MusicError, MusicIndex, TrackCandidate};
 // This synthetic test exercises index -> checked path -> decoded PCM -> Opus

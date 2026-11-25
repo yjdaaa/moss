@@ -292,8 +292,7 @@ pub fn fuse_command_keyword_hint(
     if crate::fast::is_stop(text) {
         return None;
     }
-    let dummy_settings = ConversationSettings::default();
-    if is_exit_phrase(text, &dummy_settings.exit_words) {
+    if is_default_exit_phrase(text) {
         return None;
     }
     let normalized = crate::fast::normalized(text);
@@ -304,6 +303,12 @@ pub fn fuse_command_keyword_hint(
         moss_voice_providers::local::CommandKeyword::Stop => "停",
         moss_voice_providers::local::CommandKeyword::Exit => "退下",
     })
+}
+
+/// 判断识别文本是否命中默认整句退出短令（如“退下 / 再见 / 退一下”，供会话与连贯试跑共用快路径判断）。
+pub fn is_default_exit_phrase(text: &str) -> bool {
+    let defaults = ConversationSettings::default();
+    is_exit_phrase(text, &defaults.exit_words)
 }
 
 fn is_exit_phrase(text: &str, exit_words: &[String]) -> bool {

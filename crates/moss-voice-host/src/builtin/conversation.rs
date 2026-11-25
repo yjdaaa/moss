@@ -1258,36 +1258,8 @@ impl BuiltinVoice {
             .map_err(invalid)?
             .with_fast_reply(experience.llm_fast_reply);
 
-        let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost {
-            host: self.host.clone(),
-        })));
-        let plugin_host = Arc::new(DesktopInfoHost {
-            host: self.host.clone(),
-        });
-        let info =
-            InfoTools::new(plugin_host).map_err(|_| internal("信息插件 HTTP 客户端初始化失败"))?;
-        let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools {
-            original,
-            info: Arc::new(info),
-        });
-        let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
-            original: combined,
-            home: Arc::new(DesktopHomeHost {
-                host: self.host.clone(),
-                control: self.home_control.clone(),
-            }),
-        });
         self.persona.configure(persona_config(experience));
-        let persona_host = self.host.clone();
-        let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools {
-            original: tools,
-            persona: self.persona.clone(),
-            permitted: Some(Arc::new(move |ctx: &ToolContext| {
-                persona_host
-                    .api_service
-                    .voice_session_allowed(&ctx.device_id, &ctx.session_id)
-            })),
-        });
+        let tools = self.base_tool_executor()?;
         let system_prompt = self.persona.system_prompt();
         let asr_corrections = moss_voice::settings::effective_asr_corrections(
             experience.asr_homophone_fix,
@@ -1391,6 +1363,51 @@ impl BuiltinVoice {
             conversation = conversation.with_turn_predictor(predictor);
         }
         Ok(Some((conversation, streaming_tts)))
+    }
+
+    pub(super) fn base_tool_executor(&self) -> Result<Arc<dyn ToolExecutor>, CenterError> {
+        let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost {
+            host: self.host.clone(),
+        })));
+        let plugin_host = Arc::new(DesktopInfoHost {
+            host: self.host.clone(),
+        });
+        let info =
+            InfoTools::new(plugin_host).map_err(|_| internal("信息插件 HTTP 客户端初始化失败"))?;
+        let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools {
+            original,
+            info: Arc::new(info),
+        });
+        let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
+            original: combined,
+            home: Arc::new(DesktopHomeHost {
+                host: self.host.clone(),
+                control: self.home_control.clone(),
+            }),
+        });
+        let persona_host = self.host.clone();
+        Ok(Arc::new(PersonaTools {
+            original: tools,
+            persona: self.persona.clone(),
+            permitted: Some(Arc::new(move |ctx: &ToolContext| {
+                persona_host
+                    .api_service
+                    .voice_session_allowed(&ctx.device_id, &ctx.session_id)
+            })),
+        }))
+    }
+
+    /// 构造与真机一致的完整工具规格清单（仅用于 Jev 工具组评估，不执行任何调用）。
+    pub(super) fn jev_tool_specs(
+        &self,
+        music: &moss_voice::settings::BuiltinMusic,
+    ) -> Result<Vec<moss_voice_providers::ToolSpec>, CenterError> {
+        let mut list = self.base_tool_executor()?.tools();
+        if music::scan_music_for_start(music, true).0.is_some() {
+            list.retain(|tool| tool.name != "play_music");
+            list.push(moss_voice_server::music::play_music_tool_spec());
+        }
+        Ok(list)
     }
 }
 
