@@ -161,12 +161,21 @@ impl Default for Pacing {
 impl Pacing {
     /// 新的一句第一段最多多少字（0 = 用最保守的阶梯）。
     /// 允许的合成耗时 = 前面的存货还能播多久 + 可接受的开口等待；按每秒约 4.5 个字换算，留两成余量。
+    /// 当播放队列已有存货垫底且本机实时率未严重落后实时时，按算力分两档抬高下限（`rtf <= 0.85` 保底 28 字整句合成；
+    /// `0.85 < rtf <= 1.25` 且存货 ≥1.2 秒保底 18 字），避免首句开播后仍每逢逗号切碎重起调，同时防止超慢 CPU 整句阻塞断流。
     fn first_max_chars(&self, now: std::time::Instant) -> u32 {
         const ACCEPTABLE_WAIT: f64 = 0.5;
         let lead = self.play_until.map_or(0.0, |until| {
             until.saturating_duration_since(now).as_secs_f64()
         });
-        let chars = (lead + ACCEPTABLE_WAIT) / self.rtf.max(0.02) * 4.5 * 0.8;
+        let raw_chars = (lead + ACCEPTABLE_WAIT) / self.rtf.max(0.02) * 4.5 * 0.8;
+        let chars = if lead >= 0.8 && self.rtf <= 0.85 {
+            raw_chars.max(28.0)
+        } else if lead >= 1.2 && self.rtf <= 1.25 {
+            raw_chars.max(18.0)
+        } else {
+            raw_chars
+        };
         if chars < 14.0 {
             0
         } else {

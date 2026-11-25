@@ -544,6 +544,14 @@ pub fn synthesis_segments_with(
     short_opener: bool,
 ) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
+    if first_max_chars > 0 && !short_opener && chars.len() <= first_max_chars as usize {
+        let trimmed = text.trim();
+        return if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![text.to_owned()]
+        };
+    }
     let widen = |index: usize, (floor, cap): (usize, usize)| -> (usize, usize) {
         let wanted = (first_max_chars as f64 * 1.5f64.powi(index as i32)).min(72.0) as usize;
         if wanted <= cap {
@@ -594,8 +602,15 @@ pub fn synthesis_segments_with(
                 })
                 .map_or(chars.len() - i - 1, |at| at + 1)
         };
+        let remaining = chars.len() - i - 1;
+        let orphan_sentence_tail = !short_opener
+            && remaining > 0
+            && remaining <= 6
+            && length + remaining <= max_len.max(15)
+            && !chars[i + 1..].iter().any(|c| matches!(c, '，' | ','));
         let should_cut = (length >= 8 && is_sentence_end)
             || (is_comma
+                && !orphan_sentence_tail
                 && (length >= min_comma_len || (length >= 5 && length + next_clause() > max_len)))
             || (length >= 45 && is_soft_pause)
             || (length >= 72
@@ -919,6 +934,15 @@ mod tests {
         assert_eq!(
             synthesis_segments_with("好的，激光机现在空闲。", 0, false),
             vec!["好的，激光机现在空闲。".to_owned()]
+        );
+        // 首句冷启动（first_max_chars=0）遇到末尾仅剩 ≤6 字收尾短半句时保持整句合成；有垫底上限 ≥ 句长时也不再按逗号二次切碎
+        assert_eq!(
+            synthesis_segments_with("三毫米椴木刻字，把握较大。", 0, false),
+            vec!["三毫米椴木刻字，把握较大。".to_owned()]
+        );
+        assert_eq!(
+            synthesis_segments_with("激光雕刻机目前处于空闲待命状态，把握较大。", 28, false),
+            vec!["激光雕刻机目前处于空闲待命状态，把握较大。".to_owned()]
         );
         assert_eq!(synthesis_segments_with(long, 0, false), pieces);
         let num_text = "当前雕刻速度为 1,200 毫米每分钟，功率已设好，随时可以开始。";

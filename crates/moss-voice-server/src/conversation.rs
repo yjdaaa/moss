@@ -1685,6 +1685,7 @@ impl Turn {
     ) -> bool {
         let (index, began) = (current.index, current.began);
         let sentence = current.text.clone();
+        let (clause_keep_ms, clause_trigger_ms) = crate::audio::clause_silence_bounds_ms(&sentence);
         let mut pending_text = Some(current.text);
         let mut held_tail: Vec<i16> = Vec::new();
         let mut sample_rate: u32 = 0;
@@ -1727,9 +1728,8 @@ impl Turn {
             let fade_samples = ((u64::from(sample_rate)
                 * u64::from(crate::audio::BOUNDARY_FADE_MS))
                 / 1000) as usize;
-            let keep_samples = ((u64::from(sample_rate)
-                * u64::from(crate::audio::CLAUSE_SILENCE_KEEP_MS))
-                / 1000) as usize;
+            let keep_samples =
+                ((u64::from(sample_rate) * u64::from(clause_keep_ms)) / 1000) as usize;
             let max_silence_hold = ((u64::from(sample_rate)
                 * u64::from(crate::audio::MAX_STREAM_SILENCE_HOLD_MS))
                 / 1000) as usize;
@@ -1837,16 +1837,14 @@ impl Turn {
                 crate::audio::trim_trailing_silence_i16(
                     &mut held_tail,
                     sample_rate,
-                    crate::audio::CLAUSE_SILENCE_KEEP_MS,
-                    crate::audio::CLAUSE_SILENCE_TRIGGER_MS,
+                    clause_keep_ms,
+                    clause_trigger_ms,
                 );
             } else if saw_active {
-                let trigger_samples = ((u64::from(sample_rate)
-                    * u64::from(crate::audio::CLAUSE_SILENCE_TRIGGER_MS))
-                    / 1000) as usize;
-                let keep_samples = ((u64::from(sample_rate)
-                    * u64::from(crate::audio::CLAUSE_SILENCE_KEEP_MS))
-                    / 1000) as usize;
+                let trigger_samples =
+                    ((u64::from(sample_rate) * u64::from(clause_trigger_ms)) / 1000) as usize;
+                let keep_samples =
+                    ((u64::from(sample_rate) * u64::from(clause_keep_ms)) / 1000) as usize;
                 let fade_samples = ((u64::from(sample_rate)
                     * u64::from(crate::audio::BOUNDARY_FADE_MS))
                     / 1000) as usize;

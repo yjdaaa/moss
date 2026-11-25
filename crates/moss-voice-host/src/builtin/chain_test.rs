@@ -1260,8 +1260,8 @@ impl BuiltinVoice {
         let stream_tts_res: Result<moss_voice_providers::Pcm, moss_voice_providers::ProviderError> =
             crate::block_on(async {
                 use moss_voice_server::audio::{
-                    BOUNDARY_FADE_MS, CLAUSE_SILENCE_KEEP_MS, CLAUSE_SILENCE_TRIGGER_MS,
-                    fade_head_i16, fade_tail_i16, trim_trailing_silence_i16,
+                    BOUNDARY_FADE_MS, clause_silence_bounds_ms, fade_head_i16, fade_tail_i16,
+                    trim_trailing_silence_i16,
                 };
                 let mut merged_samples: Vec<i16> = Vec::new();
                 let mut out_rate: u32 = 0;
@@ -1305,12 +1305,8 @@ impl BuiltinVoice {
                             moss_voice_providers::resample::Resampler::new(clause_rate, out_rate)
                                 .process(&clause_samples);
                     }
-                    trim_trailing_silence_i16(
-                        &mut clause_samples,
-                        out_rate,
-                        CLAUSE_SILENCE_KEEP_MS,
-                        CLAUSE_SILENCE_TRIGGER_MS,
-                    );
+                    let (keep_ms, trigger_ms) = clause_silence_bounds_ms(sentence);
+                    trim_trailing_silence_i16(&mut clause_samples, out_rate, keep_ms, trigger_ms);
                     fade_head_i16(&mut clause_samples, out_rate, BOUNDARY_FADE_MS);
                     fade_tail_i16(&mut clause_samples, out_rate, BOUNDARY_FADE_MS);
                     merged_samples.extend_from_slice(&clause_samples);

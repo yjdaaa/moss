@@ -819,11 +819,17 @@ async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence
     }
 
     let llm = Arc::new(FakeLlm {
-        rounds: Mutex::new(VecDeque::from([say(&["这是一句带停顿的话。"])])),
+        rounds: Mutex::new(VecDeque::from([
+            say(&["这是一句带停顿的话。"]),
+            say(&["前半句先换口气，", "后半句收尾。"]),
+        ])),
         ..FakeLlm::default()
     });
     let asr = Arc::new(FakeAsr {
-        replies: Mutex::new(VecDeque::from([Ok("测试流式停顿".into())])),
+        replies: Mutex::new(VecDeque::from([
+            Ok("测试流式停顿".into()),
+            Ok("测试逗号与句号层次".into()),
+        ])),
         ..Default::default()
     });
     let conversation = Arc::new(Conversation::new(
@@ -838,8 +844,8 @@ async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence
         session_id: "sess-pause".into(),
     };
     let (handle, mut rx) = spawn_turn(
-        conversation,
-        ctx,
+        conversation.clone(),
+        ctx.clone(),
         TurnInput::Utterance {
             pcm: vec![0; 960],
             sample_rate: UP,
@@ -864,10 +870,35 @@ async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence
         sentence_ends, 1,
         "句子结束应发出 SentenceEnd 供节奏泵冲刷句尾残帧"
     );
-    // 期望总长：100ms 语音 + 300ms 句中停顿（完整保留！）+ 100ms 语音 + 140ms 裁剪后句尾气口 = 640ms（15360 样本）
+    // 期望总长：100ms 语音 + 300ms 句中停顿（完整保留！）+ 100ms 语音 + 250ms 句号结尾停顿 = 750ms
     let expected_ms = (total_samples * 1000) / DOWN as usize;
     assert!(
-        (630..=650).contains(&expected_ms),
-        "句中 300ms 停顿必须完整保留且句尾 900ms 跨块死寂裁剪至 140ms（期望约 640ms，实际 {expected_ms}ms / {total_samples} 样本）"
+        (740..=760).contains(&expected_ms),
+        "句中 300ms 停顿必须完整保留且句号句尾死寂裁剪至 250ms（期望约 750ms，实际 {expected_ms}ms / {total_samples} 样本）"
+    );
+
+    // 逗号分句保留 140ms 紧凑换气，句号分句保留 250ms 完整收尾（总长 640ms + 750ms = 1390ms）
+    let (handle2, mut rx2) = spawn_turn(
+        conversation,
+        ctx,
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut two_clause_samples = 0usize;
+    while let Some(ev) = rx2.recv().await {
+        if let TurnEvent::Speech { pcm, .. } | TurnEvent::SpeechMore(pcm) = ev {
+            two_clause_samples += pcm.samples.len();
+        }
+    }
+    handle2.await.unwrap();
+    let two_clause_ms = (two_clause_samples * 1000) / DOWN as usize;
+    assert!(
+        (1380..=1400).contains(&two_clause_ms),
+        "逗号分句（140ms）与句号分句（250ms）须拉开停顿层次（期望约 1390ms，实际 {two_clause_ms}ms）"
     );
 }

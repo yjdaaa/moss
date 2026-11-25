@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 本地语音合成输出先隔直，消除 Kokoro 随音量起伏的直流偏移（2026-11-25）
+
+- **现象**：Windows「连贯试跑」导出的 Kokoro 合成音频（种子句与第 5 棒回复）整体偏向正半轴：每 100 ms 均值达有效值的 0.4～0.6 倍，0～20 Hz 占全段约三成能量，正峰 0.63、负峰仅 0.29～0.44，扬声器每个分句开头会被推一下，负向余量浪费一半，软限幅只压正峰。
+- **根因与修复**：声码器输出自带直流，`moss-voice-local` 转 16-bit 前只做软限幅、没有隔直。新增 `remove_dc`（一阶 25 Hz 隔直高通，80 Hz 以上衰减 <0.5 dB），整段合成与流式子分段都经 `tts_pcm` 先隔直再 `to_i16`，对所有 sherpa-onnx 本地合成引擎生效；Qwen3-TTS（speech.cpp）与云端合成不经此路径。
+- **验证**：新增 `tts_dc_block_removes_envelope_offset_keeps_voice_band_and_settles_in_silence`；同一滤波套用到 Windows 导出音频后 0～20 Hz 能量从 31% / 27% 降到 0.4% / 0.3%，人声均值归零。本机无 Kokoro 模型，实际合成与听感未验证（`unverified`）。
+- **关联**：`apps/moss-voice-local/src/main.rs`（`remove_dc`、`tts_pcm`、`TTS_DC_BLOCK_HZ`）、内置语音技术书 n120。
+
+### 修复本地 Kokoro 语音合成一字一顿与缺变调问题，消除分句二次切碎并拉开逗句停顿层次（2026-11-25）
+
+- **现象**：使用本地 Kokoro 合成语音（真机与「连贯试跑 / 录真话测」）时，“三毫米 / 椴木 / 刻字 / 确认 / 对焦 / 两遍”等常用词组被逐字拆散念出一字一顿感，“切不透 / 一般 / 你好”缺少普通话连读变调，且一句话在逗号处被二次切碎并把句号与逗号停顿压成同一时长，缺少真人说话的连贯起伏。
+- **根因与修复**：`moss-voice-local` 新增 `kokoro_prosody` 模块，针对 `sherpa-onnx 1.13.8` 忽略 `jieba` 词典、缺失中文词界记号与 v1.0 缺变调的问题，不改模型原目录派生缓存增强词表（v1.0 映射单码点非空白词界 `▁ -> space_id`、v1.1 复用 `/`，复合词拼装优先继承原词表多音子词并融合工坊高频词与 `jieba.dict.utf8` 常用词，完成“一 / 不 / 三声”变调，`tts_voices` 试听缓存版本升至 `v2`）；`Segmenter`（含流式 SSE 逐字到达）与 `synthesis_segments_with` 对句末 4～8 字短收尾不再从逗号硬拆，`Pacing::first_max_chars` 在有待播音频垫底且实时率允许时按算力放宽至 18～28 字整句合成（子分段换气从 80ms 调至 130ms）；`moss-voice-server` 新增 `clause_silence_bounds_ms` 将逗号（140ms）、分号（200ms）与句号（250ms）停顿分层（真机与 `chain_test` 同步生效），并优化 `RISK_NOTES_RULE` 避免拆出孤立四字短句。
+- **验证**：新增 `kokoro_prosody` 词界、多音子词继承、普通话变调与并发缓存复用单测，补充 `Segmenter` 流式短尾合并、`synthesis_segments_with` 整句直通、`Pacing` 算力分档放宽及真机流式逗句分层停顿单测；`verify.mjs --finish`（含 `moss-voice-local` 独立工作区检查与测试）通过并快更本机桌面程序。真机与更新后本地实际听感未验证（`unverified`）。
+- **关联**：`apps/moss-voice-local/src/kokoro_prosody.rs`、`apps/moss-voice-local/src/main.rs`、`crates/moss-voice-local-proto/src/lib.rs`、`crates/moss-voice-providers/src/local.rs`、`crates/moss-voice-providers/src/text.rs`、`crates/moss-voice-server/src/audio/mod.rs`、`crates/moss-voice-server/src/conversation.rs`、`crates/moss-voice-host/src/builtin/chain_test.rs`、内置语音技术书 n119。
+
 ### 补齐五步连贯试跑 Jev 快路径与完整工具组评估，修复切换云端地址时的模型列表串缓存（2026-11-25）
 
 - **现象**：「连贯试跑 / 录真话测」在开启 Jev 时对“退下 / 再见”退出词与“机器状态”等本地只读快答未像真机一样 0ms 跳过 Jev，Jev 工具剪枝评估只带激光与外部工具而漏掉角色/信息/家居/音乐 4 个工具组，且仅勾选尾音续听与只读快答遇到含逗号句子时会因 `evaluate_turn` 本地直通而漏调 `check_unfinished_hold`；语音中心切换云端地址后未重新拉取列表即保存时，会把旧端点的模型列表写进新端点缓存。

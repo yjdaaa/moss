@@ -14,8 +14,8 @@ use serde::Serialize;
 
 use crate::local_models::{ModelKind, spec_of};
 
-/// 试听缓存协议版本：若将来调整默认试听句，递增目录号即可无感失效旧缓存。
-pub const PREVIEW_CACHE_VERSION: &str = "v1";
+/// 试听缓存协议版本：调整默认试听句或底层韵律词表时递增目录号，无感失效旧缓存。
+pub const PREVIEW_CACHE_VERSION: &str = "v2";
 
 pub const SAMPLE_ZH: &str = "你好，我是 MOSS 语音助手，激光雕刻工作台已就绪。";
 pub const SAMPLE_EN_US: &str = "Hello, I am MOSS. Your laser engraving studio is ready.";

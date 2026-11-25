@@ -8,6 +8,7 @@
 //!
 //! 本程序静态链接 sherpa-onnx（Apache-2.0），其中包含 espeak-ng（GPL-3.0），因此以 GPL-3.0-or-later 发布。
 
+mod kokoro_prosody;
 mod smart_turn;
 
 use moss_voice_local_proto::{
@@ -94,7 +95,35 @@ fn to_i16(samples: &[f32]) -> Vec<i16> {
         .collect()
 }
 
-/// 平滑本地流式子分段拼接边缘：非末段裁除模型尾部超长死寂（>200ms 裁至 80ms 自然换气）并做 6ms 淡出，
+/// 合成输出隔直高通的截止频率（Hz）：一阶滤波在 80 Hz 以上的人声基频处衰减不到 0.5 dB。
+const TTS_DC_BLOCK_HZ: f32 = 25.0;
+
+/// 一阶隔直高通 `y[n] = x[n] - x[n-1] + R·y[n-1]`。Kokoro 声码器输出带随音量起伏的正向直流偏移
+/// （实测每 100 ms 均值达有效值的 0.4～0.6 倍、0～20 Hz 占全段约三成能量，正峰 0.63 / 负峰 0.29），
+/// 不滤掉会让扬声器在每个分句开头被推一下、负向余量只用一半、软限幅只压正峰。非有限值按 0 处理，避免污染滤波状态。
+fn remove_dc(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if sample_rate == 0 {
+        return samples.to_vec();
+    }
+    let r = (-2.0 * std::f32::consts::PI * TTS_DC_BLOCK_HZ / sample_rate as f32).exp();
+    let (mut prev_x, mut prev_y) = (0.0f32, 0.0f32);
+    samples
+        .iter()
+        .map(|&sample| {
+            let x = if sample.is_finite() { sample } else { 0.0 };
+            let y = x - prev_x + r * prev_y;
+            (prev_x, prev_y) = (x, y);
+            y
+        })
+        .collect()
+}
+
+/// 合成模型浮点输出先隔直再转 16-bit PCM。
+fn tts_pcm(samples: &[f32], sample_rate: u32) -> Vec<i16> {
+    to_i16(&remove_dc(samples, sample_rate))
+}
+
+/// 平滑本地流式子分段拼接边缘：非末段裁除模型尾部超长死寂（>220ms 裁至 130ms 自然换气）并做 6ms 淡出，
 /// 非首段做 6ms 淡入，消除同一句内多个 `AudioChunk` 独立合成时的直流跳变咔哒声。
 fn smooth_stream_subsegment(
     samples: &mut Vec<i16>,
@@ -107,8 +136,8 @@ fn smooth_stream_subsegment(
     }
     const SILENCE_THRESHOLD: i16 = 24;
     const SUBSEG_FADE_MS: u64 = 6;
-    const SUBSEG_SILENCE_TRIGGER_MS: u64 = 200;
-    const SUBSEG_SILENCE_KEEP_MS: u64 = 80;
+    const SUBSEG_SILENCE_TRIGGER_MS: u64 = 220;
+    const SUBSEG_SILENCE_KEEP_MS: u64 = 130;
     if !is_last
         && let Some(last_active) = samples
             .iter()
@@ -1169,16 +1198,18 @@ fn build_tts_gen_config(runtime: &TtsRuntime, speaker: i32, speed: f32) -> Gener
 fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String> {
     let model = match engine {
         TtsEngine::Kokoro => {
-            let lexicon = format!(
-                "{},{}",
-                require(&dir.join("lexicon-us-en.txt"))?,
-                require(&dir.join("lexicon-zh.txt"))?
-            );
+            let en_lexicon = require(&dir.join("lexicon-us-en.txt"))?;
+            let raw_zh_lexicon = require(&dir.join("lexicon-zh.txt"))?;
+            let raw_tokens = require(&dir.join("tokens.txt"))?;
+            let (tokens_path, zh_lexicon) = kokoro_prosody::prepare_kokoro_prosody_files(dir)
+                .map(|(t, l)| (native_path_string(&t), native_path_string(&l)))
+                .unwrap_or((raw_tokens, raw_zh_lexicon));
+            let lexicon = format!("{en_lexicon},{zh_lexicon}");
             OfflineTtsModelConfig {
                 kokoro: OfflineTtsKokoroModelConfig {
                     model: Some(first_of(dir, &["model.onnx", "model.int8.onnx"])?),
                     voices: Some(require(&dir.join("voices.bin"))?),
-                    tokens: Some(require(&dir.join("tokens.txt"))?),
+                    tokens: Some(tokens_path),
                     data_dir: Some(require(&dir.join("espeak-ng-data"))?),
                     dict_dir: Some(require(&dir.join("dict"))?),
                     lexicon: Some(lexicon),
@@ -1315,15 +1346,9 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 match generated {
                     _ if cancelled => error(&out, id, "合成已取消"),
                     Some(audio) => {
-                        let pcm = to_i16(audio.samples());
-                        send(
-                            &out,
-                            id,
-                            Reply::Audio {
-                                sample_rate: audio.sample_rate().max(0) as u32,
-                            },
-                            &pcm_to_bytes(&pcm),
-                        );
+                        let sample_rate = audio.sample_rate().max(0) as u32;
+                        let pcm = tts_pcm(audio.samples(), sample_rate);
+                        send(&out, id, Reply::Audio { sample_rate }, &pcm_to_bytes(&pcm));
                     }
                     None => error(&out, id, "合成失败"),
                 }
@@ -1369,7 +1394,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     match generated {
                         Some(audio) => {
                             let sample_rate = audio.sample_rate().max(0) as u32;
-                            let mut pcm = to_i16(audio.samples());
+                            let mut pcm = tts_pcm(audio.samples(), sample_rate);
                             if total > 1 {
                                 smooth_stream_subsegment(
                                     &mut pcm,
@@ -1974,8 +1999,8 @@ mod tests {
         smooth_stream_subsegment(&mut seg1, rate, true, false);
         assert_eq!(seg1[0], 6000, "首段起点由上层统一淡入，子分段内不重复衰减");
         assert!(
-            seg1.len() <= 2400 + 1950,
-            "非末段超长静音被裁至约 80ms: {}",
+            seg1.len() <= 2400 + 3150,
+            "非末段超长静音被裁至约 130ms: {}",
             seg1.len()
         );
         assert_eq!(*seg1.last().unwrap(), 0, "非末段结尾平滑归零");
@@ -1984,6 +2009,62 @@ mod tests {
         smooth_stream_subsegment(&mut seg2, rate, false, true);
         assert_eq!(seg2[0], 0, "非首段开头平滑淡入消除直流跳变");
         assert_eq!(*seg2.last().unwrap(), -5000, "末段结尾交由上层统一收尾");
+    }
+
+    #[test]
+    fn tts_dc_block_removes_envelope_offset_keeps_voice_band_and_settles_in_silence() {
+        let rate = 24_000u32;
+        let voiced = (rate / 2) as usize; // 500ms 人声 + 200ms 静音
+        let samples: Vec<f32> = (0..voiced + (rate / 5) as usize)
+            .map(|i| {
+                if i >= voiced {
+                    return 0.0;
+                }
+                let t = i as f32 / rate as f32;
+                // 150 Hz 基频 + 随包络起伏的正向偏移（复现 Kokoro 实测形态）
+                let envelope = (std::f32::consts::PI * t / 0.5).sin();
+                0.3 * envelope * (2.0 * std::f32::consts::PI * 150.0 * t).sin() + 0.1 * envelope
+            })
+            .collect();
+        let mid = (rate / 10) as usize..(rate * 2 / 5) as usize;
+        let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+        assert!(mean(&samples[mid.clone()]) > 0.08, "构造的输入带明显直流");
+
+        let filtered = remove_dc(&samples, rate);
+        assert_eq!(filtered.len(), samples.len());
+        let dc = mean(&filtered[mid.clone()]);
+        assert!(dc.abs() < 0.01, "包络直流被滤掉: {dc}");
+        // 150 Hz 分量幅度基本不变：去掉直流后两者的交流有效值相差 <3%
+        let ac_rms = |s: &[f32]| {
+            let m = mean(s);
+            (s.iter().map(|v| (v - m).powi(2)).sum::<f32>() / s.len() as f32).sqrt()
+        };
+        let raw_ac = ac_rms(&samples[mid.clone()]);
+        let out_ac = ac_rms(&filtered[mid.clone()]);
+        assert!(
+            (out_ac / raw_ac - 1.0).abs() < 0.03,
+            "人声频段无损: {raw_ac} -> {out_ac}"
+        );
+        // 人声结束 100ms 后回落到静音裁剪门限（24/32768）以下，不影响子分段尾静音判定
+        let tail_start = voiced + (rate / 10) as usize;
+        let tail_peak = filtered[tail_start..]
+            .iter()
+            .fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(tail_peak < 24.0 / 32_768.0, "静音段残留: {tail_peak}");
+
+        let pcm = tts_pcm(&samples, rate);
+        let (max, min) = (*pcm.iter().max().unwrap(), *pcm.iter().min().unwrap());
+        assert!(
+            (f32::from(max) / -f32::from(min) - 1.0).abs() < 0.15,
+            "隔直后正负峰基本对称: {max} / {min}"
+        );
+
+        let guarded = remove_dc(&[f32::NAN, 0.5, f32::INFINITY, 0.5], rate);
+        assert!(
+            guarded.iter().all(|v| v.is_finite()),
+            "非有限值不污染滤波状态"
+        );
+        assert_eq!(remove_dc(&[0.2, 0.3], 0), vec![0.2, 0.3]);
     }
 
     #[test]

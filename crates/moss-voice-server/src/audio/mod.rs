@@ -54,12 +54,38 @@ pub const UNDERRUN_FADE_MS: u32 = 5;
 pub const TRAILING_SILENCE_TRIGGER_MS: u32 = 120;
 /// 句尾裁剪后保留的自然气口静音时长（毫秒）。
 pub const TRAILING_SILENCE_KEEP_MS: u32 = 60;
-/// 流式分句合成时触发静音裁剪的阈值（毫秒）：保留句中逗号的自然停顿（≤220ms 不裁），仅裁掉模型尾部的超长死寂。
+/// 流式分句在逗号等句中停顿处触发静音裁剪的阈值（毫秒）：保留句中逗号的自然停顿（≤220ms 不裁），仅裁掉超长死寂。
 pub const CLAUSE_SILENCE_TRIGGER_MS: u32 = 220;
-/// 流式分句合成裁剪后保留的自然换气停顿时长（毫秒），避免两句贴死导致抢拍吞字。
+/// 流式分句在逗号等句中停顿处裁剪后保留的自然换气时长（毫秒），避免两半句贴死抢拍。
 pub const CLAUSE_SILENCE_KEEP_MS: u32 = 140;
-/// 流式分句缓冲对超出 `CLAUSE_SILENCE_KEEP_MS` 的尾部静音最大暂存观察时长（毫秒）：仅在整句结束时裁剪句尾死寂，不误剪流式分块中间的自然停顿。
+/// 完整句子结尾（。！？）触发静音裁剪的阈值（毫秒）：让句号停顿明显长于逗号，拉开句间层次。
+pub const SENTENCE_SILENCE_TRIGGER_MS: u32 = 340;
+/// 完整句子结尾（。！？）裁剪后保留的句间停顿时长（毫秒）。
+pub const SENTENCE_SILENCE_KEEP_MS: u32 = 250;
+/// 流式分句缓冲对超出保留阈值的尾部静音最大暂存观察时长（毫秒）：仅在整句结束时裁剪句尾死寂，不误剪流式分块中间的自然停顿。
 pub const MAX_STREAM_SILENCE_HOLD_MS: u32 = 1000;
+
+/// 按分句结尾标点返回 `(保留静音 keep_ms, 触发裁剪阈值 trigger_ms)`：
+/// 句中逗号/顿号/冒号保留短换气（140ms），分号居中（200ms），句号/叹号/问号保留完整句间落调停顿（250ms）。
+pub fn clause_silence_bounds_ms(sentence: &str) -> (u32, u32) {
+    let terminal = sentence
+        .trim_end_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '”' | '’' | '"' | '\'' | '）' | ')' | '】' | ']' | '》' | '」' | '』'
+                )
+        })
+        .chars()
+        .last();
+    match terminal {
+        Some('，' | ',' | '、' | '：' | ':') => {
+            (CLAUSE_SILENCE_KEEP_MS, CLAUSE_SILENCE_TRIGGER_MS)
+        }
+        Some('；' | ';') => (200, 280),
+        _ => (SENTENCE_SILENCE_KEEP_MS, SENTENCE_SILENCE_TRIGGER_MS),
+    }
+}
 const SILENCE_SAMPLE_THRESHOLD: i16 = 24;
 /// 下行软限幅拐点（约 -4.3 dBFS）：低于此幅值的正常语音 1:1 无损直通，不损失中小音量响度。
 const SOFT_LIMIT_KNEE_I16: i32 = 20_000;
@@ -241,6 +267,10 @@ mod boundary_tests {
 
     #[test]
     fn boundary_fade_and_trailing_silence_trim_smooth_edges_without_touching_active_tones() {
+        assert_eq!(clause_silence_bounds_ms("三毫米椴木刻字，"), (140, 220));
+        assert_eq!(clause_silence_bounds_ms("先确认对焦；"), (200, 280));
+        assert_eq!(clause_silence_bounds_ms("把握较大。"), (250, 340));
+        assert_eq!(clause_silence_bounds_ms("“必要时走两遍。”"), (250, 340));
         let rate = 16_000;
         // 1. 纯正弦音调无尾部静音，长度保持不变，首尾采样点平滑归零
         let mut active = tone(rate, 440.0, 300, 6000.0);

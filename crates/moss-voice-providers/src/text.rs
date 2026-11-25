@@ -234,6 +234,43 @@ fn is_end(c: char) -> bool {
     matches!(c, '。' | '！' | '？' | '!' | '?' | '\n')
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClauseTailState {
+    /// 后续尚未满 `max_speakable` 字且未见句末或新分句停顿：流式 SSE 还在吐字，可暂缓切分观察短尾
+    Undecided,
+    /// 在 `max_speakable` 字内已见句末标点：跳过当前逗号，留到该句末整句送出
+    NearSentenceEnd,
+    /// 后续超过 `max_speakable` 字或出现新分句停顿/换行：正常在当前逗号切开
+    LongOrMultiClause,
+}
+
+/// 观察逗号后的缓冲区尾部状态，用于消除 4~8 字孤立句末短尾（兼容整块推入与逐字 SSE 流式推入）。
+fn inspect_clause_tail(rest: &str, max_speakable: usize) -> ClauseTailState {
+    let mut speakable_seen = 0usize;
+    let mut chars = rest.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\n' || is_clause_pause(ch) {
+            return ClauseTailState::LongOrMultiClause;
+        }
+        if matches!(ch, '。' | '！' | '？' | '!' | '?')
+            || (ch == '.' && chars.peek().is_some_and(|next| next.is_whitespace()))
+        {
+            return if speakable_seen > 0 && speakable_seen <= max_speakable {
+                ClauseTailState::NearSentenceEnd
+            } else {
+                ClauseTailState::LongOrMultiClause
+            };
+        }
+        if ch.is_alphanumeric() {
+            speakable_seen += 1;
+            if speakable_seen > max_speakable {
+                return ClauseTailState::LongOrMultiClause;
+            }
+        }
+    }
+    ClauseTailState::Undecided
+}
+
 fn is_emoji(c: char) -> bool {
     matches!(c as u32, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D | 0x2B50 | 0x2B55)
 }
@@ -537,6 +574,19 @@ impl Segmenter {
                     || (c == '\n' && count >= 1)
                     || (c == '\n' && !self.buffer[..at].trim().is_empty())
                 {
+                    // 首句已送出（喇叭正在播放）时，若逗号后还没流够 8 个字就暂缓切分观察；一旦 ≤8 字内即见句号便合并整句送出，
+                    // 超过 8 字或遇到新逗号则立即在当前逗号切开。首句未送出时保持 6 字首逗快切，保证冷启动首声延迟最低。
+                    if self.sent_any && is_clause_pause(c) {
+                        match inspect_clause_tail(&self.buffer[end..], 8) {
+                            ClauseTailState::NearSentenceEnd => continue,
+                            ClauseTailState::Undecided
+                                if self.buffer.chars().count() <= MAX_CHARS =>
+                            {
+                                return None;
+                            }
+                            _ => {}
+                        }
+                    }
                     return Some(end);
                 }
                 if count == 0 && c == '\n' {
@@ -792,6 +842,31 @@ mod tests {
         assert_eq!(
             clean_for_speech("查看 [材料库说明](https://example.com/docs) 中的 *3cm* 焦距。"),
             "查看 材料库说明 中的 3厘米 焦距。"
+        );
+        // 3. 首句已开播后，后续复合句末尾紧跟 ≤8 字短收尾时不从逗号硬拆出孤立尾巴（含整块推入与逐字模拟真实 SSE 流式到达）
+        let smooth = run(&[
+            "三毫米椴木刻字把握较大。",
+            "最需要注意的是切不透，建议先确认对焦，速度别太快，必要时走两遍。",
+        ]);
+        assert_eq!(
+            smooth,
+            vec![
+                "三毫米椴木刻字把握较大。",
+                "最需要注意的是切不透，建议先确认对焦，速度别太快，必要时走两遍。"
+            ]
+        );
+        let sse_tokens: Vec<String> =
+            "收到，激光机空闲。最需要注意的是切不透，建议先确认对焦，速度别太快，必要时走两遍。"
+                .chars()
+                .map(|ch| ch.to_string())
+                .collect();
+        let sse_refs: Vec<&str> = sse_tokens.iter().map(String::as_str).collect();
+        assert_eq!(
+            run(&sse_refs),
+            vec![
+                "收到，激光机空闲。",
+                "最需要注意的是切不透，建议先确认对焦，速度别太快，必要时走两遍。"
+            ]
         );
     }
 

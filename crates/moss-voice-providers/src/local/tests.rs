@@ -1047,6 +1047,21 @@ fn pacing_relaxes_segmentation_only_when_synthesis_can_keep_up() {
     let mut cold = slow;
     cold.play_until = None;
     assert_eq!(cold.first_max_chars(now), 0);
+    // 首句已交出约 1.8 秒语音正在播放时：常规算力（rtf <= 0.85）保底 28 字整句合成；
+    // 临界 CPU（rtf ≈ 1.1）保底 18 字；超慢 CPU（rtf = 1.8 且仅 0.85s 缓冲）不强拉，防止句间断流死寂
+    let mut medium_after_opener = Pacing::default();
+    medium_after_opener.delivered(now, Some(Duration::from_millis(1260)), 1.8);
+    assert!(
+        medium_after_opener.first_max_chars(now) >= 28,
+        "{}",
+        medium_after_opener.first_max_chars(now)
+    );
+    let mut cpu_after_opener = Pacing::default();
+    cpu_after_opener.delivered(now, Some(Duration::from_millis(1980)), 1.8);
+    assert_eq!(cpu_after_opener.first_max_chars(now), 18);
+    let mut very_slow = Pacing::default();
+    very_slow.delivered(now, Some(Duration::from_millis(1530)), 0.85);
+    assert_eq!(very_slow.first_max_chars(now), 0);
     // 同一台慢机器，队列里已有 12 秒存货：下一句可以长一些
     assert!(
         slow.first_max_chars(now) >= 40,
