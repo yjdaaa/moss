@@ -92,6 +92,16 @@ export function localJevRuntimeView(runtime) {
 
 const LOCAL_BUSY_STATES = new Set(["downloading", "preparing_runtime", "waiting_runtime", "verifying", "installing"]);
 
+/**
+ * 叠加功能缺前提时的提示（n130）：命令词抗噪跑在本地判停上，前端降噪只作用于本地判停与本地识别；
+ * 前提没满足时勾上也不生效（后端状态写“没用上”），这里提前说清楚。前提满足或不是这类功能时返回空串。
+ */
+export function localAddonPrereqNote(kind, form) {
+  if (kind === "kws" && !form?.vad) return "当前“拾音判停”没用本地模型，勾上也不生效：先在顶部把它换成本地模型";
+  if (kind === "denoise" && !form?.vad && !form?.asr) return "当前“拾音判停”和“语音识别”都没用本地模型，勾上也不生效：先在顶部把其中一个换成本地模型";
+  return "";
+}
+
 /** 跑在 speech.cpp 上的 Qwen3-TTS（0.6B / 1.7B 共用同一运行时，n126）。 */
 export function isSpeechTtsModel(model) {
   return model?.engine === "speech_cpp_tts" || /^qwen3_tts_/.test(String(model?.id || ""));

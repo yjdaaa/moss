@@ -75,6 +75,7 @@ import {
   selectLocalModel,
   selectedVoices,
   localTtsSpeakerGroups,
+  localAddonPrereqNote,
   localTtsSpeedFixed,
   VOICE_TIMING_STAGES,
   voiceTimingReport,
@@ -2237,4 +2238,23 @@ test("本地合成音色下拉按语种分组，当前值不在音色表里时�
   const big = { id: "qwen3_tts_1_7b", kind: "tts", engine: "speech_cpp_tts", label: "Qwen3-TTS 1.7B", installed: true };
   assert.doesNotMatch(localModelDeleteText(small, [small, big], {}), /speech/);
   assert.match(localModelDeleteText(big, [small, { ...big }].map((m) => (m.id === small.id ? { ...m, installed: false } : m)), {}), /speech/);
+});
+
+test("没有的功能不显示：设备没有的控制项隐藏，叠加功能缺前提时给提示（n130）", () => {
+  const session = (tools) => ({ session_id: "s1", device_id: "d1", device_tools: tools });
+  const device = { device_id: "d1" };
+  const full = builtinDeviceControlsView(device, session(["self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.set_press_to_talk"]), {});
+  assert.deepEqual([full.showVolume, full.showBrightness, full.showTheme, full.showPressToTalk], [true, true, true, true]);
+  const bare = builtinDeviceControlsView(device, session(["self.get_device_status", "self.audio_speaker.set_volume"]), {});
+  assert.deepEqual([bare.showVolume, bare.showBrightness, bare.showTheme, bare.showPressToTalk], [true, false, false, false], "在线且已上报工具清单：没有的控制项不显示");
+  const loading = builtinDeviceControlsView(device, session([]), {});
+  assert.deepEqual([loading.showBrightness, loading.showPressToTalk], [true, true], "工具清单还没读到：照旧显示（置灰）");
+  const offline = builtinDeviceControlsView(device, null, {});
+  assert.deepEqual([offline.showVolume, offline.showPressToTalk], [true, true], "离线：照旧显示（置灰）");
+
+  assert.match(localAddonPrereqNote("kws", { vad: false }), /拾音判停/);
+  assert.equal(localAddonPrereqNote("kws", { vad: true }), "");
+  assert.match(localAddonPrereqNote("denoise", { vad: false, asr: false }), /拾音判停.*语音识别.*不生效/);
+  assert.equal(localAddonPrereqNote("denoise", { vad: false, asr: true }), "");
+  assert.equal(localAddonPrereqNote("turn", {}), "");
 });

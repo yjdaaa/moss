@@ -360,6 +360,16 @@ button.conn-pill:hover {
   border-color: rgba(139, 92, 246, 0.75);
   background: rgba(139, 92, 246, 0.14);
 }
+/* n130：只有一种语言时语言卡只展示信息、不做筛选，不显示可点的样子 */
+.tts-lang-card:disabled {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
+}
+.tts-lang-card:disabled:hover {
+  border-color: var(--ob-line-2, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.025);
+}
 .tts-lang-card-head {
   display: flex;
   align-items: center;

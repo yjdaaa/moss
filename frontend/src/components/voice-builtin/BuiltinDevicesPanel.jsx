@@ -200,103 +200,111 @@ export function BuiltinDevicesPanel({ builtin }) {
                                 </span>
                               </div>
                               <div className="voice-device-controls-grid">
-                                <div className="voice-device-control-item">
-                                  <span className="voice-device-control-label">
-                                    <span>扬声器音量</span>
-                                    <b className="mono">{volVal}%</b>
-                                  </span>
-                                  <div className="voice-actions">
-                                    <input
-                                      type="range"
-                                      min="0"
-                                      max="100"
-                                      step="5"
-                                      value={volVal}
-                                      disabled={Boolean(asking) || !online || !controls.canVolume}
-                                      onChange={(e) =>
-                                        setControlDrafts((prev) => ({
-                                          ...prev,
-                                          [device.device_id]: { ...(prev[device.device_id] || {}), volume: Number(e.target.value) },
-                                        }))
-                                      }
-                                      aria-label="设备音量"
-                                    />
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost"
-                                      disabled={Boolean(asking) || !online || !controls.canVolume}
-                                      onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%（重连自动保持）`)}
-                                    >
-                                      应用
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost"
-                                      disabled={Boolean(asking) || !online || !controls.canVolume}
-                                      onClick={() => {
-                                        setControlDrafts((prev) => ({
-                                          ...prev,
-                                          [device.device_id]: { ...(prev[device.device_id] || {}), volume: 0 },
-                                        }));
-                                        sendDeviceControl(device, "set_volume", { volume: 0 }, "已静音（0%，设备重启后 MOSS 会自动恢复静音）");
-                                      }}
-                                    >
-                                      静音
-                                    </button>
+                                {controls.showVolume && (
+                                  <div className="voice-device-control-item">
+                                    <span className="voice-device-control-label">
+                                      <span>扬声器音量</span>
+                                      <b className="mono">{volVal}%</b>
+                                    </span>
+                                    <div className="voice-actions">
+                                      <input
+                                        type="range"
+                                        min="0"
+                                        max="100"
+                                        step="5"
+                                        value={volVal}
+                                        disabled={Boolean(asking) || !online || !controls.canVolume}
+                                        onChange={(e) =>
+                                          setControlDrafts((prev) => ({
+                                            ...prev,
+                                            [device.device_id]: { ...(prev[device.device_id] || {}), volume: Number(e.target.value) },
+                                          }))
+                                        }
+                                        aria-label="设备音量"
+                                      />
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={Boolean(asking) || !online || !controls.canVolume}
+                                        onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%（重连自动保持）`)}
+                                      >
+                                        应用
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={Boolean(asking) || !online || !controls.canVolume}
+                                        onClick={() => {
+                                          setControlDrafts((prev) => ({
+                                            ...prev,
+                                            [device.device_id]: { ...(prev[device.device_id] || {}), volume: 0 },
+                                          }));
+                                          sendDeviceControl(device, "set_volume", { volume: 0 }, "已静音（0%，设备重启后 MOSS 会自动恢复静音）");
+                                        }}
+                                      >
+                                        静音
+                                      </button>
+                                    </div>
                                   </div>
-                                </div>
-                                <div className="voice-device-control-item">
-                                  <span className="voice-device-control-label">
-                                    <span>屏幕亮度</span>
-                                    <b className="mono">{briVal}%</b>
-                                  </span>
-                                  <div className="voice-actions">
-                                    <input
-                                      type="range"
-                                      min="0"
-                                      max="100"
-                                      step="5"
-                                      value={briVal}
-                                      disabled={Boolean(asking) || !online || !controls.canBrightness}
-                                      onChange={(e) =>
-                                        setControlDrafts((prev) => ({
-                                          ...prev,
-                                          [device.device_id]: { ...(prev[device.device_id] || {}), brightness: Number(e.target.value) },
-                                        }))
-                                      }
-                                      aria-label="设备屏幕亮度"
-                                    />
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost"
-                                      disabled={Boolean(asking) || !online || !controls.canBrightness}
-                                      onClick={() => sendDeviceControl(device, "set_brightness", { brightness: briVal }, `屏幕亮度已设为 ${briVal}%`)}
-                                    >
-                                      应用
-                                    </button>
+                                )}
+                                {controls.showBrightness && (
+                                  <div className="voice-device-control-item">
+                                    <span className="voice-device-control-label">
+                                      <span>屏幕亮度</span>
+                                      <b className="mono">{briVal}%</b>
+                                    </span>
+                                    <div className="voice-actions">
+                                      <input
+                                        type="range"
+                                        min="0"
+                                        max="100"
+                                        step="5"
+                                        value={briVal}
+                                        disabled={Boolean(asking) || !online || !controls.canBrightness}
+                                        onChange={(e) =>
+                                          setControlDrafts((prev) => ({
+                                            ...prev,
+                                            [device.device_id]: { ...(prev[device.device_id] || {}), brightness: Number(e.target.value) },
+                                          }))
+                                        }
+                                        aria-label="设备屏幕亮度"
+                                      />
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={Boolean(asking) || !online || !controls.canBrightness}
+                                        onClick={() => sendDeviceControl(device, "set_brightness", { brightness: briVal }, `屏幕亮度已设为 ${briVal}%`)}
+                                      >
+                                        应用
+                                      </button>
+                                    </div>
                                   </div>
-                                </div>
+                                )}
                                 <div className="voice-device-control-item">
                                   <span className="voice-device-control-label">
-                                    <span>屏幕主题与激光预览投屏</span>
+                                    <span>{controls.showTheme ? "屏幕主题与激光预览投屏" : "激光预览投屏"}</span>
                                   </span>
                                   <div className="voice-actions">
-                                    <button
-                                      type="button"
-                                      className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
-                                      disabled={Boolean(asking) || !online || !controls.canTheme}
-                                      onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
-                                    >
-                                      深色屏
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
-                                      disabled={Boolean(asking) || !online || !controls.canTheme}
-                                      onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
-                                    >
-                                      浅色屏
-                                    </button>
+                                    {controls.showTheme && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
+                                          disabled={Boolean(asking) || !online || !controls.canTheme}
+                                          onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
+                                        >
+                                          深色屏
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
+                                          disabled={Boolean(asking) || !online || !controls.canTheme}
+                                          onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
+                                        >
+                                          浅色屏
+                                        </button>
+                                      </>
+                                    )}
                                     <button
                                       type="button"
                                       className="btn btn-primary"
@@ -323,48 +331,50 @@ export function BuiltinDevicesPanel({ builtin }) {
                                     </button>
                                   </div>
                                 </div>
-                                <div className="voice-device-control-item">
-                                  <span className="voice-device-control-label">
-                                    <span>按键拾音模式（排风抗噪）</span>
-                                    <span className="voice-muted mono">
-                                      {controls.talkMode === "press_to_talk" ? "长按说话" : "单击唤醒"}
+                                {controls.showPressToTalk && (
+                                  <div className="voice-device-control-item">
+                                    <span className="voice-device-control-label">
+                                      <span>按键拾音模式（排风抗噪）</span>
+                                      <span className="voice-muted mono">
+                                        {controls.talkMode === "press_to_talk" ? "长按说话" : "单击唤醒"}
+                                      </span>
                                     </span>
-                                  </span>
-                                  <div className="voice-actions">
-                                    <button
-                                      type="button"
-                                      className={`btn btn-ghost${controls.talkMode === "click_to_talk" ? " is-active" : ""}`}
-                                      disabled={Boolean(asking) || !online || !controls.canPressToTalk}
-                                      title="安静环境推荐：短按 BOOT 键或说唤醒词即可连续对话"
-                                      onClick={() =>
-                                        sendDeviceControl(
-                                          device,
-                                          "set_talk_mode",
-                                          { mode: "click_to_talk" },
-                                          "已切换为「单击唤醒」模式（已同步写入设备 NVS 与上位机记忆）",
-                                        )
-                                      }
-                                    >
-                                      单击唤醒
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className={`btn btn-ghost${controls.talkMode === "press_to_talk" ? " is-active" : ""}`}
-                                      disabled={Boolean(asking) || !online || !controls.canPressToTalk}
-                                      title="激光雕刻排风/气泵轰鸣时推荐：按住 BOOT 键说话、松手立即判停，彻底隔绝环境噪音误触发"
-                                      onClick={() =>
-                                        sendDeviceControl(
-                                          device,
-                                          "set_talk_mode",
-                                          { mode: "press_to_talk" },
-                                          "已切换为「长按说话（抗噪）」模式：按住设备按键说话，松手即停",
-                                        )
-                                      }
-                                    >
-                                      长按说话（抗噪）
-                                    </button>
+                                    <div className="voice-actions">
+                                      <button
+                                        type="button"
+                                        className={`btn btn-ghost${controls.talkMode === "click_to_talk" ? " is-active" : ""}`}
+                                        disabled={Boolean(asking) || !online || !controls.canPressToTalk}
+                                        title="安静环境推荐：短按 BOOT 键或说唤醒词即可连续对话"
+                                        onClick={() =>
+                                          sendDeviceControl(
+                                            device,
+                                            "set_talk_mode",
+                                            { mode: "click_to_talk" },
+                                            "已切换为「单击唤醒」模式（已同步写入设备 NVS 与上位机记忆）",
+                                          )
+                                        }
+                                      >
+                                        单击唤醒
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`btn btn-ghost${controls.talkMode === "press_to_talk" ? " is-active" : ""}`}
+                                        disabled={Boolean(asking) || !online || !controls.canPressToTalk}
+                                        title="激光雕刻排风/气泵轰鸣时推荐：按住 BOOT 键说话、松手立即判停，彻底隔绝环境噪音误触发"
+                                        onClick={() =>
+                                          sendDeviceControl(
+                                            device,
+                                            "set_talk_mode",
+                                            { mode: "press_to_talk" },
+                                            "已切换为「长按说话（抗噪）」模式：按住设备按键说话，松手即停",
+                                          )
+                                        }
+                                      >
+                                        长按说话（抗噪）
+                                      </button>
+                                    </div>
                                   </div>
-                                </div>
+                                )}
                               </div>
                               {controlNotice[device.device_id] && (
                                 <div className="voice-ok" style={{ marginTop: 6 }}>{controlNotice[device.device_id]}</div>

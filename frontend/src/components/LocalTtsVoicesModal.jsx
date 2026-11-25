@@ -237,6 +237,10 @@ function LocalTtsVoicesModalDialog({
     });
   }, [speakers, langFilter, genderFilter, query]);
 
+  // n130：没有的筛选不显示——只有一种语言不做语种筛选，只有一种性别不做性别筛选，只有一个音色不显示筛选栏
+  const canFilterLang = languages.length > 1;
+  const canFilterGender = new Set(speakers.map((s) => s.gender)).size > 1;
+  const showFilterBar = speakers.length > 1;
   const installed = Boolean(data?.installed);
   const totalCount = data?.total_count ?? speakers.length;
   const cachedCount = data?.cached_count ?? 0;
@@ -339,17 +343,18 @@ function LocalTtsVoicesModalDialog({
               </div>
 
               <div className="tts-lang-pack-section">
-                <div className="tts-section-label">支持的语言包（点选筛选）</div>
+                <div className="tts-section-label">{canFilterLang ? "支持的语言包（点选筛选）" : "支持的语言包"}</div>
                 <div className="tts-lang-pack-grid" id="voice-local-tts-languages">
                   {languages.map((lang) => {
-                    const active = langFilter === lang.code;
+                    const active = canFilterLang && langFilter === lang.code;
                     return (
                       <button
                         key={lang.code}
                         type="button"
                         className={`tts-lang-card${active ? " is-active" : ""}`}
                         onClick={() => setLangFilter(active ? "all" : lang.code)}
-                        aria-pressed={active}
+                        disabled={!canFilterLang}
+                        aria-pressed={canFilterLang ? active : undefined}
                         id={`voice-local-tts-lang-${lang.code}`}
                       >
                         <div className="tts-lang-card-head">
@@ -372,46 +377,56 @@ function LocalTtsVoicesModalDialog({
                 </div>
               )}
 
-              <div className="tts-filter-bar">
-                <div className="tts-filter-pills" role="group" aria-label="语言与性别筛选">
-                  <button
-                    type="button"
-                    className={`btn btn-ghost voice-inline-btn${langFilter === "all" ? " is-selected" : ""}`}
-                    onClick={() => setLangFilter("all")}
-                  >
-                    全部语种 ({speakers.length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-ghost voice-inline-btn${genderFilter === "all" ? " is-selected" : ""}`}
-                    onClick={() => setGenderFilter("all")}
-                  >
-                    全部性别
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-ghost voice-inline-btn${genderFilter === "female" ? " is-selected" : ""}`}
-                    onClick={() => setGenderFilter(genderFilter === "female" ? "all" : "female")}
-                  >
-                    女声
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-ghost voice-inline-btn${genderFilter === "male" ? " is-selected" : ""}`}
-                    onClick={() => setGenderFilter(genderFilter === "male" ? "all" : "male")}
-                  >
-                    男声
-                  </button>
+              {showFilterBar && (
+                <div className="tts-filter-bar">
+                  {(canFilterLang || canFilterGender) && (
+                    <div className="tts-filter-pills" role="group" aria-label="语言与性别筛选">
+                      {canFilterLang && (
+                        <button
+                          type="button"
+                          className={`btn btn-ghost voice-inline-btn${langFilter === "all" ? " is-selected" : ""}`}
+                          onClick={() => setLangFilter("all")}
+                        >
+                          全部语种 ({speakers.length})
+                        </button>
+                      )}
+                      {canFilterGender && (
+                        <>
+                          <button
+                            type="button"
+                            className={`btn btn-ghost voice-inline-btn${genderFilter === "all" ? " is-selected" : ""}`}
+                            onClick={() => setGenderFilter("all")}
+                          >
+                            全部性别
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn btn-ghost voice-inline-btn${genderFilter === "female" ? " is-selected" : ""}`}
+                            onClick={() => setGenderFilter(genderFilter === "female" ? "all" : "female")}
+                          >
+                            女声
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn btn-ghost voice-inline-btn${genderFilter === "male" ? " is-selected" : ""}`}
+                            onClick={() => setGenderFilter(genderFilter === "male" ? "all" : "male")}
+                          >
+                            男声
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <input
+                    type="search"
+                    className="text-input tts-search-input"
+                    placeholder="搜索音色编号、名称或代号（如 45 / 晓北 / zf_）"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    id="voice-local-tts-search"
+                  />
                 </div>
-                <input
-                  type="search"
-                  className="text-input tts-search-input"
-                  placeholder="搜索音色编号、名称或代号（如 45 / 晓北 / zf_）"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  id="voice-local-tts-search"
-                />
-              </div>
+              )}
 
               <div className="tts-speaker-list" id="voice-local-tts-speakers">
                 {filteredSpeakers.length === 0 ? (

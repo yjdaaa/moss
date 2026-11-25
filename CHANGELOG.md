@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 设备没有的快捷控制、只有一种的音色筛选不再显示，叠加功能缺前提时提示（2026-11-25）
+
+- **现象**：小智不支持的音量 / 亮度 / 主题 / 按键拾音模式按钮仍显示为置灰；单音色或单语种合成模型的“语言包与试听”里仍有点了没用的语种 / 性别筛选；本地判停没开时勾“命令词抗噪”不生效却没提示。
+- **根因与修复**：`builtinDeviceControlsView` 新增 `show*`，设备在线且已上报工具清单时缺的控制项不渲染，离线或清单未读到时照旧置灰；`LocalTtsVoicesModal` 只在有多种语言 / 性别 / 音色时显示对应筛选；新增 `localAddonPrereqNote`，命令词抗噪 / 前端降噪缺前提时在开关下提示“勾上也不生效”。不改后端与设置契约。
+- **验证**：`voiceState.test.mjs` 新增设备控制项显示规则与缺前提提示单测，`localTtsVoicesModal.test.mjs` 断言筛选按能力渲染；`verify.mjs --finish` 通过（含浏览器测试）。未连真实小智核对不同固件的工具清单（`unverified`）。
+- **关联**：`frontend/src/voiceState/devices.js`、`frontend/src/components/voice-builtin/BuiltinDevicesPanel.jsx`、`frontend/src/components/LocalTtsVoicesModal.jsx`、`frontend/src/voiceState/localModels.js`、内置语音技术书 n130。
+
 ### 单音色本地合成模型不再显示音色栏（2026-11-25）
 
 - **现象**：选 Matcha、MOSS 原声这类只有一个音色的合成模型时，“5. 语音合成模型包”下仍占一行显示“所选合成模型只有一个音色”，没有可调的东西。

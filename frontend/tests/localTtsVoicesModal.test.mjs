@@ -42,6 +42,11 @@ test("语音中心本地合成模型包名称可点击打开语言包与本机�
 
   const modalSrc = fs.readFileSync(path.join(SRC_DIR, "components/LocalTtsVoicesModal.jsx"), "utf8");
   assert.match(modalSrc, /支持的语言包/, "弹窗须展示支持的语言包区块");
+  // n130：没有的筛选不显示——一种语言不做语种筛选（语言卡只展示），一种性别不显示性别筛选，一个音色不显示筛选栏
+  assert.match(modalSrc, /const canFilterLang = languages\.length > 1/);
+  assert.match(modalSrc, /const canFilterGender = new Set\(speakers\.map\(\(s\) => s\.gender\)\)\.size > 1/);
+  assert.match(modalSrc, /\{showFilterBar && \(/);
+  assert.match(modalSrc, /disabled=\{!canFilterLang\}/);
   assert.match(modalSrc, /本机已缓存/, "弹窗须标注已缓存在本机磁盘的音色");
   assert.match(modalSrc, /选用此音色/, "弹窗须支持直接一键选用音色");
 });

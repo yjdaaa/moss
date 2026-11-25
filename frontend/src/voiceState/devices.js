@@ -173,9 +173,15 @@ export function builtinDeviceControlsView(device, session, devicePrefs = {}) {
         ? "press_to_talk"
         : "click_to_talk";
 
+  // n130：设备在线且已上报工具清单时，它没有的控制项不显示；离线或清单还没读到时照旧显示（置灰），免得忽隐忽现
+  const hideMissing = Boolean(session) && hasToolList;
   return {
     online: Boolean(session),
     mcpSupported,
+    showVolume: !hideMissing || canVolume,
+    showBrightness: !hideMissing || canBrightness,
+    showTheme: !hideMissing || canTheme,
+    showPressToTalk: !hideMissing || canPressToTalk,
     canVolume,
     canBrightness,
     canTheme,

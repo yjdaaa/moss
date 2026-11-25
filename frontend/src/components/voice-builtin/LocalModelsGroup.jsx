@@ -13,6 +13,7 @@ import {
   isLocalJevModel,
   isRecommendedLocalModel,
   isSpeechTtsModel,
+  localAddonPrereqNote,
   localModelGroups,
   localModelLayout,
   localModelSettingsError,
@@ -188,18 +189,29 @@ export function LocalModelsGroup({ builtin }) {
     </div>
   );
   const renderNote = (kind) => ROLE_NOTE[kind] && <p className="voice-muted voice-role-note" id={`voice-local-${kind}-note`}>{ROLE_NOTE[kind]}</p>;
-  const renderToggle = (item) => (
-    <label className="voice-check">
-      <input type="checkbox" id={`voice-local-${item.kind}-toggle`} checked={Boolean(form[item.kind])} onChange={(e) => update(item.kind, e.target.checked)} />
-      <span>
-        {item.kind === "denoise"
-          ? "启用前端降噪（保存后重启生效）"
-          : item.kind === "kws"
-            ? "启用命令词抗噪（随本地判停运行，保存后重启生效）"
-            : "启用语义判停（保存后重启生效）"}
-      </span>
-    </label>
-  );
+  const renderToggle = (item) => {
+    const prereq = localAddonPrereqNote(item.kind, form);
+    return (
+      <>
+        <label className="voice-check">
+          <input type="checkbox" id={`voice-local-${item.kind}-toggle`} checked={Boolean(form[item.kind])} onChange={(e) => update(item.kind, e.target.checked)} />
+          <span>
+            {item.kind === "denoise"
+              ? "启用前端降噪（保存后重启生效）"
+              : item.kind === "kws"
+                ? "启用命令词抗噪（随本地判停运行，保存后重启生效）"
+                : "启用语义判停（保存后重启生效）"}
+          </span>
+        </label>
+        {/* n130：缺前提时勾上也不生效，提前说清楚 */}
+        {prereq && (
+          <div className="voice-hint voice-hint--warn" id={`voice-local-${item.kind}-prereq`}>
+            {prereq}
+          </div>
+        )}
+      </>
+    );
+  };
   const renderTable = (item) => {
     const selectedId = form[`${item.kind}_model`];
     const activeOn = Boolean(form[item.kind]);
