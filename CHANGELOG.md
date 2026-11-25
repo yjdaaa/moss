@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 本地合成音色改为按名称下拉，Qwen3-TTS 语速框置灰，新增按当前音色和语速试一句（2026-11-25）
+
+- **现象**：“5. 语音合成模型包”下的音色是编号输入框，Qwen3-TTS 的标签塞进 9 个音色说明、把两栏撑歪；Qwen3-TTS 不支持调语速但语速框照样能改；想听新语速只能先保存再跑连贯试跑，语言包与试听弹窗的试听固定 1.0x。
+- **根因与修复**：音色与语速抽成 `LocalTtsSettings`，音色读该模型音色表做按语种分组的名称下拉（`localTtsSpeakerGroups`，读不到退回编号框），`localTtsSpeedFixed` 为真时语速框置灰并写明原因；新增“按当前音色和语速试一句”，`local_tts_preview` 接受可选 `speed`（0.5～2.0，越界 400），非 1.0 时当场合成、不读也不写 1.0x 试听缓存，Qwen3-TTS 固定 1.0。保存口径不变：对话、连贯试跑与弹窗“当前启用”仍只认已保存的设置。
+- **验证**：`local_runtime_tests` 补非 1.0x 不拿缓存冒充、越界语速拒绝、不覆盖缓存；`voiceState.test.mjs` 新增音色分组与固定语速判断；`voice-center.browser.mjs` 覆盖下拉分组、不悄悄换音色与“试一句”带未保存语速；`verify.mjs --finish` 通过。未在真实设备上收听（`unverified`）。
+- **关联**：`frontend/src/components/voice-builtin/LocalTtsSettings.jsx`、`frontend/src/voiceState/localModels.js`、`frontend/src/voiceApi.js`（`localTtsPreview`）、`crates/moss-voice-host/src/builtin/tts_preview.rs`（`local_tts_preview`）、内置语音技术书 n124。
+
 ### 语音合成支持千问 / 百炼原生流式接口（`Qwen-Audio-3.1-TTS-Flash`）与本机录音一键克隆音色（2026-11-25）
 
 - **现象**：千问 AI 平台（`maas.qianwenaiapi.com`）与阿里云百炼不提供 OpenAI `/v1/audio/speech` 接口，填进原有语音合成会报 404，也无法在 MOSS 内上传参考录音克隆专属音色。

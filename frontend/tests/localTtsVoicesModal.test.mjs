@@ -16,7 +16,7 @@ test("语音中心本地合成模型包名称可点击打开语言包与本机�
   );
   assert.match(
     apiSrc,
-    /localTtsPreview:\s*\(modelId,\s*speaker\)\s*=>\s*invokeVoice\("voice_builtin_models_test",\s*\{\s*section:\s*"local_tts",\s*input:\s*\{\s*model_id:\s*modelId,\s*speaker\s*\}\s*\}\)/,
+    /localTtsPreview:\s*\(modelId,\s*speaker,\s*speed\)\s*=>\s*invokeVoice\("voice_builtin_models_test",\s*\{\s*section:\s*"local_tts",\s*input:\s*speed === undefined \? \{\s*model_id:\s*modelId,\s*speaker\s*\}\s*:\s*\{\s*model_id:\s*modelId,\s*speaker,\s*speed\s*\}\s*\}\)/,
     "voiceApi 须通过已授权的 voice_builtin_models_test('local_tts') 读取或生成本机试听 WAV",
   );
 

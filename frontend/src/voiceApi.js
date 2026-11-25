@@ -110,7 +110,9 @@ export const voiceApi = {
   localDelete: (id) => invokeVoice("voice_local_model_delete", { id }),
   // 本地合成模型支持的语言包、全部音色列表及本机缓存试听
   localTtsVoices: (modelId) => invokeVoice("voice_builtin_models_list", { section: "local_tts", input: { model_id: modelId } }),
-  localTtsPreview: (modelId, speaker) => invokeVoice("voice_builtin_models_test", { section: "local_tts", input: { model_id: modelId, speaker } }),
+  // speed 可选（2026-11-25）：设置页按未保存的语速试一句；不传即 1.0x 并走本机缓存
+  localTtsPreview: (modelId, speaker, speed) =>
+    invokeVoice("voice_builtin_models_test", { section: "local_tts", input: speed === undefined ? { model_id: modelId, speaker } : { model_id: modelId, speaker, speed } }),
   // 千问 / 百炼原生语音合成：上传本机录音创建复刻音色并生成试听、读取账号已复刻音色列表
   ttsVoiceClone: (input) => invokeVoice("voice_builtin_models_test", { section: "tts_clone", input }),
   ttsClonedVoices: (input) => invokeVoice("voice_builtin_models_list", { section: "tts_voices", input }),

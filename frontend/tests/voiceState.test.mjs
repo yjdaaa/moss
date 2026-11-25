@@ -74,6 +74,8 @@ import {
   localModelDeleteText,
   selectLocalModel,
   selectedVoices,
+  localTtsSpeakerGroups,
+  localTtsSpeedFixed,
   VOICE_TIMING_STAGES,
   voiceTimingReport,
   pipelineTestPlan,
@@ -2171,4 +2173,20 @@ test("千问 / 百炼原生流式语音合成与声音克隆表单状态（n123�
     builtinModelSummary("tts", { configured: true, kind: "dashscope", model: "qwen-audio-3.1-tts-flash" }, false),
     /千问 \/ 百炼/,
   );
+});
+
+test("本地合成音色下拉按语种分组，当前值不在音色表里时单独列出；Qwen3-TTS 固定语速（2026-11-25）", () => {
+  const speakers = [
+    { id: 45, name: "晓北", gender_label: "女声", lang_label: "中文普通话" },
+    { id: 46, name: "晓妮", gender_label: "女声", lang_label: "中文普通话" },
+    { id: 3, name: "Heart", gender_label: "女声", lang_label: "美式英语" },
+  ];
+  const groups = localTtsSpeakerGroups(speakers, "46");
+  assert.deepEqual(groups.map((g) => g.label), ["中文普通话", "美式英语"]);
+  assert.deepEqual(groups[0].options[1], { value: "46", label: "46 · 晓妮（女声）" });
+  const stray = localTtsSpeakerGroups(speakers, "50");
+  assert.deepEqual(stray.at(-1), { label: "当前值", options: [{ value: "50", label: "50（不在该模型的音色表里）" }] });
+  assert.equal(localTtsSpeedFixed({ id: "qwen3_tts_0_6b", engine: "speech_cpp_tts" }), true);
+  assert.equal(localTtsSpeedFixed({ id: "moss_vits", engine: "vits" }), false);
+  assert.equal(localTtsSpeedFixed(null), false);
 });

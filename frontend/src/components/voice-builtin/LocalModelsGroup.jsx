@@ -30,6 +30,7 @@ import { restartEffect, TONE_CLASS, LAYA_HINT_CLASS, focusJevSwitch, LOCAL_MORE_
 import { useLocalGroup } from "./useLocalGroup.js";
 import { ColabBridgeSection } from "./ColabBridgeSection.jsx";
 import { ModelPairingGuide } from "./ModelPairingGuide.jsx";
+import { LocalTtsSettings } from "./LocalTtsSettings.jsx";
 
 /** 本地模型（NV6）：判停、识别、合成各有几个可选模型，每类选一个、可分别下载。 */
 export function LocalModelsGroup({ builtin }) {
@@ -319,52 +320,16 @@ export function LocalModelsGroup({ builtin }) {
         {renderTable(item)}
         {/* 2026-11-25：音色与语速从卡片底部挪到合成模型包里，选完模型就近调整，仍随“保存本地模型设置”提交 */}
         {item.kind === "tts" && (
-          <div className="voice-form-grid" id="voice-local-tts-settings">
-            {voices ? (
-              <label>
-                <span className="voice-label-with-link">
-                  <span>本地合成音色编号（{voices.hint}；默认 {voices.default}）</span>
-                  <button
-                    type="button"
-                    className="voice-link-btn"
-                    onClick={() => {
-                      const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
-                      if (target) setTtsVoicesModalModel(target);
-                    }}
-                    id="voice-local-speaker-browse"
-                  >
-                    试听选音色
-                  </button>
-                </span>
-                <input className="text-input mono" inputMode="numeric" value={form.tts_speaker} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker" />
-              </label>
-            ) : (
-              <label>
-                <span className="voice-label-with-link">
-                  <span>本地合成音色</span>
-                  <button
-                    type="button"
-                    className="voice-link-btn"
-                    onClick={() => {
-                      const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
-                      if (target) setTtsVoicesModalModel(target);
-                    }}
-                    id="voice-local-speaker-browse"
-                  >
-                    查看语言包与试听
-                  </button>
-                </span>
-                <span className="voice-muted">所选合成模型只有一个音色</span>
-              </label>
-            )}
-            <label>
-              <span>本地合成语速（0.5 ~ 2.0）</span>
-              <input className="text-input" inputMode="decimal" value={form.tts_speed} onChange={(e) => update("tts_speed", e.target.value)} />
-              {form.tts_model === "qwen3_tts_0_6b" && (
-                <small className="voice-muted">Qwen3-TTS 当前固定自然语速（1.0x），语速数值仅对 Kokoro / Matcha / ZipVoice / MOSS 原声生效</small>
-              )}
-            </label>
-          </div>
+          <LocalTtsSettings
+            form={form}
+            update={update}
+            models={models}
+            voices={voices}
+            onBrowse={() => {
+              const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
+              if (target) setTtsVoicesModalModel(target);
+            }}
+          />
         )}
       </div>
     );

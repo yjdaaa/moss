@@ -231,6 +231,7 @@ try {
             elapsed_ms: 1,
             model_id: input?.model_id || "kokoro",
             speaker: input?.speaker ?? 45,
+            speed: input?.speed ?? 1,
             sample_text: "你好，我是 MOSS 语音助手，激光雕刻工作台已就绪。",
             audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=",
           }
@@ -907,6 +908,16 @@ try {
   assert.equal(await page.locator("#voice-local-group-tts #voice-local-tts-settings").getByLabel("本地合成语速（0.5 ~ 2.0）").count(), 1, "语速框在语音合成模型包里");
   assert.equal(await page.locator("#voice-local-group-tts #voice-local-speaker-browse").count(), 1, "音色在语音合成模型包里");
   await page.getByLabel("本地合成语速（0.5 ~ 2.0）").fill("1.5");
+  // 2026-11-25：音色按名称下拉（按语种分组，不在音色表里的当前值单独列出）；“按当前音色和语速试一句”带上未保存的语速
+  const speakerSelect = page.locator("#voice-local-tts-settings select#voice-local-speaker");
+  await speakerSelect.locator("option", { hasText: "45 · 晓北（女声）" }).waitFor({ state: "attached" });
+  assert.equal(await speakerSelect.inputValue(), "50", "下拉不悄悄换掉当前音色");
+  assert.equal(await speakerSelect.locator("optgroup").count(), 3, "按语种分组，外加当前值");
+  assert.equal(await page.locator("#voice-local-speed").isDisabled(), false, "Kokoro 可以调语速");
+  await speakerSelect.selectOption("45");
+  await page.locator("#voice-local-tts-try").click();
+  await page.waitForFunction(() => !/合成中/.test(document.querySelector("#voice-local-tts-try")?.textContent || ""));
+  assert.deepEqual(last("voice_builtin_models_test").args, { section: "local_tts", input: { model_id: "kokoro", speaker: 45, speed: 1.5 } }, "试一句用未保存的音色和语速");
   await page.locator("#voice-barge-in").check();
   await page.locator("#voice-experience-save").click();
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();

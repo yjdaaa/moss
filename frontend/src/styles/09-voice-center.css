@@ -207,6 +207,10 @@
 @media (prefers-reduced-motion: reduce) {
   .ob-tbl tbody tr.voice-local-row--flash td { animation: none; background: rgba(139, 123, 255, 0.24); }
 }
+/* 2026-11-25：合成模型包下方“按当前音色和语速试一句” */
+.voice-local-tts-trial { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.voice-local-tts-trial small { font-size: 12px; }
+.voice-local-tts-trial .voice-local-tts-trial-bad { color: var(--ob-red-2); }
 .voice-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--ob-ink-2); cursor: pointer; }
 .voice-check input { margin-top: 2px; }
 .voice-progress { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--ob-line); overflow: hidden; max-width: 160px; }

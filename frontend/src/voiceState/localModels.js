@@ -236,6 +236,35 @@ export function selectedVoices(form, models) {
   return model?.voices || null;
 }
 
+/** 所选本地合成模型是否不支持调语速（Qwen3-TTS 跑在 speech.cpp 上，固定 1.0x；2026-11-25）。 */
+export function localTtsSpeedFixed(model) {
+  return model?.engine === "speech_cpp_tts" || model?.id === "qwen3_tts_0_6b";
+}
+
+/**
+ * 音色表按语种分组成下拉选项（`编号 · 名称（性别）`，2026-11-25）。
+ * 当前值不在音色表里时单独列一项，避免下拉悄悄把它换成别的音色。
+ */
+export function localTtsSpeakerGroups(speakers, current) {
+  const groups = [];
+  const byLabel = new Map();
+  for (const sp of Array.isArray(speakers) ? speakers : []) {
+    const label = sp.lang_label || "其他";
+    let group = byLabel.get(label);
+    if (!group) {
+      group = { label, options: [] };
+      byLabel.set(label, group);
+      groups.push(group);
+    }
+    group.options.push({ value: String(sp.id), label: `${sp.id} · ${sp.name}${sp.gender_label ? `（${sp.gender_label}）` : ""}` });
+  }
+  const value = String(current ?? "").trim();
+  if (value && !groups.some((group) => group.options.some((option) => option.value === value))) {
+    groups.push({ label: "当前值", options: [{ value, label: `${value}（不在该模型的音色表里）` }] });
+  }
+  return groups;
+}
+
 /** 云端 TTS 启用时（`!form.tts`），返回当前作为云端异常优先兜底的已安装本地 TTS 模型；未安装任何本地 TTS 或已启用本地主 TTS 时返回 `null`。 */
 export function resolveFallbackTtsModel(form, models = []) {
   if (!form || Boolean(form.tts)) return null;

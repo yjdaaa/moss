@@ -1110,6 +1110,32 @@ fn local_tts_voices_list_and_preview_serve_cached_wav_and_clean_on_delete() {
         .unwrap();
     assert_eq!(preview["ok"], true);
     assert_eq!(preview["from_cache"], true);
+    // 2026-11-25：设置页按未保存语速试一句——1.0x 仍读缓存；非 1.0x 不读缓存（桩模型当场合成必然失败），越界语速直接拒绝
+    let same_speed = builtin
+        .local_tts_preview(
+            &serde_json::json!({ "model_id": "kokoro", "speaker": 45, "speed": 1.0 }),
+        )
+        .unwrap();
+    assert_eq!(same_speed["from_cache"], true);
+    assert_eq!(same_speed["speed"], 1.0);
+    let slow = builtin.local_tts_preview(
+        &serde_json::json!({ "model_id": "kokoro", "speaker": 45, "speed": 0.7 }),
+    );
+    assert!(
+        slow.as_ref().map_or(true, |v| v["from_cache"] != true),
+        "非 1.0x 语速不能拿 1.0x 的缓存冒充：{slow:?}"
+    );
+    let err = builtin
+        .local_tts_preview(
+            &serde_json::json!({ "model_id": "kokoro", "speaker": 45, "speed": 3.0 }),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "model_input_invalid");
+    assert!(
+        moss_voice::tts_voices::read_cached_preview(builtin.models.root(), "kokoro", 45)
+            .is_some_and(|cached| cached == wav),
+        "非 1.0x 试听不覆盖 1.0x 缓存"
+    );
     assert!(
         preview["audio_data_url"]
             .as_str()

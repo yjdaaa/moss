@@ -655,6 +655,9 @@ impl BuiltinVoice {
     }
 
     /// 试听指定本地合成模型的单个音色：优先直接秒读本机 WAV 缓存；尚未缓存时当场合成并落盘缓存。
+    ///
+    /// 可选 `speed`（0.5 ~ 2.0，2026-11-25）：设置页“按当前音色和语速试一句”用未保存的语速试听。
+    /// 非 1.0 的语速当场合成、不读也不写缓存（缓存只存 1.0x 的试听）；Qwen3-TTS 不支持调语速，固定按 1.0x。
     pub fn local_tts_preview(&self, input: &Value) -> Result<Value, CenterError> {
         let started = std::time::Instant::now();
         let model_id = input
@@ -668,8 +671,28 @@ impl BuiltinVoice {
             .and_then(Value::as_i64)
             .and_then(|v| i32::try_from(v).ok())
             .ok_or_else(|| CenterError::new("model_input_invalid", 400, "缺少有效的音色编号"))?;
+        let speed = match input.get("speed") {
+            None | Some(Value::Null) => 1.0f32,
+            Some(value) => value
+                .as_f64()
+                .filter(|v| (0.5..=2.0).contains(v))
+                .map(|v| v as f32)
+                .ok_or_else(|| {
+                    CenterError::new(
+                        "model_input_invalid",
+                        400,
+                        "本地合成语速须在 0.5 ~ 2.0 之间",
+                    )
+                })?,
+        };
         let spec = local_models::spec_of(model_id, ModelKind::Tts)
             .ok_or_else(|| CenterError::new("model_input_invalid", 400, "不支持的本地合成模型"))?;
+        let speed = if spec.engine.uses_speech_runtime() {
+            1.0
+        } else {
+            speed
+        };
+        let custom_speed = (speed - 1.0).abs() > 1e-3;
         let meta = moss_voice::tts_voices::tts_speaker_meta(spec.id, speaker).ok_or_else(|| {
             CenterError::new("model_input_invalid", 400, "音色编号超出该模型支持范围")
         })?;
@@ -681,7 +704,10 @@ impl BuiltinVoice {
             ));
         }
         let root = self.models.root_for(spec.id);
-        if let Some(wav) = moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker) {
+        if let Some(wav) = (!custom_speed)
+            .then(|| moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker))
+            .flatten()
+        {
             let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
             return Ok(serde_json::json!({
                 "section": "local_tts",
@@ -690,6 +716,7 @@ impl BuiltinVoice {
                 "elapsed_ms": started.elapsed().as_millis() as u64,
                 "model_id": spec.id,
                 "speaker": speaker,
+                "speed": speed,
                 "sample_text": meta.sample_text,
                 "audio_data_url": data_url,
             }));
@@ -756,7 +783,7 @@ impl BuiltinVoice {
             };
             if let Some(helper) = reusable_helper {
                 helper
-                    .synthesize_blocking(meta.sample_text, speaker, 1.0)
+                    .synthesize_blocking(meta.sample_text, speaker, speed)
                     .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
             } else {
                 let exe = helper_path().filter(|p| p.is_file()).ok_or_else(|| {
@@ -786,12 +813,15 @@ impl BuiltinVoice {
                     )
                 })?;
                 helper
-                    .synthesize_blocking(meta.sample_text, speaker, 1.0)
+                    .synthesize_blocking(meta.sample_text, speaker, speed)
                     .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
             }
         };
         let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
-        if !preview_guard.is_cancelled() && self.models.path_if_installed(spec.id).is_some() {
+        if !custom_speed
+            && !preview_guard.is_cancelled()
+            && self.models.path_if_installed(spec.id).is_some()
+        {
             let _ =
                 moss_voice::tts_voices::write_cached_preview_atomic(root, spec.id, speaker, &wav);
         }
@@ -805,6 +835,7 @@ impl BuiltinVoice {
             "elapsed_ms": started.elapsed().as_millis() as u64,
             "model_id": spec.id,
             "speaker": speaker,
+            "speed": speed,
             "sample_text": meta.sample_text,
             "audio_data_url": data_url,
         }))
