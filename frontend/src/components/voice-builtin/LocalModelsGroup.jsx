@@ -10,6 +10,7 @@ import {
   comboMissing,
   comboPatch,
   formatBytes,
+  isAudioCppTtsModel,
   isLocalJevModel,
   isRecommendedLocalModel,
   isSpeechTtsModel,
@@ -71,7 +72,7 @@ export function LocalModelsGroup({ builtin }) {
   const { local, models, baseline, draft: form, setDraft, update, dirty, error, result, setResult } = group;
   const groups = localModelGroups(models);
   const voices = selectedVoices(form, models);
-  const fallbackTtsModel = resolveFallbackTtsModel(form, models);
+  const fallbackTtsModel = resolveFallbackTtsModel(form, models, local);
   const colabActive = Boolean(local.colab?.active);
   const on = [
     ...groups.filter((item) => baseline[item.kind]).map((item) => item.title),
@@ -231,7 +232,12 @@ export function LocalModelsGroup({ builtin }) {
               const view = localModelView(model);
               const chosen = activeOn && model.id === selectedId;
               const isFallback = item.kind === "tts" && !activeOn && fallbackTtsModel?.id === model.id;
-              const canSetFallback = item.kind === "tts" && !activeOn && Boolean(model.installed) && fallbackTtsModel?.id !== model.id;
+              const canSetFallback =
+                item.kind === "tts" &&
+                !activeOn &&
+                Boolean(model.installed) &&
+                (!isAudioCppTtsModel(model) || Boolean(local.tts_clone_ref?.configured)) &&
+                fallbackTtsModel?.id !== model.id;
               // 降噪有两个模型但顶部没有降噪下拉：在表里选用哪一个（2026-11-23 n109，之前 DPDFNet 下载后选不到）
               const pickedDenoise = item.kind === "denoise" && !activeOn && model.id === selectedId;
               const canPickDenoise = item.kind === "denoise" && Boolean(model.installed) && model.id !== selectedId;
@@ -239,7 +245,7 @@ export function LocalModelsGroup({ builtin }) {
                 <tr key={model.id} id={`voice-local-row-${model.id}`} className={chosen ? "on" : ""}>
                   <td className="voice-model-cell">
                     <div className="voice-model-name">
-                      {item.kind === "tts" ? (
+                      {item.kind === "tts" && !isAudioCppTtsModel(model) ? (
                         <button
                           type="button"
                           className="voice-tts-model-trigger"
@@ -330,6 +336,13 @@ export function LocalModelsGroup({ builtin }) {
               Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}
             </div>
           )}
+        {item.kind === "tts" &&
+          (item.models.some((m) => isAudioCppTtsModel(m) && (m.id === form.tts_model || m.installed))) &&
+          local.audiocpp_env?.summary && (
+            <div className="voice-hint" id="voice-local-audiocpp-env-hint">
+              Qwen3-TTS 离线克隆引擎（audio.cpp）：{local.audiocpp_env.summary}
+            </div>
+          )}
         {renderTable(item)}
         {/* 2026-11-25：音色与语速从卡片底部挪到合成模型包里，选完模型就近调整，仍随“保存本地模型设置”提交 */}
         {item.kind === "tts" && (
@@ -338,6 +351,8 @@ export function LocalModelsGroup({ builtin }) {
             update={update}
             models={models}
             voices={voices}
+            local={local}
+            onStatus={(next) => next && builtin.setStatus(next)}
             onBrowse={() => {
               const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
               if (target) setTtsVoicesModalModel(target);

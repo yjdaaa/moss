@@ -6,6 +6,7 @@ use moss_voice::builtin::{self, KeyChange};
 use moss_voice::local_models::{self, Engine, ModelKind, ModelManager};
 use moss_voice::settings::{BuiltinLocal, builtin_secret_name};
 use moss_voice::{CenterError, ModelsInput, ProviderKind, Section, SectionInput, VoiceMode};
+use moss_voice_providers::audio_cpp::{AudioCppTts, AudioCppVoiceRef, AudioCppWorker};
 use moss_voice_providers::dashscope::DashscopeTts;
 use moss_voice_providers::doubao::{DoubaoAsr, DoubaoTts};
 use moss_voice_providers::local::{
@@ -133,6 +134,10 @@ pub struct BuiltinVoice {
     turn_worker: Mutex<Option<TurnHelper>>,
     /// 运行中的 `speech.cpp`（Qwen3-TTS）长驻子进程（随内置服务启停）
     speech_worker: Mutex<Option<SpeechCppWorker>>,
+    /// 运行中的 `audio.cpp`（Qwen3-TTS 1.7B Base 声音克隆）长驻子进程（随内置服务启停，n131）
+    audiocpp_worker: Mutex<Option<AudioCppWorker>>,
+    /// 串行化本机离线克隆参考音色（`local-tts-clone/`）的原子写入与清理（n131）
+    local_clone_io: Mutex<()>,
     /// 运行中的本地降级兜底合成句柄（用于停止服务与删除模型时隔离和回收延迟加载的子进程）
     fallback_tts: Mutex<Option<Arc<LazyLocalFallbackTts>>>,
     /// 运行中 `helper` 已加载的本地模型规格快照（配置一致时供全链连贯试跑直接复用，免去另起子进程重载模型）
@@ -166,6 +171,29 @@ pub struct BuiltinVoice {
 }
 
 impl BuiltinVoice {
+    pub(super) fn local_clone_root(&self) -> std::path::PathBuf {
+        self.host.runtime_root.path.join("local-tts-clone")
+    }
+
+    pub(super) fn clone_voice_ref_resolver(
+        &self,
+    ) -> moss_voice_providers::audio_cpp::VoiceRefResolver {
+        let clone_root = self.local_clone_root();
+        Arc::new(move || {
+            let binding = moss_voice::audio_cpp::resolve_clone_voice_binding(&clone_root, None)
+                .map_err(|msg| {
+                    moss_voice_providers::ProviderError::with_category(
+                        moss_voice_providers::DiagCategory::Config,
+                        msg,
+                    )
+                })?;
+            Ok(AudioCppVoiceRef {
+                voice_name: binding.voice_name,
+                transcript: binding.transcript,
+            })
+        })
+    }
+
     /// NV13 desktop-only inert configuration. Live execution remains locked
     /// until separately authorized real CLI sandbox-negative tests succeed.
     pub fn agent_stop(&self, run_id: &str) -> Value {

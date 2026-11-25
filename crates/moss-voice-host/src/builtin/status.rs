@@ -8,6 +8,7 @@ pub(super) struct StatusProbeCache {
     onejev_probe_id: &'static str,
     onejev_env: Value,
     speech_env: Value,
+    audiocpp_env: Value,
     laya_env: Value,
     local_ip: Option<String>,
     local_ips: Vec<String>,
@@ -152,58 +153,70 @@ impl BuiltinVoice {
         } else {
             None
         };
-        let (onejev_env, speech_env, laya_env, detected_ip, detected_ips, helper_found) =
-            if let Some(entry) = cached_probes {
-                (
-                    entry.onejev_env,
-                    entry.speech_env,
-                    entry.laya_env,
-                    entry.local_ip,
-                    entry.local_ips,
-                    entry.helper_found,
-                )
-            } else {
-                let onejev_env = serde_json::to_value(moss_voice::onejev::detect_onejev_env(
-                    self.models.root_for(onejev_probe_id),
-                    false,
-                ))
+        let (
+            onejev_env,
+            speech_env,
+            audiocpp_env,
+            laya_env,
+            detected_ip,
+            detected_ips,
+            helper_found,
+        ) = if let Some(entry) = cached_probes {
+            (
+                entry.onejev_env,
+                entry.speech_env,
+                entry.audiocpp_env,
+                entry.laya_env,
+                entry.local_ip,
+                entry.local_ips,
+                entry.helper_found,
+            )
+        } else {
+            let onejev_env = serde_json::to_value(moss_voice::onejev::detect_onejev_env(
+                self.models.root_for(onejev_probe_id),
+                false,
+            ))
+            .unwrap_or(Value::Null);
+            let speech_env =
+                moss_voice::speech_cpp::detect_speech_env(self.models.speech_runtime_root());
+            let audiocpp_env =
+                moss_voice::audio_cpp::detect_audiocpp_env(self.models.audiocpp_runtime_root());
+            let laya_env = serde_json::to_value(Self::detect_laya_env_with_probe(false))
                 .unwrap_or(Value::Null);
-                let speech_env =
-                    moss_voice::speech_cpp::detect_speech_env(self.models.speech_runtime_root());
-                let laya_env = serde_json::to_value(Self::detect_laya_env_with_probe(false))
-                    .unwrap_or(Value::Null);
-                let mut detected_ips: Vec<String> = moss_voice_server::lan_ipv4_addrs()
-                    .into_iter()
-                    .map(|ip| ip.to_string())
-                    .collect();
-                let detected_ip = local_ip().or_else(|| detected_ips.first().cloned());
-                if let Some(ip) = detected_ip.as_ref()
-                    && !detected_ips.contains(ip)
-                {
-                    detected_ips.insert(0, ip.clone());
-                }
-                let helper_found = helper_path().is_some_and(|path| path.is_file());
-                if let Ok(mut slot) = self.status_probe_cache.lock() {
-                    *slot = Some(StatusProbeCache {
-                        captured_at: std::time::Instant::now(),
-                        onejev_probe_id,
-                        onejev_env: onejev_env.clone(),
-                        speech_env: speech_env.clone(),
-                        laya_env: laya_env.clone(),
-                        local_ip: detected_ip.clone(),
-                        local_ips: detected_ips.clone(),
-                        helper_found,
-                    });
-                }
-                (
-                    onejev_env,
-                    speech_env,
-                    laya_env,
-                    detected_ip,
-                    detected_ips,
+            let mut detected_ips: Vec<String> = moss_voice_server::lan_ipv4_addrs()
+                .into_iter()
+                .map(|ip| ip.to_string())
+                .collect();
+            let detected_ip = local_ip().or_else(|| detected_ips.first().cloned());
+            if let Some(ip) = detected_ip.as_ref()
+                && !detected_ips.contains(ip)
+            {
+                detected_ips.insert(0, ip.clone());
+            }
+            let helper_found = helper_path().is_some_and(|path| path.is_file());
+            if let Ok(mut slot) = self.status_probe_cache.lock() {
+                *slot = Some(StatusProbeCache {
+                    captured_at: std::time::Instant::now(),
+                    onejev_probe_id,
+                    onejev_env: onejev_env.clone(),
+                    speech_env: speech_env.clone(),
+                    audiocpp_env: audiocpp_env.clone(),
+                    laya_env: laya_env.clone(),
+                    local_ip: detected_ip.clone(),
+                    local_ips: detected_ips.clone(),
                     helper_found,
-                )
-            };
+                });
+            }
+            (
+                onejev_env,
+                speech_env,
+                audiocpp_env,
+                laya_env,
+                detected_ip,
+                detected_ips,
+                helper_found,
+            )
+        };
         let mut root = serde_json::json!({
             "running": view.is_some(),
             "mode": mode,
@@ -251,6 +264,8 @@ impl BuiltinVoice {
                 "models_dir": self.models.write_root_for(models_dir_ref).to_string_lossy(),
                 "onejev_env": onejev_env,
                 "speech_env": speech_env,
+                "audiocpp_env": audiocpp_env,
+                "tts_clone_ref": moss_voice::audio_cpp::clone_reference_status_json(&self.local_clone_root()),
                 "jev_runtime": self.local_jev_runtime_status(&settings, jev_feedback_enabled),
                 "laya_env": laya_env,
                 "laya_setup": self.laya_setup.status(),
@@ -401,6 +416,8 @@ impl BuiltinVoice {
                 "jev_runtime": status["local"]["jev_runtime"],
                 "onejev_env": status["local"]["onejev_env"],
                 "speech_env": status["local"]["speech_env"],
+                "audiocpp_env": status["local"]["audiocpp_env"],
+                "tts_clone_configured": status["local"]["tts_clone_ref"]["configured"],
                 "laya_env": status["local"]["laya_env"],
                 "laya_setup": status["local"]["laya_setup"],
                 "asr_model": settings.builtin_local.asr_model,

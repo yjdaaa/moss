@@ -6,6 +6,7 @@ use super::*;
 pub(super) enum PreviewRunner {
     Helper(LocalHelper),
     SpeechCpp(SpeechCppWorker),
+    AudioCpp(AudioCppWorker),
 }
 
 impl PreviewRunner {
@@ -13,6 +14,7 @@ impl PreviewRunner {
         match self {
             Self::Helper(h) => h.terminate_with_reason("MOSS 不再使用它，已结束"),
             Self::SpeechCpp(w) => w.terminate_with_reason("MOSS 不再使用它，已结束"),
+            Self::AudioCpp(w) => w.terminate_with_reason("MOSS 不再使用它，已结束"),
         }
     }
 }
@@ -295,6 +297,9 @@ impl BuiltinVoice {
         let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
             return;
         };
+        if spec.engine.uses_audiocpp_runtime() {
+            return;
+        }
         if self.is_tts_warmup_blocked(spec.id) {
             return;
         }
@@ -429,6 +434,9 @@ impl BuiltinVoice {
         let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
             return;
         };
+        if spec.engine.uses_audiocpp_runtime() {
+            return;
+        }
         let (dir, root, speech_exe, helper_exe) = {
             let Some(builtin) = weak.upgrade() else {
                 return;
@@ -542,6 +550,7 @@ impl BuiltinVoice {
                     item.sample_text,
                     moss_voice::tts_voices::qwen3_tts_voice_slug(item.id),
                 ),
+                PreviewRunner::AudioCpp(_) => continue,
             };
             let Ok(pcm) = synth else {
                 if Self::is_tts_warmup_cancelled(weak, spec.id) {
@@ -706,9 +715,12 @@ impl BuiltinVoice {
             ));
         }
         let root = self.models.root_for(spec.id);
-        if let Some(wav) = (!custom_speed)
-            .then(|| moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker))
-            .flatten()
+        let is_audiocpp = spec.engine.uses_audiocpp_runtime();
+        let draft_transcript = input.get("transcript").and_then(Value::as_str);
+        if !is_audiocpp
+            && let Some(wav) = (!custom_speed)
+                .then(|| moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker))
+                .flatten()
         {
             let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
             return Ok(serde_json::json!({
@@ -732,7 +744,71 @@ impl BuiltinVoice {
             ));
         };
         // 若当前常驻进程恰好已加载同款合成模型，直接借用免重载；否则按引擎拉起短生命周期推理进程
-        let pcm = if spec.engine.uses_speech_runtime() {
+        let pcm = if is_audiocpp {
+            struct TempPreviewWavGuard(Option<std::path::PathBuf>);
+            impl Drop for TempPreviewWavGuard {
+                fn drop(&mut self) {
+                    if let Some(path) = self.0.take() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+            let (binding, temp_wav) = moss_voice::audio_cpp::prepare_clone_preview_binding(
+                &self.local_clone_root(),
+                draft_transcript,
+            )
+            .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
+            let _temp_wav_guard = TempPreviewWavGuard(temp_wav);
+            let model_file = super::conversation::resolve_model_entry_file(&dir, spec);
+            let reusable_worker = self.audiocpp_worker.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .filter(|w| {
+                        w.is_alive()
+                            && w.model_path() == model_file
+                            && w.voice_dir() == binding.voice_dir
+                    })
+                    .cloned()
+            });
+            let worker = match reusable_worker {
+                Some(w) => w,
+                None => {
+                    let audiocpp_exe = moss_voice::audio_cpp::resolve_audiocpp_binary(root)
+                        .ok_or_else(|| {
+                            CenterError::new(
+                                "local_helper_missing",
+                                409,
+                                "未找到声音克隆推理引擎 audiocpp_server，请删除并重新下载 Qwen3-TTS 声音克隆模型",
+                            )
+                        })?;
+                    let backend =
+                        moss_voice::audio_cpp::recommended_audiocpp_backend(&audiocpp_exe);
+                    let spawned = AudioCppWorker::spawn_as_cancellable(
+                        &audiocpp_exe,
+                        &model_file,
+                        &binding.voice_dir,
+                        backend,
+                        "克隆音色试听程序",
+                        &|| preview_guard.is_cancelled(),
+                    )
+                    .map_err(|e| {
+                        CenterError::new(
+                            "local_tts_load_failed",
+                            500,
+                            format!("加载声音克隆模型失败：{e}"),
+                        )
+                    })?;
+                    preview_guard.attach_helper(PreviewRunner::AudioCpp(spawned.clone()))?;
+                    spawned
+                }
+            };
+            let voice_ref = AudioCppVoiceRef {
+                voice_name: binding.voice_name,
+                transcript: binding.transcript,
+            };
+            crate::block_on(worker.synthesize_with_ref(meta.sample_text, &voice_ref))
+                .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
+        } else if spec.engine.uses_speech_runtime() {
             let model_file = super::conversation::resolve_model_entry_file(&dir, spec);
             let voice = moss_voice::tts_voices::qwen3_tts_voice_slug(speaker);
             let reusable_worker = self.speech_worker.lock().ok().and_then(|guard| {
@@ -754,15 +830,19 @@ impl BuiltinVoice {
                             "未找到 Qwen3-TTS 推理引擎 speech，请删除并重新下载 Qwen3-TTS 模型包",
                         )
                     })?;
-                let worker =
-                    SpeechCppWorker::spawn_as(&speech_exe, &model_file, "音色试听缓存程序")
-                        .map_err(|e| {
-                            CenterError::new(
-                                "local_tts_load_failed",
-                                500,
-                                format!("加载合成模型失败：{e}"),
-                            )
-                        })?;
+                let worker = SpeechCppWorker::spawn_as_cancellable(
+                    &speech_exe,
+                    &model_file,
+                    "音色试听缓存程序",
+                    &|| preview_guard.is_cancelled(),
+                )
+                .map_err(|e| {
+                    CenterError::new(
+                        "local_tts_load_failed",
+                        500,
+                        format!("加载合成模型失败：{e}"),
+                    )
+                })?;
                 preview_guard.attach_helper(PreviewRunner::SpeechCpp(worker.clone()))?;
                 worker
                     .synthesize_blocking_with(meta.sample_text, voice, instructions)
@@ -820,7 +900,8 @@ impl BuiltinVoice {
             }
         };
         let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
-        if !custom_speed
+        if !is_audiocpp
+            && !custom_speed
             && !preview_guard.is_cancelled()
             && self.models.path_if_installed(spec.id).is_some()
         {

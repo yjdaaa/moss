@@ -1550,9 +1550,120 @@ fn model_delete_waits_for_lifecycle_lock_before_deleting_running_speech_worker()
     let bundle = builtin.diagnostics_bundle();
     assert!(bundle["local"]["speech_env"].is_object());
     assert!(bundle["local"]["speech_env"].get("binary_path").is_none());
+    assert!(bundle["local"]["audiocpp_env"].is_object());
+    assert!(bundle["local"]["audiocpp_env"].get("binary_path").is_none());
+    assert_eq!(bundle["local"]["tts_clone_configured"], false);
     assert_eq!(bundle["local"]["denoise"], false);
     assert_eq!(bundle["local"]["denoise_model"], "gtcrn_simple");
     assert_eq!(bundle["local"]["turn"], false);
     assert_eq!(bundle["local"]["turn_model"], "smart_turn_v3");
     builtin.stop_locked_inner(false);
+}
+
+#[test]
+fn local_tts_clone_manage_persists_ref_guards_active_delete_and_redacts_bundle() {
+    use base64::Engine as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let host =
+        Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+    let builtin = init(Some(host.clone())).0.unwrap();
+    let sample_rate = 24_000u32;
+    let samples = sample_rate * 4;
+    let data_bytes = samples * 2;
+    let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_bytes.to_le_bytes());
+    wav.resize(44 + data_bytes as usize, 0);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+
+    let uploaded = builtin
+        .local_tts_clone_manage(&serde_json::json!({
+            "action": "upload",
+            "file_name": "../moss550w.wav",
+            "audio_base64": b64,
+            "transcript": "让人类永远保持理智，确实是一种奢求。",
+        }))
+        .unwrap();
+    assert_eq!(uploaded["ok"], true);
+    assert_eq!(uploaded["tts_clone_ref"]["configured"], true);
+    assert_eq!(uploaded["tts_clone_ref"]["file_name"], "moss550w.wav");
+    assert_eq!(uploaded["tts_clone_ref"]["mode"], "icl");
+
+    let bundle = builtin.diagnostics_bundle();
+    assert_eq!(bundle["local"]["tts_clone_configured"], true);
+    assert!(
+        !bundle.to_string().contains("让人类永远保持理智"),
+        "诊断包不得泄露用户的参考录音台词"
+    );
+
+    let updated = builtin
+        .local_tts_clone_manage(&serde_json::json!({
+            "action": "update_transcript",
+            "transcript": "",
+        }))
+        .unwrap();
+    assert_eq!(updated["tts_clone_ref"]["mode"], "x_vector_only");
+
+    // 模拟运行中的 audiocpp_worker 阻止删除正在使用的克隆模型
+    let spec = moss_voice::local_models::spec("qwen3_tts_1_7b_clone").unwrap();
+    let clone_dir = builtin
+        .models
+        .write_root_for(spec.id)
+        .join("qwen3-tts-1.7b-base-clone");
+    std::fs::create_dir_all(&clone_dir).unwrap();
+    let model_file = clone_dir.join(spec.required[0]);
+    std::fs::File::create(&model_file)
+        .unwrap()
+        .set_len(spec.size)
+        .unwrap();
+    assert!(builtin.models.path_if_installed(spec.id).is_some());
+
+    let registry = Arc::new(DbRegistry {
+        db: host.db.clone(),
+        host: host.clone(),
+        settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
+    });
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            ..Default::default()
+        },
+        registry,
+    )
+    .unwrap();
+    *builtin.server.lock().unwrap() = Some(server);
+    let fake_worker = moss_voice_providers::audio_cpp::AudioCppWorker::from_loopback_url(
+        "http://127.0.0.1:9".into(),
+        model_file,
+        moss_voice::audio_cpp::clone_voices_dir(&builtin.local_clone_root()),
+    )
+    .unwrap();
+    *builtin.audiocpp_worker.lock().unwrap() = Some(fake_worker);
+    let err = builtin.model_delete(spec.id).unwrap_err();
+    assert_eq!(err.code, "local_model_in_use");
+    assert_eq!(err.status, 409);
+
+    builtin.stop();
+    builtin.model_delete(spec.id).unwrap();
+    assert!(builtin.models.path_if_installed(spec.id).is_none());
+
+    let cleared = builtin
+        .local_tts_clone_manage(&serde_json::json!({ "action": "clear" }))
+        .unwrap();
+    assert_eq!(cleared["tts_clone_ref"]["configured"], false);
 }

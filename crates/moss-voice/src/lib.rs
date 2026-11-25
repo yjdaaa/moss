@@ -13,6 +13,7 @@
 //!
 //! 本 crate 不依赖 Tauri，便于单元测试；只由桌面壳在非 Android 平台使用。
 
+pub mod audio_cpp;
 pub mod builtin;
 mod center;
 pub mod colab;

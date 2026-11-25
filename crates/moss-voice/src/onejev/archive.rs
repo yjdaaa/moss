@@ -10,7 +10,7 @@ fn safe_intra_dir_symlink_target(target: &Path) -> bool {
     matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
-pub(super) fn extract_tar_gz(
+pub(crate) fn extract_tar_gz(
     archive_file: &Path,
     dest: &Path,
     cancel: &AtomicBool,
@@ -32,6 +32,12 @@ pub(super) fn extract_tar_gz(
             .into_owned();
         if !safe_relative(&path) {
             return Err(format!("压缩包含不安全路径：{}", path.display()));
+        }
+        if !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            continue;
         }
         let entry_type = entry.header().entry_type();
         if entry_type.is_file() || entry_type.is_dir() {

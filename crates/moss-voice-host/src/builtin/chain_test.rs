@@ -136,6 +136,8 @@ impl BuiltinVoice {
                     || msg.contains("本地语音合成")
                     || msg.contains("音色")
                     || msg.contains("speech")
+                    || msg.contains("audiocpp")
+                    || msg.contains("克隆")
                 {
                     "tts"
                 } else if vad_uses_local {

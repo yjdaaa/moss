@@ -2,7 +2,7 @@
 
 import { builtinModelForm, sectionInputError, sectionPayload } from "./sections.js";
 import { MIX_SECTIONS, builtinSectionSourceView } from "./modelSources.js";
-import { isSpeechTtsModel } from "./localModels.js";
+import { isAudioCppTtsModel, isSpeechTtsModel } from "./localModels.js";
 
 /**
  * “测试全部环节”（2026-11-08 用户要求：链路栏右上角一键测试，哪个环节不通就在哪里报错）。
@@ -19,6 +19,27 @@ export function pipelineTestPlan(status) {
     if (!model?.installed) {
       return { key, kind: "static", ok: false, detail: `本地${label}模型“${model?.label || "未选择"}”还没下载：到下方“本地模型”下载，或在上方改回${key === "vad" ? "内置能量判停" : "云端"}` };
     }
+    if (isAudioCppTtsModel(model)) {
+      if (status?.local?.audiocpp_env?.ready === false) {
+        const summary = String(status?.local?.audiocpp_env?.summary || "").trim();
+        return {
+          key,
+          kind: "static",
+          ok: false,
+          detail: summary ? `本地声音克隆引擎尚未就绪：${summary}` : "找不到本地声音克隆引擎 audiocpp_server，本地合成无法运行",
+        };
+      }
+      if (!status?.local?.tts_clone_ref?.configured) {
+        return {
+          key,
+          kind: "static",
+          ok: false,
+          detail: "本地声音克隆还没上传参考录音：到下方「本地模型 → 5. 语音合成」上传一段 3 ~ 30 秒清晰 WAV 录音",
+        };
+      }
+      const refName = status.local.tts_clone_ref.file_name || "已上传";
+      return { key, kind: "static", ok: true, detail: `本地 ${model.label} 已就绪（参考录音：${refName}）` };
+    }
     if (isSpeechTtsModel(model) && status?.local?.speech_env?.ready === false) {
       const summary = String(status?.local?.speech_env?.summary || "").trim();
       return {
@@ -28,7 +49,7 @@ export function pipelineTestPlan(status) {
         detail: summary ? `Qwen3-TTS 本地运行时尚未就绪：${summary}` : "找不到 Qwen3-TTS 本地运行时 speech，本地合成无法运行",
       };
     }
-    if (!helperFound && !isSpeechTtsModel(model)) {
+    if (!helperFound && !isSpeechTtsModel(model) && !isAudioCppTtsModel(model)) {
       return { key, kind: "static", ok: false, detail: "找不到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录），本地模型无法运行" };
     }
     return { key, kind: "static", ok: true, detail: `本地 ${model.label} 已下载（本地模型只检查是否就绪，不做试跑）` };

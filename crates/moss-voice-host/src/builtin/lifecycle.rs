@@ -178,6 +178,29 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                         ),
                     );
                 }
+                let clone_root = host.runtime_root.path.join("local-tts-clone");
+                let mut audiocpp_roots = roots;
+                audiocpp_roots.push(clone_root.clone());
+                let reaped_audio =
+                    moss_voice::audio_cpp::reap_orphaned_audiocpp_servers(&audiocpp_roots);
+                let _ = moss_voice::audio_cpp::sweep_leftover_audiocpp_configs(&clone_root);
+                if reaped_audio > 0 {
+                    eprintln!(
+                        "[moss-desktop] 已结束 {reaped_audio} 个上次异常退出遗留的本地声音克隆推理进程"
+                    );
+                    diagnostics.push_from(
+                        moss_voice_server::DiagSource::Moss,
+                        EventRecord::warn(
+                            DiagCategory::Model,
+                            format!(
+                                "已结束 {reaped_audio} 个上次异常退出遗留的本地声音克隆推理进程"
+                            ),
+                        )
+                        .hint(
+                            "说明 MOSS 上次没有正常退出（崩溃、强制结束或断电）；偶尔一次不用处理",
+                        ),
+                    );
+                }
             }
             let memory = MemoryService::new(Arc::new(DbMemoryStore {
                 db: host.db.clone(),
@@ -307,6 +330,8 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                 helper: Mutex::new(None),
                 turn_worker: Mutex::new(None),
                 speech_worker: Mutex::new(None),
+                audiocpp_worker: Mutex::new(None),
+                local_clone_io: Mutex::new(()),
                 fallback_tts: Mutex::new(None),
                 running_local: Mutex::new(None),
                 chain_test_lock: Mutex::new(()),
@@ -467,6 +492,7 @@ impl BuiltinVoice {
                 helper: Option<LocalHelper>,
                 turn_worker: Option<TurnHelper>,
                 speech_worker: Option<SpeechCppWorker>,
+                audiocpp_worker: Option<AudioCppWorker>,
                 fallback_tts: Option<Arc<LazyLocalFallbackTts>>,
             }
             impl Drop for StartLocalCleanupGuard {
@@ -483,6 +509,9 @@ impl BuiltinVoice {
                     if let Some(worker) = self.speech_worker.take() {
                         worker.terminate();
                     }
+                    if let Some(worker) = self.audiocpp_worker.take() {
+                        worker.terminate();
+                    }
                     if let Some(helper) = self.helper.take() {
                         helper.terminate();
                     }
@@ -497,6 +526,7 @@ impl BuiltinVoice {
             };
             let has_local_tts = local.tts.is_some();
             let speech_worker = local.speech_worker.take();
+            let audiocpp_worker = local.audiocpp_worker.take();
             let turn_worker = local.turn_worker.take();
             let fallback_tts_handle = local.fallback_tts_handle.take();
             let mut local_cleanup = StartLocalCleanupGuard {
@@ -504,6 +534,7 @@ impl BuiltinVoice {
                 helper: helper.clone(),
                 turn_worker: turn_worker.clone(),
                 speech_worker: speech_worker.clone(),
+                audiocpp_worker: audiocpp_worker.clone(),
                 fallback_tts: fallback_tts_handle.clone(),
             };
             let mut conversation = self.conversation(
@@ -610,6 +641,9 @@ impl BuiltinVoice {
             if let Ok(mut slot) = self.speech_worker.lock() {
                 *slot = speech_worker;
             }
+            if let Ok(mut slot) = self.audiocpp_worker.lock() {
+                *slot = audiocpp_worker;
+            }
             if let Ok(mut slot) = self.fallback_tts.lock() {
                 *slot = fallback_tts_handle;
             }
@@ -709,6 +743,12 @@ impl BuiltinVoice {
         {
             w.terminate();
             ended.push("Qwen3-TTS 合成程序");
+        }
+        if let Ok(mut worker) = self.audiocpp_worker.lock()
+            && let Some(w) = worker.take()
+        {
+            w.terminate();
+            ended.push("Qwen3-TTS 克隆程序");
         }
         if let Ok(mut helper) = self.helper.lock()
             && let Some(h) = helper.take()

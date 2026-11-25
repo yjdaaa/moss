@@ -175,6 +175,16 @@ impl SpeechCppWorker {
         model_path: &Path,
         role: &'static str,
     ) -> Result<Self, ProviderError> {
+        Self::spawn_as_cancellable(exe, model_path, role, &|| false)
+    }
+
+    /// 同 [`Self::spawn_as`]，支持在等待 `"ready"` 握手期间外部取消（如用户卸载模型或退出宿主）。
+    pub fn spawn_as_cancellable(
+        exe: &Path,
+        model_path: &Path,
+        role: &'static str,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, ProviderError> {
         if !exe.is_file() {
             return Err(model_err(
                 "未找到 speech.cpp 推理程序，请先下载 Qwen3-TTS 模型",
@@ -254,6 +264,7 @@ impl SpeechCppWorker {
             Some(child),
             job,
             stderr_tail,
+            is_cancelled,
         )?;
         Ok(worker)
     }
@@ -272,9 +283,11 @@ impl SpeechCppWorker {
             None,
             None,
             Arc::new(Mutex::new(VecDeque::new())),
+            &|| false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_streams_internal(
         reader: Box<dyn std::io::Read + Send>,
         writer: Box<dyn Write + Send>,
@@ -283,6 +296,7 @@ impl SpeechCppWorker {
         child: Option<Child>,
         job: Option<JobHandle>,
         stderr_tail: Arc<Mutex<VecDeque<String>>>,
+        is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, ProviderError> {
         let (tx, rx) = channel::<Result<Value, String>>();
         let inner = Arc::new(WorkerInner {
@@ -348,7 +362,22 @@ impl SpeechCppWorker {
             })
             .map_err(|err| model_err(format!("创建 Qwen3-TTS 读线程失败：{err}")))?;
 
-        let ready = rx.recv_timeout(READY_TIMEOUT);
+        let ready_deadline = Instant::now() + READY_TIMEOUT;
+        let ready = loop {
+            if is_cancelled() {
+                let worker = Self { inner };
+                worker.terminate_with_reason("操作已取消，MOSS 结束了它");
+                return Err(model_err("已取消加载 Qwen3-TTS 模型"));
+            }
+            let remaining = ready_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break Err(RecvTimeoutError::Timeout);
+            }
+            match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Err(RecvTimeoutError::Timeout) => continue,
+                other => break other,
+            }
+        };
         if let Ok(mut io_slot) = inner.io.lock() {
             *io_slot = Some(WorkerIo { writer, rx });
         }

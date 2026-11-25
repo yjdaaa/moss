@@ -1102,6 +1102,16 @@ impl VoiceServer {
         });
     }
 
+    /// 清空固定话术缓存，并可选在后台按新音色重新预热（n131 本地克隆音色热更换时调用）。
+    pub fn invalidate_speech_cache(&self, rewarm: bool) {
+        if let Some(conversation) = self.shared.config.conversation.as_ref() {
+            conversation.invalidate_speech_cache();
+        }
+        if rewarm {
+            self.prewarm_speech_cache();
+        }
+    }
+
     /// 通知所有会话结束并关闭运行时（最多等 2 秒）。
     pub fn stop(mut self) {
         self.shutdown_now();

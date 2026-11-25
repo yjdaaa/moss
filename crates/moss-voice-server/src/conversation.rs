@@ -745,6 +745,8 @@ pub struct Conversation {
     pub process_trace: Option<laser_runtime::ProcessTrace>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
+    /// 缓存代次：热更换合成音色时递增，防止旧声线的在途预合成写回缓存
+    cache_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for Conversation {
@@ -781,6 +783,7 @@ impl Conversation {
             turn_predictor: None,
             process_trace: None,
             cache: Mutex::new(Vec::new()),
+            cache_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -865,6 +868,7 @@ impl Conversation {
         {
             return Ok(pcm.clone());
         }
+        let epoch_before = self.cache_epoch.load(std::sync::atomic::Ordering::Acquire);
         // 备用合成出的音色和主合成不同，只用这一次、不进缓存（n114）：启动预热时云端还连不上，
         // 否则固定话术会一直是本地音色，直到重启
         let (mut pcm, from_fallback) = match self.tts.synthesize(text).await {
@@ -898,7 +902,9 @@ impl Conversation {
         );
         const MAX_SPEECH_CACHE_ENTRIES: usize = 32;
         if !from_fallback
+            && self.cache_epoch.load(std::sync::atomic::Ordering::Acquire) == epoch_before
             && let Ok(mut cache) = self.cache.lock()
+            && self.cache_epoch.load(std::sync::atomic::Ordering::Acquire) == epoch_before
             && !cache.iter().any(|(key, _)| key == text)
         {
             if cache.len() >= MAX_SPEECH_CACHE_ENTRIES {
@@ -944,6 +950,15 @@ impl Conversation {
         push_unique(SLOW_LOOK_FILLER);
         push_unique(BACKGROUND_QUERY_FILLER);
         phrases
+    }
+
+    /// 清空固定话术内存缓存并递增代次（热更换本地克隆参考音色或台词时调用，n131）。
+    pub fn invalidate_speech_cache(&self) {
+        self.cache_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
     }
 
     /// 提前合成高频固定话术与慢工具过渡垫音并写入内存缓存，返回成功缓存的条数。

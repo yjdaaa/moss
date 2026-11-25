@@ -780,10 +780,13 @@ impl BuiltinVoice {
         }
         let is_speech_cpp = local_models::spec_of(id, ModelKind::Tts)
             .is_some_and(|spec| spec.engine.uses_speech_runtime());
+        let is_audiocpp = local_models::spec_of(id, ModelKind::Tts)
+            .is_some_and(|spec| spec.engine.uses_audiocpp_runtime());
         let is_turn_model = local_models::spec_of(id, ModelKind::Turn).is_some();
         let used_by_helper = id != local_models::XIAOZHI_NOTO_V1_FULL_ID
             && local_models::spec_of(id, ModelKind::Vision).is_none()
             && !is_speech_cpp
+            && !is_audiocpp
             && !is_turn_model;
         if moss_voice::settings::is_local_jev_model(id) {
             let configured_id = moss_voice::settings::canonical_local_jev_model(
@@ -822,6 +825,25 @@ impl BuiltinVoice {
                 ));
             }
             if let Ok(mut worker) = self.speech_worker.lock()
+                && let Some(w) = worker.take()
+            {
+                w.terminate();
+            }
+        } else if is_audiocpp {
+            if self.running()
+                && self
+                    .audiocpp_worker
+                    .lock()
+                    .map(|w| w.as_ref().is_some_and(AudioCppWorker::is_alive))
+                    .unwrap_or(false)
+            {
+                return Err(CenterError::new(
+                    "local_model_in_use",
+                    409,
+                    "内置服务正在使用 Qwen3-TTS 声音克隆模型，请先停止内置服务再删除",
+                ));
+            }
+            if let Ok(mut worker) = self.audiocpp_worker.lock()
                 && let Some(w) = worker.take()
             {
                 w.terminate();
@@ -1288,5 +1310,251 @@ impl BuiltinVoice {
         let mut status = self.status();
         status["restarted"] = Value::Bool(restarted);
         Ok(status)
+    }
+
+    /// 上传本地参考录音时自动尝试用本机已安装的本地语音识别提取参考台词；
+    /// 绝不将本地克隆录音发往云端（严格遵守「音频只留在本机电脑」隐私边界），识别不可用或失败时静默返回 `None`。
+    fn auto_transcribe_clone_wav(&self, mono_samples: &[i16], sr: u32) -> Option<String> {
+        let samples_16k = if sr == 16_000 {
+            mono_samples.to_vec()
+        } else {
+            moss_voice_providers::resample::Resampler::new(sr, 16_000).process(mono_samples)
+        };
+        if samples_16k.len() < 3_200 {
+            return None;
+        }
+        // 1. 若常驻 LocalHelper 已加载识别模型，先在窄锁作用域内克隆句柄再释放锁执行 IPC
+        let reusable_helper = {
+            let h_guard = self.helper.lock().ok();
+            let r_guard = self.running_local.lock().ok();
+            if let (Some(Some(helper)), Some(Some(spec))) = (h_guard.as_deref(), r_guard.as_deref())
+                && helper.is_alive()
+                && spec.asr.is_some()
+            {
+                Some(helper.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(helper) = reusable_helper {
+            let asr = LocalAsr { helper };
+            if let Ok(Ok(text)) = crate::block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    asr.transcribe(&samples_16k, 16_000),
+                )
+                .await
+            }) {
+                let cleaned = moss_voice::audio_cpp::sanitize_clone_transcript(&text).ok()?;
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        }
+        // 2. 查找本机已安装的本地识别模型（优先当前选定项，否则顺延已安装项），拉起短生命周期本地进程识别
+        let settings = self.settings();
+        let experience = &settings.builtin_local;
+        let preferred_spec = local_models::spec_of(&experience.asr_model, ModelKind::Asr)
+            .and_then(|s| self.models.path_if_installed(s.id).map(|dir| (s, dir)));
+        let (spec, dir) = preferred_spec.or_else(|| {
+            local_models::CATALOG
+                .iter()
+                .filter(|s| s.kind == ModelKind::Asr)
+                .find_map(|s| self.models.path_if_installed(s.id).map(|dir| (s, dir)))
+        })?;
+        let exe = helper_path().filter(|p| p.is_file())?;
+        let helper = LocalHelper::spawn_as(&exe, "克隆参考台词识别程序").ok()?;
+        struct Guard(LocalHelper);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.terminate_with_reason("MOSS 不再使用它，已结束");
+            }
+        }
+        let guard = Guard(helper);
+        let hotwords = self.hotwords(experience);
+        guard
+            .0
+            .load_asr_with_options(
+                &dir,
+                super::conversation::helper_asr_engine(spec.engine),
+                moss_voice_providers::local::AsrDecodeOptions {
+                    beam_search: experience.asr_beam_search,
+                    hotwords,
+                },
+            )
+            .ok()?;
+        let asr = LocalAsr {
+            helper: guard.0.clone(),
+        };
+        let text = crate::block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                asr.transcribe(&samples_16k, 16_000),
+            )
+            .await
+        })
+        .ok()?
+        .ok()?;
+        let cleaned = moss_voice::audio_cpp::sanitize_clone_transcript(&text).ok()?;
+        (!cleaned.is_empty()).then_some(cleaned)
+    }
+
+    fn sync_running_clone_caches(&self, rewarm_fixed_phrases: bool) {
+        if !rewarm_fixed_phrases
+            && let Ok(fb_guard) = self.fallback_tts.lock()
+            && let Some(fb) = fb_guard.as_ref()
+        {
+            fb.invalidate_audiocpp();
+        }
+        let local = self.settings().builtin_local;
+        if local.tts
+            && local.tts_model == local_models::QWEN3_TTS_1_7B_CLONE_ID
+            && let Ok(srv_guard) = self.server.lock()
+            && let Some(server) = srv_guard.as_ref()
+        {
+            server.invalidate_speech_cache(rewarm_fixed_phrases);
+        }
+    }
+
+    /// 管理本地零样本声音克隆（`qwen3_tts_1_7b_clone`）的参考录音与参考台词：
+    /// `action = "upload" | "update_transcript" | "clear"`（n131，不返回任何本地路径）。
+    pub fn local_tts_clone_manage(&self, input: &Value) -> Result<Value, CenterError> {
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("upload");
+        let clone_root = self.local_clone_root();
+        match action {
+            "upload" => {
+                let audio_b64 = input
+                    .get("audio_base64")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let file_name = input
+                    .get("file_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference.wav");
+                let raw_transcript = input
+                    .get("transcript")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let validated = moss_voice::audio_cpp::parse_clone_wav_upload(audio_b64, file_name)
+                    .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
+                let cleaned_input =
+                    moss_voice::audio_cpp::sanitize_clone_transcript(raw_transcript)
+                        .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
+                let (final_transcript, auto_transcribed) = if cleaned_input.is_empty() {
+                    match self
+                        .auto_transcribe_clone_wav(&validated.mono_samples, validated.sample_rate)
+                    {
+                        Some(recognized) => (recognized, true),
+                        None => (String::new(), false),
+                    }
+                } else {
+                    (cleaned_input, false)
+                };
+                let meta = {
+                    let _io = self
+                        .local_clone_io
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    moss_voice::audio_cpp::store_clone_reference(
+                        &clone_root,
+                        &validated,
+                        &final_transcript,
+                    )
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?
+                };
+                self.sync_running_clone_caches(true);
+                let detail = if auto_transcribed {
+                    format!(
+                        "已保存参考录音 {}（{:.1} 秒），并自动识别填入参考台词，可核对修改或直接点下方试听",
+                        meta.file_name, meta.duration_secs
+                    )
+                } else if meta.transcript.is_empty() {
+                    format!(
+                        "已保存参考录音 {}（{:.1} 秒，当前按声纹模式克隆；补填录音原话可进一步提高相似度）",
+                        meta.file_name, meta.duration_secs
+                    )
+                } else {
+                    format!(
+                        "已保存参考录音 {}（{:.1} 秒）与参考台词，可直接试听或对话",
+                        meta.file_name, meta.duration_secs
+                    )
+                };
+                let status = self.status();
+                Ok(serde_json::json!({
+                    "section": "local_tts_clone",
+                    "ok": true,
+                    "action": "upload",
+                    "auto_transcribed": auto_transcribed,
+                    "tts_clone_ref": status["local"]["tts_clone_ref"],
+                    "detail": detail,
+                    "status": status,
+                }))
+            }
+            "update_transcript" => {
+                let raw_transcript = input
+                    .get("transcript")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let meta = {
+                    let _io = self
+                        .local_clone_io
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    moss_voice::audio_cpp::update_clone_transcript(&clone_root, raw_transcript)
+                        .map_err(|err| match err {
+                            moss_voice::audio_cpp::CloneManageError::InvalidInput(msg) => {
+                                CenterError::new("model_input_invalid", 400, msg)
+                            }
+                            moss_voice::audio_cpp::CloneManageError::Io(msg) => {
+                                CenterError::new("voice_settings_write_failed", 500, msg)
+                            }
+                        })?
+                };
+                self.sync_running_clone_caches(true);
+                let detail = if meta.transcript.is_empty() {
+                    "已清空参考台词，切换为声纹克隆模式".to_owned()
+                } else {
+                    "已更新参考录音台词，下一句合成起立即生效".to_owned()
+                };
+                let status = self.status();
+                Ok(serde_json::json!({
+                    "section": "local_tts_clone",
+                    "ok": true,
+                    "action": "update_transcript",
+                    "tts_clone_ref": status["local"]["tts_clone_ref"],
+                    "detail": detail,
+                    "status": status,
+                }))
+            }
+            "clear" => {
+                {
+                    let _io = self
+                        .local_clone_io
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    moss_voice::audio_cpp::clear_clone_reference(&clone_root)
+                        .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                }
+                self.sync_running_clone_caches(false);
+                let status = self.status();
+                Ok(serde_json::json!({
+                    "section": "local_tts_clone",
+                    "ok": true,
+                    "action": "clear",
+                    "tts_clone_ref": status["local"]["tts_clone_ref"],
+                    "detail": "已移除本地克隆参考录音",
+                    "status": status,
+                }))
+            }
+            _ => Err(CenterError::new(
+                "model_input_invalid",
+                400,
+                "不支持的本地克隆操作",
+            )),
+        }
     }
 }

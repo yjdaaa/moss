@@ -367,6 +367,17 @@ pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
             sample_text: SAMPLE_ZH,
             recommended_for_zh: true,
         }],
+        crate::local_models::QWEN3_TTS_1_7B_CLONE_ID => vec![TtsSpeakerMeta {
+            id: 0,
+            code: "custom_clone",
+            name: "参考录音克隆声线（在下方上传 WAV）".to_owned(),
+            gender: "neutral",
+            gender_label: "克隆",
+            lang: "zh",
+            lang_label: "中英等 10 语种零样本克隆",
+            sample_text: SAMPLE_ZH,
+            recommended_for_zh: true,
+        }],
         _ => return None,
     };
 
@@ -449,7 +460,11 @@ pub fn tts_speaker_meta(model_id: &str, speaker: i32) -> Option<TtsSpeakerMeta> 
 }
 
 /// 后台自动预缓存顺序：默认音色第一 → 其余中文音色 → 英语及多语种音色。
+/// 零样本克隆模型（`qwen3_tts_1_7b_clone`）音色随用户上传录音动态变化，不预烘静态试听文件。
 pub fn tts_warmup_plan(model_id: &str) -> Vec<TtsSpeakerMeta> {
+    if model_id == crate::local_models::QWEN3_TTS_1_7B_CLONE_ID {
+        return Vec::new();
+    }
     let Some(mut catalog) = tts_voice_catalog(model_id) else {
         return Vec::new();
     };
@@ -587,8 +602,12 @@ mod tests {
             assert_eq!(cat.languages[0].code, "zh");
             assert_eq!(cat.speakers[0].lang, "zh");
             let warmup = tts_warmup_plan(spec.id);
-            assert_eq!(warmup.len(), expected_total);
-            assert_eq!(warmup[0].id, cat.default_speaker);
+            if spec.id == crate::local_models::QWEN3_TTS_1_7B_CLONE_ID {
+                assert!(warmup.is_empty(), "动态参考音色克隆模型不预烘静态试听文件");
+            } else {
+                assert_eq!(warmup.len(), expected_total);
+                assert_eq!(warmup[0].id, cat.default_speaker);
+            }
         }
         let qwen_cat = tts_voice_catalog("qwen3_tts_0_6b").unwrap();
         let eric = qwen_cat.speakers.iter().find(|s| s.id == 4).unwrap();

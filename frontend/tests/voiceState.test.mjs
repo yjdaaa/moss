@@ -2258,3 +2258,72 @@ test("没有的功能不显示：设备没有的控制项隐藏，叠加功能�
   assert.equal(localAddonPrereqNote("denoise", { vad: false, asr: true }), "");
   assert.equal(localAddonPrereqNote("turn", {}), "");
 });
+
+test("本地离线声音克隆模型（qwen3_tts_1_7b_clone）：运行时区分、兜底门禁与一键测试计划校验（n131）", async () => {
+  const { isAudioCppTtsModel, isSpeechTtsModel, resolveFallbackTtsModel, pipelineTestPlan } = await import("../src/voiceState.js");
+  const cloneModel = {
+    id: "qwen3_tts_1_7b_clone",
+    kind: "tts",
+    engine: "audio_cpp_tts",
+    label: "Qwen3-TTS 1.7B 声音克隆（离线复刻）",
+    speed_adjustable: false,
+    installed: true,
+  };
+  const customVoice = {
+    id: "qwen3_tts_1_7b",
+    kind: "tts",
+    engine: "speech_cpp_tts",
+    label: "Qwen3-TTS 1.7B（中文最自然 · 可调语速）",
+    speed_adjustable: true,
+    installed: true,
+  };
+  assert.equal(isAudioCppTtsModel(cloneModel), true);
+  assert.equal(isSpeechTtsModel(cloneModel), false, "克隆模型走 audio.cpp，不得误判为 speech.cpp");
+  assert.equal(isSpeechTtsModel(customVoice), true);
+  assert.equal(localTtsSpeedFixed(cloneModel), true, "克隆模型不支持调语速");
+  assert.match(localModelDeleteText(cloneModel, [cloneModel, customVoice], {}), /audio\.cpp/);
+  assert.doesNotMatch(localModelDeleteText(customVoice, [cloneModel, customVoice], {}), /audio\.cpp/);
+
+  // 未上传参考录音时，克隆模型不作为云端异常自动兜底候选
+  assert.equal(
+    resolveFallbackTtsModel({ tts: false, tts_model: "qwen3_tts_1_7b_clone" }, [cloneModel], { tts_clone_ref: { configured: false } }),
+    null,
+  );
+  assert.equal(
+    resolveFallbackTtsModel({ tts: false, tts_model: "qwen3_tts_1_7b_clone" }, [cloneModel, customVoice], { tts_clone_ref: { configured: false } })?.id,
+    "qwen3_tts_1_7b",
+  );
+  assert.equal(
+    resolveFallbackTtsModel({ tts: false, tts_model: "qwen3_tts_1_7b_clone" }, [cloneModel, customVoice], { tts_clone_ref: { configured: true } })?.id,
+    "qwen3_tts_1_7b_clone",
+  );
+
+  // 一键测试全部环节：未上传参考 WAV 时报错，上传后即使无 moss-voice-local 仍静态就绪
+  const baseStatus = {
+    models: {
+      llm: { configured: true, kind: "openai", url: "https://api.example.com/v1/chat/completions", model: "gpt-4o-mini", key_set: true },
+      asr: { configured: true, kind: "openai", url: "https://api.example.com/v1/audio/transcriptions", model: "whisper-1", key_set: true },
+    },
+    local: {
+      helper_found: false,
+      audiocpp_env: { ready: true, summary: "就绪" },
+      tts_clone_ref: { configured: false, file_name: "", transcript: "" },
+      settings: { vad: false, asr: false, tts: true, tts_model: "qwen3_tts_1_7b_clone", jev_filter_enabled: false },
+      models: [cloneModel],
+    },
+  };
+  const missingRefStep = pipelineTestPlan(baseStatus).find((s) => s.key === "tts");
+  assert.equal(missingRefStep.ok, false);
+  assert.match(missingRefStep.detail, /参考录音/);
+
+  const readyStatus = {
+    ...baseStatus,
+    local: {
+      ...baseStatus.local,
+      tts_clone_ref: { configured: true, file_name: "moss550w.wav", transcript: "让人类永远保持理智" },
+    },
+  };
+  const okStep = pipelineTestPlan(readyStatus).find((s) => s.key === "tts");
+  assert.equal(okStep.ok, true);
+  assert.match(okStep.detail, /moss550w\.wav/);
+});

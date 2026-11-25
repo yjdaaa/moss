@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 本地语音合成新增 Qwen3-TTS 1.7B 离线声音克隆模型（2026-11-25）
+
+- **现象**：已接入的本地 `qwen3_tts_0_6b` / `1.7B` 为固定 9 音色 `CustomVoice` 变体，断网离线场景下无法用一段本机参考录音克隆任意人声（如 550W 原声或自有录音）。
+- **根因与修复**：`local_models::CATALOG` 新增第 30 项 `qwen3_tts_1_7b_clone`（`Qwen3-TTS-12Hz-1.7B-Base` Q8_0 GGUF，Apache-2.0，支持 `hf-mirror` 与 ModelScope 回退），按需下载并校验 `audio.cpp v0.9.6` 免 Python 跨平台运行时（Metal / Vulkan / CPU，删模型时自动清理受管运行时）；新增 `moss_voice::audio_cpp` 与 `moss_voice_providers::audio_cpp`（`AudioCppWorker` / `AudioCppTts`），经 `127.0.0.1` 回环 SSE 流式输出 24 kHz PCM 并在插话打断时即刻断流；复用 `voice_builtin_models_test("local_tts_clone")` 校验保存 3～30 秒 WAV 参考录音、支持自动识别参考原话及免重启热切换（有台词走 ICL 对齐，留空走 `x_vector_only_mode`），前端按 n129/n130 隐藏无关音色/语速项并提供上传、改台词与当场试听。默认合成模型不变。
+- **验证**：`moss-voice`、`moss-voice-providers`、`moss-voice-host` 新增运行时清理、24-bit WAV 校验、SSE 流式克隆与打断取消、运行期删除门禁与诊断包脱敏单测，`voiceState.test.mjs` 与 `voice-center.browser.mjs` 新增离线克隆交互断言；`verify.mjs --finish` 通过。Windows 端与真实小智设备播报未实测（`unverified`）。
+- **关联**：`crates/moss-voice/src/audio_cpp.rs`、`crates/moss-voice/src/local_models.rs`、`crates/moss-voice-providers/src/audio_cpp.rs`、`crates/moss-voice-host/src/builtin/{conversation.rs,models.rs,tts_preview.rs}`、`frontend/src/components/voice-builtin/LocalTtsSettings.jsx`、内置语音技术书 n131。
+
 ### 设备没有的快捷控制、只有一种的音色筛选不再显示，叠加功能缺前提时提示（2026-11-25）
 
 - **现象**：小智不支持的音量 / 亮度 / 主题 / 按键拾音模式按钮仍显示为置灰；单音色或单语种合成模型的“语言包与试听”里仍有点了没用的语种 / 性别筛选；本地判停没开时勾“命令词抗噪”不生效却没提示。

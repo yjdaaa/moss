@@ -43,8 +43,14 @@ pub const DEFAULT_QWEN3_TTS_0_6B_BASE: &str =
 /// 本地语音合成 Qwen3-TTS 1.7B CustomVoice GGUF（Apache-2.0；同一 speech.cpp 运行时，接受说话指令，n126）
 pub const DEFAULT_QWEN3_TTS_1_7B_BASE: &str =
     "https://huggingface.co/sakasegawa/Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/resolve/main";
+/// 本地语音合成 Qwen3-TTS 1.7B Base 零样本声音克隆 GGUF（Apache-2.0；audio.cpp 原生推理，支持 hf-mirror 与 ModelScope 回退，n131）
+pub const DEFAULT_QWEN3_TTS_1_7B_CLONE_BASE: &str =
+    "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-1.7B-Base-GGUF";
+pub const MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE: &str = "https://www.modelscope.cn/models/HereIsMark/audio.cpp-gguf/resolve/master/Qwen3-TTS-12Hz-1.7B-Base-GGUF";
 /// 按说话指令调语速的合成模型（speech.cpp 的 `instructions` 只有 Qwen3-TTS 1.7B 接受，n126）
 pub const QWEN3_TTS_1_7B_ID: &str = "qwen3_tts_1_7b";
+/// 本地零样本声音克隆合成模型（Qwen3-TTS 1.7B Base + audio.cpp，n131）
+pub const QWEN3_TTS_1_7B_CLONE_ID: &str = "qwen3_tts_1_7b_clone";
 /// 新一代本地视觉模型 Qwen3.5（Unsloth GGUF，Apache-2.0；n87），与 OneJev 共用 llama.cpp 推理引擎
 pub const DEFAULT_QWEN3_5_2B_BASE: &str =
     "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main";
@@ -117,8 +123,10 @@ pub enum Engine {
     Matcha,
     /// ZipVoice Distill 4 步流匹配合成（n87）
     ZipVoice,
-    /// Qwen3-TTS 0.6B CustomVoice，由 `speech.cpp` 独立 worker 运行（n87）
+    /// Qwen3-TTS 0.6B / 1.7B CustomVoice，由 `speech.cpp` 独立 worker 运行（n87 / n126）
     SpeechCppTts,
+    /// Qwen3-TTS 1.7B Base 零样本声音克隆，由 `audio.cpp` `audiocpp_server` 运行（n131）
+    AudioCppTts,
     /// 单说话人中文 VITS（注音符号输入；MOSS 原声，n122）
     Vits,
     Laya,
@@ -147,6 +155,11 @@ impl Engine {
     /// 是否运行在 MOSS 自动下载的 `speech.cpp` 推理引擎上（Qwen3-TTS 使用）。
     pub fn uses_speech_runtime(self) -> bool {
         matches!(self, Engine::SpeechCppTts)
+    }
+
+    /// 是否运行在 MOSS 自动下载的 `audio.cpp` 推理引擎上（Qwen3-TTS Base 声音克隆使用，n131）。
+    pub fn uses_audiocpp_runtime(self) -> bool {
+        matches!(self, Engine::AudioCppTts)
     }
 }
 
@@ -200,8 +213,10 @@ impl ModelSpec {
     /// `speech.cpp` 上的 Qwen3-TTS 0.6B 拒收 `speed` 也不接受说话指令，界面不显示语速框；
     /// 1.7B 同样拒收 `speed`，但能按说话指令粗调（见 [`Self::tts_speed_by_instructions`]）。
     pub fn tts_speed_adjustable(&self) -> Option<bool> {
-        (self.kind == ModelKind::Tts)
-            .then(|| !self.engine.uses_speech_runtime() || self.tts_speed_by_instructions())
+        (self.kind == ModelKind::Tts).then(|| {
+            (!self.engine.uses_speech_runtime() && !self.engine.uses_audiocpp_runtime())
+                || self.tts_speed_by_instructions()
+        })
     }
 
     /// 语速是否靠说话指令粗调（Qwen3-TTS 1.7B，n126）。
@@ -385,7 +400,7 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 29] = [
+pub const CATALOG: [ModelSpec; 30] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -743,6 +758,23 @@ pub const CATALOG: [ModelSpec; 29] = [
             max: 8,
             hint: "0 Vivian 女声（默认），1 Serena 女声，2 Uncle_Fu 老傅男声；方言：3 Dylan 北京口音，4 Eric 四川话；5 Ryan / 6 Aiden 英文男声；7 Ono_Anna 日语女声；8 Sohee 韩语女声",
         }),
+    },
+    ModelSpec {
+        id: QWEN3_TTS_1_7B_CLONE_ID,
+        kind: ModelKind::Tts,
+        engine: Engine::AudioCppTts,
+        label: "Qwen3-TTS 1.7B 声音克隆（离线复刻）",
+        note: "上传 5～20 秒清晰干声即可断网克隆任意人声（如 550W 原声），24 kHz 流式首声约 0.15～0.3 秒；常驻约 5.2 GB 内存，不支持调语速，免装 Python。",
+        path: "qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf",
+        sha256: "92641a8022d521efd79a5db45e952589b3f2b781680f9abfcf26f075d37b86c6",
+        size: 2_695_186_240,
+        archive: Archive::Directory {
+            dir: "qwen3-tts-1.7b-base-clone",
+            base_url: DEFAULT_QWEN3_TTS_1_7B_CLONE_BASE,
+        },
+        required: &["qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf"],
+        extras: &[],
+        voices: None,
     },
     ModelSpec {
         id: "zipvoice_distill",
@@ -1207,6 +1239,15 @@ impl ModelManager {
             .unwrap_or_else(|| self.write_root_for("qwen3_tts_0_6b"))
     }
 
+    /// `audio.cpp` 运行时所在的模型根目录：优先已安装的克隆模型所在目录，未安装时指向其写入目录（n131）。
+    pub fn audiocpp_runtime_root(&self) -> &Path {
+        CATALOG
+            .iter()
+            .filter(|spec| spec.engine.uses_audiocpp_runtime())
+            .find_map(|spec| self.installed_root_for_spec(spec))
+            .unwrap_or_else(|| self.write_root_for(QWEN3_TTS_1_7B_CLONE_ID))
+    }
+
     pub fn path_if_installed(&self, id: &str) -> Option<PathBuf> {
         let spec = spec(id)?;
         let root = self.installed_root_for_spec(spec)?;
@@ -1328,6 +1369,10 @@ impl ModelManager {
 
     fn speech_still_needed(&self, root: &Path) -> bool {
         self.runtime_still_needed(root, Engine::uses_speech_runtime)
+    }
+
+    fn audiocpp_still_needed(&self, root: &Path) -> bool {
+        self.runtime_still_needed(root, Engine::uses_audiocpp_runtime)
     }
 
     /// 开始下载（后台线程）。`base` 为发布地址或镜像。
@@ -1479,6 +1524,9 @@ impl ModelManager {
         if spec.engine.uses_speech_runtime() && !self.speech_still_needed(&root) {
             crate::speech_cpp::remove_managed_runtime(&root)?;
         }
+        if spec.engine.uses_audiocpp_runtime() && !self.audiocpp_still_needed(&root) {
+            crate::audio_cpp::remove_managed_runtime(&root)?;
+        }
         Ok(())
     }
 }
@@ -1543,7 +1591,7 @@ fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
         }
         Archive::Directory { base_url, .. } => {
             let mirror_url = hf_mirror_for(base_url);
-            if trimmed_base == DEFAULT_BASE {
+            let mut bases = if trimmed_base == DEFAULT_BASE {
                 vec![base_url.to_owned(), mirror_url]
             } else if trimmed_base.contains("k2-fsa/sherpa-onnx") {
                 // 用户填写的是 sherpa-onnx GitHub 发布镜像：目录模型优先走对应仓库的 HF 国内镜像，再兜底官方 HF
@@ -1564,7 +1612,23 @@ fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
                 vec![mirror_url, base_url.to_owned()]
             } else {
                 vec![trimmed_base.to_owned()]
+            };
+            if spec.id == QWEN3_TTS_1_7B_CLONE_ID
+                && !is_loopback_test_base(trimmed_base)
+                && (bases.contains(&base_url.to_owned())
+                    || bases.contains(&hf_mirror_for(base_url)))
+                && !bases
+                    .iter()
+                    .any(|b| b == MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE)
+            {
+                // 国内镜像优先时把魔搭 ModelScope 排在直连 HuggingFace 之前作为第二国内回退源
+                if bases.first().is_some_and(|b| b.contains("hf-mirror")) {
+                    bases.insert(1, MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE.to_owned());
+                } else {
+                    bases.push(MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE.to_owned());
+                }
             }
+            bases
         }
         Archive::TarGz { base_url, .. } => {
             if trimmed_base == DEFAULT_BASE
@@ -1643,6 +1707,14 @@ fn run_download(
                 report(Progress::Downloading { done: 0, total });
             } else if spec.engine.uses_speech_runtime() {
                 crate::speech_cpp::ensure_speech_runtime(
+                    root,
+                    bases.first().map(String::as_str),
+                    cancel,
+                    &report_runtime,
+                )?;
+                report(Progress::Downloading { done: 0, total });
+            } else if spec.engine.uses_audiocpp_runtime() {
+                crate::audio_cpp::ensure_audiocpp_runtime(
                     root,
                     bases.first().map(String::as_str),
                     cancel,
@@ -2605,6 +2677,7 @@ mod tests {
                 | Engine::Matcha
                 | Engine::ZipVoice
                 | Engine::SpeechCppTts
+                | Engine::AudioCppTts
                 | Engine::Vits => ModelKind::Tts,
                 Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
@@ -3051,6 +3124,39 @@ mod local_vision_catalog_tests {
             "1.7B 靠说话指令调语速"
         );
         assert_eq!(qwen_tts_17.download_size(), 2_287_780_352);
+        let qwen_clone = spec_of(QWEN3_TTS_1_7B_CLONE_ID, ModelKind::Tts).unwrap();
+        assert_eq!(qwen_clone.engine, Engine::AudioCppTts);
+        assert!(qwen_clone.engine.uses_audiocpp_runtime());
+        assert!(!qwen_clone.engine.uses_speech_runtime());
+        assert!(
+            qwen_clone.voices.is_none(),
+            "克隆模型使用自定义上传参考音色，无内置编号表"
+        );
+        assert_eq!(
+            qwen_clone.tts_speed_adjustable(),
+            Some(false),
+            "1.7B Base 克隆模型不支持调语速"
+        );
+        assert_eq!(qwen_clone.download_size(), 2_695_186_240);
+        assert_eq!(
+            resolve_download_bases(qwen_clone, DEFAULT_BASE),
+            vec![
+                DEFAULT_QWEN3_TTS_1_7B_CLONE_BASE.to_owned(),
+                "https://hf-mirror.com/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-1.7B-Base-GGUF".to_owned(),
+                MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE.to_owned(),
+            ]
+        );
+        assert_eq!(
+            resolve_download_bases(
+                qwen_clone,
+                "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download"
+            ),
+            vec![
+                "https://hf-mirror.com/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-1.7B-Base-GGUF".to_owned(),
+                MODELSCOPE_QWEN3_TTS_1_7B_CLONE_BASE.to_owned(),
+                DEFAULT_QWEN3_TTS_1_7B_CLONE_BASE.to_owned(),
+            ]
+        );
         for id in [
             "kokoro",
             "kokoro_v11",

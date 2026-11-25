@@ -148,6 +148,7 @@ const COMBO_SHORT_NAMES = {
   matcha_zh_en: "Matcha",
   qwen3_tts_0_6b: "Qwen3-TTS 0.6B",
   qwen3_tts_1_7b: "Qwen3-TTS 1.7B",
+  qwen3_tts_1_7b_clone: "Qwen3-TTS 1.7B 声音克隆",
   kws_zipformer_zh: "命令词抗噪",
 };
 

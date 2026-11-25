@@ -102,8 +102,14 @@ export function localAddonPrereqNote(kind, form) {
   return "";
 }
 
+/** 跑在 audio.cpp 上的 Qwen3-TTS 1.7B Base 离线声音克隆模型（n131）。 */
+export function isAudioCppTtsModel(model) {
+  return model?.engine === "audio_cpp_tts" || model?.id === "qwen3_tts_1_7b_clone";
+}
+
 /** 跑在 speech.cpp 上的 Qwen3-TTS（0.6B / 1.7B 共用同一运行时，n126）。 */
 export function isSpeechTtsModel(model) {
+  if (isAudioCppTtsModel(model)) return false;
   return model?.engine === "speech_cpp_tts" || /^qwen3_tts_/.test(String(model?.id || ""));
 }
 
@@ -113,6 +119,11 @@ export function localModelDeleteText(model, models, local) {
   let extra = "";
   if (model?.id === "laya_multilingual" && local?.laya_env?.managed) {
     extra = "会同时删除 MOSS 自动创建的 Laya Python 运行环境（含 PyTorch，可能有几 GB），下次使用时重新准备。";
+  } else if (isAudioCppTtsModel(model)) {
+    const otherAudioCpp = (Array.isArray(models) ? models : []).some(
+      (item) => isAudioCppTtsModel(item) && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
+    );
+    if (!otherAudioCpp) extra = "会同时删除 MOSS 自动下载的声音克隆推理引擎 audio.cpp（已上传的参考录音会保留）。";
   } else if (isSpeechTtsModel(model)) {
     const otherSpeech = (Array.isArray(models) ? models : []).some(
       (item) => isSpeechTtsModel(item) && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
@@ -289,10 +300,11 @@ export function localTtsSpeakerGroups(speakers, current) {
 }
 
 /** 云端 TTS 启用时（`!form.tts`），返回当前作为云端异常优先兜底的已安装本地 TTS 模型；未安装任何本地 TTS 或已启用本地主 TTS 时返回 `null`。 */
-export function resolveFallbackTtsModel(form, models = []) {
+export function resolveFallbackTtsModel(form, models = [], local = null) {
   if (!form || Boolean(form.tts)) return null;
+  const cloneReady = local ? Boolean(local.tts_clone_ref?.configured) : true;
   const ttsModels = (Array.isArray(models) ? models : []).filter(
-    (item) => (!item.kind || item.kind === "tts") && item.installed
+    (item) => (!item.kind || item.kind === "tts") && item.installed && (!isAudioCppTtsModel(item) || cloneReady)
   );
   if (ttsModels.length === 0) return null;
   return ttsModels.find((item) => item.id === form.tts_model) || ttsModels[0] || null;

@@ -52,7 +52,7 @@ try {
       ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       ota_ip_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       ota_ip_urls: ["http://192.0.2.10:8003/xiaozhi/ota/", "http://192.0.2.20:8003/xiaozhi/ota/"],
-      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "gtcrn_simple", kind: "denoise", label: "GTCRN 降噪", installed: false }, { id: "dpdfnet_baseline", kind: "denoise", label: "DPDFNet 降噪", installed: true }, { id: "kws_zipformer_zh", kind: "kws", label: "命令词抗噪", installed: false }, { id: "smart_turn_v3", kind: "turn", label: "Smart Turn", installed: false }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, audiocpp_env: { ready: true, installed: true, binary_found: true, backend: "metal", accelerator_label: "Apple Metal 硬件加速", summary: "audio.cpp 原生克隆引擎已就绪（Apple Metal 硬件加速 · 免装 Python）" }, tts_clone_ref: { configured: false, file_name: "", sample_rate: 0, duration_secs: 0, transcript: "", mode: "none" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "gtcrn_simple", kind: "denoise", label: "GTCRN 降噪", installed: false }, { id: "dpdfnet_baseline", kind: "denoise", label: "DPDFNet 降噪", installed: true }, { id: "kws_zipformer_zh", kind: "kws", label: "命令词抗噪", installed: false }, { id: "smart_turn_v3", kind: "turn", label: "Smart Turn", installed: false }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "qwen3_tts_1_7b_clone", kind: "tts", engine: "audio_cpp_tts", label: "Qwen3-TTS 1.7B 声音克隆（离线复刻）", size: 2695186240, note: "上传 5～20 秒清晰干声即可断网克隆任意人声。", speed_adjustable: false, installed: true }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
       debug_enabled: true,
       debug_traces: [
         {
@@ -222,8 +222,61 @@ try {
       state.builtin.link_mode = mode;
       return voiceStatus();
     },
-    voice_builtin_models_test: ({ section, input }) => (
-      section === "local_tts"
+    voice_builtin_models_test: ({ section, input }) => {
+      if (section === "local_tts_clone") {
+        if (input?.action === "upload") {
+          const transcript = input?.transcript?.trim() || "让人类永远保持理智，确实是一种奢求。";
+          const nextGen = Number(state.builtin.local.tts_clone_ref?.generation || 0) + 1;
+          state.builtin.local.tts_clone_ref = {
+            configured: true,
+            generation: nextGen,
+            file_name: input?.file_name || "moss550w.wav",
+            sample_rate: 24000,
+            duration_secs: 4.3,
+            transcript,
+            mode: transcript ? "icl" : "x_vector_only",
+          };
+          return {
+            section: "local_tts_clone",
+            ok: true,
+            action: "upload",
+            auto_transcribed: !input?.transcript?.trim(),
+            tts_clone_ref: structuredClone(state.builtin.local.tts_clone_ref),
+            detail: `已保存参考录音 ${state.builtin.local.tts_clone_ref.file_name}（4.3 秒），并自动识别填入参考台词`,
+            status: structuredClone(state.builtin),
+          };
+        }
+        if (input?.action === "update_transcript") {
+          const transcript = String(input?.transcript || "").trim();
+          const nextGen = Number(state.builtin.local.tts_clone_ref?.generation || 0) + 1;
+          state.builtin.local.tts_clone_ref = {
+            ...state.builtin.local.tts_clone_ref,
+            generation: nextGen,
+            transcript,
+            mode: transcript ? "icl" : "x_vector_only",
+          };
+          return {
+            section: "local_tts_clone",
+            ok: true,
+            action: "update_transcript",
+            tts_clone_ref: structuredClone(state.builtin.local.tts_clone_ref),
+            detail: "已更新参考录音台词，下一句合成起立即生效",
+            status: structuredClone(state.builtin),
+          };
+        }
+        if (input?.action === "clear") {
+          state.builtin.local.tts_clone_ref = { configured: false, generation: 0, file_name: "", sample_rate: 0, duration_secs: 0, transcript: "", mode: "none" };
+          return {
+            section: "local_tts_clone",
+            ok: true,
+            action: "clear",
+            tts_clone_ref: structuredClone(state.builtin.local.tts_clone_ref),
+            detail: "已移除本地克隆参考录音",
+            status: structuredClone(state.builtin),
+          };
+        }
+      }
+      return section === "local_tts"
         ? {
             section: "local_tts",
             ok: true,
@@ -248,8 +301,8 @@ try {
               elapsed_ms: 180,
               detail: "合成测试响应",
               ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
-            }
-    ),
+            };
+    },
     voice_builtin_models_list: async ({ section, input }) => {
       if (section === "llm" && String(input?.url || "").includes("slow-list.example.test")) {
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1016,6 +1069,34 @@ try {
   assert.equal(state.builtin.local.settings.tts_speed ?? 1, 1, "未保存的语速草稿仍未被误提交");
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => !document.querySelector("#voice-local-tts-modal"));
+
+  // 6h. n131：切到本地离线声音克隆模型——不显示预设语言包按钮、音色下拉与语速框，支持上传 WAV 自动填台词、改原话与当场试听
+  assert.equal(await page.locator("#voice-local-tts-open-qwen3_tts_1_7b_clone").count(), 0, "离线克隆行不显示预设语言包弹窗按钮");
+  await page.locator("#voice-builtin-mix-select-tts").selectOption("local:qwen3_tts_1_7b_clone");
+  await page.locator("#voice-local-clone-box").waitFor();
+  assert.equal(await page.locator("#voice-local-speaker").count(), 0, "克隆模型无内置音色下拉");
+  assert.equal(await page.locator("#voice-local-speed").count(), 0, "克隆模型不支持调语速，不显示语速框");
+  assert.equal(await page.locator("#voice-local-speaker-browse").count(), 0, "克隆模型不显示查看语言包按钮");
+  assert.equal(await page.locator("#voice-local-tts-try").isDisabled(), true, "未上传参考 WAV 前禁用试听按钮");
+  await page.locator("#voice-local-clone-file").setInputFiles({
+    name: "moss550w.wav",
+    mimeType: "audio/wav",
+    buffer: Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64"),
+  });
+  await page.locator("#voice-local-clone-summary").filter({ hasText: "moss550w.wav（4.3 秒" }).waitFor();
+  await page.locator("#voice-local-clone-notice").filter({ hasText: "已保存参考录音 moss550w.wav" }).waitFor();
+  assert.equal(await page.locator("#voice-local-clone-transcript").inputValue(), "让人类永远保持理智，确实是一种奢求。", "上传后自动回填识别台词");
+  assert.equal(await page.locator("#voice-local-tts-try").isDisabled(), false, "上传参考 WAV 后解锁试听按钮");
+  await page.locator("#voice-local-clone-transcript").fill("延续人类文明是唯一目标。");
+  await page.locator("#voice-local-clone-save-transcript").click();
+  await page.locator("#voice-local-clone-notice").filter({ hasText: "已更新参考录音台词" }).waitFor();
+  await page.locator("#voice-local-tts-try").click();
+  await page.waitForFunction(() => !/合成中/.test(document.querySelector("#voice-local-tts-try")?.textContent || ""));
+  assert.deepEqual(last("voice_builtin_models_test").args, {
+    section: "local_tts",
+    input: { model_id: "qwen3_tts_1_7b_clone", speaker: 0, speed: 1, transcript: "延续人类文明是唯一目标。" },
+  });
+  await page.locator("#voice-builtin-mix-select-tts").selectOption("local:kokoro");
 
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");

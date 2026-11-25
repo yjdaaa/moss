@@ -8,7 +8,7 @@ pub(super) struct RunningLocalSpec {
     /// 命令词检测模型目录（随本地判停运行，n101）
     kws: Option<(&'static str, std::path::PathBuf)>,
     denoise: Option<(&'static str, std::path::PathBuf)>,
-    asr: Option<(&'static str, std::path::PathBuf, bool, Vec<String>)>,
+    pub(super) asr: Option<(&'static str, std::path::PathBuf, bool, Vec<String>)>,
     pub(super) tts: Option<(
         &'static str,
         std::path::PathBuf,
@@ -41,6 +41,8 @@ pub(super) struct LocalParts {
     pub(super) tts: Option<Arc<dyn Tts>>,
     /// 选用 `speech.cpp`（Qwen3-TTS）时的长驻子进程句柄。
     pub(super) speech_worker: Option<SpeechCppWorker>,
+    /// 选用 `audio.cpp`（Qwen3-TTS 声音克隆）时的长驻子进程句柄（n131）。
+    pub(super) audiocpp_worker: Option<AudioCppWorker>,
     /// 选用尾音语义判停时的专用子进程句柄（与主 `helper` 隔离）。
     pub(super) turn_worker: Option<TurnHelper>,
     /// 主用云端 TTS 时，若本机已安装本地合成模型，挂作失败时的按需自动降级兜底。
@@ -59,6 +61,7 @@ pub(super) struct ChainTestLocalGuard {
     _helper: Option<LocalHelper>,
     turn_worker: Option<TurnHelper>,
     speech_worker: Option<SpeechCppWorker>,
+    audiocpp_worker: Option<AudioCppWorker>,
     fallback_tts: Option<Arc<LazyLocalFallbackTts>>,
 }
 
@@ -71,6 +74,9 @@ impl Drop for ChainTestLocalGuard {
             worker.terminate();
         }
         if let Some(worker) = self.speech_worker.take() {
+            worker.terminate();
+        }
+        if let Some(worker) = self.audiocpp_worker.take() {
             worker.terminate();
         }
         if let Some(helper) = self._helper.take() {
@@ -145,6 +151,7 @@ impl TurnEndPredictor for LocalTurnEndPredictor {
 enum FallbackTtsBackend {
     Helper(TtsEngine),
     SpeechCpp { model_file: std::path::PathBuf },
+    AudioCpp { model_file: std::path::PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +176,10 @@ fn ordered_local_tts_candidates(
                         is_preferred_model: bool| {
         let backend = if spec.engine.uses_speech_runtime() {
             FallbackTtsBackend::SpeechCpp {
+                model_file: resolve_model_entry_file(&dir, spec),
+            }
+        } else if spec.engine.uses_audiocpp_runtime() {
+            FallbackTtsBackend::AudioCpp {
                 model_file: resolve_model_entry_file(&dir, spec),
             }
         } else {
@@ -228,6 +239,10 @@ enum LoadedFallbackTts {
         /// Qwen3-TTS 1.7B 按语速选的说话指令（其他为空，n126）
         instructions: String,
     },
+    AudioCpp {
+        worker: AudioCppWorker,
+        resolve_ref: moss_voice_providers::audio_cpp::VoiceRefResolver,
+    },
 }
 
 impl Drop for LoadedFallbackTts {
@@ -241,6 +256,9 @@ impl Drop for LoadedFallbackTts {
             Self::SpeechCpp { worker, .. } => {
                 worker.terminate();
             }
+            Self::AudioCpp { worker, .. } => {
+                worker.terminate();
+            }
         }
     }
 }
@@ -250,6 +268,7 @@ impl LoadedFallbackTts {
         match self {
             Self::Helper { tts, .. } => tts.helper.is_alive(),
             Self::SpeechCpp { worker, .. } => worker.is_alive(),
+            Self::AudioCpp { worker, .. } => worker.is_alive(),
         }
     }
 
@@ -278,6 +297,13 @@ impl LoadedFallbackTts {
                 worker: worker.clone(),
                 voice: voice.clone(),
                 instructions: instructions.clone(),
+            }),
+            Self::AudioCpp {
+                worker,
+                resolve_ref,
+            } => Arc::new(AudioCppTts {
+                worker: worker.clone(),
+                resolve_ref: resolve_ref.clone(),
             }),
         }
     }
@@ -319,6 +345,10 @@ impl Drop for FallbackTtsDeleteGuard {
 pub(super) struct LazyLocalFallbackTts {
     helper_exe: Option<std::path::PathBuf>,
     speech_exe: Option<std::path::PathBuf>,
+    audiocpp_exe: Option<std::path::PathBuf>,
+    audiocpp_voice_dir: std::path::PathBuf,
+    audiocpp_backend: &'static str,
+    audiocpp_resolve_ref: moss_voice_providers::audio_cpp::VoiceRefResolver,
     candidates: Vec<LocalFallbackCandidate>,
     speed: f32,
     shared_helper: Option<LocalHelper>,
@@ -328,6 +358,17 @@ pub(super) struct LazyLocalFallbackTts {
 impl LazyLocalFallbackTts {
     pub(super) fn terminate_all(&self) {
         if let Ok(mut guard) = self.state.lock() {
+            guard.loaded = None;
+        }
+    }
+
+    pub(super) fn invalidate_audiocpp(&self) {
+        if let Ok(mut guard) = self.state.lock()
+            && guard
+                .loaded
+                .as_ref()
+                .is_some_and(|(_, entry)| matches!(entry, LoadedFallbackTts::AudioCpp { .. }))
+        {
             guard.loaded = None;
         }
     }
@@ -357,6 +398,12 @@ impl LazyLocalFallbackTts {
         Arc::new(Self {
             helper_exe: None,
             speech_exe: None,
+            audiocpp_exe: None,
+            audiocpp_voice_dir: std::path::PathBuf::new(),
+            audiocpp_backend: "cpu",
+            audiocpp_resolve_ref: Arc::new(|| {
+                Err(moss_voice_providers::ProviderError::new("test"))
+            }),
             candidates: vec![
                 LocalFallbackCandidate {
                     id,
@@ -396,16 +443,28 @@ impl LazyLocalFallbackTts {
                 "没有可用的本地降级语音合成模型",
             ));
         }
-        if let Ok(guard) = self.state.lock()
+        if let Ok(mut guard) = self.state.lock()
             && let Some((idx, existing)) = guard.loaded.as_ref()
             && *idx >= start_index
             && existing.is_alive()
             && !guard.deleting.contains(self.candidates[*idx].id)
         {
-            return Ok((*idx, existing.to_arc_tts()));
+            let audiocpp_unready = matches!(
+                self.candidates[*idx].backend,
+                FallbackTtsBackend::AudioCpp { .. }
+            ) && (self.audiocpp_resolve_ref)().is_err();
+            if audiocpp_unready {
+                guard.loaded = None;
+            } else {
+                return Ok((*idx, existing.to_arc_tts()));
+            }
         }
         let helper_exe = self.helper_exe.clone();
         let speech_exe = self.speech_exe.clone();
+        let audiocpp_exe = self.audiocpp_exe.clone();
+        let audiocpp_voice_dir = self.audiocpp_voice_dir.clone();
+        let audiocpp_backend = self.audiocpp_backend;
+        let audiocpp_resolve_ref = self.audiocpp_resolve_ref.clone();
         let candidates = self.candidates.clone();
         let speed = self.speed.clamp(0.5, 2.0);
         let shared_helper = self.shared_helper.clone();
@@ -420,7 +479,15 @@ impl LazyLocalFallbackTts {
                 && existing.is_alive()
                 && !guard.deleting.contains(candidates[*idx].id)
             {
-                return Ok((*idx, existing.to_arc_tts()));
+                let audiocpp_unready = matches!(
+                    candidates[*idx].backend,
+                    FallbackTtsBackend::AudioCpp { .. }
+                ) && (audiocpp_resolve_ref)().is_err();
+                if audiocpp_unready {
+                    guard.loaded = None;
+                } else {
+                    return Ok((*idx, existing.to_arc_tts()));
+                }
             }
             let reused = guard
                 .loaded
@@ -458,6 +525,33 @@ impl LazyLocalFallbackTts {
                                     worker,
                                     voice,
                                     instructions,
+                                };
+                                let tts = entry.to_arc_tts();
+                                guard.loaded = Some((idx, entry));
+                                return Ok((idx, tts));
+                            }
+                            Err(err) => {
+                                last_err = err;
+                            }
+                        }
+                    }
+                    FallbackTtsBackend::AudioCpp { model_file } => {
+                        let Some(exe) = audiocpp_exe.as_deref() else {
+                            continue;
+                        };
+                        if (audiocpp_resolve_ref)().is_err() {
+                            continue;
+                        }
+                        match AudioCppWorker::spawn(
+                            exe,
+                            model_file,
+                            &audiocpp_voice_dir,
+                            audiocpp_backend,
+                        ) {
+                            Ok(worker) => {
+                                let entry = LoadedFallbackTts::AudioCpp {
+                                    worker,
+                                    resolve_ref: audiocpp_resolve_ref.clone(),
                                 };
                                 let tts = entry.to_arc_tts();
                                 guard.loaded = Some((idx, entry));
@@ -668,6 +762,13 @@ impl BuiltinVoice {
         let helper_exe = helper_path().filter(|path| path.is_file());
         let speech_exe =
             moss_voice::speech_cpp::resolve_speech_binary(self.models.speech_runtime_root());
+        let audiocpp_exe =
+            moss_voice::audio_cpp::resolve_audiocpp_binary(self.models.audiocpp_runtime_root());
+        let audiocpp_backend = audiocpp_exe
+            .as_deref()
+            .map(moss_voice::audio_cpp::recommended_audiocpp_backend)
+            .unwrap_or("cpu");
+        let clone_root = self.local_clone_root();
         let candidates: Vec<_> =
             ordered_local_tts_candidates(&local.tts_model, local.tts_speaker, |id| {
                 self.models.path_if_installed(id)
@@ -676,6 +777,7 @@ impl BuiltinVoice {
             .filter(|cand| match &cand.backend {
                 FallbackTtsBackend::Helper(_) => helper_exe.is_some(),
                 FallbackTtsBackend::SpeechCpp { .. } => speech_exe.is_some(),
+                FallbackTtsBackend::AudioCpp { .. } => audiocpp_exe.is_some(),
             })
             .collect();
         if candidates.is_empty() {
@@ -684,6 +786,10 @@ impl BuiltinVoice {
         Some(Arc::new(LazyLocalFallbackTts {
             helper_exe,
             speech_exe,
+            audiocpp_exe,
+            audiocpp_voice_dir: moss_voice::audio_cpp::clone_voices_dir(&clone_root),
+            audiocpp_backend,
+            audiocpp_resolve_ref: self.clone_voice_ref_resolver(),
             candidates,
             speed: local.tts_speed,
             shared_helper,
@@ -704,6 +810,14 @@ impl BuiltinVoice {
     ) -> Result<(LocalParts, Option<(LocalHelper, RunningLocalSpec)>), CenterError> {
         struct TerminateSpeechOnErr(Option<SpeechCppWorker>);
         impl Drop for TerminateSpeechOnErr {
+            fn drop(&mut self) {
+                if let Some(worker) = self.0.take() {
+                    worker.terminate();
+                }
+            }
+        }
+        struct TerminateAudioCppOnErr(Option<AudioCppWorker>);
+        impl Drop for TerminateAudioCppOnErr {
             fn drop(&mut self) {
                 if let Some(worker) = self.0.take() {
                     worker.terminate();
@@ -746,12 +860,18 @@ impl BuiltinVoice {
         } else {
             None
         };
-        let (speech_tts, helper_tts) = match tts {
-            Some((spec, dir)) if spec.engine.uses_speech_runtime() => (Some((spec, dir)), None),
-            other => (None, other),
+        let (speech_tts, audiocpp_tts, helper_tts) = match tts {
+            Some((spec, dir)) if spec.engine.uses_speech_runtime() => {
+                (Some((spec, dir)), None, None)
+            }
+            Some((spec, dir)) if spec.engine.uses_audiocpp_runtime() => {
+                (None, Some((spec, dir)), None)
+            }
+            other => (None, None, other),
         };
         let mut parts = LocalParts::default();
         let mut speech_guard = TerminateSpeechOnErr(None);
+        let mut audiocpp_guard = TerminateAudioCppOnErr(None);
         if let Some((spec, dir)) = speech_tts {
             if let Some(voices) = spec.voices
                 && (local.tts_speaker < 0 || local.tts_speaker > voices.max)
@@ -780,6 +900,24 @@ impl BuiltinVoice {
                 instructions,
             }));
             speech_guard.0 = Some(worker);
+        } else if let Some((spec, dir)) = audiocpp_tts {
+            let audiocpp_exe =
+                moss_voice::audio_cpp::resolve_audiocpp_binary(self.models.root_for(spec.id))
+                    .ok_or_else(|| {
+                        start_error(
+                            "未找到声音克隆推理引擎 audiocpp_server，请删除并重新下载 Qwen3-TTS 声音克隆模型",
+                        )
+                    })?;
+            let backend = moss_voice::audio_cpp::recommended_audiocpp_backend(&audiocpp_exe);
+            let voice_dir = moss_voice::audio_cpp::clone_voices_dir(&self.local_clone_root());
+            let model_file = resolve_model_entry_file(&dir, spec);
+            let worker = AudioCppWorker::spawn(&audiocpp_exe, &model_file, &voice_dir, backend)
+                .map_err(|error| start_error(format!("本地合成（{}）：{}", spec.label, error)))?;
+            parts.tts = Some(Arc::new(AudioCppTts {
+                worker: worker.clone(),
+                resolve_ref: self.clone_voice_ref_resolver(),
+            }));
+            audiocpp_guard.0 = Some(worker);
         }
         let mut turn_guard = TerminateTurnOnErr(None);
         if let Some((spec, path)) = turn {
@@ -796,6 +934,7 @@ impl BuiltinVoice {
         if !needs_helper {
             self.attach_fallback_tts(&mut parts, local, None, colab_tts_override);
             parts.speech_worker = speech_guard.0.take();
+            parts.audiocpp_worker = audiocpp_guard.0.take();
             parts.turn_worker = turn_guard.0.take();
             return Ok((parts, None));
         }
@@ -892,6 +1031,7 @@ impl BuiltinVoice {
             self.attach_fallback_tts(&mut parts, local, Some(helper.clone()), colab_tts_override);
         }
         parts.speech_worker = speech_guard.0.take();
+        parts.audiocpp_worker = audiocpp_guard.0.take();
         parts.turn_worker = turn_guard.0.take();
         Ok((parts, Some((helper, running_spec))))
     }
@@ -934,13 +1074,19 @@ impl BuiltinVoice {
                 _helper: None,
                 turn_worker: None,
                 speech_worker: None,
+                audiocpp_worker: None,
                 fallback_tts: parts.fallback_tts_handle.take(),
             };
             return Ok((parts, guard));
         }
-        let (speech_tts, helper_tts) = match tts {
-            Some((spec, dir)) if spec.engine.uses_speech_runtime() => (Some((spec, dir)), None),
-            other => (None, other),
+        let (speech_tts, audiocpp_tts, helper_tts) = match tts {
+            Some((spec, dir)) if spec.engine.uses_speech_runtime() => {
+                (Some((spec, dir)), None, None)
+            }
+            Some((spec, dir)) if spec.engine.uses_audiocpp_runtime() => {
+                (None, Some((spec, dir)), None)
+            }
+            other => (None, None, other),
         };
         let needs_helper =
             vad.is_some() || asr.is_some() || helper_tts.is_some() || denoise.is_some();
@@ -1095,6 +1241,42 @@ impl BuiltinVoice {
                     voice,
                     instructions,
                 }));
+            } else if let Some((spec, dir)) = audiocpp_tts {
+                let model_file = resolve_model_entry_file(&dir, spec);
+                let voice_dir = moss_voice::audio_cpp::clone_voices_dir(&self.local_clone_root());
+                let reusable_worker = self.audiocpp_worker.lock().ok().and_then(|w| {
+                    w.as_ref()
+                        .filter(|worker| {
+                            worker.is_alive()
+                                && worker.model_path() == model_file
+                                && worker.voice_dir() == voice_dir
+                        })
+                        .cloned()
+                });
+                let worker = match reusable_worker {
+                    Some(w) => w,
+                    None => {
+                        let audiocpp_exe = moss_voice::audio_cpp::resolve_audiocpp_binary(
+                            self.models.root_for(spec.id),
+                        )
+                        .ok_or_else(|| {
+                            start_error("未找到声音克隆推理引擎 audiocpp_server，请删除并重新下载 Qwen3-TTS 声音克隆模型")
+                        })?;
+                        let backend =
+                            moss_voice::audio_cpp::recommended_audiocpp_backend(&audiocpp_exe);
+                        let spawned =
+                            AudioCppWorker::spawn(&audiocpp_exe, &model_file, &voice_dir, backend)
+                                .map_err(|error| {
+                                    start_error(format!("本地合成（{}）：{}", spec.label, error))
+                                })?;
+                        guard.audiocpp_worker = Some(spawned.clone());
+                        spawned
+                    }
+                };
+                parts.tts = Some(Arc::new(AudioCppTts {
+                    worker,
+                    resolve_ref: self.clone_voice_ref_resolver(),
+                }));
             } else if parts.tts.is_none() {
                 // 兜底合成不向常驻运行中的 helper 发 LoadTts（避免覆盖线上兜底槽位或永久滞留 ONNX 会话）；
                 // 主云端 TTS 可用时惰性不拉起任何进程，真触发兜底时单独拉起临时进程并在试跑结束后自动回收。
@@ -1131,6 +1313,7 @@ impl BuiltinVoice {
             _helper: spawned.map(|(h, _)| h),
             turn_worker: parts.turn_worker.take(),
             speech_worker: parts.speech_worker.take(),
+            audiocpp_worker: parts.audiocpp_worker.take(),
             fallback_tts: parts.fallback_tts_handle.take(),
         };
         Ok((parts, guard))
