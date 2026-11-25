@@ -5,7 +5,8 @@ import { localModelSettingsError, localTtsSpeedFixed, localTtsSpeakerGroups, voi
 
 /**
  * 5. 语音合成模型包下方的本地合成音色与语速（2026-11-25）。
- * 音色按名称下拉选择（读该模型的音色表，读不到时退回编号输入框）；所选模型不支持调语速时不显示语速框（n126）；
+ * 音色按名称下拉选择（读该模型的音色表，读不到时退回编号输入框）；所选模型不支持调语速时不显示语速框（n126），
+ * 单音色模型不显示音色栏，“查看语言包与试听”挪到试听那一行（n129）；
  * “按当前音色和语速试一句”用未保存的草稿当场合成，保存后才影响对话与连贯试跑。
  */
 export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
@@ -100,34 +101,34 @@ export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
 
   return (
     <div className="voice-form-grid" id="voice-local-tts-settings">
-      <label>
-        <span className="voice-label-with-link">
-          <span>本地合成音色</span>
-          <button type="button" className="voice-link-btn" onClick={onBrowse} id="voice-local-speaker-browse">
-            {voices ? "试听选音色" : "查看语言包与试听"}
-          </button>
-        </span>
-        {!voices ? (
-          <span className="voice-muted">所选合成模型只有一个音色</span>
-        ) : groups ? (
-          <select className="text-input" value={String(form.tts_speaker)} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker">
-            {groups.map((group) => (
-              <optgroup key={group.label} label={group.label}>
-                {group.options.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        ) : (
-          <>
-            <input className="text-input mono" inputMode="numeric" value={form.tts_speaker} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker" />
-            <small className="voice-muted">音色编号 0 ~ {voices.max}（默认 {voices.default}）</small>
-          </>
-        )}
-      </label>
+      {voices && (
+        <label>
+          <span className="voice-label-with-link">
+            <span>本地合成音色</span>
+            <button type="button" className="voice-link-btn" onClick={onBrowse} id="voice-local-speaker-browse">
+              试听选音色
+            </button>
+          </span>
+          {groups ? (
+            <select className="text-input" value={String(form.tts_speaker)} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker">
+              {groups.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          ) : (
+            <>
+              <input className="text-input mono" inputMode="numeric" value={form.tts_speaker} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker" />
+              <small className="voice-muted">音色编号 0 ~ {voices.max}（默认 {voices.default}）</small>
+            </>
+          )}
+        </label>
+      )}
       {!speedFixed && (
         <label>
           <span>本地合成语速（0.5 ~ 2.0）</span>
@@ -146,6 +147,11 @@ export function LocalTtsSettings({ form, update, models, voices, onBrowse }) {
           {trial.state === "playing" ? <Square size={13} /> : <Play size={13} />}
           {trial.state === "playing" ? "停止" : trial.state === "loading" ? "合成中…" : speedFixed ? "按当前音色试一句" : "按当前音色和语速试一句"}
         </button>
+        {!voices && (
+          <button type="button" className="voice-link-btn" onClick={onBrowse} id="voice-local-speaker-browse">
+            查看语言包与试听
+          </button>
+        )}
         <small className={trial.state === "error" ? "voice-local-tts-trial-bad" : "voice-muted"} id="voice-local-tts-try-note" role="status">
           {trial.text || trialBlocked || "试听不用先保存；要让对话和连贯试跑用上，改完点下方“保存”"}
         </small>

@@ -33,6 +33,13 @@ test("语音中心本地合成模型包名称可点击打开语言包与本机�
     "LocalModelsGroup 须挂载 LocalTtsVoicesModal 并接入一键选用音色回调",
   );
 
+  // n129：没有的功能不显示——单音色模型不渲染音色栏、不支持调语速的模型不渲染语速框，“查看语言包与试听”挪到试听那一行
+  const settingsSrc = fs.readFileSync(path.join(SRC_DIR, "components/voice-builtin/LocalTtsSettings.jsx"), "utf8");
+  assert.match(settingsSrc, /\{voices && \(\s*<label>/, "只有多音色模型才渲染音色栏");
+  assert.match(settingsSrc, /\{!speedFixed && \(\s*<label>/, "支持调语速的模型才渲染语速框");
+  assert.match(settingsSrc, /\{!voices && \([\s\S]*?查看语言包与试听/, "单音色模型在试听那一行保留语言包入口");
+  assert.doesNotMatch(settingsSrc, /只有一个音色/, "不再用一行灰字占位");
+
   const modalSrc = fs.readFileSync(path.join(SRC_DIR, "components/LocalTtsVoicesModal.jsx"), "utf8");
   assert.match(modalSrc, /支持的语言包/, "弹窗须展示支持的语言包区块");
   assert.match(modalSrc, /本机已缓存/, "弹窗须标注已缓存在本机磁盘的音色");
