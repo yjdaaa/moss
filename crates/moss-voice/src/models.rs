@@ -663,6 +663,40 @@ pub fn dashscope_customization_url(input: &str) -> String {
     }
 }
 
+/// 若克隆音色 ID 带有明确的模型前缀（`<target_model>-...`），返回其绑定的目标模型名。
+pub fn infer_dashscope_voice_target_model(voice_id: &str) -> Option<&'static str> {
+    let trimmed = voice_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    DASHSCOPE_TTS_MODELS.into_iter().find(|model| {
+        lower
+            .strip_prefix(&model.to_ascii_lowercase())
+            .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
+
+/// 统一校验千问 / 百炼语音合成与声音克隆的地址和密钥边界，拦截纯对话网关、Token Plan 套餐端点与 `sk-sp-` 密钥。
+pub fn validate_dashscope_gateway_and_key(raw_url: &str, api_key: &str) -> Result<String, String> {
+    if is_alibaba_token_plan_url(raw_url) || api_key.trim().starts_with("sk-sp-") {
+        return Err("语音合成：千问 / 百炼 Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话，语音合成与声音克隆请填按量付费地址（如 https://maas.qianwenaiapi.com/api/v1）与 sk- 密钥".into());
+    }
+    if let Some(gateway) = chat_only_gateway_name(raw_url) {
+        return Err(format!(
+            "语音合成：{gateway} 仅提供大模型对话接口，不支持千问 / 百炼原生语音合成与声音克隆；请填千问或阿里云百炼按量付费地址（如 https://maas.qianwenaiapi.com/api/v1）"
+        ));
+    }
+    let url = dashscope_tts_url(raw_url);
+    if is_alibaba_token_plan_url(&url) || chat_only_gateway_name(&url).is_some() {
+        return Err(
+            "语音合成：该地址仅支持大模型对话，请填千问 / 百炼按量付费地址与 sk- 密钥".into(),
+        );
+    }
+    validate_dashscope_url(&url).map_err(|error| format!("语音合成：{error}"))?;
+    Ok(url)
+}
+
 /// 判断两个云端地址是否严格属于同一个安全源（同协议、同主机、同端口、无账号信息，且公网必须为 `https://`），
 /// 用于安全地跨分区（如大模型 `/compatible-mode/v1` 与语音合成 `/api/v1/...`）复用本机已保存的同源密钥。
 pub fn same_cloud_origin_key(url_a: &str, url_b: &str) -> bool {
@@ -834,12 +868,7 @@ pub fn resolve_list_request(
                     section.label()
                 ));
             }
-            if is_alibaba_token_plan_url(&input.url) || input.api_key.trim().starts_with("sk-sp-") {
-                return Err("语音合成：千问 / 百炼 Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话，语音合成与声音克隆请填按量付费地址与 sk- 密钥".into());
-            }
-            let url = dashscope_tts_url(&input.url);
-            validate_dashscope_url(&url)
-                .map_err(|error| format!("{}：{error}", section.label()))?;
+            let url = validate_dashscope_gateway_and_key(&input.url, &input.api_key)?;
             Ok(ResolvedListRequest {
                 section,
                 kind: ProviderKind::Dashscope,
@@ -896,11 +925,7 @@ fn resolve_dashscope(section: Section, input: &SectionInput) -> Result<ResolvedS
             section.label()
         ));
     }
-    if is_alibaba_token_plan_url(&input.url) || input.api_key.trim().starts_with("sk-sp-") {
-        return Err("语音合成：千问 / 百炼 Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话，语音合成与声音克隆请填按量付费地址（如 https://maas.qianwenaiapi.com/api/v1）与 sk- 密钥".into());
-    }
-    let url = dashscope_tts_url(&input.url);
-    validate_dashscope_url(&url).map_err(|error| format!("{}：{error}", section.label()))?;
+    let url = validate_dashscope_gateway_and_key(&input.url, &input.api_key)?;
     let model = input.model.trim();
     let model = if model.is_empty() {
         DASHSCOPE_TTS_MODEL.to_owned()
@@ -910,6 +935,18 @@ fn resolve_dashscope(section: Section, input: &SectionInput) -> Result<ResolvedS
     let voice = input.voice.trim().to_owned();
     if voice.is_empty() {
         return Err("语音合成：请选择系统音色，或点“上传录音克隆音色”生成专属音色".into());
+    }
+    if let Some(bound_model) = infer_dashscope_voice_target_model(&voice)
+        && !bound_model.eq_ignore_ascii_case(&model)
+    {
+        return Err(format!(
+            "语音合成：克隆音色绑定模型 {bound_model}，不能与当前模型 {model} 混用；请切换模型或重新选择音色"
+        ));
+    }
+    if voice.to_ascii_lowercase().ends_with("_v3.1")
+        && !model.to_ascii_lowercase().starts_with("qwen-audio-3.1-tts")
+    {
+        return Err("语音合成：_v3.1 系统音色仅适用于 qwen-audio-3.1-tts 系列模型，请上传录音克隆专属音色或填写对应音色 ID".into());
     }
     let speed = input.speed.unwrap_or(1.0);
     if !(0.5..=2.0).contains(&speed) {

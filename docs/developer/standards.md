@@ -21,7 +21,7 @@
 | `crates/moss-xiaozhi-proto` | 小智设备协议：消息、音频帧、设备 token、OTA |
 | `crates/moss-xiaozhi-display` | 小智彩屏渲染、护目镜小机器人动图、中文字库与全屏画风/唤醒词 `assets.bin` 纯构造（零网络与异步依赖） |
 | `crates/moss-voice-server` | 内置语音服务：OTA / WebSocket、设备允许、会话、插件（仅桌面） |
-| `crates/moss-voice-providers` | ASR / LLM / TTS 提供方（OpenAI 兼容、本地模型、豆包流式） |
+| `crates/moss-voice-providers` | ASR / LLM / TTS 提供方（OpenAI 兼容、本地模型、豆包流式、千问 / 百炼原生 SSE 流式合成与声音克隆） |
 | `crates/moss-voice` | 语音中心设置与链路切换（官方 / 内置）、内置服务的模型配置与本地模型管理（仅桌面） |
 | `crates/moss-voice-host` | 内置语音与长期记忆宿主总装配（零 Tauri/UI 依赖，`BuiltinVoice` / `ContextHost` 编排，仅桌面） |
 | `crates/moss-voice-local-proto` | 与本地模型 helper 的帧协议 |

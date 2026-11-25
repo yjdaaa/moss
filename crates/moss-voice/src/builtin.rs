@@ -276,6 +276,43 @@ mod tests {
             "https://evil.example.com/compatible-mode/v1",
             &ds_tts.url
         ));
+        // 纯对话网关（OpenRouter / DeepSeek 等）与跨模型克隆音色、不匹配 _v3.1 系统音色均被明确拦截
+        assert!(
+            crate::models::resolve_builtin(
+                Section::Tts,
+                &SectionInput {
+                    kind: crate::models::ProviderKind::Dashscope,
+                    voice: "longanhuan_v3.1".into(),
+                    ..input("https://openrouter.ai/api/v1", "sk-or-test", "")
+                },
+            )
+            .unwrap_err()
+            .contains("OpenRouter")
+        );
+        assert!(
+            crate::models::resolve_builtin(
+                Section::Tts,
+                &SectionInput {
+                    kind: crate::models::ProviderKind::Dashscope,
+                    voice: "qwen-audio-3.1-tts-flash-moss-abc1".into(),
+                    ..input("", "sk-test", "qwen-audio-3.1-tts-plus")
+                },
+            )
+            .unwrap_err()
+            .contains("qwen-audio-3.1-tts-flash")
+        );
+        assert!(
+            crate::models::resolve_builtin(
+                Section::Tts,
+                &SectionInput {
+                    kind: crate::models::ProviderKind::Dashscope,
+                    voice: "longanhuan_v3.1".into(),
+                    ..input("", "sk-test", "cosyvoice-v3.5-flash")
+                },
+            )
+            .unwrap_err()
+            .contains("_v3.1")
+        );
     }
 
     #[test]

@@ -897,7 +897,10 @@ impl BuiltinVoice {
                 None => true,
             };
             if own_usable
-                && !(input.kind == ProviderKind::Dashscope && own.trim().starts_with("sk-sp-"))
+                && !(input.kind == ProviderKind::Dashscope
+                    && (own.trim().starts_with("sk-sp-")
+                        || moss_voice::models::is_alibaba_token_plan_url(&input.url)
+                        || moss_voice::models::chat_only_gateway_name(&input.url).is_some()))
             {
                 return Ok(Some(own));
             }
@@ -906,10 +909,11 @@ impl BuiltinVoice {
             if section != Section::Tts {
                 return Ok(None);
             }
-            let target_url = moss_voice::models::dashscope_tts_url(&input.url);
-            if moss_voice::models::is_alibaba_token_plan_url(&target_url) {
+            let Ok(target_url) =
+                moss_voice::models::validate_dashscope_gateway_and_key(&input.url, "")
+            else {
                 return Ok(None);
-            }
+            };
             for other in Section::ALL {
                 if other == section {
                     continue;
@@ -917,7 +921,10 @@ impl BuiltinVoice {
                 let Some(provider) = settings.builtin_models.get(other) else {
                     continue;
                 };
-                if provider.kind == ProviderKind::Doubao {
+                if provider.kind == ProviderKind::Doubao
+                    || moss_voice::models::is_alibaba_token_plan_url(&provider.url)
+                    || moss_voice::models::chat_only_gateway_name(&provider.url).is_some()
+                {
                     continue;
                 }
                 if moss_voice::models::same_cloud_origin_key(&target_url, &provider.url)
@@ -1043,25 +1050,14 @@ impl BuiltinVoice {
             .and_then(Value::as_str)
             .unwrap_or_default();
 
-        if moss_voice::models::is_alibaba_token_plan_url(&raw_url)
-            || typed_key.starts_with("sk-sp-")
-        {
-            return Err(CenterError::new(
-                "model_input_invalid",
-                400,
-                "Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话；声音克隆请填按量付费地址与 sk- 密钥",
-            ));
-        }
+        let final_url =
+            moss_voice::models::validate_dashscope_gateway_and_key(&raw_url, &typed_key)
+                .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
         let target_model = moss_voice_providers::dashscope::validate_clone_target_model(&raw_model)
             .map_err(|e| CenterError::new("model_input_invalid", 400, e.to_string()))?;
         let audio_uri =
             moss_voice_providers::dashscope::prepare_clone_audio_data_uri(audio_b64, file_name)
                 .map_err(|e| CenterError::new("model_input_invalid", 400, e.to_string()))?;
-
-        let final_url = moss_voice::models::dashscope_tts_url(&raw_url);
-        moss_voice::models::validate_dashscope_url(&final_url).map_err(|msg| {
-            CenterError::new("model_input_invalid", 400, format!("语音合成：{msg}"))
-        })?;
         let redacted_final_url = moss_voice::redact::redact_line(&final_url);
 
         let probe_input = SectionInput {
@@ -1174,6 +1170,15 @@ impl BuiltinVoice {
             .unwrap_or_default()
             .trim()
             .to_owned();
+        if let Err(detail) =
+            moss_voice::models::validate_dashscope_gateway_and_key(&raw_url, &typed_key)
+        {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "voices": [],
+                "detail": detail,
+            }));
+        }
         let probe_input = SectionInput {
             kind: ProviderKind::Dashscope,
             url: raw_url.clone(),

@@ -113,8 +113,46 @@ function isLoopbackHost(hostname) {
   return clean === "127.0.0.1" || clean === "localhost" || clean === "::1";
 }
 
+function isAlibabaHostUrl(url) {
+  const raw = cleanSchemeAndWhitespace(url);
+  if (!raw || !/^https?:\/\//i.test(raw)) return false;
+  try {
+    return isAlibabaCompatHost(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isAlibabaPaygOrLoopbackUrl(url) {
+  const raw = cleanSchemeAndWhitespace(url);
+  if (!raw || !/^https?:\/\//i.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host.startsWith("token-plan.")) return false;
+    return isAlibabaCompatHost(host) || isLoopbackHost(host);
+  } catch {
+    return false;
+  }
+}
+
 export function isDashscope(form) {
   return form?.kind === "dashscope";
+}
+
+const DASHSCOPE_KNOWN_MODELS = DASHSCOPE_MODEL_OPTIONS.tts.map((item) => item.id).sort((a, b) => b.length - a.length);
+
+/** 若克隆音色 ID 带明确模型前缀（`<target_model>-...`），返回绑定的目标模型名。 */
+export function inferDashscopeVoiceTargetModel(voiceId) {
+  const clean = String(voiceId || "").trim();
+  if (!clean) return "";
+  const lower = clean.toLowerCase();
+  return DASHSCOPE_KNOWN_MODELS.find((model) => lower.startsWith(`${model.toLowerCase()}-`)) || "";
+}
+
+function isLikelyDashscopeClonedVoice(voiceId) {
+  const clean = String(voiceId || "").trim();
+  return Boolean(inferDashscopeVoiceTargetModel(clean)) || /^qwen-tts-vc-/i.test(clean) || /^cosyvoice-v\d/i.test(clean);
 }
 
 export function dashscopeApiBaseUrl(url) {
@@ -263,8 +301,8 @@ const DOUBAO_V1_VOICE_PRESETS = [
 export function ttsVoiceOptionsFor(form) {
   const model = String(form?.model || "").trim();
   if (isDashscope(form)) {
-    if (/^cosyvoice-v3\.5/i.test(model)) return [];
-    return DASHSCOPE_QWEN_VOICE_PRESETS;
+    if (!model || /^qwen-audio-3\.1-tts/i.test(model)) return DASHSCOPE_QWEN_VOICE_PRESETS;
+    return [];
   }
   if (isDoubao(form)) {
     const isV1 = model === "seed-tts-1.0" || model === "volc.service_type.10029";
@@ -283,7 +321,7 @@ const ALL_OPENAI_PRESET_IDS = new Set(OPENAI_VOICE_PRESETS.map((v) => v.id));
 const ALL_DOUBAO_PRESET_IDS = new Set([...DOUBAO_V2_VOICE_PRESETS, ...DOUBAO_V1_VOICE_PRESETS].map((v) => v.id));
 const ALL_DASHSCOPE_PRESET_IDS = new Set(DASHSCOPE_QWEN_VOICE_PRESETS.map((v) => v.id));
 
-/** 选定合成模型或切换接口类型时，若音色为空或仍是其他接口类型的内置预设音色，自动填入新模型默认音色。 */
+/** 选定合成模型或切换接口类型时，若音色为空或与新模型/接口不兼容，自动填入新模型默认音色。 */
 export function applyDefaultTtsVoice(form, nextModel = form?.model) {
   const next = { ...form, model: nextModel };
   const options = ttsVoiceOptionsFor(next);
@@ -294,18 +332,43 @@ export function applyDefaultTtsVoice(form, nextModel = form?.model) {
     return next;
   }
   if (isDashscope(next)) {
-    if (ALL_OPENAI_PRESET_IDS.has(currentVoice) || ALL_DOUBAO_PRESET_IDS.has(currentVoice) || currentVoice.includes(":")) {
+    const effectiveModel = String(nextModel || "").trim() || DASHSCOPE_DEFAULTS.tts.model;
+    const boundModel = inferDashscopeVoiceTargetModel(currentVoice);
+    const presetMismatch =
+      (ALL_DASHSCOPE_PRESET_IDS.has(currentVoice) || /_v3\.1$/i.test(currentVoice)) &&
+      !options.some((opt) => opt.id === currentVoice);
+    const cloneModelMismatch = Boolean(boundModel) && boundModel.toLowerCase() !== effectiveModel.toLowerCase();
+    if (
+      ALL_OPENAI_PRESET_IDS.has(currentVoice) ||
+      ALL_DOUBAO_PRESET_IDS.has(currentVoice) ||
+      currentVoice.includes(":") ||
+      presetMismatch ||
+      cloneModelMismatch
+    ) {
       next.voice = defaultVoice;
     }
     return next;
   }
   if (isDoubao(next)) {
-    if (ALL_OPENAI_PRESET_IDS.has(currentVoice) || ALL_DASHSCOPE_PRESET_IDS.has(currentVoice) || currentVoice.includes(":")) {
+    const presetMismatch = ALL_DOUBAO_PRESET_IDS.has(currentVoice) && !options.some((opt) => opt.id === currentVoice);
+    if (
+      ALL_OPENAI_PRESET_IDS.has(currentVoice) ||
+      ALL_DASHSCOPE_PRESET_IDS.has(currentVoice) ||
+      /_v3\.1$/i.test(currentVoice) ||
+      isLikelyDashscopeClonedVoice(currentVoice) ||
+      currentVoice.includes(":") ||
+      presetMismatch
+    ) {
       next.voice = defaultVoice;
     }
     return next;
   }
-  if (ALL_DOUBAO_PRESET_IDS.has(currentVoice) || ALL_DASHSCOPE_PRESET_IDS.has(currentVoice)) {
+  if (
+    ALL_DOUBAO_PRESET_IDS.has(currentVoice) ||
+    ALL_DASHSCOPE_PRESET_IDS.has(currentVoice) ||
+    /_v3\.1$/i.test(currentVoice) ||
+    isLikelyDashscopeClonedVoice(currentVoice)
+  ) {
     next.voice = defaultVoice;
     return next;
   }
@@ -332,7 +395,10 @@ export function switchKind(section, form, kind) {
   if (kind === "dashscope" && section === "tts") {
     next.kind = "dashscope";
     const rawUrl = String(next.url || "").trim();
-    next.url = /^https?:\/\//i.test(rawUrl) ? dashscopeApiBaseUrl(rawUrl) : DASHSCOPE_DEFAULTS.tts.url;
+    next.url =
+      isAlibabaPaygOrLoopbackUrl(rawUrl) && !chatOnlyGatewayName(rawUrl)
+        ? dashscopeApiBaseUrl(rawUrl)
+        : DASHSCOPE_DEFAULTS.tts.url;
     if (!String(next.model || "").trim() || !isDashscope(form)) {
       next.model = DASHSCOPE_DEFAULTS.tts.model;
     }
@@ -340,8 +406,13 @@ export function switchKind(section, form, kind) {
   }
   delete next.kind;
   if (/^wss?:\/\//i.test(String(next.url || "").trim())) next.url = "";
-  if (isDashscope(form) && /\/api\/v1(?:\/|$)/i.test(String(next.url || "").trim())) {
-    next.url = cleanUrlInput(String(next.url || "").replace(/\/api\/v1.*$/i, ""));
+  if (isDashscope(form)) {
+    const rawUrl = cleanSchemeAndWhitespace(next.url);
+    if (!rawUrl || rawUrl === DASHSCOPE_DEFAULTS.tts.url || isAlibabaHostUrl(rawUrl)) {
+      next.url = "";
+    } else if (/\/api\/v1(?:\/|$)/i.test(rawUrl)) {
+      next.url = cleanUrlInput(rawUrl.replace(/\/api\/v1.*$/i, ""));
+    }
   }
   if (isDoubao(form) || isDashscope(form)) next.model = "";
   return next;
@@ -615,7 +686,8 @@ export function findPeerCloudSource(section, status, formUrl = "", formKind = "o
       if (sameCloudOriginKey(targetUrl, peer.url) && peer.key_set && !sameOrigin) {
         sameOrigin = info;
       }
-      if (!reusable && !sameCloudOriginKey(targetUrl, peer.url)) {
+      const peerEligibleForDashscope = peer.kind === "dashscope" || isAlibabaPaygOrLoopbackUrl(peer.url);
+      if (!reusable && peerEligibleForDashscope && !sameCloudOriginKey(targetUrl, peer.url)) {
         reusable = info;
       }
     }
@@ -628,7 +700,9 @@ export function findPeerCloudSource(section, status, formUrl = "", formKind = "o
     if (item.key === section) continue;
     const peer = models[item.key];
     if (!peer?.configured || peer.kind === "doubao") continue;
-    if (section !== "llm" && chatOnlyGatewayName(peer.url)) continue;
+    if (section !== "llm" && (chatOnlyGatewayName(peer.url) || peer.kind === "dashscope" || isAlibabaHostUrl(peer.url))) {
+      continue;
+    }
     const peerBase = peer.kind === "dashscope" ? completeAlibabaBareRoot(peer.url.replace(/\/api\/v1.*$/i, "")) : baseServiceUrl(peer.url);
     const peerListUrl = modelsListUrl(peerBase);
     if (!peerBase || !peerListUrl) continue;
@@ -638,10 +712,14 @@ export function findPeerCloudSource(section, status, formUrl = "", formKind = "o
       baseUrl: peerBase,
       keySet: Boolean(peer.key_set),
     };
-    if (currentListUrl && peerListUrl === currentListUrl && peer.key_set && !sameOrigin) {
+    const isSame =
+      peer.kind === "dashscope"
+        ? section === "llm" && Boolean(currentListUrl) && sameCloudOriginKey(currentListUrl, peer.url)
+        : Boolean(currentListUrl) && peerListUrl === currentListUrl;
+    if (isSame && peer.key_set && !sameOrigin) {
       sameOrigin = info;
     }
-    if (!reusable && (!currentListUrl || peerListUrl !== currentListUrl)) {
+    if (!reusable && (!currentListUrl || !isSame)) {
       reusable = info;
     }
   }
@@ -845,6 +923,14 @@ export function sectionInputError(section, form) {
       return "Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话；语音合成与声音克隆请填按量付费地址与 sk- 密钥";
     }
     if (!payload.voice) return "请选择系统音色，或点“上传录音克隆音色”生成专属音色";
+    const effectiveModel = payload.model || DASHSCOPE_DEFAULTS.tts.model;
+    const boundModel = inferDashscopeVoiceTargetModel(payload.voice);
+    if (boundModel && boundModel.toLowerCase() !== effectiveModel.toLowerCase()) {
+      return `克隆音色绑定模型 ${boundModel}，不能与当前模型 ${effectiveModel} 混用；请切换模型或重新选择音色`;
+    }
+    if (/_v3\.1$/i.test(payload.voice) && !/^qwen-audio-3\.1-tts/i.test(effectiveModel)) {
+      return "_v3.1 系统音色仅适用于 qwen-audio-3.1-tts 系列模型，请上传录音克隆专属音色或填写对应音色 ID";
+    }
     if (!(payload.speed >= 0.5 && payload.speed <= 2)) return "千问 / 百炼语速须在 0.5 ~ 2.0 之间";
     return "";
   }

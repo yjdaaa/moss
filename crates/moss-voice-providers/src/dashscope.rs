@@ -29,8 +29,8 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 const CLONE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CLONE_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
-const CLONE_POLL_INTERVAL: Duration = Duration::from_millis(600);
-const CLONE_MAX_POLLS: usize = 45;
+const CLONE_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const CLONE_MAX_POLLS: usize = 100;
 const MAX_CLONE_RAW_BYTES: usize = 7 * 1024 * 1024;
 const MAX_SSE_STREAM_BYTES: usize = MAX_AUDIO_BYTES * 2;
 
@@ -39,6 +39,64 @@ fn is_loopback_host(host: &str) -> bool {
     clean.eq_ignore_ascii_case("127.0.0.1")
         || clean.eq_ignore_ascii_case("localhost")
         || clean == "::1"
+}
+
+fn is_loopback_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+fn is_private_or_internal_v4(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
+    let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+    let is_ietf_or_testnet1 =
+        octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2);
+    let is_testnet2 = octets[0] == 198 && octets[1] == 51 && octets[2] == 100;
+    let is_testnet3 = octets[0] == 203 && octets[1] == 0 && octets[2] == 113;
+    let is_reserved = octets[0] == 0 || octets[0] >= 240;
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || is_cgnat
+        || is_benchmark
+        || is_ietf_or_testnet1
+        || is_testnet2
+        || is_testnet3
+        || is_reserved
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_private_or_internal_v4(v4),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_private_or_internal_v4(mapped);
+            }
+            let seg = v6.segments();
+            if seg[0] == 0x0064 && seg[1] == 0xff9b {
+                let nat64 = std::net::Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    seg[6] as u8,
+                    (seg[7] >> 8) as u8,
+                    seg[7] as u8,
+                );
+                return is_private_or_internal_v4(nat64);
+            }
+            let is_doc = seg[0] == 0x2001 && seg[1] == 0x0db8;
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || is_doc
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn is_private_or_internal_host(host: &str) -> bool {
@@ -50,35 +108,9 @@ fn is_private_or_internal_host(host: &str) -> bool {
     {
         return true;
     }
-    let check_v4 = |v4: std::net::Ipv4Addr| {
-        let octets = v4.octets();
-        let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
-        let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
-        v4.is_loopback()
-            || v4.is_private()
-            || v4.is_link_local()
-            || v4.is_unspecified()
-            || v4.is_broadcast()
-            || v4.is_multicast()
-            || is_cgnat
-            || is_benchmark
-    };
-    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => check_v4(v4),
-            std::net::IpAddr::V6(v6) => {
-                if let Some(mapped) = v6.to_ipv4_mapped() {
-                    return check_v4(mapped);
-                }
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-    }
-    false
+    clean
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(is_private_or_internal_ip)
 }
 
 fn sanitize_short_token(raw: &str, fallback: &str) -> String {
@@ -240,6 +272,12 @@ fn validate_audio_download_url(
             "千问语音合成返回的音频地址包含非法凭据",
         ));
     }
+    if parsed.fragment().is_some() {
+        return Err(ProviderError::with_category(
+            DiagCategory::Model,
+            "千问语音合成返回的音频地址包含非法片段",
+        ));
+    }
     let Some(host) = parsed.host_str() else {
         return Err(ProviderError::with_category(
             DiagCategory::Model,
@@ -250,8 +288,8 @@ fn validate_audio_download_url(
         .ok()
         .and_then(|u| u.host_str().map(is_loopback_host))
         .unwrap_or(false);
-    if endpoint_is_loopback {
-        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback_host(host)) {
+    if endpoint_is_loopback && is_loopback_host(host) {
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
             return Err(ProviderError::with_category(
                 DiagCategory::Model,
                 "千问语音合成返回的音频地址协议不受信任",
@@ -266,6 +304,115 @@ fn validate_audio_download_url(
         ));
     }
     Ok(parsed)
+}
+
+async fn download_fallback_audio(
+    label: &str,
+    tts_endpoint: &str,
+    audio_url: &str,
+    deadline: Instant,
+) -> Result<Vec<u8>, ProviderError> {
+    let safe_url = validate_audio_download_url(tts_endpoint, audio_url)?;
+    let endpoint_is_loopback = reqwest::Url::parse(tts_endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(is_loopback_host))
+        .unwrap_or(false);
+    let raw_host = safe_url.host_str().ok_or_else(|| {
+        ProviderError::with_category(DiagCategory::Model, "千问语音合成返回的音频地址缺少主机名")
+    })?;
+    let clean_host = raw_host.trim_matches(['[', ']']);
+    let port = safe_url.port_or_known_default().ok_or_else(|| {
+        ProviderError::with_category(DiagCategory::Model, "千问语音合成返回的音频地址端口无效")
+    })?;
+    let lookup_budget = AUDIO_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+    if lookup_budget.is_zero() {
+        return Err(ProviderError::with_category(
+            DiagCategory::Network,
+            "千问语音合成总耗时超时",
+        ));
+    }
+    let ip_allowed = |ip: std::net::IpAddr| {
+        (endpoint_is_loopback && is_loopback_ip(ip)) || !is_private_or_internal_ip(ip)
+    };
+    let (is_ip_literal, addresses) = if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+        if !ip_allowed(ip) {
+            return Err(ProviderError::with_category(
+                DiagCategory::Model,
+                "千问语音合成返回的音频下载源不受信任（禁止访问内网或本机地址）",
+            ));
+        }
+        (true, vec![std::net::SocketAddr::new(ip, port)])
+    } else {
+        let addrs: Vec<std::net::SocketAddr> =
+            tokio::time::timeout(lookup_budget, tokio::net::lookup_host((clean_host, port)))
+                .await
+                .map_err(|_| {
+                    ProviderError::with_category(
+                        DiagCategory::Network,
+                        "千问语音合成音频地址解析超时",
+                    )
+                })?
+                .map_err(|_| {
+                    ProviderError::with_category(
+                        DiagCategory::Network,
+                        "千问语音合成音频地址解析失败",
+                    )
+                })?
+                .take(16)
+                .collect();
+        if addrs.is_empty() {
+            return Err(ProviderError::with_category(
+                DiagCategory::Network,
+                "千问语音合成音频地址未解析出可用 IP",
+            ));
+        }
+        if addrs.iter().any(|addr| !ip_allowed(addr.ip())) {
+            return Err(ProviderError::with_category(
+                DiagCategory::Model,
+                "千问语音合成返回的音频下载源解析到内网或本机地址，已拦截",
+            ));
+        }
+        (false, addrs)
+    };
+
+    let req_budget = AUDIO_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+    if req_budget.is_zero() {
+        return Err(ProviderError::with_category(
+            DiagCategory::Network,
+            "千问语音合成总耗时超时",
+        ));
+    }
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("MOSS/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(safe_url.scheme() == "https")
+        .connect_timeout(Duration::from_secs(10).min(req_budget))
+        .timeout(req_budget);
+    if !is_ip_literal {
+        builder = builder.resolve_to_addrs(clean_host, &addresses);
+    }
+    let pinned = builder.build().map_err(|err| {
+        ProviderError::with_category(
+            DiagCategory::Network,
+            format!("{label}初始化下载连接失败：{err}"),
+        )
+    })?;
+    let dl = tokio::time::timeout(req_budget, pinned.get(safe_url).send())
+        .await
+        .map_err(|_| ProviderError::with_category(DiagCategory::Network, "千问语音合成下载超时"))?
+        .map_err(|error| describe_send_error(label, &error))?;
+    let dl = check_status(label, dl).await?;
+    let body_budget = AUDIO_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+    if body_budget.is_zero() {
+        return Err(ProviderError::with_category(
+            DiagCategory::Network,
+            "千问语音合成总耗时超时",
+        ));
+    }
+    tokio::time::timeout(body_budget, read_body(label, dl, MAX_AUDIO_BYTES))
+        .await
+        .map_err(|_| ProviderError::with_category(DiagCategory::Network, "千问语音合成下载超时"))?
 }
 
 fn dashscope_json_error(label: &str, payload: &Value) -> Option<ProviderError> {
@@ -395,6 +542,9 @@ impl DashscopeTts {
 
     async fn speak(&self, text: &str, chunks: &UnboundedSender<Pcm>) -> Result<(), ProviderError> {
         const LABEL: &str = "千问语音合成";
+        if chunks.is_closed() {
+            return Ok(());
+        }
         let deadline = Instant::now() + STREAM_TOTAL_TIMEOUT;
         let body = json!({
             "model": self.model,
@@ -413,13 +563,28 @@ impl DashscopeTts {
             .header("X-DashScope-SSE", "enable")
             .json(&body)
             .send();
-        let response = tokio::time::timeout(AUDIO_TIMEOUT, send)
-            .await
-            .map_err(|_| {
-                ProviderError::with_category(DiagCategory::Network, "千问语音合成请求超时")
-            })?
-            .map_err(|error| describe_send_error(LABEL, &error))?;
+        let response = tokio::select! {
+            biased;
+            _ = chunks.closed() => return Ok(()),
+            res = tokio::time::timeout(AUDIO_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())), send) => res,
+        }
+        .map_err(|_| {
+            ProviderError::with_category(DiagCategory::Network, "千问语音合成请求超时")
+        })?
+        .map_err(|error| describe_send_error(LABEL, &error))?;
         let mut response = check_status(LABEL, response).await?;
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_event_stream = content_type.contains("text/event-stream");
+        let is_explicit_non_sse = !is_event_stream
+            && (content_type.contains("application/json")
+                || content_type.contains("audio/")
+                || content_type.contains("application/octet-stream"));
 
         let mut decoder = SseDecoder::default();
         let mut raw = Vec::new();
@@ -429,13 +594,22 @@ impl DashscopeTts {
         let mut carry: Option<u8> = None;
         let mut total_samples = 0usize;
 
-        let mut process_event = |payload: &str| -> Result<bool, ProviderError> {
+        enum EventStep {
+            Continue,
+            Done,
+            ReceiverClosed,
+        }
+
+        let mut process_event = |payload: &str| -> Result<EventStep, ProviderError> {
             let trimmed = payload.trim();
-            if trimmed.is_empty() || trimmed == "[DONE]" {
-                return Ok(trimmed == "[DONE]");
+            if trimmed.is_empty() {
+                return Ok(EventStep::Continue);
+            }
+            if trimmed == "[DONE]" {
+                return Ok(EventStep::Done);
             }
             let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                return Ok(false);
+                return Ok(EventStep::Continue);
             };
             if let Some(err) = dashscope_json_error(LABEL, &value) {
                 return Err(err);
@@ -470,17 +644,26 @@ impl DashscopeTts {
                         ));
                     }
                     total_samples = next_total;
-                    let _ = chunks.send(Pcm {
-                        samples,
-                        sample_rate: TTS_SAMPLE_RATE,
-                    });
+                    if chunks
+                        .send(Pcm {
+                            samples,
+                            sample_rate: TTS_SAMPLE_RATE,
+                        })
+                        .is_err()
+                    {
+                        return Ok(EventStep::ReceiverClosed);
+                    }
                 }
             }
             let finished = value
                 .pointer("/output/finish_reason")
                 .and_then(Value::as_str)
                 .is_some_and(|r| r == "stop");
-            Ok(finished)
+            Ok(if finished {
+                EventStep::Done
+            } else {
+                EventStep::Continue
+            })
         };
 
         'stream: loop {
@@ -491,12 +674,15 @@ impl DashscopeTts {
                     "千问语音合成总耗时超时",
                 ));
             }
-            let chunk = tokio::time::timeout(wait, response.chunk())
-                .await
-                .map_err(|_| {
-                    ProviderError::with_category(DiagCategory::Network, "千问语音合成流式接收超时")
-                })?
-                .map_err(|error| describe_send_error(LABEL, &error))?;
+            let chunk = tokio::select! {
+                biased;
+                _ = chunks.closed() => return Ok(()),
+                res = tokio::time::timeout(wait, response.chunk()) => res,
+            }
+            .map_err(|_| {
+                ProviderError::with_category(DiagCategory::Network, "千问语音合成流式接收超时")
+            })?
+            .map_err(|error| describe_send_error(LABEL, &error))?;
             let Some(chunk) = chunk else { break };
             stream_bytes = stream_bytes.saturating_add(chunk.len());
             if stream_bytes > MAX_SSE_STREAM_BYTES {
@@ -514,27 +700,46 @@ impl DashscopeTts {
                 }
                 raw.extend_from_slice(&chunk);
             }
-            for event_data in decoder.push(&chunk) {
-                if !saw_event {
-                    saw_event = true;
-                    raw.clear();
-                    raw.shrink_to_fit();
-                }
-                if process_event(&event_data)? {
-                    break 'stream;
+            let looks_like_raw_fallback = !is_event_stream
+                && (is_explicit_non_sse
+                    || raw.starts_with(b"RIFF")
+                    || raw
+                        .iter()
+                        .copied()
+                        .find(|b| !b.is_ascii_whitespace())
+                        .is_some_and(|b| b == b'{'));
+            if !looks_like_raw_fallback {
+                for event_data in decoder.push(&chunk) {
+                    if !saw_event {
+                        saw_event = true;
+                        raw.clear();
+                        raw.shrink_to_fit();
+                    }
+                    match process_event(&event_data)? {
+                        EventStep::Continue => {}
+                        EventStep::Done => break 'stream,
+                        EventStep::ReceiverClosed => return Ok(()),
+                    }
                 }
             }
         }
         if let Some(event_data) = decoder.finish() {
             saw_event = true;
-            let _ = process_event(&event_data)?;
+            if matches!(process_event(&event_data)?, EventStep::ReceiverClosed) {
+                return Ok(());
+            }
         }
 
         if !saw_event && !raw.is_empty() {
+            if chunks.is_closed() {
+                return Ok(());
+            }
             if raw.starts_with(b"RIFF") {
                 let pcm = decode_wav(&raw)?;
                 total_samples += pcm.samples.len();
-                let _ = chunks.send(pcm);
+                if chunks.send(pcm).is_err() {
+                    return Ok(());
+                }
             } else {
                 let value: Value = serde_json::from_slice(&raw).map_err(|_| {
                     ProviderError::with_category(
@@ -545,7 +750,12 @@ impl DashscopeTts {
                 if let Some(err) = dashscope_json_error(LABEL, &value) {
                     return Err(err);
                 }
-                let _ = process_event(std::str::from_utf8(&raw).unwrap_or_default())?;
+                if matches!(
+                    process_event(std::str::from_utf8(&raw).unwrap_or_default())?,
+                    EventStep::ReceiverClosed
+                ) {
+                    return Ok(());
+                }
                 if total_samples == 0
                     && let Some(audio_url) = value
                         .pointer("/output/audio/url")
@@ -553,16 +763,11 @@ impl DashscopeTts {
                         .map(str::trim)
                         .filter(|u| !u.is_empty())
                 {
-                    let safe_url = validate_audio_download_url(&self.tts_url, audio_url)?;
-                    let dl = self
-                        .client
-                        .get(safe_url)
-                        .timeout(AUDIO_TIMEOUT)
-                        .send()
-                        .await
-                        .map_err(|error| describe_send_error(LABEL, &error))?;
-                    let dl = check_status(LABEL, dl).await?;
-                    let audio_bytes = read_body(LABEL, dl, MAX_AUDIO_BYTES).await?;
+                    let audio_bytes = tokio::select! {
+                        biased;
+                        _ = chunks.closed() => return Ok(()),
+                        res = download_fallback_audio(LABEL, &self.tts_url, audio_url, deadline) => res?,
+                    };
                     let pcm = if audio_bytes.starts_with(b"RIFF") {
                         decode_wav(&audio_bytes)?
                     } else {
@@ -574,7 +779,9 @@ impl DashscopeTts {
                     };
                     if !pcm.samples.is_empty() {
                         total_samples += pcm.samples.len();
-                        let _ = chunks.send(pcm);
+                        if chunks.send(pcm).is_err() {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -667,6 +874,110 @@ pub fn sanitize_voice_prefix(raw: &str) -> String {
     }
 }
 
+fn inspect_clone_wav(bytes: &[u8]) -> Result<(u32, f64), ProviderError> {
+    let bad = |msg: &str| ProviderError::with_category(DiagCategory::Config, msg);
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(bad(
+            "参考录音不是有效的 WAV 文件（请上传标准 WAV / MP3 / M4A 录音）",
+        ));
+    }
+    let mut at = 12usize;
+    let mut fmt_info: Option<(u32, usize)> = None;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size_u32 =
+            u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]]);
+        let size = size_u32 as usize;
+        let body = at + 8;
+        if id == b"fmt " {
+            let fmt_end = body.saturating_add(size).min(bytes.len());
+            if fmt_end < body + 16 {
+                return Err(bad("参考 WAV 音频格式头（fmt）不完整"));
+            }
+            let raw_tag = u16::from_le_bytes([bytes[body], bytes[body + 1]]);
+            let channels = u16::from_le_bytes([bytes[body + 2], bytes[body + 3]]);
+            let rate = u32::from_le_bytes([
+                bytes[body + 4],
+                bytes[body + 5],
+                bytes[body + 6],
+                bytes[body + 7],
+            ]);
+            let block_align = u16::from_le_bytes([bytes[body + 12], bytes[body + 13]]) as usize;
+            let bits = u16::from_le_bytes([bytes[body + 14], bytes[body + 15]]);
+            let tag = if raw_tag == 0xFFFE {
+                if fmt_end < body + 40 {
+                    return Err(bad("参考 WAV 扩展格式头（WAVE_FORMAT_EXTENSIBLE）不完整"));
+                }
+                const KSDATAFORMAT_SUBTYPE_TAIL: [u8; 14] = [
+                    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+                    0x71,
+                ];
+                if bytes[body + 26..body + 40] != KSDATAFORMAT_SUBTYPE_TAIL {
+                    return Err(bad(
+                        "参考 WAV 使用了不受支持的扩展子编码，请导出为标准 PCM WAV（16/24/32 位）或 MP3 / M4A",
+                    ));
+                }
+                u16::from_le_bytes([bytes[body + 24], bytes[body + 25]])
+            } else {
+                raw_tag
+            };
+            if channels == 0 || channels > 8 || rate == 0 {
+                return Err(bad("参考 WAV 声道数或采样率无效"));
+            }
+            if !matches!((tag, bits), (1, 8 | 16 | 24 | 32) | (3, 32 | 64)) {
+                return Err(ProviderError::with_category(
+                    DiagCategory::Config,
+                    format!(
+                        "参考 WAV 编码不受支持（格式 {tag}，{bits} 位），请导出为标准 PCM WAV（16/24/32 位）或 MP3 / M4A"
+                    ),
+                ));
+            }
+            let min_frame_bytes = (channels as usize) * (bits as usize / 8);
+            let frame_bytes = if block_align >= min_frame_bytes && min_frame_bytes > 0 {
+                block_align
+            } else {
+                min_frame_bytes
+            };
+            if frame_bytes == 0 {
+                return Err(bad("参考 WAV 采样帧字节数无效"));
+            }
+            fmt_info = Some((rate, frame_bytes));
+        } else if id == b"data" {
+            let (rate, frame_bytes) =
+                fmt_info.ok_or_else(|| bad("参考 WAV 缺少音频格式头（fmt）"))?;
+            let avail = bytes.len().saturating_sub(body);
+            let data_bytes = if size_u32 == u32::MAX {
+                avail
+            } else {
+                size.min(avail)
+            };
+            let frames = data_bytes / frame_bytes;
+            let secs = frames as f64 / rate as f64;
+            return Ok((rate, secs));
+        }
+        at = body.saturating_add(size).saturating_add(size & 1);
+    }
+    Err(bad("参考 WAV 缺少音频数据块（data）"))
+}
+
+fn is_voice_ready_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("OK")
+        || status.eq_ignore_ascii_case("PUBLISHED")
+        || status.eq_ignore_ascii_case("SUCCESS")
+        || status.eq_ignore_ascii_case("SUCCEEDED")
+}
+
+fn is_voice_pending_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("DEPLOYING")
+        || status.eq_ignore_ascii_case("INIT")
+        || status.eq_ignore_ascii_case("TRAINING")
+        || status.eq_ignore_ascii_case("PROCESSING")
+        || status.eq_ignore_ascii_case("PENDING")
+        || status.eq_ignore_ascii_case("AUDITING")
+        || status.eq_ignore_ascii_case("QUEUED")
+        || status.eq_ignore_ascii_case("RUNNING")
+}
+
 /// 校验本地上传的参考音频并封装为标准 Data URI（`data:audio/...;base64,...`）。
 pub fn prepare_clone_audio_data_uri(
     audio_base64_or_data_url: &str,
@@ -726,19 +1037,13 @@ pub fn prepare_clone_audio_data_uri(
     };
 
     if mime == "audio/wav" {
-        let pcm = decode_wav(&bytes).map_err(|err| {
-            ProviderError::with_category(DiagCategory::Config, format!("参考 WAV 无法解析：{err}"))
-        })?;
-        if pcm.sample_rate < 16_000 {
+        let (sample_rate, secs) = inspect_clone_wav(&bytes)?;
+        if sample_rate < 16_000 {
             return Err(ProviderError::with_category(
                 DiagCategory::Config,
-                format!(
-                    "参考录音采样率过低（当前 {} Hz，至少需要 16000 Hz）",
-                    pcm.sample_rate
-                ),
+                format!("参考录音采样率过低（当前 {sample_rate} Hz，至少需要 16000 Hz）"),
             ));
         }
-        let secs = pcm.samples.len() as f64 / pcm.sample_rate as f64;
         if secs < 3.0 {
             return Err(ProviderError::with_category(
                 DiagCategory::Config,
@@ -858,25 +1163,15 @@ pub async fn enroll_voice(
             post_customization(&http, &customization_url, api_key, &query_body, remaining).await?;
         let status = queried
             .pointer("/output/status")
+            .or_else(|| queried.pointer("/output/voice/status"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .unwrap_or("OK");
-        if status.eq_ignore_ascii_case("OK")
-            || status.eq_ignore_ascii_case("PUBLISHED")
-            || status.eq_ignore_ascii_case("SUCCESS")
-            || status.eq_ignore_ascii_case("SUCCEEDED")
-        {
+            .filter(|s| !s.is_empty())
+            .unwrap_or("DEPLOYING");
+        if is_voice_ready_status(status) {
             return Ok(voice_id);
         }
-        if status.eq_ignore_ascii_case("DEPLOYING")
-            || status.eq_ignore_ascii_case("INIT")
-            || status.eq_ignore_ascii_case("TRAINING")
-            || status.eq_ignore_ascii_case("PROCESSING")
-            || status.eq_ignore_ascii_case("PENDING")
-            || status.eq_ignore_ascii_case("AUDITING")
-            || status.eq_ignore_ascii_case("QUEUED")
-            || status.eq_ignore_ascii_case("RUNNING")
-        {
+        if is_voice_pending_status(status) {
             if attempt + 1 < CLONE_MAX_POLLS {
                 let sleep_for =
                     CLONE_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now()));
@@ -943,22 +1238,17 @@ pub async fn list_cloned_voices(
             else {
                 continue;
             };
-            let status = item
+            let raw_status = item
                 .get("status")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .unwrap_or("OK")
-                .to_owned();
-            if !status.eq_ignore_ascii_case("OK")
-                && !status.eq_ignore_ascii_case("PUBLISHED")
-                && !status.eq_ignore_ascii_case("DEPLOYING")
-                && !status.eq_ignore_ascii_case("PROCESSING")
-                && !status.eq_ignore_ascii_case("PENDING")
-                && !status.eq_ignore_ascii_case("AUDITING")
-                && !status.eq_ignore_ascii_case("TRAINING")
-                && !status.eq_ignore_ascii_case("INIT")
-                && !status.is_empty()
-            {
+                .unwrap_or_default();
+            let status = if raw_status.is_empty() {
+                "OK".to_owned()
+            } else {
+                raw_status.to_owned()
+            };
+            if !is_voice_ready_status(&status) && !is_voice_pending_status(&status) {
                 continue;
             }
             let target_model = item
@@ -984,7 +1274,14 @@ pub async fn list_cloned_voices(
         }
     }
     if let Some(model) = preferred_model.map(str::trim).filter(|s| !s.is_empty()) {
-        list.sort_by_key(|v| !v.target_model.eq_ignore_ascii_case(model));
+        list.sort_by_key(|v| {
+            (
+                !v.target_model.eq_ignore_ascii_case(model),
+                !is_voice_ready_status(&v.status),
+            )
+        });
+    } else {
+        list.sort_by_key(|v| !is_voice_ready_status(&v.status));
     }
     Ok(list)
 }
@@ -1039,6 +1336,60 @@ mod tests {
         );
         let uri = prepare_clone_audio_data_uri(&good_b64, "sample.wav").unwrap();
         assert!(uri.starts_with("data:audio/wav;base64,"));
+
+        // 24-bit PCM 与 WAVE_FORMAT_EXTENSIBLE (0xFFFE) 录音均可正常通过本地时长/采样率校验
+        let frames_24k_4s = 24_000usize * 4;
+        let data_bytes_24 = frames_24k_4s * 3;
+        let mut wav_24 = Vec::with_capacity(44 + data_bytes_24);
+        wav_24.extend_from_slice(b"RIFF");
+        wav_24.extend_from_slice(&((36 + data_bytes_24) as u32).to_le_bytes());
+        wav_24.extend_from_slice(b"WAVEfmt ");
+        wav_24.extend_from_slice(&16u32.to_le_bytes());
+        wav_24.extend_from_slice(&1u16.to_le_bytes());
+        wav_24.extend_from_slice(&1u16.to_le_bytes());
+        wav_24.extend_from_slice(&24_000u32.to_le_bytes());
+        wav_24.extend_from_slice(&(24_000u32 * 3).to_le_bytes());
+        wav_24.extend_from_slice(&3u16.to_le_bytes());
+        wav_24.extend_from_slice(&24u16.to_le_bytes());
+        wav_24.extend_from_slice(b"data");
+        wav_24.extend_from_slice(&(data_bytes_24 as u32).to_le_bytes());
+        wav_24.resize(44 + data_bytes_24, 0);
+        let b64_24 = base64::engine::general_purpose::STANDARD.encode(&wav_24);
+        assert!(prepare_clone_audio_data_uri(&b64_24, "voice24.wav").is_ok());
+
+        let mut wav_ext = Vec::with_capacity(68 + data_bytes_24);
+        wav_ext.extend_from_slice(b"RIFF");
+        wav_ext.extend_from_slice(&((60 + data_bytes_24) as u32).to_le_bytes());
+        wav_ext.extend_from_slice(b"WAVEfmt ");
+        wav_ext.extend_from_slice(&40u32.to_le_bytes());
+        wav_ext.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        wav_ext.extend_from_slice(&1u16.to_le_bytes());
+        wav_ext.extend_from_slice(&24_000u32.to_le_bytes());
+        wav_ext.extend_from_slice(&(24_000u32 * 3).to_le_bytes());
+        wav_ext.extend_from_slice(&3u16.to_le_bytes());
+        wav_ext.extend_from_slice(&24u16.to_le_bytes());
+        wav_ext.extend_from_slice(&22u16.to_le_bytes());
+        wav_ext.extend_from_slice(&24u16.to_le_bytes());
+        wav_ext.extend_from_slice(&4u32.to_le_bytes());
+        wav_ext.extend_from_slice(&1u16.to_le_bytes());
+        wav_ext.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+        ]);
+        wav_ext.extend_from_slice(b"data");
+        wav_ext.extend_from_slice(&(data_bytes_24 as u32).to_le_bytes());
+        wav_ext.resize(68 + data_bytes_24, 0);
+        let b64_ext = base64::engine::general_purpose::STANDARD.encode(&wav_ext);
+        assert!(prepare_clone_audio_data_uri(&b64_ext, "ext24.wav").is_ok());
+
+        let bad_wav_err = prepare_clone_audio_data_uri(
+            &base64::engine::general_purpose::STANDARD.encode(b"not-a-riff-file"),
+            "broken.wav",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(bad_wav_err.contains("参考录音不是有效的 WAV"));
+        assert!(!bad_wav_err.contains("response_format"));
+
         assert!(validate_clone_target_model("qwen3-tts-flash").is_err());
         assert_eq!(
             validate_clone_target_model("").unwrap(),
@@ -1080,8 +1431,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            // 1) create_voice -> 2) query_voice -> 3) SpeechSynthesizer SSE
-            for step in 0..3 {
+            // 1) create_voice -> 2) query_voice (missing status -> keeps polling) -> 3) query_voice OK -> 4) SpeechSynthesizer SSE
+            for step in 0..4 {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 let req = read_http_request(&mut sock).await;
                 assert!(
@@ -1102,7 +1453,17 @@ mod tests {
                     }
                     1 => {
                         assert!(req.contains("\"query_voice\""));
-                        let body = r#"{"output":{"status":"OK"},"request_id":"r2"}"#;
+                        let body = r#"{"output":{},"request_id":"r2a"}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    2 => {
+                        assert!(req.contains("\"query_voice\""));
+                        let body =
+                            r#"{"output":{"voice":{"status":"SUCCEEDED"}},"request_id":"r2b"}"#;
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
@@ -1183,7 +1544,26 @@ mod tests {
         assert!(validate_audio_download_url(prod_tts, "https://169.254.169.254/latest").is_err());
         assert!(validate_audio_download_url(prod_tts, "https://[::ffff:127.0.0.1]/a.wav").is_err());
         assert!(validate_audio_download_url(prod_tts, "http://cdn.example.com/a.wav").is_err());
+        assert!(
+            validate_audio_download_url(prod_tts, "https://cdn.example.com/a.wav#frag").is_err()
+        );
         assert!(validate_audio_download_url(prod_tts, "https://cdn.example.com/a.wav").is_ok());
+
+        // 回环主端点下也严禁把下载链接指向局域网或链路本地内网地址，且解析到 127.0.0.1 的域名在公网端点下被 DNS 固定检查拦截
+        let loop_tts = "http://127.0.0.1:18080/api/v1/services/audio/tts/SpeechSynthesizer";
+        assert!(validate_audio_download_url(loop_tts, "https://192.168.1.10/a.wav").is_err());
+        assert!(validate_audio_download_url(loop_tts, "https://169.254.169.254/latest").is_err());
+        assert!(validate_audio_download_url(loop_tts, "http://127.0.0.1:18080/a.wav").is_ok());
+        assert!(
+            download_fallback_audio(
+                "千问语音合成",
+                prod_tts,
+                "https://localhost/a.wav",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .is_err()
+        );
 
         // 非流式 JSON 返回 finish_reason=="stop" 且仅含 output.audio.url 时正常走回退下载
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1225,5 +1605,40 @@ mod tests {
         let pcm = tts.synthesize("测试回退").await.unwrap();
         assert_eq!(pcm.samples, vec![321, -321, 654, -654]);
         server.await.unwrap();
+
+        // 接收端提前关闭（用户插话打断）时立即断开流，不再后台挂起等满空闲超时
+        let slow_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_listener.local_addr().unwrap();
+        let slow_server = tokio::spawn(async move {
+            let (mut sock, _) = slow_listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let b64 = base64::engine::general_purpose::STANDARD.encode([1i8 as u8, 0, 2, 0]);
+            let first = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\ndata:{{\"output\":{{\"finish_reason\":\"null\",\"audio\":{{\"data\":\"{b64}\"}}}}}}\n\n"
+            );
+            let _ = sock.write_all(first.as_bytes()).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let cancel_tts = DashscopeTts::new(
+            &format!("http://{slow_addr}/api/v1"),
+            "sk-test-secret",
+            "qwen-audio-3.1-tts-flash",
+            "longanhuan_v3.1",
+            1.0,
+        )
+        .unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let stream_task =
+            tokio::spawn(async move { cancel_tts.synthesize_stream("长句", tx).await });
+        let first_chunk = rx.recv().await.unwrap();
+        assert_eq!(first_chunk.samples.len(), 2);
+        drop(rx);
+        let cancel_res = tokio::time::timeout(Duration::from_millis(500), stream_task)
+            .await
+            .expect("dropping chunks receiver must abort SSE stream immediately")
+            .unwrap();
+        assert!(cancel_res.is_ok());
+        slow_server.abort();
     }
 }

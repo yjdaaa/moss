@@ -11,6 +11,13 @@
 - **验证**：真实 1.7B 模型经 `speech` 实测五档指令时长（同句 3 个种子），新增 `worker_sends_speaking_instructions_for_qwen3_tts_1_7b`、`qwen3_tts_1_7b_maps_speed_to_coarse_instructions_and_0_6b_never_gets_any` 与目录、前端分组 / 删除提示单测；`verify.mjs --finish` 通过。未在真实小智设备上收听（`unverified`）。
 - **关联**：`crates/moss-voice/src/local_models.rs`（`qwen3_tts_1_7b`、`tts_speed_adjustable`、`speech_runtime_root`）、`crates/moss-voice/src/tts_voices.rs`（`speech_tts_instructions`）、`crates/moss-voice-providers/src/speech_cpp.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`、`frontend/src/components/voice-builtin/LocalTtsSettings.jsx`、内置语音技术书 n126。
 
+### 修复千问 / 百炼语音合成与声音克隆的 SSRF 防护、模型音色绑定及跨区复用边界（2026-11-25）
+
+- **现象**：非流式回退下载 `output.audio.url` 未固定 DNS 解析且回环网关未拦内网 HTTPS，插话打断时流式下载未立即终止；克隆音色下拉点选未联动切换绑定的 `target_model`、切换模型残留不兼容音色、跨分区复用会双向误推非千问或无语音端点的地址、保存时可能跨账号串入克隆音色缓存，且 24-bit / 扩展头 WAV 录音在本地被误拒。
+- **根因与修复**：`download_fallback_audio` 异步解析并校验全部 IP 非私网/回环后用 `.no_proxy().redirect(Policy::none()).resolve_to_addrs(...)` 固定地址在剩余总超时内下载，`DashscopeTts::speak` 监听接收端关闭即刻断流并按响应头区分 SSE 与裸 WAV/JSON；`enroll_voice` 轮询缺省状态改为 `DEPLOYING` 并跑满 60 秒总预算，本地 WAV 头解析兼容 24/32-bit PCM 与 `WAVE_FORMAT_EXTENSIBLE`；后端五处入口统一拦截纯对话网关、`token-plan.*` 与 `sk-sp-` 密钥，前后端校验克隆音色模型前缀与 `_v3.1` 系统音色范围、点选克隆音色自动同步 `model`、收紧跨区复用并按 `savedFromVoicesKey` 隔离缓存，同步补齐架构与规范文档。
+- **验证**：`dashscope` 新增 24-bit/扩展头 WAV、流式打断即停、轮询缺省状态等待与回环/DNS 内网拦截测试，`moss-voice` 新增纯对话网关与异模型音色拦截测试，`voiceState.test.mjs` 与 `voice-center.browser.mjs` 新增跨服务商复用隔离及点选克隆音色联动模型断言；`verify.mjs --finish` 通过。未用真实千问云端账号与小智真机实测（`unverified`）。
+- **关联**：`crates/moss-voice-providers/src/dashscope.rs`、`crates/moss-voice/src/models.rs`、`crates/moss-voice-host/src/builtin/models.rs`、`frontend/src/voiceState/sections.js`、`frontend/src/components/voice-builtin/BuiltinModelGroup.jsx`、内置语音技术书 n125。
+
 ### 本地合成音色改为按名称下拉，Qwen3-TTS 语速框置灰，新增按当前音色和语速试一句（2026-11-25）
 
 - **现象**：“5. 语音合成模型包”下的音色是编号输入框，Qwen3-TTS 的标签塞进 9 个音色说明、把两栏撑歪；Qwen3-TTS 不支持调语速但语速框照样能改；想听新语速只能先保存再跑连贯试跑，语言包与试听弹窗的试听固定 1.0x。

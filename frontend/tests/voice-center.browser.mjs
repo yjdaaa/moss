@@ -260,6 +260,7 @@ try {
           elapsed_ms: 40,
           voices: [
             { voice_id: "qwen-tts-vc-mossclone-voice-001", target_model: input?.model || "qwen-audio-3.1-tts-flash", status: "OK" },
+            { voice_id: "qwen-audio-3.1-tts-plus-moss-pro1", target_model: "qwen-audio-3.1-tts-plus", status: "OK" },
           ],
         };
       }
@@ -693,7 +694,9 @@ try {
   assert.equal(await page.locator("#voice-builtin-model-save-tts").isDisabled(), false, "克隆并合成试听通过后可直接保存");
   await page.locator("#voice-builtin-voice-toggle-tts").click();
   await page.locator("#voice-builtin-voice-options-tts").getByRole("option", { name: /qwen-tts-vc-mossclone-voice-001/ }).waitFor();
-  await page.locator("#voice-builtin-voice-toggle-tts").click();
+  await page.locator("#voice-builtin-voice-options-tts").getByRole("option", { name: /qwen-audio-3\.1-tts-plus-moss-pro1/ }).click();
+  assert.equal(await page.locator("#voice-builtin-model-voice-tts").inputValue(), "qwen-audio-3.1-tts-plus-moss-pro1");
+  assert.equal(await page.locator("#voice-builtin-model-name-tts").inputValue(), "qwen-audio-3.1-tts-plus", "点选已有克隆音色时自动同步切换其绑定的目标模型");
   // 5c. 顶部四栏自由混搭下拉框（大模型 + 语音识别 + 语音合成 + 拾音判停）：直接在顶部下拉框选本地合成与本地判停，下方卡片仅用于配置模型或下载
   await page.locator("#voice-builtin-mix-select-tts").selectOption("local:kokoro");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为本地语音合成" }).waitFor();

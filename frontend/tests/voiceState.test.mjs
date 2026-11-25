@@ -2125,7 +2125,7 @@ test("千问 / 百炼原生流式语音合成与声音克隆表单状态（n123�
   assert.equal(dashscopeTtsUrl("https://dashscope.aliyuncs.com"), "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer");
   assert.ok(ttsVoiceOptionsFor(switched).some((v) => v.id === "qiaoxiaojiao_v3.1"));
 
-  // 3. 大模型已保存同域名 maas.qianwenaiapi.com 密钥时，dashscope 语音合成直接识别同源复用
+  // 3. 大模型已保存同域名 maas.qianwenaiapi.com 密钥时，dashscope 语音合成直接识别同源复用；非千问服务商与纯对话网关不误推荐跨接口复用
   const peer = findPeerCloudSource(
     "tts",
     {
@@ -2138,13 +2138,41 @@ test("千问 / 百炼原生流式语音合成与声音克隆表单状态（n123�
   );
   assert.equal(peer.sameOrigin?.section, "llm");
   assert.equal(peer.sameOrigin?.keySet, true);
+  assert.equal(
+    findPeerCloudSource(
+      "tts",
+      { models: { llm: { configured: true, kind: "openai", url: "https://api.siliconflow.cn/v1", key_set: true } } },
+      switched.url,
+      "dashscope",
+    ).reusable,
+    null,
+    "dashscope 接口下不得把 SiliconFlow 等非千问服务商推荐为可复用地址",
+  );
+  assert.equal(
+    findPeerCloudSource(
+      "asr",
+      { models: { llm: { configured: true, kind: "openai", url: "https://maas.qianwenaiapi.com/compatible-mode/v1", key_set: true } } },
+      "",
+      "openai",
+    ).reusable,
+    null,
+    "OpenAI 语音识别/合成不得把无 /audio/* 端点的千问 compatible-mode 地址推荐为可复用",
+  );
 
-  // 4. 拦截 sk-sp- 套餐密钥、公网明文 HTTP、带查询参数 URL 与语速越界，克隆音色保留不覆盖，跨服务商不误沿用旧密钥
+  // 4. 拦截 sk-sp- 套餐密钥、公网明文 HTTP、带查询参数 URL、异模型克隆音色混用与语速越界；同模型克隆音色保留，切异模型或切回 OpenAI 时自动清理
   assert.match(sectionInputError("tts", { ...switched, api_key: "sk-sp-demo" }), /sk-sp-/);
   assert.match(sectionInputError("tts", { ...switched, url: "http://maas.qianwenaiapi.com/api/v1" }), /https:\/\//);
   assert.match(sectionInputError("tts", { ...switched, url: "https://maas.qianwenaiapi.com/api/v1?api_key=leak" }), /查询参数/);
   assert.equal(sectionInputError("tts", { ...switched, url: "http://127.0.0.1:18080/api/v1" }), "");
   assert.match(sectionInputError("tts", { ...switched, speed: "3.0" }), /0\.5 ~ 2\.0/);
+  assert.match(
+    sectionInputError("tts", {
+      ...switched,
+      model: "qwen-audio-3.1-tts-plus",
+      voice: "qwen-audio-3.1-tts-flash-moss-1234",
+    }),
+    /qwen-audio-3\.1-tts-flash/,
+  );
   const oldSiliconEntry = { configured: true, kind: "openai", url: "https://api.siliconflow.cn/v1/audio/speech", key_set: true };
   assert.equal(ownKeyReusable(oldSiliconEntry, switched, "tts"), false, "切换服务商后不得把旧服务商已存密钥当作当前服务商可用密钥");
   assert.match(builtinKeyPlaceholder(oldSiliconEntry, peer.sameOrigin, switched, "tts"), /自动复用“大模型”/);
@@ -2153,10 +2181,20 @@ test("千问 / 百炼原生流式语音合成与声音克隆表单状态（n123�
     dashscopeClonedVoicesKey({ ...switched, api_key: "sk-b" }, oldSiliconEntry, false),
     "切换密钥或目标模型时刷新克隆音色缓存键防跨账号串台",
   );
-  const clonedForm = applyDefaultTtsVoice({ ...switched, voice: "qwen-audio-3.1-tts-flash-moss-1234" }, "qwen-audio-3.1-tts-plus");
-  assert.equal(clonedForm.voice, "qwen-audio-3.1-tts-flash-moss-1234", "自定义克隆音色不被默认音色覆盖");
+  const sameModelClone = applyDefaultTtsVoice(
+    { ...switched, voice: "qwen-audio-3.1-tts-flash-moss-1234" },
+    "qwen-audio-3.1-tts-flash",
+  );
+  assert.equal(sameModelClone.voice, "qwen-audio-3.1-tts-flash-moss-1234", "同模型专属克隆音色保留不覆盖");
+  const crossModelReset = applyDefaultTtsVoice(sameModelClone, "qwen-audio-3.1-tts-plus");
+  assert.equal(crossModelReset.voice, "longanhuan_v3.1", "切换到另一模型时自动清理绑死旧模型的克隆音色");
+  const cosyClear = applyDefaultTtsVoice(switched, "cosyvoice-v3.5-flash");
+  assert.equal(cosyClear.voice, "", "切到无 _v3.1 系统音色的 CosyVoice 时清空不兼容预设");
+  const backToOpenai = applyDefaultTtsVoice(switchKind("tts", sameModelClone, "openai"));
+  assert.equal(backToOpenai.url, "", "从千问默认地址切回 OpenAI 时清空千问地址避免空卡变脏");
+  assert.equal(backToOpenai.voice, "alloy", "切回 OpenAI 时清理千问克隆音色");
 
-  const payload = sectionPayload("tts", clonedForm);
+  const payload = sectionPayload("tts", sameModelClone);
   assert.equal(payload.kind, "dashscope");
   assert.equal(payload.url, "https://maas.qianwenaiapi.com/api/v1");
   const restored = builtinModelForm("tts", {

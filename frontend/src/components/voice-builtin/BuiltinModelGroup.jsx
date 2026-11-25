@@ -21,6 +21,7 @@ import {
   finalUrl,
   findPeerCloudSource,
   formDirty,
+  inferDashscopeVoiceTargetModel,
   isDashscope,
   isSectionBlank,
   modelsListError,
@@ -60,7 +61,7 @@ function BuiltinModelGroup({ section, builtin }) {
   const [filtering, setFiltering] = useState(false);
   const [showAllModels, setShowAllModels] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
-  const [clonedVoices, setClonedVoices] = useState({ key: "", items: [], loading: false });
+  const [clonedVoices, setClonedVoices] = useState({ key: "", items: [], error: "", loading: false });
   const comboRef = useRef(null);
   const voiceComboRef = useRef(null);
   const cloneFileRef = useRef(null);
@@ -114,10 +115,18 @@ function BuiltinModelGroup({ section, builtin }) {
   const baseVoiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
   const clonedVoiceOptions =
     dashscope && clonedVoices.key === currentVoicesKey
-      ? clonedVoices.items.map((item) => ({
-          id: item.voice_id,
-          hint: `已克隆专属音色${item.target_model ? ` · 绑定 ${item.target_model}` : ""}`,
-        }))
+      ? clonedVoices.items.map((item) => {
+          const statusText = String(item.status || "OK").trim();
+          const ready = !statusText || /^(?:ok|published|success|succeeded)$/i.test(statusText);
+          const targetModel = item.target_model || inferDashscopeVoiceTargetModel(item.voice_id);
+          const statusLabel = ready ? "已克隆专属音色" : `克隆处理中（${statusText}，请稍候）`;
+          return {
+            id: item.voice_id,
+            targetModel,
+            ready,
+            hint: `${statusLabel}${targetModel ? ` · 绑定 ${targetModel}` : ""}`,
+          };
+        })
       : [];
   const voiceOptions = [...clonedVoiceOptions, ...baseVoiceOptions.filter((opt) => !clonedVoiceOptions.some((c) => c.id === opt.id))];
   const gatewayAudioErr = !presetKind ? chatOnlyAudioGatewayError(section, form.url) : "";
@@ -316,15 +325,29 @@ function BuiltinModelGroup({ section, builtin }) {
     const reqKey = dashscopeClonedVoicesKey(targetForm, entry, targetPeerKeySet);
     if (clonedVoices.loading && clonedVoices.key === reqKey) return;
     const seq = ++voicesSeq.current;
-    setClonedVoices((prev) => ({ key: reqKey, items: prev.key === reqKey ? prev.items : [], loading: true }));
+    setClonedVoices((prev) => ({
+      key: prev.key === reqKey ? reqKey : "",
+      items: prev.key === reqKey ? prev.items : [],
+      error: "",
+      loading: true,
+    }));
     try {
       const res = await voiceApi.ttsClonedVoices(sectionPayload("tts", targetForm));
       if (voicesSeq.current !== seq) return;
+      if (res?.ok === false) {
+        setClonedVoices({
+          key: "",
+          items: [],
+          error: String(res?.detail || "读取已克隆音色失败"),
+          loading: false,
+        });
+        return;
+      }
       const items = Array.isArray(res?.voices) ? res.voices : [];
-      setClonedVoices({ key: reqKey, items, loading: false });
-    } catch {
+      setClonedVoices({ key: reqKey, items, error: "", loading: false });
+    } catch (error) {
       if (voicesSeq.current !== seq) return;
-      setClonedVoices({ key: reqKey, items: [], loading: false });
+      setClonedVoices({ key: "", items: [], error: voiceErrorText(error), loading: false });
     }
   };
 
@@ -342,7 +365,9 @@ function BuiltinModelGroup({ section, builtin }) {
     }
     const snapshotForm = { ...form };
     stopAudioPreview();
+    setMenuOpen(false);
     setVoiceMenuOpen(false);
+    setFiltering(false);
     setResult(null);
     setLocalBusy("builtin-clone-tts");
     const reader = new FileReader();
@@ -376,6 +401,7 @@ function BuiltinModelGroup({ section, builtin }) {
           setTest({ ...outcome, ok: previewReady, fingerprint });
           loadClonedVoices(nextForm);
         } else {
+          setClonedVoices({ key: "", items: [], error: "", loading: false });
           setTest({
             ok: false,
             detail: outcome?.detail || "声音克隆未通过",
@@ -383,6 +409,7 @@ function BuiltinModelGroup({ section, builtin }) {
           });
         }
       } catch (error) {
+        setClonedVoices({ key: "", items: [], error: "", loading: false });
         setTest({ ok: false, detail: voiceErrorText(error), fingerprint: "" });
       } finally {
         setLocalBusy("");
@@ -512,6 +539,7 @@ function BuiltinModelGroup({ section, builtin }) {
 
   const save = async () => {
     const savedFromListKey = currentListKey;
+    const savedFromVoicesKey = currentVoicesKey;
     cancelInflightFetch();
     setMenuOpen(false);
     setVoiceMenuOpen(false);
@@ -530,10 +558,14 @@ function BuiltinModelGroup({ section, builtin }) {
       fetchSeq.current += 1;
       voicesSeq.current += 1;
       if (!isDashscope(nextForm)) {
-        setClonedVoices({ key: "", items: [], loading: false });
+        setClonedVoices({ key: "", items: [], error: "", loading: false });
       } else {
         const nextVoicesKey = dashscopeClonedVoicesKey(nextForm, nextEntry, nextPeerKeySet);
-        setClonedVoices((prev) => ({ key: nextVoicesKey, items: prev.items, loading: false }));
+        setClonedVoices((prev) =>
+          prev.key === savedFromVoicesKey
+            ? { key: nextVoicesKey, items: prev.items, error: "", loading: false }
+            : { key: "", items: [], error: "", loading: false },
+        );
       }
       setRemoteModels((prev) => {
         if (prev.key === savedFromListKey && prev.items.length > 0) {
@@ -571,7 +603,7 @@ function BuiltinModelGroup({ section, builtin }) {
       setStatus(next);
       setForm(builtinModelForm(section, next.models?.[section]));
       setRemoteModels({ key: "", items: [], modelSections: null, suggestedUrl: "", detail: "", ok: null, loading: false });
-      setClonedVoices({ key: "", items: [], loading: false });
+      setClonedVoices({ key: "", items: [], error: "", loading: false });
       setTest(null);
       setResult({ ok: true, text: `已删除${current.label}设置与密钥 · ${restartEffect(next)}` });
     } catch (error) {
@@ -736,6 +768,7 @@ function BuiltinModelGroup({ section, builtin }) {
             <button
               type="button"
               className="voice-combo-toggle"
+              disabled={cloning}
               aria-label={doubao ? "展开常用资源 ID" : "展开模型列表"}
               aria-expanded={menuOpen}
               onClick={toggleMenu}
@@ -894,6 +927,7 @@ function BuiltinModelGroup({ section, builtin }) {
                 <button
                   type="button"
                   className="voice-combo-toggle"
+                  disabled={cloning}
                   aria-label="展开常用音色列表"
                   aria-expanded={voiceMenuOpen}
                   onClick={() => {
@@ -908,35 +942,46 @@ function BuiltinModelGroup({ section, builtin }) {
                   <ChevronDown size={14} />
                 </button>
               </div>
-              {voiceMenuOpen && (voiceOptions.length > 0 || (dashscope && clonedVoices.loading)) && (
+              {voiceMenuOpen && (voiceOptions.length > 0 || (dashscope && (clonedVoices.loading || Boolean(clonedVoices.error)))) && (
                 <div className="voice-combo-menu" role="listbox" aria-label="语音合成常用音色" id={n("voice-options")}>
                   <div className="voice-combo-meta">
-                    <span>
-                      {dashscope && clonedVoices.loading
-                        ? "正在读取账号已克隆音色…"
-                        : dashscope && clonedVoiceOptions.length > 0
-                          ? `已含账号下 ${clonedVoiceOptions.length} 个克隆音色（共 ${voiceOptions.length} 个可选）`
+                    {dashscope && clonedVoices.loading ? (
+                      <span>正在读取账号已克隆音色…</span>
+                    ) : dashscope && clonedVoices.error ? (
+                      <span className="voice-combo-err">{clonedVoices.error}</span>
+                    ) : (
+                      <span>
+                        {dashscope && clonedVoiceOptions.length > 0
+                          ? `已含账号下 ${clonedVoiceOptions.length} 个克隆音色（共 ${voiceOptions.length} 个可选，点选自动匹配绑定模型）`
                           : `推荐常用音色（共 ${voiceOptions.length} 个，也可直接手动输入）`}
-                    </span>
+                      </span>
+                    )}
                   </div>
-                  <div className="voice-combo-list">
-                    {voiceOptions.map((opt) => (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={opt.id === form.voice}
-                        key={opt.id}
-                        className={`voice-combo-option mono${opt.id === form.voice ? " is-selected" : ""}`}
-                        onClick={() => {
-                          update("voice", opt.id);
-                          setVoiceMenuOpen(false);
-                        }}
-                      >
-                        <span className="voice-combo-id">{opt.id}</span>
-                        {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
-                      </button>
-                    ))}
-                  </div>
+                  {voiceOptions.length > 0 && (
+                    <div className="voice-combo-list">
+                      {voiceOptions.map((opt) => (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={opt.id === form.voice}
+                          key={opt.id}
+                          className={`voice-combo-option mono${opt.id === form.voice ? " is-selected" : ""}`}
+                          onClick={() => {
+                            setForm((all) => ({
+                              ...all,
+                              voice: opt.id,
+                              ...(opt.targetModel ? { model: opt.targetModel } : {}),
+                            }));
+                            setResult(null);
+                            setVoiceMenuOpen(false);
+                          }}
+                        >
+                          <span className="voice-combo-id">{opt.id}</span>
+                          {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
