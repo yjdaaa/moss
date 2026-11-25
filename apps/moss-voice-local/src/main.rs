@@ -1137,8 +1137,8 @@ struct TtsRuntime {
     tts: OfflineTts,
     speakers: i32,
     kokoro: bool,
-    /// 中文 VITS：送进模型前先整理文字（[`vits_zh::normalize_text`]）
-    vits: bool,
+    /// 中文 VITS：送进模型前先整理文字并在词间插入空格标记（[`vits_zh::normalize_text`] / [`vits_zh::insert_word_boundaries`]）
+    vits_words: Option<std::collections::HashSet<String>>,
     zipvoice_refs: Option<Vec<ZipVoiceRef>>,
 }
 
@@ -1204,7 +1204,16 @@ fn build_tts_gen_config(runtime: &TtsRuntime, speaker: i32, speed: f32) -> Gener
     }
 }
 
+#[cfg(test)]
 fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String> {
+    tts_config_and_vits_words(dir, engine).map(|(cfg, _)| cfg)
+}
+
+fn tts_config_and_vits_words(
+    dir: &Path,
+    engine: TtsEngine,
+) -> Result<(OfflineTtsConfig, Option<std::collections::HashSet<String>>), String> {
+    let mut vits_words = None;
     let model = match engine {
         TtsEngine::Kokoro => {
             let en_lexicon = require(&dir.join("lexicon-us-en.txt"))?;
@@ -1269,24 +1278,65 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
         },
         TtsEngine::Vits => {
             let files = vits_zh::prepare_vits_files(dir)?;
-            OfflineTtsModelConfig {
+            let model_cfg = OfflineTtsModelConfig {
                 vits: OfflineTtsVitsModelConfig {
                     model: Some(native_path_string(&files.model)),
                     lexicon: Some(native_path_string(&files.lexicon)),
                     tokens: Some(native_path_string(&files.tokens)),
+                    // 小样本微调 VITS 降低随机波形/时长噪声（0.667/0.8 -> 0.5/0.5），减少字音随机飘移
+                    noise_scale: 0.5,
+                    noise_scale_w: 0.5,
+                    length_scale: 1.0,
                     ..Default::default()
                 },
                 num_threads: inference_threads(),
                 debug: false,
                 ..Default::default()
-            }
+            };
+            vits_words = Some(files.words);
+            model_cfg
         }
     };
-    Ok(OfflineTtsConfig {
-        model,
-        rule_fsts: rule_fsts(dir, engine),
-        ..Default::default()
-    })
+    Ok((
+        OfflineTtsConfig {
+            model,
+            rule_fsts: rule_fsts(dir, engine),
+            ..Default::default()
+        },
+        vits_words,
+    ))
+}
+
+fn generate_vits_sentences(
+    rt: &TtsRuntime,
+    words: &std::collections::HashSet<String>,
+    normalized_text: &str,
+    config: &GenerationConfig,
+    loaded: &Loaded,
+) -> Option<(u32, Vec<f32>)> {
+    let mut all_samples = Vec::new();
+    let mut sample_rate = rt.tts.sample_rate().max(16_000) as u32;
+    for sentence in vits_zh::split_sentences(normalized_text) {
+        let segmented = vits_zh::insert_word_boundaries(&sentence, words);
+        if !vits_zh::has_speakable_content(&segmented) {
+            continue;
+        }
+        let audio =
+            rt.tts
+                .generate_with_config(&segmented, config, Some(loaded.synth.keep_going()))?;
+        if loaded.synth.stopped() {
+            return None;
+        }
+        let sr = audio.sample_rate().max(0) as u32;
+        if sr > 0 {
+            sample_rate = sr;
+        }
+        if !all_samples.is_empty() && !audio.samples().is_empty() && sample_rate > 0 {
+            all_samples.resize(all_samples.len() + (sample_rate as usize * 200) / 1000, 0.0);
+        }
+        all_samples.extend_from_slice(audio.samples());
+    }
+    Some((sample_rate, all_samples))
 }
 
 fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
@@ -1296,7 +1346,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
             Op::LoadTts { dir, engine } => {
                 let dir_path = Path::new(&dir);
                 let created = (|| -> Result<TtsRuntime, String> {
-                    let config = tts_config(dir_path, engine)?;
+                    let (config, vits_words) = tts_config_and_vits_words(dir_path, engine)?;
                     let zipvoice_refs = if matches!(engine, TtsEngine::ZipVoice) {
                         Some(load_zipvoice_refs(dir_path)?)
                     } else {
@@ -1315,7 +1365,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         tts: created,
                         speakers,
                         kokoro: matches!(engine, TtsEngine::Kokoro),
-                        vits: matches!(engine, TtsEngine::Vits),
+                        vits_words,
                         zipvoice_refs,
                     })
                 })();
@@ -1329,8 +1379,12 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         // 预热：第一次推理要做图优化与内存分配，明显慢于之后；放在加载阶段做掉，
                         // 不让它落在用户听到的第一句话上
                         let warmup_cfg = build_tts_gen_config(&rt, 0, 1.0);
+                        let warmup_text = rt.vits_words.as_ref().map_or_else(
+                            || "好的。".to_owned(),
+                            |words| vits_zh::insert_word_boundaries("好的。", words),
+                        );
                         let _ = rt.tts.generate_with_config(
-                            "好的。",
+                            &warmup_text,
                             &warmup_cfg,
                             None::<fn(&[f32], f32) -> bool>,
                         );
@@ -1363,24 +1417,37 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     error(&out, id, "合成已取消");
                     continue;
                 }
-                let text = if rt.vits {
-                    vits_zh::normalize_text(&text)
-                } else {
-                    text
-                };
-                let generated =
-                    rt.tts
-                        .generate_with_config(&text, &config, Some(loaded.synth.keep_going()));
-                let cancelled = loaded.synth.stopped();
-                loaded.synth.end();
-                match generated {
-                    _ if cancelled => error(&out, id, "合成已取消"),
-                    Some(audio) => {
-                        let sample_rate = audio.sample_rate().max(0) as u32;
-                        let pcm = tts_pcm(audio.samples(), sample_rate);
-                        send(&out, id, Reply::Audio { sample_rate }, &pcm_to_bytes(&pcm));
+                if let Some(words) = rt.vits_words.as_ref() {
+                    let normalized = vits_zh::normalize_text(&text);
+                    let generated =
+                        generate_vits_sentences(rt, words, &normalized, &config, &loaded);
+                    let cancelled = loaded.synth.stopped();
+                    loaded.synth.end();
+                    match generated {
+                        _ if cancelled => error(&out, id, "合成已取消"),
+                        Some((sample_rate, samples)) if !samples.is_empty() => {
+                            let pcm = tts_pcm(&samples, sample_rate);
+                            send(&out, id, Reply::Audio { sample_rate }, &pcm_to_bytes(&pcm));
+                        }
+                        _ => error(&out, id, "合成失败"),
                     }
-                    None => error(&out, id, "合成失败"),
+                } else {
+                    let generated = rt.tts.generate_with_config(
+                        &text,
+                        &config,
+                        Some(loaded.synth.keep_going()),
+                    );
+                    let cancelled = loaded.synth.stopped();
+                    loaded.synth.end();
+                    match generated {
+                        _ if cancelled => error(&out, id, "合成已取消"),
+                        Some(audio) if !audio.samples().is_empty() => {
+                            let sample_rate = audio.sample_rate().max(0) as u32;
+                            let pcm = tts_pcm(audio.samples(), sample_rate);
+                            send(&out, id, Reply::Audio { sample_rate }, &pcm_to_bytes(&pcm));
+                        }
+                        _ => error(&out, id, "合成失败"),
+                    }
                 }
             }
             Op::SynthesizeStream {
@@ -1400,44 +1467,63 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     continue;
                 }
                 let mut failed = false;
-                let text = if rt.vits {
+                let text = if rt.vits_words.is_some() {
                     vits_zh::normalize_text(&text)
                 } else {
                     text
                 };
-                let segments = moss_voice_local_proto::synthesis_segments_with(
+                let mut segments = moss_voice_local_proto::synthesis_segments_with(
                     &text,
                     first_max_chars,
                     short_opener,
                 );
+                if let Some(words) = rt.vits_words.as_ref() {
+                    segments.retain(|seg| {
+                        vits_zh::split_sentences(seg).iter().any(|s| {
+                            vits_zh::has_speakable_content(&vits_zh::insert_word_boundaries(
+                                s, words,
+                            ))
+                        })
+                    });
+                }
                 let total = segments.len();
+                let mut emitted_chunks = 0usize;
                 for (idx, segment) in segments.into_iter().enumerate() {
                     let mut config = config.clone();
                     if rt.kokoro {
                         config.speed *= long_segment_speed(segment.chars().count());
                     }
-                    let generated = rt.tts.generate_with_config(
-                        &segment,
-                        &config,
-                        Some(loaded.synth.keep_going()),
-                    );
+                    let generated_samples = if let Some(words) = rt.vits_words.as_ref() {
+                        generate_vits_sentences(rt, words, &segment, &config, &loaded)
+                    } else {
+                        rt.tts
+                            .generate_with_config(
+                                &segment,
+                                &config,
+                                Some(loaded.synth.keep_going()),
+                            )
+                            .map(|audio| {
+                                (audio.sample_rate().max(0) as u32, audio.samples().to_vec())
+                            })
+                    };
                     if loaded.synth.stopped() {
                         error(&out, id, "合成已取消");
                         failed = true;
                         break;
                     }
-                    match generated {
-                        Some(audio) => {
-                            let sample_rate = audio.sample_rate().max(0) as u32;
-                            let mut pcm = tts_pcm(audio.samples(), sample_rate);
+                    match generated_samples {
+                        Some((_, samples)) if samples.is_empty() => continue,
+                        Some((sample_rate, samples)) => {
+                            let mut pcm = tts_pcm(&samples, sample_rate);
                             if total > 1 {
                                 smooth_stream_subsegment(
                                     &mut pcm,
                                     sample_rate,
-                                    idx == 0,
+                                    emitted_chunks == 0,
                                     idx + 1 == total,
                                 );
                             }
+                            emitted_chunks += 1;
                             send(
                                 &out,
                                 id,
@@ -1454,7 +1540,11 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 }
                 loaded.synth.end();
                 if !failed {
-                    send(&out, id, Reply::Done, &[]);
+                    if emitted_chunks == 0 {
+                        error(&out, id, "分段合成失败");
+                    } else {
+                        send(&out, id, Reply::Done, &[]);
+                    }
                 }
             }
             _ => error(&out, id, "合成线程收到不支持的请求"),
@@ -2301,7 +2391,7 @@ mod tests {
         }
         let cfg = tts_config(&model_dir, TtsEngine::Vits).unwrap();
         let vits = &cfg.model.vits;
-        let derived = model_dir.join("derived-v1");
+        let derived = model_dir.join("derived-v2");
         for (path, name) in [
             (&vits.model, "model.onnx"),
             (&vits.tokens, "tokens.txt"),
@@ -2312,8 +2402,8 @@ mod tests {
                 Some(native_path_string(&derived.join(name)).as_str())
             );
         }
-        // sherpa 默认的 VITS 噪声与时长参数与训练配置一致（0.667 / 0.8 / 1.0）
-        assert!((vits.noise_scale - 0.667).abs() < 1e-6);
+        assert!((vits.noise_scale - 0.5).abs() < 1e-6);
+        assert!((vits.noise_scale_w - 0.5).abs() < 1e-6);
         assert!((vits.length_scale - 1.0).abs() < 1e-6);
         let fsts = cfg.rule_fsts.unwrap();
         assert!(

@@ -782,7 +782,7 @@ pub const CATALOG: [ModelSpec; 29] = [
         kind: ModelKind::Tts,
         engine: Engine::Vits,
         label: "MOSS 原声（流浪地球，VITS）",
-        note: "电影 MOSS 声线，合成快（1 秒语音约 0.2 秒）；16 kHz 单音色、只念中文，英文单词会跳过，安装后另占约 115 MB 派生文件。注意：权重仅限非商用。",
+        note: "电影 MOSS 声线，合成快（1 秒语音约 0.2 秒）；小样本电影台词微调模型，生僻字音偶有生硬，16 kHz 单音色、只念中文，安装后另占约 115 MB 派生文件。注意：权重仅限非商用。",
         // OpenMOSS/moss-vits-onnx-model（2023-09-09 提交，2026-11-25 实际下载核对）
         path: "OpenMOSS/moss-vits-onnx-model/resolve/715b76a3fd2b3168fe10be0bdfa0ed9977515030/moss.onnx",
         sha256: "8d60b3217ed0fbd7e63345eaaade01ebb9925892ba784affb2c037ac31802652",

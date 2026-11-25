@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复本地 MOSS 原声（`moss_vits`）一字一顿与变调多音错读，Qwen3-TTS 方言音色从普通话分组独立标出（2026-11-25）
+
+- **现象**：本地 `moss_vits` 合成日常句子时词与词之间一字一顿、句首粘连变调，且“切不透”“调好”“你好”等词声调不对；Qwen3-TTS 的 `Eric（四川）` 与 `Dylan（北京）` 混在“中文普通话”组里，误选后播报变成四川话方言。
+- **根因与修复**：`vits-zh-hf-fanchen-C/lexicon.txt` 仅含多音词而缺常见双音/三音单音词，原 `derived-v1` 在所有单字与词条前硬加 `▁` 导致未登录词逐字塞入空格并在句首产生训练前端不存在的前导空格；现升级为 `derived-v2`（自动清理旧 `derived-v1`），经 `build_vits_bopomofo_lexicon` 补齐高频词组、普通话变调与多音修正（`切不透 qiē bú tòu`、`调好 tiáo hǎo`），`normalize_text` 增补日历日期与负号中文转写，改由 `insert_word_boundaries` 仅在真实词间插入 `▁`（保持 `<YYYY>年` 与负数紧贴匹配 `date.fst` / `number.fst`）、多句按句末标点分句合成、空可朗读内容按失败回退并将 VITS 随机噪声压至 `0.5 / 0.5`；`tts_voices` 将 `Dylan（北京口音）` 与 `Eric（四川话·非普通话）` 拆入 `zh-dialect` 分组（`recommended_for_zh = false`），试听缓存升至 `v3`。
+- **验证**：`moss-voice-local` 新增 VITS 注音词表变调/多音覆盖、词界空格与日期负号转写、句界切分及 `derived-v2` 缓存清理单测，`moss-voice` 新增方言音色分组断言；`verify.mjs --finish` 通过。未在真实小智硬件与更新后的 Windows 机器复测（`unverified`）。
+- **关联**：`apps/moss-voice-local/src/vits_zh.rs`、`apps/moss-voice-local/src/kokoro_prosody.rs`、`apps/moss-voice-local/src/main.rs`、`crates/moss-voice/src/tts_voices.rs`、`crates/moss-voice/src/local_models.rs`、内置语音技术书 n127。
+
 ### 新安装默认与“推荐”的本地合成模型改为 Qwen3-TTS 1.7B（2026-11-25）
 
 - **现象**：新安装默认和界面“推荐”的合成模型是 Kokoro v1.0，声音不如 Qwen3-TTS 自然，也不能按指令调语速。

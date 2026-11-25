@@ -85,8 +85,14 @@ const SPOKEN_AND_WORKSHOP_WORDS: &[&str] = &[
     "八毫米",
     "十毫米",
     "厘米",
+    "千米",
+    "毫秒",
+    "分钟",
     "每分钟",
     "每秒",
+    "千克",
+    "千瓦",
+    "摄氏度",
     "百分之",
     "椴木",
     "椴木板",
@@ -154,6 +160,85 @@ const SPOKEN_AND_WORKSHOP_WORDS: &[&str] = &[
     "把握较大",
     "把握一般",
     "把握不大",
+    "收到",
+    "明白",
+    "主要",
+    "留意",
+    "要注意",
+    "提示",
+    "参数",
+    "微调",
+    "调好",
+    "调高",
+    "调低",
+    "调快",
+    "调慢",
+    "调大",
+    "调小",
+    "调参",
+    "切不穿",
+    "切不断",
+    "切不开",
+    "切不下",
+    "切不好",
+    "切断",
+    "切开",
+    "切掉",
+    "切边",
+    "先拿",
+    "试一刀",
+    "一刀",
+    "两刀",
+    "有效",
+    "降低",
+    "风险",
+    "用时",
+    "分钟",
+    "小时",
+    "毫秒",
+    "摄氏度",
+    "刚才",
+    "现在",
+    "当前",
+    "已经",
+    "正在",
+    "需要",
+    "可能",
+    "应该",
+    "问题",
+    "原因",
+    "方法",
+    "结果",
+    "状态",
+    "正常",
+    "异常",
+    "成功",
+    "失败",
+    "打开",
+    "关闭",
+    "开始",
+    "完成",
+    "停止",
+    "继续",
+    "设置",
+    "修改",
+    "保存",
+    "删除",
+    "测试",
+    "预览",
+    "生成",
+    "发送",
+    "机器",
+    "设备",
+    "屏幕",
+    "音量",
+    "声音",
+    "位置",
+    "中心",
+    "木头",
+    "纸板",
+    "皮革",
+    "焦点",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +247,8 @@ enum KokoroAlphabet {
     V10Ipa,
     /// Kokoro v1.1 中文注音（声调数字 `1..=5`，词间斜杠 `/`）
     V11Zhuyin,
+    /// 中文 VITS 注音符号（声调记号 `ˉ ˊ ˇ ˋ ˙`，如 `moss_vits`）
+    VitsBopomofo,
 }
 
 impl KokoroAlphabet {
@@ -182,6 +269,14 @@ impl KokoroAlphabet {
                 "5" => Some(5),
                 _ => None,
             },
+            Self::VitsBopomofo => match tok {
+                "ˉ" => Some(1),
+                "ˊ" => Some(2),
+                "ˇ" => Some(3),
+                "ˋ" => Some(4),
+                "˙" => Some(5),
+                _ => None,
+            },
         }
     }
 
@@ -196,6 +291,11 @@ impl KokoroAlphabet {
             (Self::V11Zhuyin, 3) => Some("3"),
             (Self::V11Zhuyin, 4) => Some("4"),
             (Self::V11Zhuyin, 5) => Some("5"),
+            (Self::VitsBopomofo, 1) => Some("ˉ"),
+            (Self::VitsBopomofo, 2) => Some("ˊ"),
+            (Self::VitsBopomofo, 3) => Some("ˇ"),
+            (Self::VitsBopomofo, 4) => Some("ˋ"),
+            (Self::VitsBopomofo, 5) => Some("˙"),
             _ => None,
         }
     }
@@ -603,6 +703,152 @@ pub(crate) fn build_prosody_assets(
     Some((derived_tokens, out_lexicon))
 }
 
+/// 为中文注音 VITS（如 `moss_vits`）构建带普通话变调、多音词修正与高频词组聚合的派生词表（词内与词末不内嵌词界空格，
+/// 返回所有多字词集合供运行时仅在词与词之间精确插入空格，避免句首与标点前出现非法前导空格）。
+pub(crate) fn build_vits_bopomofo_lexicon(
+    tokens_raw: &str,
+    lexicon_zh_raw: &str,
+    jieba_dict_raw: Option<&str>,
+    user_dict_raw: Option<&str>,
+) -> Option<(String, HashSet<String>)> {
+    let token_map = parse_symbol_table(tokens_raw);
+    if !(token_map.contains_key("ˉ")
+        && token_map.contains_key("ˊ")
+        && token_map.contains_key("ˇ")
+        && token_map.contains_key("ˋ"))
+    {
+        return None;
+    }
+    let alphabet = KokoroAlphabet::VitsBopomofo;
+    let mut single_chars: HashMap<char, Vec<String>> = HashMap::with_capacity(24_000);
+    let mut raw_entries: Vec<(&str, Vec<&str>)> = Vec::with_capacity(50_000);
+    let mut seen_words: HashSet<String> = HashSet::with_capacity(120_000);
+
+    for line in lexicon_zh_raw.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(word) = parts.next() else {
+            continue;
+        };
+        let phones: Vec<&str> = parts.collect();
+        if phones.is_empty() || !phones.iter().all(|&p| token_map.contains_key(p)) {
+            continue;
+        }
+        if seen_words.insert(word.to_owned()) {
+            let mut chars = word.chars();
+            if let (Some(ch), None) = (chars.next(), chars.next())
+                && is_cjk(ch)
+            {
+                single_chars
+                    .entry(ch)
+                    .or_insert_with(|| phones.iter().copied().map(str::to_owned).collect());
+            }
+            raw_entries.push((word, phones));
+        }
+    }
+    if single_chars.is_empty() {
+        return None;
+    }
+
+    let mut out_lexicon = String::with_capacity(lexicon_zh_raw.len().saturating_mul(2) + 512_000);
+    let mut known_phrases: HashMap<String, Vec<Vec<String>>> = HashMap::with_capacity(48_000);
+
+    for (word, phones) in raw_entries {
+        let clean_phones: Vec<String> = phones.into_iter().map(str::to_owned).collect();
+        let chars: Vec<char> = word.chars().collect();
+        let final_phones = if chars.len() >= 2 && chars.iter().copied().all(is_cjk) {
+            if let Some(mut syllables) = split_syllables(&clean_phones, alphabet)
+                && syllables.len() == chars.len()
+            {
+                if chars.len() <= 6 {
+                    known_phrases.insert(word.to_owned(), syllables.clone());
+                }
+                apply_mandarin_sandhi(&chars, &mut syllables, alphabet);
+                syllables.into_iter().flatten().collect()
+            } else {
+                clean_phones
+            }
+        } else {
+            clean_phones
+        };
+        append_lexicon_line_opt(&mut out_lexicon, word, &final_phones, None);
+    }
+
+    for &word in SPOKEN_AND_WORKSHOP_WORDS {
+        try_append_synthesized_word_opt(
+            word,
+            &single_chars,
+            &known_phrases,
+            &mut seen_words,
+            alphabet,
+            None,
+            &mut out_lexicon,
+        );
+    }
+
+    if let Some(user_raw) = user_dict_raw {
+        for line in user_raw.lines() {
+            let Some(word) = line.split_whitespace().next() else {
+                continue;
+            };
+            if is_cjk_word(word, 2, 6) {
+                try_append_synthesized_word_opt(
+                    word,
+                    &single_chars,
+                    &known_phrases,
+                    &mut seen_words,
+                    alphabet,
+                    None,
+                    &mut out_lexicon,
+                );
+            }
+        }
+    }
+
+    if let Some(jieba_raw) = jieba_dict_raw {
+        for line in jieba_raw.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(word) = parts.next() else {
+                continue;
+            };
+            if !is_cjk_word(word, 2, 4) {
+                continue;
+            };
+            let freq: u64 = parts
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let pos = parts.next().unwrap_or_default();
+            if pos.starts_with("nr") {
+                continue;
+            }
+            let char_len = word.chars().count();
+            let min_freq = if pos.starts_with("ns") || pos.starts_with("nz") || char_len >= 4 {
+                200
+            } else {
+                30
+            };
+            if freq < min_freq {
+                continue;
+            }
+            try_append_synthesized_word_opt(
+                word,
+                &single_chars,
+                &known_phrases,
+                &mut seen_words,
+                alphabet,
+                None,
+                &mut out_lexicon,
+            );
+        }
+    }
+
+    let multi_words = seen_words
+        .into_iter()
+        .filter(|w| is_cjk_word(w, 2, 6))
+        .collect();
+    Some((out_lexicon, multi_words))
+}
+
 fn parse_symbol_table(tokens_raw: &str) -> HashMap<String, i32> {
     let mut map = HashMap::new();
     for line in tokens_raw.lines() {
@@ -629,16 +875,58 @@ fn synthesize_word_syllables(
     chars: &[char],
     single_chars: &HashMap<char, Vec<String>>,
     known_phrases: &HashMap<String, Vec<Vec<String>>>,
+    alphabet: KokoroAlphabet,
 ) -> Option<Vec<Vec<String>>> {
-    // “调焦”中的“调”单字默认读去声 diào，优先从原词表“调整 / 调节”借阳平 tiáo 音节
-    if word == "调焦" {
-        let tiao = known_phrases
+    // “调焦 / 调好 / 微调”等词中的“调”单字默认读去声 diào（声母 d），须从“调整 / 调节”或同音单字“条”取阳平 tiáo（声母 t）
+    let tiao_syl = || {
+        known_phrases
             .get("调整")
             .or_else(|| known_phrases.get("调节"))
             .and_then(|s| s.first())
-            .or_else(|| single_chars.get(&'调'))?;
-        let jiao = single_chars.get(&'焦')?;
-        return Some(vec![tiao.clone(), jiao.clone()]);
+            .cloned()
+            .or_else(|| single_chars.get(&'条').cloned())
+    };
+    if matches!(
+        word,
+        "调焦" | "调好" | "调高" | "调低" | "调快" | "调慢" | "调大" | "调小" | "调参"
+    ) && chars.len() == 2
+    {
+        return Some(vec![tiao_syl()?, single_chars.get(&chars[1])?.clone()]);
+    }
+    if word == "微调" {
+        return Some(vec![single_chars.get(&'微')?.clone(), tiao_syl()?]);
+    }
+
+    // “切不透 / 切不断 / 切透 / 切开”等词中的“切”在原多音词表 `切不` 中读去声 qiè（切不可），切割义须固定阴平 qiē
+    if matches!(
+        word,
+        "切不透"
+            | "切不穿"
+            | "切不断"
+            | "切不开"
+            | "切不下"
+            | "切不好"
+            | "切透"
+            | "切开"
+            | "切断"
+            | "切掉"
+            | "切边"
+    ) {
+        let qie = known_phrases
+            .get("切割")
+            .and_then(|s| s.first())
+            .cloned()
+            .or_else(|| {
+                let mut base = single_chars.get(&'切')?.clone();
+                set_syllable_tone(&mut base, 1, alphabet);
+                Some(base)
+            })?;
+        let mut out = Vec::with_capacity(chars.len());
+        out.push(qie);
+        for &ch in &chars[1..] {
+            out.push(single_chars.get(&ch)?.clone());
+        }
+        return Some(out);
     }
 
     // 三字词 `X + AB`（如“轻音乐”“这一切”“不了解”）若仅后两字命中原词表多音词、前两字未命中，优先保住后两字多音词
@@ -693,6 +981,26 @@ fn try_append_synthesized_word(
     boundary_sym: &str,
     out_lexicon: &mut String,
 ) {
+    try_append_synthesized_word_opt(
+        word,
+        single_chars,
+        known_phrases,
+        seen_words,
+        alphabet,
+        Some(boundary_sym),
+        out_lexicon,
+    );
+}
+
+fn try_append_synthesized_word_opt(
+    word: &str,
+    single_chars: &HashMap<char, Vec<String>>,
+    known_phrases: &HashMap<String, Vec<Vec<String>>>,
+    seen_words: &mut HashSet<String>,
+    alphabet: KokoroAlphabet,
+    boundary_sym: Option<&str>,
+    out_lexicon: &mut String,
+) {
     if seen_words.contains(word) {
         return;
     }
@@ -700,25 +1008,37 @@ fn try_append_synthesized_word(
     if chars.len() < 2 {
         return;
     }
-    let Some(mut syllables) = synthesize_word_syllables(word, &chars, single_chars, known_phrases)
+    let Some(mut syllables) =
+        synthesize_word_syllables(word, &chars, single_chars, known_phrases, alphabet)
     else {
         return;
     };
     seen_words.insert(word.to_owned());
     apply_mandarin_sandhi(&chars, &mut syllables, alphabet);
     let flat: Vec<String> = syllables.into_iter().flatten().collect();
-    append_lexicon_line(out_lexicon, word, &flat, boundary_sym);
+    append_lexicon_line_opt(out_lexicon, word, &flat, boundary_sym);
 }
 
 fn append_lexicon_line(out: &mut String, word: &str, phones: &[String], boundary_sym: &str) {
+    append_lexicon_line_opt(out, word, phones, Some(boundary_sym));
+}
+
+fn append_lexicon_line_opt(
+    out: &mut String,
+    word: &str,
+    phones: &[String],
+    boundary_sym: Option<&str>,
+) {
     out.push_str(word);
     for p in phones {
         out.push(' ');
         out.push_str(p);
     }
-    if phones.last().map(String::as_str) != Some(boundary_sym) {
+    if let Some(boundary) = boundary_sym.filter(|b| !b.is_empty())
+        && phones.last().map(String::as_str) != Some(boundary)
+    {
         out.push(' ');
-        out.push_str(boundary_sym);
+        out.push_str(boundary);
     }
     out.push('\n');
 }
@@ -736,7 +1056,7 @@ fn split_syllables(phones: &[String], alphabet: KokoroAlphabet) -> Option<Vec<Ve
         match alphabet {
             // v1.0 词末轻声音节无箭头记号
             KokoroAlphabet::V10Ipa => syllables.push(current),
-            KokoroAlphabet::V11Zhuyin => return None,
+            KokoroAlphabet::V11Zhuyin | KokoroAlphabet::VitsBopomofo => return None,
         }
     }
     (!syllables.is_empty()).then_some(syllables)
@@ -1095,5 +1415,36 @@ mod tests {
         assert!(lookup_line(&lex4_text, "好展").is_none());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vits_bopomofo_lexicon_fixes_polyphones_sandhi_and_omits_inline_boundary() {
+        let vits_tokens = "_\t0\nˉ\t5\nˊ\t6\nˇ\t7\nˋ\t8\n˙\t9\nㄅ\t10\nㄉ\t12\nㄊ\t13\nㄋ\t14\nㄏ\t18\nㄑ\t20\nㄓ\t22\nㄧ\t37\nㄨ\t38\nㄝ\t40\nㄠ\t42\nㄡ\t43\nㄥ\t47\n \t49\n";
+        // 还原 fanchen-C 原词表里的真实陷阱：`切不` 读去声 qiè bù、`你好` 未变调、`调` 单字读 diào
+        let vits_lexicon = concat!(
+            "你 ㄋ ㄧ ˇ\n",
+            "好 ㄏ ㄠ ˇ\n",
+            "切 ㄑ ㄧ ㄝ ˋ\n",
+            "不 ㄅ ㄨ ˋ\n",
+            "透 ㄊ ㄡ ˋ\n",
+            "调 ㄉ ㄧ ㄠ ˋ\n",
+            "整 ㄓ ㄥ ˇ\n",
+            "切不 ㄑ ㄧ ㄝ ˋ ㄅ ㄨ ˋ\n",
+            "调整 ㄊ ㄧ ㄠ ˊ ㄓ ㄥ ˇ\n",
+            "你好 ㄋ ㄧ ˇ ㄏ ㄠ ˇ\n",
+        );
+        let (lex, words) = build_vits_bopomofo_lexicon(vits_tokens, vits_lexicon, None, None)
+            .expect("build vits bopomofo lexicon");
+
+        assert_eq!(lookup_line(&lex, "你好"), Some("你好 ㄋ ㄧ ˊ ㄏ ㄠ ˇ"));
+        assert_eq!(
+            lookup_line(&lex, "切不透"),
+            Some("切不透 ㄑ ㄧ ㄝ ˉ ㄅ ㄨ ˊ ㄊ ㄡ ˋ"),
+            "切不透须固定阴平 qiē + 阳平 bú，不受原词表 `切不 qiè bù` 污染，且词末不带空格记号"
+        );
+        assert_eq!(lookup_line(&lex, "调好"), Some("调好 ㄊ ㄧ ㄠ ˊ ㄏ ㄠ ˇ"));
+        assert!(words.contains("切不透"));
+        assert!(words.contains("你好"));
+        assert!(!words.contains("你"), "单字不得进入多字分词表");
     }
 }

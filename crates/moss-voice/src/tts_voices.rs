@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::local_models::{ModelKind, ModelSpec, spec_of};
 
 /// 试听缓存协议版本：调整默认试听句或底层韵律词表时递增目录号，无感失效旧缓存。
-pub const PREVIEW_CACHE_VERSION: &str = "v2";
+pub const PREVIEW_CACHE_VERSION: &str = "v3";
 
 pub const SAMPLE_ZH: &str = "你好，我是 MOSS 语音助手，激光雕刻工作台已就绪。";
 pub const SAMPLE_EN_US: &str = "Hello, I am MOSS. Your laser engraving studio is ready.";
@@ -228,9 +228,10 @@ fn parse_kokoro_code(code: &'static str, id: i32) -> TtsSpeakerMeta {
 fn lang_sort_rank(lang: &str) -> u8 {
     match lang {
         "zh" => 0,
-        "en-US" => 1,
-        "en-GB" => 2,
-        _ => 3,
+        "zh-dialect" => 1,
+        "en-US" => 2,
+        "en-GB" => 3,
+        _ => 4,
     }
 }
 
@@ -238,8 +239,8 @@ const QWEN3_TTS_SPEAKERS: [(&str, &str, &str, &str); 9] = [
     ("vivian", "Vivian", "female", "zh"),
     ("serena", "Serena", "female", "zh"),
     ("uncle_fu", "Uncle_Fu（老傅）", "male", "zh"),
-    ("dylan", "Dylan（北京）", "male", "zh"),
-    ("eric", "Eric（四川）", "male", "zh"),
+    ("dylan", "Dylan（北京口音）", "male", "zh-dialect"),
+    ("eric", "Eric（四川话·非普通话）", "male", "zh-dialect"),
     ("ryan", "Ryan", "male", "en-US"),
     ("aiden", "Aiden", "male", "en-US"),
     ("ono_anna", "Ono_Anna", "female", "accent"),
@@ -280,6 +281,12 @@ fn build_qwen3_tts_speaker(idx: usize) -> TtsSpeakerMeta {
     let (gender_label, lang_label, sample_text, recommended_for_zh) = match (gender, lang) {
         ("female", "zh") => ("女声", "中文普通话（中英混读）", SAMPLE_ZH, true),
         ("male", "zh") => ("男声", "中文普通话（中英混读）", SAMPLE_ZH, true),
+        ("male", "zh-dialect") => (
+            "男声",
+            "中文方言 / 地方口音（非标准普通话）",
+            SAMPLE_ZH,
+            false,
+        ),
         ("male", "en-US") => ("男声", "美式英语 (en-US)", SAMPLE_EN_US, false),
         _ => ("女声", "多语种扩展声线（日/韩）", SAMPLE_ACCENT, false),
     };
@@ -376,6 +383,17 @@ pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
             sample_text: SAMPLE_ZH,
             recommended: true,
             note: Some("内置中文词典与数字/日期读法规则，日常中文与英文术语混读最自然"),
+        });
+    }
+    let dialect_count = count_lang("zh-dialect");
+    if dialect_count > 0 {
+        languages.push(TtsLanguagePack {
+            code: "zh-dialect",
+            label: "中文方言 / 地方口音（非标准普通话）",
+            count: dialect_count,
+            sample_text: SAMPLE_ZH,
+            recommended: false,
+            note: Some("四川话、北京口音等特色方言声线；日常标准普通话播报请选上方普通话分组音色"),
         });
     }
     let us_count = count_lang("en-US");
@@ -572,6 +590,13 @@ mod tests {
             assert_eq!(warmup.len(), expected_total);
             assert_eq!(warmup[0].id, cat.default_speaker);
         }
+        let qwen_cat = tts_voice_catalog("qwen3_tts_0_6b").unwrap();
+        let eric = qwen_cat.speakers.iter().find(|s| s.id == 4).unwrap();
+        assert_eq!(
+            eric.lang, "zh-dialect",
+            "四川话音色单独归入方言组防误选为标准普通话"
+        );
+        assert!(!eric.recommended_for_zh);
         assert!(tts_voice_catalog("silero_vad").is_none());
         assert!(tts_voice_catalog("../evil").is_none());
     }
