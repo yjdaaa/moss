@@ -720,6 +720,13 @@ try {
   // 5d-2. 本地 OneJev 1.6 (0.8B / 4B / 9B) 与 Laya 自由混搭：未下载项引导到下载区，已安装项可在顶部下拉或行内一键选用并展示硬件加速提示
   await page.locator("#voice-builtin-mix-select-jev").selectOption("local:onejev_1_6_9b");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未下载" }).waitFor();
+  // 2026-11-25：直接跳到这个模型那一行、聚焦它的“下载”按钮并高亮，不只是展开整个分组
+  await page.waitForFunction(() => document.activeElement?.id === "voice-local-download-onejev_1_6_9b");
+  assert.match(await page.locator("#voice-local-row-onejev_1_6_9b").getAttribute("class"), /voice-local-row--flash/, "跳转后高亮目标行");
+  // 本地模型按顶部链路顺序排列：1 判停 → 2 识别 → 3 Jev → 4 大模型（Colab）→ 5 合成 → 视觉
+  const localOrder = await page.locator("#voice-local-models > [id^=voice-local-group-], #voice-local-models > #voice-local-colab-bridge").evaluateAll((els) => els.map((el) => el.id));
+  assert.deepEqual(localOrder, ["voice-local-group-vad", "voice-local-group-asr", "voice-local-group-jev", "voice-local-colab-bridge", "voice-local-group-tts", "voice-local-group-vision"]);
+  assert.match(await page.locator("#voice-local-group-tts .voice-field-head b").first().innerText(), /^5\. 语音合成模型包/);
   assert.match(await page.locator("#voice-local-onejev-env-hint").innerText(), /Apple Metal GPU 加速/);
   assert.match(await page.locator("#voice-local-jev-runtime").innerText(), /本地 Jev 启动失败：OneJev 模型加载超时/);
   // n69：已下载的本地 Jev 行不再有自己的“选用”按钮（它和顶部第 3 栏写的是同一个开关），改为跳到顶部下拉

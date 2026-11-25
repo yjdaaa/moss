@@ -222,7 +222,7 @@ export function LocalModelsGroup({ builtin }) {
               const pickedDenoise = item.kind === "denoise" && !activeOn && model.id === selectedId;
               const canPickDenoise = item.kind === "denoise" && Boolean(model.installed) && model.id !== selectedId;
               return (
-                <tr key={model.id} className={chosen ? "on" : ""}>
+                <tr key={model.id} id={`voice-local-row-${model.id}`} className={chosen ? "on" : ""}>
                   <td className="voice-model-cell">
                     <div className="voice-model-name">
                       {item.kind === "tts" ? (
@@ -301,6 +301,26 @@ export function LocalModelsGroup({ builtin }) {
     );
   };
 
+  // 2026-11-25：本地模型按顶部“当前语音链路”的执行顺序排列（1 判停 → 2 识别 → 3 Jev → 4 大模型 → 5 合成），
+  // 不在链路里的视觉理解、声纹放最后；序号与顶部各栏一致，方便对照
+  const renderOther = (kind, order = "") => {
+    const item = layout.others.find((group) => group.kind === kind);
+    if (!item) return null;
+    return (
+      <div className="voice-local-group" id={`voice-local-group-${item.kind}`}>
+        {renderHead(item, `${order}${item.title}模型包`)}
+        {item.kind === "tts" &&
+          (form.tts_model === "qwen3_tts_0_6b" || item.models.some((m) => m.id === "qwen3_tts_0_6b" && m.installed)) &&
+          local.speech_env?.summary && (
+            <div className="voice-hint" id="voice-local-speech-env-hint">
+              Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}
+            </div>
+          )}
+        {renderTable(item)}
+      </div>
+    );
+  };
+
   return (
     <VoiceGroup id="local-models" title="本地模型与音色" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
       <div id="voice-local-models" className="voice-stack">
@@ -308,7 +328,7 @@ export function LocalModelsGroup({ builtin }) {
           <div className="voice-hint voice-hint--warn">没有找到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录）。可以先下载模型，但打开本地开关后内置服务将无法启动。</div>
         )}
         <p className="voice-muted">
-          断网可用的本地模型在这里下载和管理，启用哪个模型请在上方「当前语音链路」下拉框切换。
+          断网可用的本地模型在这里下载和管理，按上方「当前语音链路」的顺序排列；启用哪个模型在上方下拉框切换，选了还没下载的模型会直接跳到这里它那一行。
         </p>
         <ModelPairingGuide
           settings={baseline}
@@ -317,10 +337,9 @@ export function LocalModelsGroup({ builtin }) {
           onApply={applyCombo}
           onDownload={(ids) => Promise.all(ids.map((id) => modelAct(id, "下载模型", () => voiceApi.localDownload(id))))}
         />
-        <ColabBridgeSection builtin={builtin} />
         {/* 2026-11-23 n109：命令词抗噪 / 降噪 / 语义判停并入“拾音判停”，实测没提升的收进“更多 / 实验” */}
         <div className="voice-local-group" id="voice-local-group-vad">
-          {renderHead(layout.vadMain, "拾音判停模型包", true, "replace")}
+          {renderHead(layout.vadMain, "1. 拾音判停模型包", true, "replace")}
           <p className="voice-muted voice-role-note" id="voice-local-vad-legend">
             判停模型几选一：同时只用一个，在顶部“拾音判停”下拉里换，都不选就是能量判停。命令词抗噪、前端降噪、语义判停是叠加在判停上的功能，可以同时开。
           </p>
@@ -355,24 +374,11 @@ export function LocalModelsGroup({ builtin }) {
             ))}
           </details>
         </div>
-        {layout.others.map((item) => (
-          <div className="voice-local-group" key={item.kind} id={`voice-local-group-${item.kind}`}>
-            {renderHead(item, `${item.title}模型包`)}
-            {item.kind === "tts" &&
-              (form.tts_model === "qwen3_tts_0_6b" ||
-                item.models.some((m) => m.id === "qwen3_tts_0_6b" && m.installed)) &&
-              local.speech_env?.summary && (
-                <div className="voice-hint" id="voice-local-speech-env-hint">
-                  Qwen3-TTS 本机运行时（speech.cpp）：{local.speech_env.summary}
-                </div>
-              )}
-            {renderTable(item)}
-          </div>
-        ))}
+        {renderOther("asr", "2. ")}
         {models.filter((model) => model.kind === "jev").length > 0 && (
           <div className="voice-local-group" id="voice-local-group-jev">
             <div className="voice-field-head">
-              <b>Jev 前置粗筛模型包（OneJev / Laya）</b>
+              <b>3. Jev 前置粗筛模型包（OneJev / Laya）</b>
               <span className="voice-muted">
                 {form.jev_filter_enabled && isLocalJevModel(form.jev_model)
                   ? `当前选用：${models.find((m) => m.id === canonicalLocalJevModel(form.jev_model))?.label || form.jev_model}`
@@ -479,7 +485,7 @@ export function LocalModelsGroup({ builtin }) {
                         }
                       };
                       return (
-                        <tr key={model.id} className={chosen ? "on" : ""}>
+                        <tr key={model.id} id={`voice-local-row-${model.id}`} className={chosen ? "on" : ""}>
                           <td className="voice-model-cell">
                             <div className="voice-model-name">
                               <b>{model.label}</b>
@@ -551,6 +557,10 @@ export function LocalModelsGroup({ builtin }) {
             </div>
           </div>
         )}
+        {/* 第 4 栏大模型没有断网可用的本地模型，这里只有 Colab T4 联动（它同时接管大模型、看图与合成） */}
+        <ColabBridgeSection builtin={builtin} />
+        {renderOther("tts", "5. ")}
+        {renderOther("vision")}
         {models.filter((model) => model.kind === "speaker").map((model) => {
           const view = localModelView(model);
           return (

@@ -11,13 +11,12 @@ import {
   pipelineTestSummary,
   builtinSectionSourceView,
   builtinSourceSwitchPatch,
-  isFoldedLocalModel,
   isLocalJevModel,
   isLocalOneJevModel,
   recommendationState,
   voiceErrorText,
 } from "../../voiceState.js";
-import { JEV_GROUP_TITLE, restartEffect, revealLocalMore } from "./shared.js";
+import { JEV_GROUP_TITLE, restartEffect, focusLocalModel } from "./shared.js";
 import { BuiltinModelGroup } from "./BuiltinModelGroup.jsx";
 import { BuiltinJevGroup } from "./BuiltinJevGroup.jsx";
 
@@ -302,10 +301,10 @@ export function BuiltinModelGroups({ builtin }) {
     if (section === "jev") {
       if (nextValue !== "off" && pickedOption && !pickedOption.installed) {
         if (pickedOption.isLocal) {
-          focusConfigGroup("local-models", "voice-local-group-jev");
+          focusLocalModel(pickedOption.id, "voice-local-group-jev");
           setMixNote({
             ok: false,
-            text: `本地决策模型“${pickedOption.modelLabel || pickedOption.id}”尚未下载：已为你展开下方“本地模型（断网可用）”，点击“下载”完成后即可在此直接下拉切换。`,
+            text: `本地决策模型“${pickedOption.modelLabel || pickedOption.id}”尚未下载：已跳到下方“本地模型（断网可用）”里它那一行，点“下载”完成后即可在此直接下拉切换。`,
           });
         } else {
           focusConfigGroup("builtin-model-jev", "voice-group-builtin-model-jev");
@@ -351,15 +350,10 @@ export function BuiltinModelGroups({ builtin }) {
     const isDefault = nextValue === "cloud" || nextValue === "energy";
     const cleanLabel = label.replace(/^\d+\.\s*/, "");
     if (!isDefault && pickedOption && !pickedOption.installed) {
-      if (section === "vad" && isFoldedLocalModel(pickedOption.id)) {
-        revealLocalMore();
-        focusConfigGroup("local-models", "voice-local-vad-more");
-      } else {
-        focusConfigGroup("local-models", `voice-local-group-${section}`);
-      }
+      focusLocalModel(pickedOption.id, `voice-local-group-${section}`);
       setMixNote({
         ok: false,
-        text: `本地${cleanLabel}模型“${pickedOption.modelLabel || pickedOption.label}”尚未下载：已为你展开下方“本地模型（断网可用）”，点“下载”完成后即可在此下拉选用。`,
+        text: `本地${cleanLabel}模型“${pickedOption.modelLabel || pickedOption.label}”尚未下载：已跳到下方“本地模型（断网可用）”里它那一行，点“下载”完成后即可在此下拉选用。`,
       });
       return;
     }

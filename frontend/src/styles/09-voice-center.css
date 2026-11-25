@@ -198,6 +198,15 @@
 .voice-local-more > summary small { display: block; margin-top: 2px; font-weight: 400; font-size: 11.5px; color: var(--ob-ink-3); }
 .voice-local-more[open] > summary { margin-bottom: 6px; }
 .voice-local-more > summary:focus-visible { box-shadow: 0 0 0 2px var(--ob-accent-2); border-radius: 6px; }
+/* 2026-11-25：顶部下拉选了未下载的本地模型，跳到它那一行时闪一下 */
+.ob-tbl tbody tr.voice-local-row--flash td { animation: voiceLocalRowFlash 2.4s ease-out; }
+@keyframes voiceLocalRowFlash {
+  0%, 45% { background: rgba(139, 123, 255, 0.32); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ob-tbl tbody tr.voice-local-row--flash td { animation: none; background: rgba(139, 123, 255, 0.24); }
+}
 .voice-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--ob-ink-2); cursor: pointer; }
 .voice-check input { margin-top: 2px; }
 .voice-progress { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--ob-line); overflow: hidden; max-width: 160px; }
