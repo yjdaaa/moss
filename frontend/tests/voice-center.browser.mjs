@@ -865,6 +865,9 @@ try {
   await page.locator("#voice-hotwords").waitFor();
   assert.equal(await page.locator("#voice-asr-beam").count(), 0, "没用本地 X-ASR 时不显示 X-ASR 热词识别");
   await page.locator("#voice-llm-fast-reply").uncheck();
+  // 2026-11-25：音色与语速在“5. 语音合成模型包”里，紧跟合成模型表
+  assert.equal(await page.locator("#voice-local-group-tts #voice-local-tts-settings").getByLabel("本地合成语速（0.5 ~ 2.0）").count(), 1, "语速框在语音合成模型包里");
+  assert.equal(await page.locator("#voice-local-group-tts #voice-local-speaker-browse").count(), 1, "音色在语音合成模型包里");
   await page.getByLabel("本地合成语速（0.5 ~ 2.0）").fill("1.5");
   await page.locator("#voice-barge-in").check();
   await page.locator("#voice-experience-save").click();
