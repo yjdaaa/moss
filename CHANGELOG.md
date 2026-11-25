@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复双显卡笔记本本地声音克隆误用核显及 Windows 编译告警（2026-11-25）
+
+- **现象**：在带核显与独显的双显卡 Windows 笔记本上，本地声音克隆引擎 `audiocpp_server` 固定传 `device = 0` 会落在核显（`type = "igpu"`）导致合成比实时慢数倍，且 Windows 目标编译 `moss-voice` 存在条件编译告警。
+- **根因与修复**：`AudioCppWorker` 启动前通过 `--list-devices --json` 探测后端设备（支持 `MOSS_AUDIOCPP_DEVICE` 覆盖），优先选择独立显卡（`type = "gpu"`）而非核显（`igpu`）；`moss_voice::audio_cpp` 为 Unix 专属孤儿进程回收函数补齐 `#[cfg(...)]`。
+- **验证**：`moss-voice-providers` 新增双显卡设备挑选单测（核显共享内存大于独显显存时仍选独显），`verify.mjs --finish` 通过，并在 Windows RTX 4060 实机验证克隆合成通过。
+- **关联**：`crates/moss-voice-providers/src/audio_cpp.rs`、`crates/moss-voice/src/audio_cpp.rs`、内置语音技术书 n131。
+
 ### 本地语音合成新增 Qwen3-TTS 1.7B 离线声音克隆模型（2026-11-25）
 
 - **现象**：已接入的本地 `qwen3_tts_0_6b` / `1.7B` 为固定 9 音色 `CustomVoice` 变体，断网离线场景下无法用一段本机参考录音克隆任意人声（如 550W 原声或自有录音）。

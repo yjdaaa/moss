@@ -13,6 +13,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -412,6 +413,7 @@ pub fn ensure_audiocpp_runtime(
     Ok(target_bin)
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn orphan_audiocpp_pids(ps_output: &str, roots: &[String]) -> Vec<u32> {
     if roots.is_empty() {
         return Vec::new();

@@ -160,6 +160,97 @@ fn pick_ephemeral_port() -> Result<u16, ProviderError> {
     Ok(port)
 }
 
+/// 解析 `audiocpp_server --backend <backend> --list-devices --json` 输出，双显卡机器优先选独立显卡（`type == "gpu"`）而非核显（`type == "igpu"`）。
+fn select_preferred_device_index(list_json: &str, backend: &str) -> u32 {
+    let trimmed = list_json
+        .find('{')
+        .map(|idx| &list_json[idx..])
+        .unwrap_or(list_json);
+    let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
+        return 0;
+    };
+    let Some(devices) = parsed.get("devices").and_then(Value::as_array) else {
+        return 0;
+    };
+    devices
+        .iter()
+        .filter(|d| {
+            d.get("backend")
+                .and_then(Value::as_str)
+                .is_some_and(|b| b.eq_ignore_ascii_case(backend))
+        })
+        .max_by_key(|d| {
+            let dev_type = d.get("type").and_then(Value::as_str).unwrap_or("");
+            let has_pci = d
+                .get("pci_bus_id")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+            let is_discrete = dev_type.eq_ignore_ascii_case("gpu")
+                || (!dev_type.eq_ignore_ascii_case("igpu")
+                    && !dev_type.eq_ignore_ascii_case("cpu")
+                    && has_pci);
+            let total_bytes = d
+                .pointer("/memory/total_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            (is_discrete, total_bytes)
+        })
+        .and_then(|d| d.get("index").and_then(Value::as_u64))
+        .and_then(|idx| u32::try_from(idx).ok())
+        .unwrap_or(0)
+}
+
+fn pick_preferred_backend_device(exe: &Path, backend: &str) -> u32 {
+    if let Ok(raw) = std::env::var("MOSS_AUDIOCPP_DEVICE")
+        && let Ok(explicit) = raw.trim().parse::<u32>()
+    {
+        return explicit;
+    }
+    if matches!(backend, "cpu" | "metal") {
+        return 0;
+    }
+    let mut cmd = Command::new(exe);
+    if let Some(exe_dir) = exe.parent() {
+        cmd.current_dir(exe_dir);
+    }
+    cmd.args(["--backend", backend, "--list-devices", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    prepend_library_search_path(&mut cmd, exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return 0;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let Some(mut stdout) = child.stdout.take() else {
+                    return 0;
+                };
+                let mut buf = Vec::new();
+                if (&mut stdout).take(64 * 1024).read_to_end(&mut buf).is_err() {
+                    return 0;
+                }
+                return select_preferred_device_index(&String::from_utf8_lossy(&buf), backend);
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return 0;
+            }
+        }
+    }
+}
+
 fn probe_models_ready(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
@@ -279,6 +370,7 @@ impl AudioCppWorker {
             .map_err(|e| model_err(format!("创建本地参考音色目录失败：{e}")))?;
 
         let http_client = build_loopback_client()?;
+        let device_id = pick_preferred_backend_device(exe, backend);
         let mut last_err = None;
         for attempt in 0..2 {
             if is_cancelled() {
@@ -290,6 +382,7 @@ impl AudioCppWorker {
                 model_path,
                 voice_dir,
                 backend,
+                device_id,
                 role,
                 port,
                 http_client.clone(),
@@ -311,6 +404,7 @@ impl AudioCppWorker {
         model_path: &Path,
         voice_dir: &Path,
         backend: &str,
+        device_id: u32,
         role: &'static str,
         port: u16,
         http_client: reqwest::Client,
@@ -332,7 +426,7 @@ impl AudioCppWorker {
             "host": "127.0.0.1",
             "port": port,
             "backend": backend,
-            "device": 0,
+            "device": device_id,
             "threads": recommended_cpu_threads(),
             "lazy_load": false,
             "max_loaded_models": 1,
@@ -370,6 +464,8 @@ impl AudioCppWorker {
             .arg(&config_path)
             .arg("--backend")
             .arg(backend)
+            .arg("--device")
+            .arg(device_id.to_string())
             .arg("--no-ui")
             .arg("--host")
             .arg("127.0.0.1")
@@ -984,5 +1080,17 @@ mod tests {
         let err = tts.synthesize("测试").await.unwrap_err();
         assert_eq!(err.category, DiagCategory::Config);
         assert!(err.to_string().contains("尚未上传"));
+    }
+
+    #[test]
+    fn select_preferred_device_index_prefers_discrete_gpu_over_igpu() {
+        // 真实双显卡笔记本（Intel 核显共享内存 8.39 GB > RTX 4060 独显 8.34 GB）：必须选 index=1 独显而非 index=0 核显
+        let dual_gpu_json = r#"{"schema_version":1,"devices":[
+            {"backend":"vulkan","registry":"Vulkan","index":0,"name":"Vulkan0","description":"Intel(R) RaptorLake-S Mobile Graphics Controller","type":"igpu","pci_bus_id":null,"memory":{"free_bytes":7702179943,"total_bytes":8390121472}},
+            {"backend":"vulkan","registry":"Vulkan","index":1,"name":"Vulkan1","description":"NVIDIA GeForce RTX 4060 Laptop GPU","type":"gpu","pci_bus_id":"0000:01:00.0","memory":{"free_bytes":7537164288,"total_bytes":8342470656}},
+            {"backend":"cpu","registry":"CPU","index":0,"name":"CPU","description":"13th Gen Intel(R) Core(TM) i7-13650HX","type":"cpu","pci_bus_id":null,"memory":{"free_bytes":5064302592,"total_bytes":16780242944}}
+        ]}"#;
+        assert_eq!(select_preferred_device_index(dual_gpu_json, "vulkan"), 1);
+        assert_eq!(select_preferred_device_index("invalid", "vulkan"), 0);
     }
 }
