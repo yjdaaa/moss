@@ -24,16 +24,17 @@ export const MIX_SECTIONS = [
  */
 /**
  * 每类本地模型的推荐项（本机实测，技术书 n95 / n99）：判停 Silero v6.2（敲击声与持续机器噪声都不误触发，
- * 机器噪声下识别最准）、识别 Qwen3-ASR（整链实测最准；n111 前推荐 SenseVoice 2024）、合成 Kokoro v1.0（整段回答不停顿）。
+ * 机器噪声下识别最准）、识别 Qwen3-ASR（整链实测最准；n111 前推荐 SenseVoice 2024）、合成 Qwen3-TTS 1.7B（声音最自然、
+ * 可调语速，Apple 芯片 Mac 合成约 3 倍实时；n128 前推荐 Kokoro v1.0）。
  * 只用于在界面上标“推荐”；与后端新安装默认组合 `BuiltinLocal::new_install` 一致（n111），老用户的设置不受影响。
  */
-export const RECOMMENDED_LOCAL_MODELS = { vad: "silero_vad_v6", asr: "qwen3_asr_0_6b", tts: "kokoro" };
+export const RECOMMENDED_LOCAL_MODELS = { vad: "silero_vad_v6", asr: "qwen3_asr_0_6b", tts: "qwen3_tts_1_7b" };
 
 /** “当前语音链路”下拉框下方的一句推荐（短名 + 为什么），依据 n95 / n99 本机实测。 */
 export const RECOMMENDED_LOCAL_NOTES = {
   vad: { name: "Silero v6.2", why: "噪声下不误触发、听得最准" },
   asr: { name: "Qwen3-ASR", why: "整链实测最准，机器噪声下错字少一半" },
-  tts: { name: "Kokoro v1.0", why: "回答不卡顿" },
+  tts: { name: "Qwen3-TTS 1.7B", why: "声音最自然，可调语速" },
 };
 
 /**
@@ -70,19 +71,21 @@ export function isRecommendedLocalModel(kind, id) {
  * 认不出的正好也是通用识别听错的那几句，只多救回一两条、普通说话 0 次误执行，n101 起只放进“车间噪声大”）。
  * 2026-11-24 n111：第一套（`noisy`）即新安装默认组合（`BuiltinLocal::new_install`），标题改为“推荐”；
  * 原“推荐”（`balanced`，SenseVoice）改为“要回得更快”。
+ * 2026-11-25 n128：第一套合成改为 Qwen3-TTS 1.7B（与新安装默认一致）；“说完约 2.4 秒”是 Kokoro 时的整链实测，
+ * 换模型后未重测，不再写秒数。其余几套仍用 Kokoro / Matcha（体积小、更快）。
  */
 export const MODEL_COMBOS = [
   {
     id: "noisy",
     title: "推荐（新安装默认）",
     fit: "大多数情况，车间里风扇、气泵一直响也听得准",
-    result: "整链实测错字最少（机器噪声下少一半），说完约 2.4 秒听到回答",
+    result: "整链实测错字最少（机器噪声下少一半），声音最自然、可调语速；合成模型约 2.3 GB",
     vad: "silero_vad_v6",
     kws: "kws_zipformer_zh",
     denoise: null,
     turn: null,
     asr: "qwen3_asr_0_6b",
-    tts: "kokoro",
+    tts: "qwen3_tts_1_7b",
   },
   {
     id: "balanced",
@@ -143,6 +146,8 @@ const COMBO_SHORT_NAMES = {
   kokoro: "Kokoro v1.0",
   kokoro_v11: "Kokoro v1.1",
   matcha_zh_en: "Matcha",
+  qwen3_tts_0_6b: "Qwen3-TTS 0.6B",
+  qwen3_tts_1_7b: "Qwen3-TTS 1.7B",
   kws_zipformer_zh: "命令词抗噪",
 };
 

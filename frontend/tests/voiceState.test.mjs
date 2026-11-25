@@ -781,6 +781,9 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
   assert.equal(recommendationState("asr", "local:qwen3_asr_0_6b").chosen, true);
   assert.equal(recommendationState("asr", "local:sense_voice").chosen, false);
   assert.equal(recommendationState("tts", "local:kokoro_v11").chosen, false);
+  // n128：推荐合成与新安装默认一致，改为 Qwen3-TTS 1.7B
+  assert.equal(recommendationState("tts", "local:qwen3_tts_1_7b").chosen, true);
+  assert.equal(recommendationState("tts", "local:kokoro").chosen, false);
   // 五栏都有推荐行（上下对齐）：大模型推荐云端，Jev 只给中性提示
   assert.equal(recommendationState("llm", "cloud").chosen, true);
   assert.equal(recommendationState("jev", "off").neutral, true);
@@ -799,7 +802,7 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
     ttsCloudView.options.map((opt) => [opt.value, opt.label, opt.installed]),
     [
       ["cloud", "云端（MOSS/TTS-1）", true],
-      ["local:kokoro", "本地 · Kokoro v1.0 · 推荐（未下载）", false],
+      ["local:kokoro", "本地 · Kokoro v1.0（未下载）", false],
       ["local:kokoro_v11", "本地 · Kokoro v1.1", true],
     ],
   );
@@ -1980,13 +1983,13 @@ test("按场景推荐的整套模型：一次保存、缺什么提示什么、�
     { id: picked.tts, label: "合成", installed: true },
   ];
   assert.deepEqual(comboMissing(picked, models), ["判停包"]);
-  // n111：第一套就是新安装默认组合（与后端 BuiltinLocal::new_install 一致）
+  // n111：第一套就是新安装默认组合（与后端 BuiltinLocal::new_install 一致；n128 起合成为 Qwen3-TTS 1.7B）
   const { comboMissingModels } = await import("../src/voiceState.js");
   assert.deepEqual(
     comboPatch(MODEL_COMBOS[0]),
     {
       vad: true, vad_model: "silero_vad_v6", kws: true, kws_model: "kws_zipformer_zh",
-      denoise: false, turn: false, asr: true, asr_model: "qwen3_asr_0_6b", tts: true, tts_model: "kokoro",
+      denoise: false, turn: false, asr: true, asr_model: "qwen3_asr_0_6b", tts: true, tts_model: "qwen3_tts_1_7b",
     },
   );
   // 正在用但还没下载：列出缺的模型，下载中的标出来，不算“已经能用”
@@ -1998,7 +2001,7 @@ test("按场景推荐的整套模型：一次保存、缺什么提示什么、�
     [
       { id: "kws_zipformer_zh", label: "kws_zipformer_zh", downloading: false },
       { id: "qwen3_asr_0_6b", label: "Qwen3-ASR", downloading: true },
-      { id: "kokoro", label: "kokoro", downloading: false },
+      { id: "qwen3_tts_1_7b", label: "qwen3_tts_1_7b", downloading: false },
     ],
   );
   assert.equal(comboMissing(picked, []).length, [picked.vad, picked.kws, picked.turn, picked.asr, picked.tts].filter(Boolean).length);

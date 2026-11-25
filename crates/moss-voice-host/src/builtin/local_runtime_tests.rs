@@ -833,8 +833,8 @@ fn chain_test_runs_five_steps_end_to_end_and_reports_exact_failing_stage() {
     // n111：新安装默认选着本地判停 / 识别 / 合成，但都还没下载——和实际对话一样退回能量判停与云端，并如实写明
     assert_eq!(
         builtin.settings().builtin_local.tts_model,
-        "kokoro",
-        "临时目录没有设置文件，按新安装默认组合"
+        "qwen3_tts_1_7b",
+        "临时目录没有设置文件，按新安装默认组合（n128 起合成为 Qwen3-TTS 1.7B）"
     );
     assert!(
         out.to_string().contains("还没下载，和实际对话一样先用它"),

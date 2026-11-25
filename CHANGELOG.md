@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新安装默认与“推荐”的本地合成模型改为 Qwen3-TTS 1.7B（2026-11-25）
+
+- **现象**：新安装默认和界面“推荐”的合成模型是 Kokoro v1.0，声音不如 Qwen3-TTS 自然，也不能按指令调语速。
+- **根因与修复**：`BuiltinLocal::new_install` 的合成改为 `qwen3_tts_1_7b`（音色 0 Vivian），前端 `RECOMMENDED_LOCAL_MODELS.tts`、推荐行与 `MODEL_COMBOS` 第一套同步改为 1.7B；`BuiltinLocal::default()` 仍是 Kokoro，老用户已保存或未写入文件的设置都不变。第一套不再写 Kokoro 时实测的“说完约 2.4 秒”。
+- **验证**：`new_install_picks_the_measured_combo_but_existing_users_keep_theirs` 改为断言 1.7B 与音色 0 且 `Default` 仍为 Kokoro，`voiceState.test.mjs` 断言推荐改为 1.7B；真实 1.7B 经 `speech worker` 约 3 倍实时流式合成；`verify.mjs --finish` 通过。Windows 与无显卡电脑的合成速度未实测（`unverified`）。
+- **关联**：`crates/moss-voice/src/settings.rs`（`BuiltinLocal::new_install`）、`frontend/src/voiceState/modelSources.js`（`RECOMMENDED_LOCAL_MODELS`、`MODEL_COMBOS`）、`docs/user/quick-start.md`、内置语音技术书 n128。
+
 ### 新增本地合成模型 Qwen3-TTS 1.7B 并按说话指令调语速，不支持调语速的模型不再显示语速框（2026-11-25）
 
 - **现象**：Qwen3-TTS 0.6B 不支持调语速，语速框却仍显示（上一版是置灰）；想要 Qwen3 的音色又想调语速没有办法。

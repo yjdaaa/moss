@@ -864,7 +864,8 @@ impl Default for BuiltinLocal {
 
 impl BuiltinLocal {
     /// 新安装（`settings.json` 里还没有 `voice` 分区）时本地模型的默认组合（2026-11-24 n111 用户决定）：
-    /// 判停 Silero v6.2 + 识别 Qwen3-ASR + 合成 Kokoro v1.0 + 命令词抗噪，即整链实测（n99 / n101）里
+    /// 判停 Silero v6.2 + 识别 Qwen3-ASR + 合成 Qwen3-TTS 1.7B（音色 0 Vivian，2026-11-25 n128 用户决定，
+    /// 此前为 Kokoro v1.0）+ 命令词抗噪，判停与识别即整链实测（n99 / n101）里
     /// “车间噪声大 / 要听得最准”那一套；降噪与语义判停实测无提升，不开。模型要下载后才生效，
     /// 没下载时判停退回能量判停、识别与合成用已配置的云端（`local_parts` 只加载已安装的模型）。
     ///
@@ -877,7 +878,8 @@ impl BuiltinLocal {
             asr: true,
             asr_model: "qwen3_asr_0_6b".into(),
             tts: true,
-            tts_model: "kokoro".into(),
+            tts_model: crate::local_models::QWEN3_TTS_1_7B_ID.into(),
+            tts_speaker: 0,
             kws: true,
             kws_model: default_kws_model(),
             ..Self::default()
@@ -2265,11 +2267,17 @@ mod tests {
         for (kind, id) in [
             (ModelKind::Vad, "silero_vad_v6"),
             (ModelKind::Asr, "qwen3_asr_0_6b"),
-            (ModelKind::Tts, "kokoro"),
+            (ModelKind::Tts, "qwen3_tts_1_7b"),
             (ModelKind::Kws, "kws_zipformer_zh"),
         ] {
             assert_eq!(combo.selected(kind).map(|spec| spec.id), Some(id));
         }
+        assert_eq!(combo.tts_speaker, 0, "Qwen3-TTS 默认音色 0 Vivian");
+        assert_eq!(
+            BuiltinLocal::default().tts_model,
+            "kokoro",
+            "Default 不变，老用户没写进文件的合成模型仍是 Kokoro"
+        );
         assert_ne!(
             combo,
             BuiltinLocal::default(),
