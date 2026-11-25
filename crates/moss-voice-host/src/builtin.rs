@@ -6,6 +6,7 @@ use moss_voice::builtin::{self, KeyChange};
 use moss_voice::local_models::{self, Engine, ModelKind, ModelManager};
 use moss_voice::settings::{BuiltinLocal, builtin_secret_name};
 use moss_voice::{CenterError, ModelsInput, ProviderKind, Section, SectionInput, VoiceMode};
+use moss_voice_providers::dashscope::DashscopeTts;
 use moss_voice_providers::doubao::{DoubaoAsr, DoubaoTts};
 use moss_voice_providers::local::{
     AsrEngine, HELPER_FILE, LocalAsr, LocalHelper, LocalStreamingAsr, LocalTts, TtsEngine,

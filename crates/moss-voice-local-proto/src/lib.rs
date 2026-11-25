@@ -16,6 +16,7 @@
 //! 协议 7（n101）：流式合成可选 `short_opener`（快机器上短开场白先合成）；判停流可附带关键词检测（`Op::LoadKws`、`Reply::VadEvents::keywords`）。
 //! 协议 8（n110）：打开判停流 / 流式识别流回 [`Reply::Opened`]，如实说明这一路音频有没有先经前端降噪
 //! （[`DenoiseReport`]：用的哪个模型，或降噪器没建起来、改用原始音频的原因），供完整过程记录。
+//! 协议 9（n122）：新增 `TtsEngine::Vits`（单说话人中文 VITS，首个为 MOSS 原声模型 `moss_vits`）。
 //! 辅助程序与桌面程序须一起升级，旧协议在握手时拒绝。
 
 use std::io::{self, Read, Write};
@@ -23,7 +24,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// 协议版本：辅助程序与 MOSS 不一致时拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// NV16 fixed official CampPlus ONNX, acquired and hashed on 2026-10-11.
 /// ModelScope iic/speech_campplus_sv_zh-cn_16k-common v1.0.0: Apache-2.0.
@@ -187,6 +188,8 @@ pub enum TtsEngine {
     Matcha,
     /// ZipVoice-Distill 零样本克隆（`encoder` + `decoder` + `vocos_24khz`）
     ZipVoice,
+    /// 单说话人中文 VITS（注音符号输入，`moss.onnx` + 词表 + 数字读法规则；MOSS 原声，n122）
+    Vits,
 }
 
 impl VadParams {
@@ -816,7 +819,7 @@ mod tests {
         );
         assert_eq!(VadParams::for_engine(VadEngine::Ten).min_speech_ms, 100);
         // 协议 6 新增变体往返验证（协议 7、8 起仍兼容这些请求）
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
         let qwen_asr: Request = serde_json::from_value(serde_json::json!({
             "id": 5,
             "op": "load_asr",
@@ -842,6 +845,20 @@ mod tests {
             zipvoice.op,
             Op::LoadTts {
                 engine: TtsEngine::ZipVoice,
+                ..
+            }
+        ));
+        let vits: Request = serde_json::from_value(serde_json::json!({
+            "id": 6,
+            "op": "load_tts",
+            "dir": "moss-vits",
+            "engine": "vits"
+        }))
+        .unwrap();
+        assert!(matches!(
+            vits.op,
+            Op::LoadTts {
+                engine: TtsEngine::Vits,
                 ..
             }
         ));

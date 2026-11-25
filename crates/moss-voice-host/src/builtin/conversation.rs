@@ -90,7 +90,7 @@ pub(super) fn resolve_model_entry_file(
         | moss_voice::local_models::Archive::TarGz { .. }
             if !spec.path.is_empty() =>
         {
-            dir_or_file.join(spec.path)
+            dir_or_file.join(moss_voice::local_models::installed_rel_path(spec.path))
         }
         _ => dir_or_file.to_path_buf(),
     }
@@ -110,6 +110,7 @@ pub(super) fn helper_tts_engine(engine: Engine) -> Option<TtsEngine> {
         Engine::Kokoro => Some(TtsEngine::Kokoro),
         Engine::Matcha => Some(TtsEngine::Matcha),
         Engine::ZipVoice => Some(TtsEngine::ZipVoice),
+        Engine::Vits => Some(TtsEngine::Vits),
         _ => None,
     }
 }
@@ -1186,6 +1187,20 @@ impl BuiltinVoice {
                     );
                     (
                         Arc::new(doubao.map_err(invalid)?),
+                        true,
+                        format!("TTS:{}", cloud.model),
+                    )
+                }
+                (None, None, Some(cloud)) if cloud.kind == ProviderKind::Dashscope => {
+                    let dashscope = DashscopeTts::new(
+                        &cloud.url,
+                        &key(Section::Tts)?,
+                        &cloud.model,
+                        &cloud.voice,
+                        cloud.speed,
+                    );
+                    (
+                        Arc::new(dashscope.map_err(invalid)?),
                         true,
                         format!("TTS:{}", cloud.model),
                     )

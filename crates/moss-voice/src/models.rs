@@ -67,7 +67,7 @@ impl Section {
     }
 }
 
-/// 模型接口类型（NV7）。
+/// 模型接口类型（NV7 / n123）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -76,6 +76,8 @@ pub enum ProviderKind {
     Openai,
     /// 豆包（火山引擎）流式识别 / 双向流式合成，WebSocket 接口；“模型”填资源 ID
     Doubao,
+    /// 千问 AI / 阿里云百炼原生语音合成与声音复刻（HTTP + SSE 流式合成）
+    Dashscope,
 }
 
 impl ProviderKind {
@@ -83,6 +85,22 @@ impl ProviderKind {
         *self == Self::Openai
     }
 }
+
+/// 千问 AI / 阿里云百炼原生语音合成与声音复刻默认地址和模型（n123）。
+pub const DASHSCOPE_API_BASE_URL: &str = "https://maas.qianwenaiapi.com/api/v1";
+pub const DASHSCOPE_TTS_URL: &str =
+    "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/SpeechSynthesizer";
+pub const DASHSCOPE_CUSTOMIZATION_URL: &str =
+    "https://maas.qianwenaiapi.com/api/v1/services/audio/tts/customization";
+pub const DASHSCOPE_TTS_MODEL: &str = "qwen-audio-3.1-tts-flash";
+pub const DASHSCOPE_TTS_MODELS: [&str; 6] = [
+    DASHSCOPE_TTS_MODEL,
+    "qwen-audio-3.1-tts-plus",
+    "qwen-audio-3.0-tts-flash",
+    "qwen-audio-3.0-tts-plus",
+    "cosyvoice-v3.5-flash",
+    "cosyvoice-v3.5-plus",
+];
 
 /// 豆包流式识别默认地址与资源 ID（与 `moss-voice-providers::doubao` 的默认值一致，桌面端测试核对）。
 pub const DOUBAO_ASR_URL: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
@@ -530,6 +548,203 @@ pub fn tts_full_url(input: &str) -> String {
     full_url(input, "/audio/speech")
 }
 
+pub fn is_loopback_host(host: &str) -> bool {
+    let clean = host.trim_matches(['[', ']']);
+    clean.eq_ignore_ascii_case("127.0.0.1")
+        || clean.eq_ignore_ascii_case("localhost")
+        || clean == "::1"
+}
+
+/// 规范化千问 AI / 阿里云百炼原生 `/api/v1` 基础地址：
+/// - 留空默认 `https://maas.qianwenaiapi.com/api/v1`；
+/// - 填入根域名、`.../compatible-mode/v1`、`.../v1` 或完整语音端点时，统一收敛到 `<origin>/api/v1`；
+/// - 含账号密码、查询参数或 `#` 片段的输入原样返回，由后续校验明确拦截，绝不拼接畸形路径。
+pub fn dashscope_api_base_url(input: &str) -> String {
+    let cleaned = clean_scheme_and_whitespace(input);
+    if cleaned.is_empty() {
+        return DASHSCOPE_API_BASE_URL.to_owned();
+    }
+    if !(cleaned.starts_with("http://") || cleaned.starts_with("https://"))
+        || cleaned
+            .chars()
+            .any(|c| c.is_whitespace() || c == '<' || c == '>')
+    {
+        return cleaned;
+    }
+    let Ok(parsed) = reqwest::Url::parse(&cleaned) else {
+        return cleaned;
+    };
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_none()
+    {
+        return cleaned;
+    }
+    let origin = match parsed.port() {
+        Some(port) => format!(
+            "{}://{}:{port}",
+            parsed.scheme(),
+            parsed.host_str().unwrap_or_default()
+        ),
+        None => format!(
+            "{}://{}",
+            parsed.scheme(),
+            parsed.host_str().unwrap_or_default()
+        ),
+    };
+    let mut path = parsed.path().trim_end_matches('/');
+    loop {
+        let next = [
+            "/services/audio/tts/SpeechSynthesizer",
+            "/services/audio/tts/speechsynthesizer",
+            "/services/audio/tts/customization",
+            "/services/aigc/multimodal-generation/generation",
+            "/services/aigc/text2audio/generation",
+            "/chat/completions",
+            "/audio/transcriptions",
+            "/audio/speech",
+            "/models",
+            "/compatible-mode/v1",
+            "/api/v1",
+            "/v1",
+        ]
+        .into_iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .map(|s| s.trim_end_matches('/'));
+        match next {
+            Some(stripped) if stripped != path => path = stripped,
+            _ => break,
+        }
+    }
+    format!("{origin}{path}/api/v1")
+}
+
+/// 校验千问 / 百炼端点地址：禁止账号密码、查询参数与片段，公网必须使用 `https://`（仅本机回环测试允许 `http://`）。
+pub fn validate_dashscope_url(url: &str) -> Result<(), String> {
+    validate_http_url(url)?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| "地址格式无效".to_owned())?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("地址不能包含账号或密码".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("地址不能包含查询参数（?）或片段（#），密钥请填在下方 API Key 栏".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "地址缺少主机名".to_owned())?;
+    if parsed.scheme() == "http" && !is_loopback_host(host) {
+        return Err(
+            "千问 / 百炼云端地址必须以 https:// 开头（仅本机 127.0.0.1 / localhost 测试允许 http://）"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// 千问 / 百炼原生语音合成完整端点（`.../api/v1/services/audio/tts/SpeechSynthesizer`）。
+pub fn dashscope_tts_url(input: &str) -> String {
+    let base = dashscope_api_base_url(input);
+    if base.ends_with("/api/v1") {
+        format!("{base}/services/audio/tts/SpeechSynthesizer")
+    } else {
+        base
+    }
+}
+
+/// 千问 / 百炼声音复刻完整端点（`.../api/v1/services/audio/tts/customization`）。
+pub fn dashscope_customization_url(input: &str) -> String {
+    let base = dashscope_api_base_url(input);
+    if base.ends_with("/api/v1") {
+        format!("{base}/services/audio/tts/customization")
+    } else {
+        base
+    }
+}
+
+/// 判断两个云端地址是否严格属于同一个安全源（同协议、同主机、同端口、无账号信息，且公网必须为 `https://`），
+/// 用于安全地跨分区（如大模型 `/compatible-mode/v1` 与语音合成 `/api/v1/...`）复用本机已保存的同源密钥。
+pub fn same_cloud_origin_key(url_a: &str, url_b: &str) -> bool {
+    let clean_a = clean_scheme_and_whitespace(url_a);
+    let clean_b = clean_scheme_and_whitespace(url_b);
+    let (Ok(a), Ok(b)) = (reqwest::Url::parse(&clean_a), reqwest::Url::parse(&clean_b)) else {
+        return false;
+    };
+    if !a.username().is_empty()
+        || a.password().is_some()
+        || !b.username().is_empty()
+        || b.password().is_some()
+    {
+        return false;
+    }
+    if a.scheme() != b.scheme() || a.port_or_known_default() != b.port_or_known_default() {
+        return false;
+    }
+    let (Some(host_a), Some(host_b)) = (a.host_str(), b.host_str()) else {
+        return false;
+    };
+    if !host_a.eq_ignore_ascii_case(host_b) {
+        return false;
+    }
+    if a.scheme() == "https" {
+        return true;
+    }
+    a.scheme() == "http" && is_loopback_host(host_a)
+}
+
+/// 判断当前分区已保存的配置 `saved` 是否与本次输入 `input` 属于同一安全源（防止改换服务商/域名后将旧密钥发往新域名）。
+pub fn saved_provider_matches_input(
+    section: Section,
+    saved: &crate::settings::BuiltinProvider,
+    input: &SectionInput,
+) -> bool {
+    if saved.kind == ProviderKind::Doubao || input.kind == ProviderKind::Doubao {
+        if saved.kind != ProviderKind::Doubao || input.kind != ProviderKind::Doubao {
+            return false;
+        }
+        let default_url = match section {
+            Section::Asr => DOUBAO_ASR_URL,
+            Section::Tts => DOUBAO_TTS_URL,
+            Section::Llm => return false,
+        };
+        let clean_in = clean_url_input(&input.url);
+        let in_url = if clean_in.is_empty() {
+            default_url
+        } else {
+            clean_in.as_str()
+        };
+        let (Ok(a), Ok(b)) = (reqwest::Url::parse(&saved.url), reqwest::Url::parse(in_url)) else {
+            return false;
+        };
+        return a.scheme() == "wss"
+            && b.scheme() == "wss"
+            && a.username().is_empty()
+            && a.password().is_none()
+            && b.username().is_empty()
+            && b.password().is_none()
+            && a.port_or_known_default() == b.port_or_known_default()
+            && a.host_str()
+                .zip(b.host_str())
+                .is_some_and(|(ha, hb)| ha.eq_ignore_ascii_case(hb));
+    }
+    let target_url = match input.kind {
+        ProviderKind::Dashscope => dashscope_tts_url(&input.url),
+        ProviderKind::Openai => models_list_url(&input.url),
+        ProviderKind::Doubao => unreachable!(),
+    };
+    if target_url.is_empty() {
+        return false;
+    }
+    if saved.kind == ProviderKind::Openai
+        && input.kind == ProviderKind::Openai
+        && models_list_url(&saved.url) == target_url
+    {
+        return true;
+    }
+    same_cloud_origin_key(&target_url, &saved.url)
+}
+
 /// 从各分区填写的地址推导模型列表查询地址（`<基础地址>/models`），去掉已补全的具体端点后缀。
 pub fn models_list_url(input: &str) -> String {
     let base = base_service_url(input);
@@ -612,12 +827,35 @@ pub fn resolve_list_request(
                 api_key: input.api_key.trim().to_owned(),
             })
         }
+        ProviderKind::Dashscope => {
+            if section != Section::Tts {
+                return Err(format!(
+                    "{}：千问 / 百炼原生语音接口仅用于语音合成（大模型请选 OpenAI 兼容接口）",
+                    section.label()
+                ));
+            }
+            if is_alibaba_token_plan_url(&input.url) || input.api_key.trim().starts_with("sk-sp-") {
+                return Err("语音合成：千问 / 百炼 Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话，语音合成与声音克隆请填按量付费地址与 sk- 密钥".into());
+            }
+            let url = dashscope_tts_url(&input.url);
+            validate_dashscope_url(&url)
+                .map_err(|error| format!("{}：{error}", section.label()))?;
+            Ok(ResolvedListRequest {
+                section,
+                kind: ProviderKind::Dashscope,
+                url,
+                api_key: input.api_key.trim().to_owned(),
+            })
+        }
     }
 }
 
 /// 分区是否留空（留空时保存不修改该模块）。
 pub fn is_blank(input: &SectionInput) -> bool {
-    input.url.trim().is_empty() && input.model.trim().is_empty() && input.api_key.trim().is_empty()
+    input.url.trim().is_empty()
+        && input.model.trim().is_empty()
+        && input.api_key.trim().is_empty()
+        && (input.kind.is_openai() || input.voice.trim().is_empty())
 }
 
 /// 校验并规范化一个分区（外部服务端链路：只支持 OpenAI 兼容）；留空返回 `Ok(None)`。
@@ -634,9 +872,9 @@ pub fn resolve(section: Section, input: &SectionInput) -> Result<Option<Resolved
     resolve_openai(section, input)
 }
 
-/// 内置语音服务的分区校验（NV7）：识别与合成可选豆包流式；留空返回 `Ok(None)`。
+/// 内置语音服务的分区校验（NV7 / n123）：识别与合成可选豆包流式，合成还可选千问 / 百炼原生接口；留空返回 `Ok(None)`。
 ///
-/// 豆包：地址留空用默认地址（必须是 `wss://`），“模型”留空用默认资源 ID；合成必须填音色。
+/// 豆包 / 千问百炼：地址与模型留空用默认值，合成必须填音色。
 pub fn resolve_builtin(
     section: Section,
     input: &SectionInput,
@@ -647,7 +885,45 @@ pub fn resolve_builtin(
     match input.kind {
         ProviderKind::Openai => resolve_openai(section, input),
         ProviderKind::Doubao => resolve_doubao(section, input).map(Some),
+        ProviderKind::Dashscope => resolve_dashscope(section, input).map(Some),
     }
+}
+
+fn resolve_dashscope(section: Section, input: &SectionInput) -> Result<ResolvedSection, String> {
+    if section != Section::Tts {
+        return Err(format!(
+            "{}：千问 / 百炼原生语音接口仅用于语音合成（大模型请选 OpenAI 兼容接口）",
+            section.label()
+        ));
+    }
+    if is_alibaba_token_plan_url(&input.url) || input.api_key.trim().starts_with("sk-sp-") {
+        return Err("语音合成：千问 / 百炼 Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话，语音合成与声音克隆请填按量付费地址（如 https://maas.qianwenaiapi.com/api/v1）与 sk- 密钥".into());
+    }
+    let url = dashscope_tts_url(&input.url);
+    validate_dashscope_url(&url).map_err(|error| format!("{}：{error}", section.label()))?;
+    let model = input.model.trim();
+    let model = if model.is_empty() {
+        DASHSCOPE_TTS_MODEL.to_owned()
+    } else {
+        model.to_owned()
+    };
+    let voice = input.voice.trim().to_owned();
+    if voice.is_empty() {
+        return Err("语音合成：请选择系统音色，或点“上传录音克隆音色”生成专属音色".into());
+    }
+    let speed = input.speed.unwrap_or(1.0);
+    if !(0.5..=2.0).contains(&speed) {
+        return Err("语音合成：千问 / 百炼语速须在 0.5 ~ 2.0 之间".into());
+    }
+    Ok(ResolvedSection {
+        section,
+        kind: ProviderKind::Dashscope,
+        url,
+        api_key: input.api_key.trim().to_owned(),
+        model,
+        voice,
+        speed,
+    })
 }
 
 fn resolve_doubao(section: Section, input: &SectionInput) -> Result<ResolvedSection, String> {
@@ -2026,6 +2302,19 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
             presets,
             std::collections::BTreeMap::new(),
             "豆包流式无在线列表接口，已列出常用资源 ID，也可按控制台手动填写".into(),
+        );
+    }
+    if resolved.kind == ProviderKind::Dashscope {
+        let presets: Vec<String> = DASHSCOPE_TTS_MODELS
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect();
+        return finish(
+            true,
+            None,
+            presets,
+            std::collections::BTreeMap::new(),
+            "已列出千问 / 百炼支持流式语音合成与声音克隆的模型，也可手动填写其他模型名".into(),
         );
     }
     let cline_llm = section == Section::Llm && is_cline_api_url(&resolved.url);

@@ -1,6 +1,6 @@
 # moss-voice-local
 
-MOSS 内置语音服务的本地模型辅助程序（内置语音技术书 §11.2，NV6；可选模型见 §13.10）：判停（Silero / TEN-VAD）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice）、前端降噪（GTCRN）及尾音语义判停（SmartTurn v3）。
+MOSS 内置语音服务的本地模型辅助程序（内置语音技术书 §11.2，NV6；可选模型见 §13.10）：判停（Silero / TEN-VAD）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice / 中文 VITS：MOSS 原声）、前端降噪（GTCRN）及尾音语义判停（SmartTurn v3）。
 
 ## 许可证
 
@@ -24,7 +24,7 @@ cargo build --release --manifest-path apps/moss-voice-local/Cargo.toml --target-
 
 ## 协议
 
-由 MOSS 启动，经标准输入输出按 `moss-voice-local-proto` 的帧格式（长度前缀的 JSON 头，协议 8）通信；音频负载为16位PCM，声纹向量为192维 f32le。标准输入关闭即退出。判停、识别、合成、降噪/尾音判停、声纹在独立线程（识别与合成推理线程数为逻辑核数的一半，限制在 2–6，可通过 `MOSS_VOICE_THREADS` 覆盖）；宿主声纹另启独立进程，避免声纹超时终止其他语音。`moss-voice-local --version` 打印版本与协议号。协议 8（n110）在打开判停流 / 流式识别流时回 `opened`，如实说明这一路音频是否先经降噪（模型文件名，或降噪器没建起来、改用原始音频）；辅助程序须与本轮 MOSS 一起升级，旧辅助程序会被握手拒绝。
+由 MOSS 启动，经标准输入输出按 `moss-voice-local-proto` 的帧格式（长度前缀的 JSON 头，协议 9）通信；音频负载为16位PCM，声纹向量为192维 f32le。标准输入关闭即退出。判停、识别、合成、降噪/尾音判停、声纹在独立线程（识别与合成推理线程数为逻辑核数的一半，限制在 2–6，可通过 `MOSS_VOICE_THREADS` 覆盖）；宿主声纹另启独立进程，避免声纹超时终止其他语音。`moss-voice-local --version` 打印版本与协议号。协议 8（n110）在打开判停流 / 流式识别流时回 `opened`，如实说明这一路音频是否先经降噪（模型文件名，或降噪器没建起来、改用原始音频）；协议 9（n122）新增 `TtsEngine::Vits`：模型目录放原版 `moss.onnx` 与 sherpa-onnx 官方中文 VITS 的 `tokens.txt` / `lexicon.txt` / `number.fst` / `date.fst` / `phone.fst`，首次加载在目录下 `derived-v1/` 派生 sherpa 可直接加载的文件（模型末尾追加 ONNX 元数据、空格符号改名 `▁`、词表每词前加 `▁` 还原原版前端的词间空格），合成前把百分号、紧跟数字的单位、MOSS、大写缩写整理成中文读法（`src/vits_zh.rs`）。辅助程序须与本轮 MOSS 一起升级，旧辅助程序会被握手拒绝。
 
 **NV8a 升级要求**：本次协议从 2 升为 3，必须按上方命令重建辅助程序，并与新的 MOSS 一起更新；旧辅助程序会被版本握手拒绝，不能沿用。协议 3 增加识别解码选项 / 热词、中间识别文字和 `synthesize_stream` 分段音频响应。X-ASR 可使用 `modified_beam_search`；热词仅采用模型词表能表达的短语，SenseVoice 不支持这一热词通路。分段合成在每个分段生成后返回音频，不宣称是声学模型内部逐采样流式推理。
 

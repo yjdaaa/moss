@@ -88,9 +88,140 @@ export const DOUBAO_MODEL_OPTIONS = {
   ],
 };
 
+/** 千问 AI / 阿里云百炼原生语音合成与声音克隆默认配置及支持模型（n123）。 */
+export const DASHSCOPE_DEFAULTS = {
+  tts: { url: "https://maas.qianwenaiapi.com/api/v1", model: "qwen-audio-3.1-tts-flash" },
+};
+
+export const DASHSCOPE_MODEL_OPTIONS = {
+  tts: [
+    { id: "qwen-audio-3.1-tts-flash", hint: "Qwen-Audio 3.1 Flash · 低延迟流式，支持声音克隆（推荐）" },
+    { id: "qwen-audio-3.1-tts-plus", hint: "Qwen-Audio 3.1 Plus · 高表现力流式，支持声音克隆" },
+    { id: "qwen-audio-3.0-tts-flash", hint: "Qwen-Audio 3.0 Flash · 支持声音克隆" },
+    { id: "qwen-audio-3.0-tts-plus", hint: "Qwen-Audio 3.0 Plus · 支持声音克隆" },
+    { id: "cosyvoice-v3.5-flash", hint: "CosyVoice v3.5 Flash · 支持声音克隆" },
+    { id: "cosyvoice-v3.5-plus", hint: "CosyVoice v3.5 Plus · 支持声音克隆" },
+  ],
+};
+
 export function isDoubao(form) {
   return form?.kind === "doubao";
 }
+
+function isLoopbackHost(hostname) {
+  const clean = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  return clean === "127.0.0.1" || clean === "localhost" || clean === "::1";
+}
+
+export function isDashscope(form) {
+  return form?.kind === "dashscope";
+}
+
+export function dashscopeApiBaseUrl(url) {
+  const cleaned = cleanSchemeAndWhitespace(url);
+  if (!cleaned) return DASHSCOPE_DEFAULTS.tts.url;
+  if (!/^https?:\/\//i.test(cleaned) || /[<>\s]/.test(cleaned)) return cleaned;
+  let parsed;
+  try {
+    parsed = new URL(cleaned);
+  } catch {
+    return cleaned;
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || !parsed.hostname) {
+    return cleaned;
+  }
+  const suffixes = [
+    "/services/audio/tts/SpeechSynthesizer",
+    "/services/audio/tts/speechsynthesizer",
+    "/services/audio/tts/customization",
+    "/services/aigc/multimodal-generation/generation",
+    "/services/aigc/text2audio/generation",
+    "/chat/completions",
+    "/audio/transcriptions",
+    "/audio/speech",
+    "/models",
+    "/compatible-mode/v1",
+    "/api/v1",
+    "/v1",
+  ];
+  let path = trimEndSlash(parsed.pathname || "");
+  while (true) {
+    const matched = suffixes.find((suffix) => path.endsWith(suffix));
+    if (!matched) break;
+    const stripped = trimEndSlash(path.slice(0, -matched.length));
+    if (stripped === path) break;
+    path = stripped;
+  }
+  return `${parsed.origin}${path}/api/v1`;
+}
+
+export function dashscopeTtsUrl(url) {
+  const base = dashscopeApiBaseUrl(url);
+  return base.endsWith("/api/v1") ? `${base}/services/audio/tts/SpeechSynthesizer` : base;
+}
+
+export function sameCloudOriginKey(urlA, urlB) {
+  const cleanA = cleanSchemeAndWhitespace(urlA);
+  const cleanB = cleanSchemeAndWhitespace(urlB);
+  if (!cleanA || !cleanB) return false;
+  try {
+    const a = new URL(cleanA);
+    const b = new URL(cleanB);
+    if (a.username || a.password || b.username || b.password) return false;
+    const portOf = (u) => u.port || (u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "");
+    if (a.protocol !== b.protocol || portOf(a) !== portOf(b)) return false;
+    if (a.hostname.toLowerCase() !== b.hostname.toLowerCase()) return false;
+    if (a.protocol === "https:") return true;
+    return a.protocol === "http:" && isLoopbackHost(a.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** 判断当前分区已保存的 `entry` 是否与正在编辑的 `form` 同源，防止切换服务商后误把旧密钥状态当作新服务商已配置。 */
+export function ownKeyReusable(entry, form = null, section = "") {
+  if (!entry?.key_set) return false;
+  if (!form || (!entry.configured && !entry.url && !entry.kind)) return true;
+  const savedKind = entry.kind || "openai";
+  const formKind = form.kind || "openai";
+  if (savedKind === "doubao" || formKind === "doubao") {
+    if (savedKind !== "doubao" || formKind !== "doubao") return false;
+    const defUrl = DOUBAO_DEFAULTS[section]?.url || "";
+    try {
+      const a = new URL(cleanUrlInput(entry.url) || defUrl);
+      const b = new URL(cleanUrlInput(form.url) || defUrl);
+      return (
+        a.protocol === "wss:" &&
+        b.protocol === "wss:" &&
+        !a.username &&
+        !a.password &&
+        !b.username &&
+        !b.password &&
+        (a.port || "443") === (b.port || "443") &&
+        a.hostname.toLowerCase() === b.hostname.toLowerCase()
+      );
+    } catch {
+      return false;
+    }
+  }
+  const targetUrl = formKind === "dashscope" ? dashscopeTtsUrl(form.url) : modelsListUrl(form.url);
+  if (!targetUrl) return false;
+  if (savedKind === "openai" && formKind === "openai" && modelsListUrl(entry.url) === targetUrl) {
+    return true;
+  }
+  return sameCloudOriginKey(targetUrl, entry.url);
+}
+
+const DASHSCOPE_QWEN_VOICE_PRESETS = [
+  { id: "longanhuan_v3.1", hint: "龙安欢 · 活力自然女声（默认）" },
+  { id: "qiaoxiaojiao_v3.1", hint: "巧小娇 · 灵动俏皮女声" },
+  { id: "longanlingxin_v3.1", hint: "龙安灵心 · 知性播客女声" },
+  { id: "longanfengyue_v3.1", hint: "龙安风悦 · 温柔舒缓女声" },
+  { id: "longfeifei_v3.1", hint: "龙菲菲 · 亲和自然女声" },
+  { id: "xunanchuan_v3.1", hint: "许南川 · 沉稳磁性男声" },
+  { id: "wenhuaizhi_v3.1", hint: "温怀知 · 温和青年男声" },
+  { id: "huozhuoshi_v3.1", hint: "霍卓石 · 浑厚低沉男声" },
+];
 
 const OPENAI_VOICE_PRESETS = [
   { id: "alloy", hint: "Alloy · 中性均衡（默认）" },
@@ -131,6 +262,10 @@ const DOUBAO_V1_VOICE_PRESETS = [
 /** 根据当前语音合成表单（接口类型 + 模型名）返回推荐音色列表，仍支持手动填写任意音色。 */
 export function ttsVoiceOptionsFor(form) {
   const model = String(form?.model || "").trim();
+  if (isDashscope(form)) {
+    if (/^cosyvoice-v3\.5/i.test(model)) return [];
+    return DASHSCOPE_QWEN_VOICE_PRESETS;
+  }
   if (isDoubao(form)) {
     const isV1 = model === "seed-tts-1.0" || model === "volc.service_type.10029";
     return isV1 ? DOUBAO_V1_VOICE_PRESETS : DOUBAO_V2_VOICE_PRESETS;
@@ -144,7 +279,11 @@ export function ttsVoiceOptionsFor(form) {
   return OPENAI_VOICE_PRESETS;
 }
 
-/** 选定合成模型或切换接口类型时，若音色为空或仍是旧模型的 `<oldModel>:<speaker>` 前缀，自动填入新模型默认音色。 */
+const ALL_OPENAI_PRESET_IDS = new Set(OPENAI_VOICE_PRESETS.map((v) => v.id));
+const ALL_DOUBAO_PRESET_IDS = new Set([...DOUBAO_V2_VOICE_PRESETS, ...DOUBAO_V1_VOICE_PRESETS].map((v) => v.id));
+const ALL_DASHSCOPE_PRESET_IDS = new Set(DASHSCOPE_QWEN_VOICE_PRESETS.map((v) => v.id));
+
+/** 选定合成模型或切换接口类型时，若音色为空或仍是其他接口类型的内置预设音色，自动填入新模型默认音色。 */
 export function applyDefaultTtsVoice(form, nextModel = form?.model) {
   const next = { ...form, model: nextModel };
   const options = ttsVoiceOptionsFor(next);
@@ -154,7 +293,23 @@ export function applyDefaultTtsVoice(form, nextModel = form?.model) {
     next.voice = defaultVoice;
     return next;
   }
-  if (!isDoubao(next) && currentVoice.includes(":")) {
+  if (isDashscope(next)) {
+    if (ALL_OPENAI_PRESET_IDS.has(currentVoice) || ALL_DOUBAO_PRESET_IDS.has(currentVoice) || currentVoice.includes(":")) {
+      next.voice = defaultVoice;
+    }
+    return next;
+  }
+  if (isDoubao(next)) {
+    if (ALL_OPENAI_PRESET_IDS.has(currentVoice) || ALL_DASHSCOPE_PRESET_IDS.has(currentVoice) || currentVoice.includes(":")) {
+      next.voice = defaultVoice;
+    }
+    return next;
+  }
+  if (ALL_DOUBAO_PRESET_IDS.has(currentVoice) || ALL_DASHSCOPE_PRESET_IDS.has(currentVoice)) {
+    next.voice = defaultVoice;
+    return next;
+  }
+  if (currentVoice.includes(":")) {
     const suffix = currentVoice.slice(currentVoice.lastIndexOf(":") + 1);
     if (/cosyvoice|moss-ttsd/i.test(String(nextModel || ""))) {
       next.voice = `${String(nextModel).trim()}:${suffix || "anna"}`;
@@ -165,18 +320,30 @@ export function applyDefaultTtsVoice(form, nextModel = form?.model) {
   return next;
 }
 
-/** 切换接口类型：切到豆包时填入默认地址与资源 ID；切回 OpenAI 兼容时清掉豆包地址。密钥、音色保留。 */
+/** 切换接口类型：豆包与千问百炼自动填入默认地址与模型；切回 OpenAI 兼容时清理协议专属地址。 */
 export function switchKind(section, form, kind) {
   const next = { ...form };
   if (kind === "doubao" && DOUBAO_DEFAULTS[section]) {
     next.kind = "doubao";
     if (!/^wss:\/\//i.test(String(next.url || "").trim())) next.url = DOUBAO_DEFAULTS[section].url;
     if (!String(next.model || "").trim() || !isDoubao(form)) next.model = DOUBAO_DEFAULTS[section].model;
-  } else {
-    delete next.kind;
-    if (/^wss?:\/\//i.test(String(next.url || "").trim())) next.url = "";
-    if (isDoubao(form)) next.model = "";
+    return next;
   }
+  if (kind === "dashscope" && section === "tts") {
+    next.kind = "dashscope";
+    const rawUrl = String(next.url || "").trim();
+    next.url = /^https?:\/\//i.test(rawUrl) ? dashscopeApiBaseUrl(rawUrl) : DASHSCOPE_DEFAULTS.tts.url;
+    if (!String(next.model || "").trim() || !isDashscope(form)) {
+      next.model = DASHSCOPE_DEFAULTS.tts.model;
+    }
+    return next;
+  }
+  delete next.kind;
+  if (/^wss?:\/\//i.test(String(next.url || "").trim())) next.url = "";
+  if (isDashscope(form) && /\/api\/v1(?:\/|$)/i.test(String(next.url || "").trim())) {
+    next.url = cleanUrlInput(String(next.url || "").replace(/\/api\/v1.*$/i, ""));
+  }
+  if (isDoubao(form) || isDashscope(form)) next.model = "";
   return next;
 }
 
@@ -369,10 +536,29 @@ export function chatOnlyAudioGatewayError(section, url) {
   return `${gateway} 仅提供大模型对话接口，不支持${label}（无 ${endpoint} 端点）；请在顶部下拉框切换为「本地${label}」，或填写支持语音的服务商（如硅基流动 SiliconFlow、OpenAI、豆包流式）`;
 }
 
-/** 与桌面端一致的最终地址规则：大模型写基础地址，语音识别 / 合成写完整接口地址；豆包留空用默认地址；仅对话网关在语音分区不拼凑虚假音频路径。 */
+/** 检测语音合成误将千问 / 百炼地址留在 OpenAI 兼容模式（无 `/audio/speech` 端点），提示一键切到千问 / 百炼原生接口。 */
+export function alibabaOpenaiTtsMismatch(section, form) {
+  if (section !== "tts" || isDoubao(form) || isDashscope(form)) return null;
+  const raw = cleanSchemeAndWhitespace(form?.url);
+  if (!raw || !/^https?:\/\//i.test(raw)) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (!isAlibabaCompatHost(host) || host.startsWith("token-plan.")) return null;
+    return {
+      message: "千问 / 百炼的 compatible-mode 没有 /audio/speech 语音接口；切换接口类型即可启用流式合成与上传录音克隆音色。",
+      actionLabel: "切换为千问 / 百炼接口",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 与桌面端一致的最终地址规则：大模型写基础地址，语音识别 / 合成写完整接口地址；豆包 / 千问百炼留空用默认地址；仅对话网关在语音分区不拼凑虚假音频路径。 */
 export function finalUrl(section, url, kind) {
   const cleaned = cleanSchemeAndWhitespace(url);
   if (kind === "doubao") return cleaned || DOUBAO_DEFAULTS[section]?.url || "";
+  if (kind === "dashscope") return dashscopeTtsUrl(cleaned);
   if (!cleaned) return "";
   if (section === "llm") {
     const stripped = trimEndSlash(cleaned.replace(/\/chat\/completions$/, ""));
@@ -403,12 +589,38 @@ export function modelsListUrl(url) {
 }
 
 /**
- * 查找其他分区已保存的 OpenAI 兼容服务商信息：
- * - `sameOrigin`: 当前填写的 `formUrl` 与另一个已保存密钥的分区同源（基础 `/models` 地址一致），密钥留空可直接复用；
+ * 查找其他分区已保存的云端服务商信息：
+ * - `sameOrigin`: 当前填写的 `formUrl` 与另一个已保存密钥的分区同源，密钥留空可直接复用；
  * - `reusable`: 当前分区可一键填入的已配置服务商地址与本机密钥来源（优先大模型 `llm`；仅支持大模型的网关不会提供给语音识别/合成）。
  */
-export function findPeerCloudSource(section, status, formUrl = "") {
+export function findPeerCloudSource(section, status, formUrl = "", formKind = "openai") {
   const models = status?.models || {};
+  if (formKind === "dashscope") {
+    if (section !== "tts") return { sameOrigin: null, reusable: null };
+    const targetUrl = dashscopeTtsUrl(formUrl);
+    let sameOrigin = null;
+    let reusable = null;
+    for (const item of SECTIONS) {
+      if (item.key === section) continue;
+      const peer = models[item.key];
+      if (!peer?.configured || peer.kind === "doubao") continue;
+      if (chatOnlyGatewayName(peer.url)) continue;
+      const peerApiBase = dashscopeApiBaseUrl(peer.url);
+      const info = {
+        section: item.key,
+        label: item.label,
+        baseUrl: peerApiBase,
+        keySet: Boolean(peer.key_set),
+      };
+      if (sameCloudOriginKey(targetUrl, peer.url) && peer.key_set && !sameOrigin) {
+        sameOrigin = info;
+      }
+      if (!reusable && !sameCloudOriginKey(targetUrl, peer.url)) {
+        reusable = info;
+      }
+    }
+    return { sameOrigin, reusable };
+  }
   const currentListUrl = modelsListUrl(formUrl);
   let sameOrigin = null;
   let reusable = null;
@@ -417,8 +629,8 @@ export function findPeerCloudSource(section, status, formUrl = "") {
     const peer = models[item.key];
     if (!peer?.configured || peer.kind === "doubao") continue;
     if (section !== "llm" && chatOnlyGatewayName(peer.url)) continue;
-    const peerBase = baseServiceUrl(peer.url);
-    const peerListUrl = modelsListUrl(peer.url);
+    const peerBase = peer.kind === "dashscope" ? completeAlibabaBareRoot(peer.url.replace(/\/api\/v1.*$/i, "")) : baseServiceUrl(peer.url);
+    const peerListUrl = modelsListUrl(peerBase);
     if (!peerBase || !peerListUrl) continue;
     const info = {
       section: item.key,
@@ -438,7 +650,7 @@ export function findPeerCloudSource(section, status, formUrl = "") {
 
 /** 读取模型列表前的地址检查（不要求提前填写模型名与音色）。 */
 export function modelsListError(form, section = "") {
-  if (isDoubao(form)) return "";
+  if (isDoubao(form) || isDashscope(form)) return "";
   const url = cleanUrlInput(form?.url);
   if (!url) return "请先填写地址";
   if (!/^https?:\/\//i.test(url)) return "地址必须以 http:// 或 https:// 开头";
@@ -450,16 +662,31 @@ export function modelsListError(form, section = "") {
 
 /** 是否满足自动读取模型列表的条件：OpenAI 兼容、地址有效，且已有密钥（含同源已存密钥或本机回环服务）。 */
 export function canAutoFetchModels(form, entry, status = null, section = "") {
-  if (isDoubao(form) || modelsListError(form, section)) return false;
+  if (isDoubao(form) || isDashscope(form) || modelsListError(form, section)) return false;
   const cleanedUrl = cleanUrlInput(form?.url);
-  if (String(form?.api_key || "").trim() || entry?.key_set) return true;
+  if (String(form?.api_key || "").trim() || ownKeyReusable(entry, form, section)) return true;
   if (status && section && findPeerCloudSource(section, status, cleanedUrl).sameOrigin) return true;
-  return /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(cleanedUrl);
+  return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/i.test(cleanedUrl);
 }
 /** 当前表单对应的模型列表缓存键（地址或密钥变动后重新读取）。 */
-export function modelsListKey(form, entry, peerKeySet = false) {
+export function modelsListKey(form, entry, peerKeySet = false, section = "") {
   if (isDoubao(form)) return `doubao:${cleanSchemeAndWhitespace(form?.url)}`;
-  return JSON.stringify([modelsListUrl(form?.url), String(form?.api_key || "").trim(), Boolean(entry?.key_set || peerKeySet)]);
+  if (isDashscope(form)) return `dashscope:${dashscopeApiBaseUrl(form?.url)}`;
+  return JSON.stringify([
+    modelsListUrl(form?.url),
+    String(form?.api_key || "").trim(),
+    Boolean(ownKeyReusable(entry, form, section) || peerKeySet),
+  ]);
+}
+/** 千问 / 百炼账号已克隆音色列表缓存键（随规范化地址、输入密钥、本机可用密钥标志与目标模型联动刷新，防止跨账号/模型串台）。 */
+export function dashscopeClonedVoicesKey(form, entry, peerKeySet = false) {
+  if (!isDashscope(form)) return "";
+  return JSON.stringify([
+    dashscopeApiBaseUrl(form?.url),
+    String(form?.api_key || "").trim(),
+    Boolean(ownKeyReusable(entry, form, "tts") || peerKeySet),
+    String(form?.model || "").trim() || DASHSCOPE_DEFAULTS.tts.model,
+  ]);
 }
 const SECTION_USAGE_LABEL = { llm: "大模型", asr: "语音识别", tts: "语音合成" };
 const OMNI_ALL_RE = /(?:qwen[\d.]*-omni|gpt-4o(?:-[a-z0-9]+)*-(?:audio|realtime)|gemini-[\d.]+-[a-z0-9-]*live|glm-4-voice|step-1o|minimax-omni)/i;
@@ -555,18 +782,20 @@ export function emptyForm(section) {
 
 export function isSectionBlank(form) {
   const value = form || {};
-  return !String(value.url || "").trim() && !String(value.model || "").trim() && !String(value.api_key || "").trim();
+  const hasVoiceForPreset = (isDoubao(value) || isDashscope(value)) && Boolean(String(value.voice || "").trim());
+  return !String(value.url || "").trim() && !String(value.model || "").trim() && !String(value.api_key || "").trim() && !hasVoiceForPreset;
 }
 
 /** 提交给桌面端的分区内容（自动清理多行粘贴带入的空白，语速转为数字）。 */
 export function sectionPayload(section, form) {
   const value = form || {};
   const payload = {
-    url: cleanUrlInput(value.url),
+    url: isDashscope(value) ? dashscopeApiBaseUrl(value.url) : cleanUrlInput(value.url),
     api_key: String(value.api_key || "").trim(),
     model: String(value.model || "").trim(),
   };
   if (isDoubao(value)) payload.kind = "doubao";
+  else if (isDashscope(value)) payload.kind = "dashscope";
   if (section === "tts") {
     payload.voice = String(value.voice || "").trim();
     const speed = Number(value.speed);
@@ -598,6 +827,27 @@ export function sectionInputError(section, form) {
     }
     return "";
   }
+  if (payload.kind === "dashscope") {
+    if (section !== "tts") return "千问 / 百炼原生语音接口仅用于语音合成";
+    if (payload.url && !/^https?:\/\//i.test(payload.url)) return "地址必须以 https:// 开头";
+    if (/[<>\s]/.test(payload.url)) return "地址包含空白或占位符";
+    try {
+      const parsed = new URL(payload.url || DASHSCOPE_DEFAULTS.tts.url);
+      if (parsed.username || parsed.password) return "地址不能包含账号或密码";
+      if (parsed.search || parsed.hash) return "地址不能包含查询参数（?）或片段（#），密钥请填在下方 API Key 栏";
+      if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) {
+        return "千问 / 百炼云端地址必须以 https:// 开头（仅本机 127.0.0.1 / localhost 测试允许 http://）";
+      }
+    } catch {
+      return "地址格式无效";
+    }
+    if (payload.api_key.startsWith("sk-sp-") || chatOnlyGatewayName(payload.url)) {
+      return "Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话；语音合成与声音克隆请填按量付费地址与 sk- 密钥";
+    }
+    if (!payload.voice) return "请选择系统音色，或点“上传录音克隆音色”生成专属音色";
+    if (!(payload.speed >= 0.5 && payload.speed <= 2)) return "千问 / 百炼语速须在 0.5 ~ 2.0 之间";
+    return "";
+  }
   if (!payload.url) return "请填写地址";
   if (!/^https?:\/\//i.test(payload.url)) return "地址必须以 http:// 或 https:// 开头";
   if (/[<>\s]/.test(payload.url)) return "地址包含空白或占位符";
@@ -624,9 +874,10 @@ export function canSaveSection(section, form, test) {
 export function builtinModelForm(section, entry) {
   const form = emptyForm(section);
   if (!entry?.configured) return form;
-  form.url = entry.url || "";
+  form.url = entry.kind === "dashscope" ? dashscopeApiBaseUrl(entry.url || "") : entry.url || "";
   form.model = entry.model || "";
   if (entry.kind === "doubao") form.kind = "doubao";
+  else if (entry.kind === "dashscope") form.kind = "dashscope";
   if (section === "tts") {
     form.voice = entry.voice || "";
     form.speed = String(entry.speed ?? 1);
@@ -634,9 +885,9 @@ export function builtinModelForm(section, entry) {
   return form;
 }
 
-/** 密钥输入框的占位文字：已保存或同源已存时说明留空即沿用，绝不显示密钥本身。 */
-export function builtinKeyPlaceholder(entry, sameOriginPeer = null) {
-  if (entry?.key_set) return "已设置（留空则沿用已保存的密钥）";
+/** 密钥输入框的占位文字：已保存（且与当前地址同源）或同源其他分区已存时说明留空即沿用，绝不显示密钥本身。 */
+export function builtinKeyPlaceholder(entry, sameOriginPeer = null, form = null, section = "") {
+  if (ownKeyReusable(entry, form, section)) return "已设置（留空则沿用已保存的密钥）";
   if (sameOriginPeer?.keySet) return `留空将自动复用“${sameOriginPeer.label}”已保存的密钥`;
   return "未设置（本地模型服务可以不填）";
 }
@@ -645,6 +896,6 @@ export function builtinKeyPlaceholder(entry, sameOriginPeer = null) {
 export function builtinModelSummary(section, entry, localOn = false) {
   if (localOn && section !== "llm") return entry?.configured ? "使用本地模型（云端设置作备用）" : "使用本地模型";
   if (!entry?.configured) return "未配置";
-  const kind = entry.kind === "doubao" ? "豆包流式" : "";
+  const kind = entry.kind === "doubao" ? "豆包流式" : entry.kind === "dashscope" ? "千问 / 百炼" : "";
   return ["已配置", kind, entry.model].filter(Boolean).join(" · ");
 }

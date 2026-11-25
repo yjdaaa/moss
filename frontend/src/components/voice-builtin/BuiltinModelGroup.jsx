@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Square, FlaskConical, Trash2, ChevronDown, RefreshCw, Volume2 } from "lucide-react";
+import { Square, FlaskConical, Trash2, ChevronDown, RefreshCw, Upload, Volume2 } from "lucide-react";
 import { showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { SaveBar, VoiceGroup } from "../VoiceLayout.jsx";
 import {
+  DASHSCOPE_MODEL_OPTIONS,
   DOUBAO_MODEL_OPTIONS,
   SECTIONS,
+  alibabaOpenaiTtsMismatch,
   applyDefaultTtsVoice,
   builtinKeyPlaceholder,
   builtinModelForm,
@@ -14,13 +16,16 @@ import {
   canAutoFetchModels,
   canSaveSection,
   chatOnlyAudioGatewayError,
+  dashscopeClonedVoicesKey,
   filterModelOptions,
   finalUrl,
   findPeerCloudSource,
   formDirty,
+  isDashscope,
   isSectionBlank,
   modelsListError,
   modelsListKey,
+  ownKeyReusable,
   presetModelOptionsFor,
   savedNoteText,
   isDoubao,
@@ -55,37 +60,47 @@ function BuiltinModelGroup({ section, builtin }) {
   const [filtering, setFiltering] = useState(false);
   const [showAllModels, setShowAllModels] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [clonedVoices, setClonedVoices] = useState({ key: "", items: [], loading: false });
   const comboRef = useRef(null);
   const voiceComboRef = useRef(null);
+  const cloneFileRef = useRef(null);
   const audioRef = useRef(null);
   const fetchSeq = useRef(0);
+  const voicesSeq = useRef(0);
   const dirty = formDirty(baseline, form);
   const saveEnabled = canSaveSection(section, form, test);
   const doubao = isDoubao(form);
+  const dashscope = isDashscope(form);
+  const presetKind = doubao || dashscope;
   const sourceView = builtinSectionSourceView(section, status);
   const localOn = sourceView.localOn;
   const sectionBusy = Boolean(busy || localBusy);
+  const cloning = localBusy === "builtin-clone-tts";
   const n = (suffix) => `voice-builtin-${suffix}-${section}`;
-  const peerCloud = findPeerCloudSource(section, status, form.url);
+  const peerCloud = findPeerCloudSource(section, status, form.url, form.kind || "openai");
   const peerKeySet = Boolean(peerCloud.sameOrigin?.keySet);
-  const currentListKey = modelsListKey(form, entry, peerKeySet);
+  const ownKeySet = ownKeyReusable(entry, form, section);
+  const currentListKey = modelsListKey(form, entry, peerKeySet, section);
+  const currentVoicesKey = dashscopeClonedVoicesKey(form, entry, peerKeySet);
   const currentCacheKey = remoteCacheKey(section, form, entry, peerKeySet);
-  const cachedModels = !doubao ? REMOTE_MODELS_CACHE.get(currentCacheKey) : null;
-  const presetOptions = !doubao ? presetModelOptionsFor(section, form.url) : [];
-  const liveItems = !doubao
+  const cachedModels = !presetKind ? REMOTE_MODELS_CACHE.get(currentCacheKey) : null;
+  const presetOptions = !presetKind ? presetModelOptionsFor(section, form.url) : [];
+  const liveItems = !presetKind
     ? remoteModels.key === currentListKey && remoteModels.ok !== null
       ? remoteModels.items
       : cachedModels
         ? cachedModels.items
         : null
     : null;
-  const usingPresets = !doubao && (!liveItems || liveItems.length === 0) && presetOptions.length > 0;
+  const usingPresets = !presetKind && (!liveItems || liveItems.length === 0) && presetOptions.length > 0;
   const rawOptions = doubao
     ? DOUBAO_MODEL_OPTIONS[section] || []
-    : liveItems && liveItems.length > 0
-      ? liveItems
-      : presetOptions;
-  const modelSections = !doubao && !usingPresets
+    : dashscope
+      ? DASHSCOPE_MODEL_OPTIONS[section] || []
+      : liveItems && liveItems.length > 0
+        ? liveItems
+        : presetOptions;
+  const modelSections = !presetKind && !usingPresets
     ? remoteModels.key === currentListKey && remoteModels.ok !== null
       ? remoteModels.modelSections
       : cachedModels?.modelSections || null
@@ -93,15 +108,24 @@ function BuiltinModelGroup({ section, builtin }) {
   const allOptions = filterModelOptions(rawOptions, "", false, { section, modelSections });
   const matchedOptions = allOptions.filter((item) => item.sections?.includes(section));
   const anyClassified = allOptions.some((item) => item.sections?.length > 0);
-  const onlyMatched = !doubao && !showAllModels && anyClassified;
+  const onlyMatched = !presetKind && !showAllModels && anyClassified;
   const scopedOptions = onlyMatched ? matchedOptions : allOptions;
   const filteredOptions = filterModelOptions(rawOptions, form.model, filtering, { section, onlyMatched, modelSections });
-  const voiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
-  const gatewayAudioErr = !doubao ? chatOnlyAudioGatewayError(section, form.url) : "";
-  const endpointMismatch = !doubao && section === "llm" ? tokenPlanEndpointMismatch(form.url, form.api_key) : null;
-  const listErr = !doubao && form.url.trim() ? modelsListError(form, section) : "";
+  const baseVoiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
+  const clonedVoiceOptions =
+    dashscope && clonedVoices.key === currentVoicesKey
+      ? clonedVoices.items.map((item) => ({
+          id: item.voice_id,
+          hint: `已克隆专属音色${item.target_model ? ` · 绑定 ${item.target_model}` : ""}`,
+        }))
+      : [];
+  const voiceOptions = [...clonedVoiceOptions, ...baseVoiceOptions.filter((opt) => !clonedVoiceOptions.some((c) => c.id === opt.id))];
+  const gatewayAudioErr = !presetKind ? chatOnlyAudioGatewayError(section, form.url) : "";
+  const alibabaTtsHint = section === "tts" ? alibabaOpenaiTtsMismatch(section, form) : null;
+  const endpointMismatch = !presetKind && section === "llm" ? tokenPlanEndpointMismatch(form.url, form.api_key) : null;
+  const listErr = !presetKind && form.url.trim() ? modelsListError(form, section) : "";
   const inlineListError =
-    !doubao && remoteModels.key === currentListKey && remoteModels.ok === false && remoteModels.detail
+    !presetKind && remoteModels.key === currentListKey && remoteModels.ok === false && remoteModels.detail
       ? remoteModels.detail
       : "";
 
@@ -167,7 +191,7 @@ function BuiltinModelGroup({ section, builtin }) {
   };
 
   const fetchModels = async ({ auto = false, nextForm = form } = {}) => {
-    if (isDoubao(nextForm)) return;
+    if (isDoubao(nextForm) || isDashscope(nextForm)) return;
     const err = modelsListError(nextForm, section);
     if (err) {
       if (!auto) setRemoteModels({ key: "", items: [], modelSections: null, detail: err, ok: false, loading: false });
@@ -240,7 +264,7 @@ function BuiltinModelGroup({ section, builtin }) {
 
   useEffect(() => {
     // 仅在用户当前编辑表单（dirty）且空闲时防抖自动拉取，避免后台隐藏标签或测试/保存中途并发触发 `/models`
-    if (!dirty || sectionBusy || doubao || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
+    if (!dirty || sectionBusy || presetKind || endpointMismatch || !canAutoFetchModels(form, entry, status, section)) return undefined;
     if (remoteModels.key === currentListKey && (remoteModels.loading || remoteModels.ok !== null)) return undefined;
     // 停手 1 秒再读：地址、密钥还没输完时不发请求，免得先报一次鉴权失败
     const timer = setTimeout(() => {
@@ -248,11 +272,11 @@ function BuiltinModelGroup({ section, builtin }) {
     }, MODELS_AUTO_FETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, sectionBusy, doubao, Boolean(endpointMismatch), currentListKey]);
+  }, [dirty, sectionBusy, presetKind, Boolean(endpointMismatch), currentListKey]);
 
   // 裸域名只在 /v1 下读到列表：对话不会自动补 /v1，提示一键改用（后端 `suggested_url`）
   const v1Suggestion =
-    !doubao && remoteModels.key === currentListKey && remoteModels.suggestedUrl
+    !presetKind && remoteModels.key === currentListKey && remoteModels.suggestedUrl
       ? remoteModels.suggestedUrl
       : "";
   const applyV1Suggestion = () => {
@@ -273,15 +297,115 @@ function BuiltinModelGroup({ section, builtin }) {
     fetchModels({ auto: true, nextForm });
   };
 
+  const applyDashscopeKind = () => {
+    setForm((all) => applyDefaultTtsVoice(switchKind("tts", all, "dashscope")));
+    setMenuOpen(false);
+    setVoiceMenuOpen(false);
+    setFiltering(false);
+    setTest(null);
+    setResult(null);
+  };
+
+  const loadClonedVoices = async (targetForm = form) => {
+    if (!isDashscope(targetForm)) return;
+    const targetPeer = findPeerCloudSource("tts", status, targetForm.url, "dashscope");
+    const targetPeerKeySet = Boolean(targetPeer.sameOrigin?.keySet);
+    const targetOwnKeySet = ownKeyReusable(entry, targetForm, "tts");
+    const hasKey = Boolean(String(targetForm.api_key || "").trim() || targetOwnKeySet || targetPeerKeySet);
+    if (!hasKey) return;
+    const reqKey = dashscopeClonedVoicesKey(targetForm, entry, targetPeerKeySet);
+    if (clonedVoices.loading && clonedVoices.key === reqKey) return;
+    const seq = ++voicesSeq.current;
+    setClonedVoices((prev) => ({ key: reqKey, items: prev.key === reqKey ? prev.items : [], loading: true }));
+    try {
+      const res = await voiceApi.ttsClonedVoices(sectionPayload("tts", targetForm));
+      if (voicesSeq.current !== seq) return;
+      const items = Array.isArray(res?.voices) ? res.voices : [];
+      setClonedVoices({ key: reqKey, items, loading: false });
+    } catch {
+      if (voicesSeq.current !== seq) return;
+      setClonedVoices({ key: reqKey, items: [], loading: false });
+    }
+  };
+
+  const handleCloneFilePick = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 7 * 1024 * 1024) {
+      setTest({
+        ok: false,
+        detail: "参考录音文件不能超过 7 MB（推荐上传 10～20 秒清晰、无背景音乐的单人说话 WAV / MP3 / M4A）",
+        fingerprint: "",
+      });
+      return;
+    }
+    const snapshotForm = { ...form };
+    stopAudioPreview();
+    setVoiceMenuOpen(false);
+    setResult(null);
+    setLocalBusy("builtin-clone-tts");
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const dataUrl = String(reader.result || "");
+        const payload = {
+          ...sectionPayload("tts", snapshotForm),
+          file_name: file.name,
+          audio_base64: dataUrl,
+        };
+        const outcome = await voiceApi.ttsVoiceClone(payload);
+        if (outcome?.ok && outcome?.voice_id) {
+          const nextForm = {
+            ...snapshotForm,
+            kind: "dashscope",
+            model: outcome.model || snapshotForm.model,
+            voice: outcome.voice_id,
+          };
+          const previewReady = outcome.preview_ok !== false && Boolean(outcome.audio_data_url);
+          const fingerprint = previewReady ? sectionFingerprint("tts", nextForm) : "";
+          setForm((prev) =>
+            isDashscope(prev)
+              ? {
+                  ...prev,
+                  model: outcome.model || prev.model,
+                  voice: outcome.voice_id,
+                }
+              : prev,
+          );
+          setTest({ ...outcome, ok: previewReady, fingerprint });
+          loadClonedVoices(nextForm);
+        } else {
+          setTest({
+            ok: false,
+            detail: outcome?.detail || "声音克隆未通过",
+            fingerprint: "",
+          });
+        }
+      } catch (error) {
+        setTest({ ok: false, detail: voiceErrorText(error), fingerprint: "" });
+      } finally {
+        setLocalBusy("");
+      }
+    };
+    reader.onerror = () => {
+      setLocalBusy("");
+      setTest({ ok: false, detail: "读取参考录音文件失败", fingerprint: "" });
+    };
+    reader.readAsDataURL(file);
+  };
+
   const reusePeerSource = (event) => {
     event?.stopPropagation?.();
     if (!peerCloud.reusable) return;
     const nextForm = { ...form, url: peerCloud.reusable.baseUrl };
     setForm(nextForm);
     setResult(null);
-    setMenuOpen(true);
-    setFiltering(false);
-    fetchModels({ auto: true, nextForm });
+    if (!presetKind) {
+      setMenuOpen(true);
+      setFiltering(false);
+      fetchModels({ auto: true, nextForm });
+    }
   };
 
   const pickModel = (modelId) => {
@@ -299,7 +423,7 @@ function BuiltinModelGroup({ section, builtin }) {
   const handleModelFocus = () => {
     setFiltering(false);
     setActiveIndex(-1);
-    if (doubao || allOptions.length > 0 || Boolean(form.url.trim()) || canAutoFetchModels(form, entry, status, section)) {
+    if (presetKind || allOptions.length > 0 || Boolean(form.url.trim()) || canAutoFetchModels(form, entry, status, section)) {
       setMenuOpen(true);
       if (!endpointMismatch) fetchModels({ auto: true });
     }
@@ -381,7 +505,9 @@ function BuiltinModelGroup({ section, builtin }) {
 
   const cancelInflightFetch = () => {
     fetchSeq.current += 1;
+    voicesSeq.current += 1;
     setRemoteModels((prev) => (prev.loading ? { ...prev, loading: false } : prev));
+    setClonedVoices((prev) => (prev.loading ? { ...prev, loading: false } : prev));
   };
 
   const save = async () => {
@@ -397,10 +523,18 @@ function BuiltinModelGroup({ section, builtin }) {
       const nextForm = builtinModelForm(section, nextEntry);
       setStatus(next);
       setForm(nextForm);
-      const nextPeer = findPeerCloudSource(section, next, nextForm.url);
-      const nextListKey = modelsListKey(nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
-      const nextCacheKey = remoteCacheKey(section, nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
+      const nextPeer = findPeerCloudSource(section, next, nextForm.url, nextForm.kind || "openai");
+      const nextPeerKeySet = Boolean(nextPeer.sameOrigin?.keySet);
+      const nextListKey = modelsListKey(nextForm, nextEntry, nextPeerKeySet, section);
+      const nextCacheKey = remoteCacheKey(section, nextForm, nextEntry, nextPeerKeySet);
       fetchSeq.current += 1;
+      voicesSeq.current += 1;
+      if (!isDashscope(nextForm)) {
+        setClonedVoices({ key: "", items: [], loading: false });
+      } else {
+        const nextVoicesKey = dashscopeClonedVoicesKey(nextForm, nextEntry, nextPeerKeySet);
+        setClonedVoices((prev) => ({ key: nextVoicesKey, items: prev.items, loading: false }));
+      }
       setRemoteModels((prev) => {
         if (prev.key === savedFromListKey && prev.items.length > 0) {
           REMOTE_MODELS_CACHE.set(nextCacheKey, {
@@ -437,6 +571,7 @@ function BuiltinModelGroup({ section, builtin }) {
       setStatus(next);
       setForm(builtinModelForm(section, next.models?.[section]));
       setRemoteModels({ key: "", items: [], modelSections: null, suggestedUrl: "", detail: "", ok: null, loading: false });
+      setClonedVoices({ key: "", items: [], loading: false });
       setTest(null);
       setResult({ ok: true, text: `已删除${current.label}设置与密钥 · ${restartEffect(next)}` });
     } catch (error) {
@@ -467,7 +602,8 @@ function BuiltinModelGroup({ section, builtin }) {
             <span>接口类型</span>
             <select
               className="text-input"
-              value={doubao ? "doubao" : "openai"}
+              disabled={cloning}
+              value={doubao ? "doubao" : dashscope ? "dashscope" : "openai"}
               onChange={(e) => {
                 setForm((all) => {
                   const switched = switchKind(section, all, e.target.value);
@@ -476,18 +612,24 @@ function BuiltinModelGroup({ section, builtin }) {
                 setMenuOpen(false);
                 setVoiceMenuOpen(false);
                 setFiltering(false);
+                setTest(null);
                 setResult(null);
               }}
               id={n("model-kind")}
             >
               <option value="openai">OpenAI 兼容（整段{section === "asr" ? "识别" : "合成"}）</option>
               <option value="doubao">豆包流式（{section === "asr" ? "边说边识别" : "边合成边播放"}，首句更快）</option>
+              {section === "tts" && (
+                <option value="dashscope">千问 / 百炼（流式合成 · 支持声音克隆）</option>
+              )}
             </select>
           </label>
         )}
         <div className="voice-field voice-wide">
           <div className="voice-field-head">
-            <label htmlFor={n("model-url")}>地址（{doubao ? "豆包 WebSocket 地址，一般不用改" : current.hint}）</label>
+            <label htmlFor={n("model-url")}>
+              地址（{doubao ? "豆包 WebSocket 地址，一般不用改" : dashscope ? "千问或百炼地址，填根域名或大模型地址会自动转换" : current.hint}）
+            </label>
             {!doubao && peerCloud.reusable && (
               <button
                 type="button"
@@ -502,6 +644,7 @@ function BuiltinModelGroup({ section, builtin }) {
           </div>
           <input
             className="text-input mono"
+            disabled={cloning}
             value={form.url}
             onChange={(e) => update("url", e.target.value)}
             spellCheck="false"
@@ -510,12 +653,19 @@ function BuiltinModelGroup({ section, builtin }) {
           />
         </div>
         <label>
-          <span>{doubao ? "API Key" : "密钥"}</span>
+          <span>{doubao || dashscope ? "API Key" : "密钥"}</span>
           <input
             className="text-input"
             type="password"
+            disabled={cloning}
             value={form.api_key}
-            placeholder={doubao && !entry?.key_set ? "控制台 API Key；旧版控制台填“APP ID:Access Token”" : builtinKeyPlaceholder(entry, peerCloud.sameOrigin)}
+            placeholder={
+              doubao && !ownKeySet
+                ? "控制台 API Key；旧版控制台填“APP ID:Access Token”"
+                : dashscope && !ownKeySet && !peerKeySet
+                  ? "千问 / 百炼按量付费 API Key（sk- 开头）"
+                  : builtinKeyPlaceholder(entry, peerCloud.sameOrigin, form, section)
+            }
             onChange={(e) => update("api_key", e.target.value)}
             autoComplete="new-password"
             spellCheck="false"
@@ -534,7 +684,7 @@ function BuiltinModelGroup({ section, builtin }) {
         >
           <div className="voice-field-head">
             <label htmlFor={n("model-name")}>{doubao ? "资源 ID（留空用默认）" : "模型"}</label>
-            {!doubao && (
+            {!presetKind && (
               <button
                 type="button"
                 className="voice-link-btn"
@@ -561,17 +711,20 @@ function BuiltinModelGroup({ section, builtin }) {
           <div className="voice-combo-wrap">
             <input
               className="text-input mono voice-combo-input"
+              disabled={cloning}
               value={form.model}
               placeholder={
                 doubao
                   ? "下拉选择或手动填写资源 ID"
-                  : usingPresets
-                    ? `已预置 ${allOptions.length} 个常用模型，点击选择或填密钥读取全量`
-                    : allOptions.length > 0
-                      ? onlyMatched && matchedOptions.length < allOptions.length
-                        ? `已筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个），点击选择或输入查询`
-                        : `已读 ${allOptions.length} 个，输入关键词查询或下拉选择`
-                      : "输入关键词筛选，或填好地址密钥读取"
+                  : dashscope
+                    ? "下拉选择或手动填写千问 / 百炼语音模型"
+                    : usingPresets
+                      ? `已预置 ${allOptions.length} 个常用模型，点击选择或填密钥读取全量`
+                      : allOptions.length > 0
+                        ? onlyMatched && matchedOptions.length < allOptions.length
+                          ? `已筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个），点击选择或输入查询`
+                          : `已读 ${allOptions.length} 个，输入关键词查询或下拉选择`
+                        : "输入关键词筛选，或填好地址密钥读取"
               }
               onFocus={handleModelFocus}
               onChange={handleModelChange}
@@ -596,9 +749,9 @@ function BuiltinModelGroup({ section, builtin }) {
               <div className="voice-combo-meta">
                 {remoteModels.loading ? (
                   <span>正在读取服务商支持的全部模型…</span>
-                ) : !doubao && listErr ? (
+                ) : !presetKind && listErr ? (
                   <span className="voice-combo-err">{listErr}</span>
-                ) : !doubao && remoteModels.ok === false && remoteModels.detail ? (
+                ) : !presetKind && remoteModels.ok === false && remoteModels.detail ? (
                   <span className="voice-combo-err">
                     {remoteModels.detail}（{usingPresets ? "下方仍可选择预置模型或手动输入" : "仍可直接手动输入模型名"}）
                   </span>
@@ -611,19 +764,21 @@ function BuiltinModelGroup({ section, builtin }) {
                     <span>
                       {doubao
                         ? `常用资源 ID（${allOptions.length} 个）`
-                        : matchedOptions.length === 0
-                          ? onlyMatched
-                            ? `该服务商返回的 ${allOptions.length} 个模型均为大模型，无${current.label}模型`
-                            : `未发现专用${current.label}模型，已显示全部 ${allOptions.length} 个`
-                          : matchedOptions.length < allOptions.length
+                        : dashscope
+                          ? `支持流式合成与声音克隆的模型（${allOptions.length} 个）`
+                          : matchedOptions.length === 0
                             ? onlyMatched
-                              ? `已自动筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个）`
-                              : `全部 ${allOptions.length} 个模型（含 ${matchedOptions.length} 个${current.label}模型）`
-                            : `共 ${allOptions.length} 个${current.label}模型`}
+                              ? `该服务商返回的 ${allOptions.length} 个模型均为大模型，无${current.label}模型`
+                              : `未发现专用${current.label}模型，已显示全部 ${allOptions.length} 个`
+                            : matchedOptions.length < allOptions.length
+                              ? onlyMatched
+                                ? `已自动筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个）`
+                                : `全部 ${allOptions.length} 个模型（含 ${matchedOptions.length} 个${current.label}模型）`
+                              : `共 ${allOptions.length} 个${current.label}模型`}
                       {filtering && filteredOptions.length !== scopedOptions.length ? ` · 筛出 ${filteredOptions.length} 个` : matchedOptions.length > 0 || !onlyMatched ? " · 输入关键词可查询" : ""}
                     </span>
                     <span className="voice-actions">
-                      {!doubao && matchedOptions.length < allOptions.length && (
+                      {!presetKind && matchedOptions.length < allOptions.length && (
                         <button
                           type="button"
                           className="voice-link-btn"
@@ -640,7 +795,7 @@ function BuiltinModelGroup({ section, builtin }) {
                       )}
                     </span>
                   </>
-                ) : !doubao && remoteModels.ok === true ? (
+                ) : !presetKind && remoteModels.ok === true ? (
                   <span>{remoteModels.detail || "未返回可选模型，请直接手动输入"}</span>
                 ) : (
                   <span>先填好上方地址与密钥，点“读取模型”即可拉取全部模型</span>
@@ -686,14 +841,51 @@ function BuiltinModelGroup({ section, builtin }) {
               }}
             >
               <div className="voice-field-head">
-                <label htmlFor={n("model-voice")}>{doubao ? "音色 ID（可下拉选常用或手填）" : "音色（可下拉选常用或手填）"}</label>
+                <label htmlFor={n("model-voice")}>
+                  {doubao ? "音色 ID（可下拉选常用或手填）" : dashscope ? "音色 ID（系统音色或克隆音色）" : "音色（可下拉选常用或手填）"}
+                </label>
+                {dashscope && (
+                  <>
+                    <input
+                      ref={cloneFileRef}
+                      type="file"
+                      accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4"
+                      hidden
+                      onChange={handleCloneFilePick}
+                      id={n("voice-clone-input")}
+                    />
+                    <button
+                      type="button"
+                      className="voice-link-btn"
+                      disabled={sectionBusy}
+                      onClick={() => cloneFileRef.current?.click()}
+                      title="选择一段 5～20 秒清晰无伴奏的单人说话录音（WAV / MP3 / M4A，自有或获授权音频），自动克隆并生成专属音色 ID"
+                      id={n("voice-clone-btn")}
+                    >
+                      <Upload size={11} className={localBusy === "builtin-clone-tts" ? "voice-spin" : ""} />
+                      {localBusy === "builtin-clone-tts" ? "正在克隆音色…" : "上传录音克隆音色"}
+                    </button>
+                  </>
+                )}
               </div>
               <div className="voice-combo-wrap">
                 <input
                   className="text-input mono voice-combo-input"
+                  disabled={cloning}
                   value={form.voice}
-                  placeholder={voiceOptions[0] ? `如 ${voiceOptions[0].id}` : "填写或下拉选择音色"}
-                  onFocus={() => setVoiceMenuOpen(true)}
+                  placeholder={
+                    dashscope && voiceOptions.length === 0
+                      ? "点右上角“上传录音克隆音色”生成专属音色 ID"
+                      : voiceOptions[0]
+                        ? `如 ${voiceOptions[0].id}`
+                        : "填写或下拉选择音色"
+                  }
+                  onFocus={() => {
+                    setVoiceMenuOpen(true);
+                    if (dashscope && clonedVoices.key !== currentVoicesKey) {
+                      loadClonedVoices(form);
+                    }
+                  }}
                   onChange={(e) => update("voice", e.target.value)}
                   spellCheck="false"
                   autoComplete="off"
@@ -704,16 +896,28 @@ function BuiltinModelGroup({ section, builtin }) {
                   className="voice-combo-toggle"
                   aria-label="展开常用音色列表"
                   aria-expanded={voiceMenuOpen}
-                  onClick={() => setVoiceMenuOpen((prev) => !prev)}
+                  onClick={() => {
+                    const nextOpen = !voiceMenuOpen;
+                    setVoiceMenuOpen(nextOpen);
+                    if (nextOpen && dashscope) {
+                      loadClonedVoices(form);
+                    }
+                  }}
                   id={n("voice-toggle")}
                 >
                   <ChevronDown size={14} />
                 </button>
               </div>
-              {voiceMenuOpen && voiceOptions.length > 0 && (
+              {voiceMenuOpen && (voiceOptions.length > 0 || (dashscope && clonedVoices.loading)) && (
                 <div className="voice-combo-menu" role="listbox" aria-label="语音合成常用音色" id={n("voice-options")}>
                   <div className="voice-combo-meta">
-                    <span>推荐常用音色（共 {voiceOptions.length} 个，也可直接手动输入）</span>
+                    <span>
+                      {dashscope && clonedVoices.loading
+                        ? "正在读取账号已克隆音色…"
+                        : dashscope && clonedVoiceOptions.length > 0
+                          ? `已含账号下 ${clonedVoiceOptions.length} 个克隆音色（共 ${voiceOptions.length} 个可选）`
+                          : `推荐常用音色（共 ${voiceOptions.length} 个，也可直接手动输入）`}
+                    </span>
                   </div>
                   <div className="voice-combo-list">
                     {voiceOptions.map((opt) => (
@@ -737,8 +941,8 @@ function BuiltinModelGroup({ section, builtin }) {
               )}
             </div>
             <label>
-              <span>{doubao ? "语速（0.5 ~ 2.0）" : "语速（0.25 ~ 4.0）"}</span>
-              <input className="text-input" inputMode="decimal" value={form.speed} onChange={(e) => update("speed", e.target.value)} />
+              <span>{doubao || dashscope ? "语速（0.5 ~ 2.0）" : "语速（0.25 ~ 4.0）"}</span>
+              <input className="text-input" disabled={cloning} inputMode="decimal" value={form.speed} onChange={(e) => update("speed", e.target.value)} />
             </label>
           </>
         )}
@@ -750,6 +954,20 @@ function BuiltinModelGroup({ section, builtin }) {
       {gatewayAudioErr && (
         <div className="voice-hint voice-hint--bad" id={n("gateway-audio-error")}>
           {gatewayAudioErr}
+        </div>
+      )}
+      {alibabaTtsHint && !gatewayAudioErr && (
+        <div className="voice-hint voice-hint--warn" id={n("alibaba-tts-hint")}>
+          <span>{alibabaTtsHint.message}</span>
+          <button
+            type="button"
+            className="btn btn-ghost voice-inline-btn"
+            onClick={applyDashscopeKind}
+            disabled={sectionBusy}
+            id={n("use-dashscope")}
+          >
+            {alibabaTtsHint.actionLabel}
+          </button>
         </div>
       )}
       {endpointMismatch && (

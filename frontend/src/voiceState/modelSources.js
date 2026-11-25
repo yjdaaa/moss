@@ -304,7 +304,7 @@ export function builtinSectionSourceView(section, status) {
   const defaultOptionLabel = isVad
     ? "内置能量判停（免下载）"
     : cloudConfigured
-      ? `云端（${entry?.kind === "doubao" ? `豆包 · ${cloudModel}` : cloudModel}）`
+      ? `云端（${entry?.kind === "doubao" ? `豆包 · ${cloudModel}` : entry?.kind === "dashscope" ? `千问 · ${cloudModel}` : cloudModel}）`
       : "云端（未配置）";
   const colab = status?.local?.colab;
   const colabActive = Boolean(colab?.active);

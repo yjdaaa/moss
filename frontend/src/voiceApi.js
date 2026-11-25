@@ -111,6 +111,9 @@ export const voiceApi = {
   // 本地合成模型支持的语言包、全部音色列表及本机缓存试听
   localTtsVoices: (modelId) => invokeVoice("voice_builtin_models_list", { section: "local_tts", input: { model_id: modelId } }),
   localTtsPreview: (modelId, speaker) => invokeVoice("voice_builtin_models_test", { section: "local_tts", input: { model_id: modelId, speaker } }),
+  // 千问 / 百炼原生语音合成：上传本机录音创建复刻音色并生成试听、读取账号已复刻音色列表
+  ttsVoiceClone: (input) => invokeVoice("voice_builtin_models_test", { section: "tts_clone", input }),
+  ttsClonedVoices: (input) => invokeVoice("voice_builtin_models_list", { section: "tts_voices", input }),
   // 2026-11-07：自动准备 Laya 的 Python 运行环境（action: start / cancel），进度在 builtinStatus().local.laya_setup
   localLayaSetup: (action) => invokeVoice("voice_local_laya_setup", { action }),
   // 严格模式开关：写运行目录 .env，开与关都立即生效（n27）

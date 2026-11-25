@@ -48,7 +48,44 @@ fn test_doubao(resolved: &moss_voice::models::ResolvedSection) -> moss_voice::Te
         ok,
         elapsed_ms: started.elapsed().as_millis() as u64,
         http_status: None,
-        final_url: resolved.url.clone(),
+        final_url: moss_voice::redact::redact_line(&resolved.url),
+        detail,
+        audio_data_url,
+        thinking_off: None,
+    }
+}
+
+/// 测试千问 / 百炼原生流式语音合成（n123）：合成短句并返回 WAV Data URL 供页面直接试听，不含密钥。
+fn test_dashscope(resolved: &moss_voice::models::ResolvedSection) -> moss_voice::TestResult {
+    let started = std::time::Instant::now();
+    let outcome: Result<(String, Option<String>), moss_voice_providers::ProviderError> =
+        crate::block_on(async {
+            let tts = DashscopeTts::new(
+                &resolved.url,
+                &resolved.api_key,
+                &resolved.model,
+                &resolved.voice,
+                resolved.speed as f32,
+            )?;
+            let pcm = tts.synthesize("你好，我是 MOSS。").await?;
+            let seconds = pcm.samples.len() as f64 / pcm.sample_rate as f64;
+            let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+            let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
+            Ok((
+                format!("连接成功，合成了 {seconds:.1} 秒音频（流式）"),
+                Some(data_url),
+            ))
+        });
+    let (ok, detail, audio_data_url) = match outcome {
+        Ok((detail, audio_data_url)) => (true, detail, audio_data_url),
+        Err(error) => (false, error.to_string(), None),
+    };
+    moss_voice::TestResult {
+        section: resolved.section,
+        ok,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        http_status: None,
+        final_url: moss_voice::redact::redact_line(&resolved.url),
         detail,
         audio_data_url,
         thinking_off: None,
@@ -844,14 +881,53 @@ impl BuiltinVoice {
     }
 
     /// 测试一个分区的连接：密钥留空时用已保存的密钥。结果不含密钥。
-    /// 读取当前分区密钥；若当前分区尚未保存密钥且填写的地址与另一个已保存 OpenAI 兼容分区同源（基础 `/models` 地址一致），自动沿用同源分区的本机密钥。
+    /// 读取当前分区密钥；若当前分区尚未保存密钥且填写的地址与另一个已保存分区严格同源（OpenAI 兼容同基础 `/models` 地址，
+    /// 或千问 / 百炼语音合成与大模型共享同一 HTTPS 主机端口），自动沿用同源分区的本机密钥。
     pub(super) fn secret_or_same_origin(
         &self,
         section: Section,
         input: &SectionInput,
     ) -> Result<Option<String>, CenterError> {
+        let settings = self.settings();
         if let Some(own) = self.secret(section)?.filter(|value| !value.is_empty()) {
-            return Ok(Some(own));
+            let own_usable = match settings.builtin_models.get(section) {
+                Some(saved) => {
+                    moss_voice::models::saved_provider_matches_input(section, saved, input)
+                }
+                None => true,
+            };
+            if own_usable
+                && !(input.kind == ProviderKind::Dashscope && own.trim().starts_with("sk-sp-"))
+            {
+                return Ok(Some(own));
+            }
+        }
+        if input.kind == ProviderKind::Dashscope {
+            if section != Section::Tts {
+                return Ok(None);
+            }
+            let target_url = moss_voice::models::dashscope_tts_url(&input.url);
+            if moss_voice::models::is_alibaba_token_plan_url(&target_url) {
+                return Ok(None);
+            }
+            for other in Section::ALL {
+                if other == section {
+                    continue;
+                }
+                let Some(provider) = settings.builtin_models.get(other) else {
+                    continue;
+                };
+                if provider.kind == ProviderKind::Doubao {
+                    continue;
+                }
+                if moss_voice::models::same_cloud_origin_key(&target_url, &provider.url)
+                    && let Some(peer_key) = self.secret(other)?.filter(|value| !value.is_empty())
+                    && !peer_key.trim().starts_with("sk-sp-")
+                {
+                    return Ok(Some(peer_key));
+                }
+            }
+            return Ok(None);
         }
         if input.kind != ProviderKind::Openai {
             return Ok(None);
@@ -865,7 +941,6 @@ impl BuiltinVoice {
         if target_list_url.is_empty() {
             return Ok(None);
         }
-        let settings = self.settings();
         for other in Section::ALL {
             if other == section {
                 continue;
@@ -875,6 +950,12 @@ impl BuiltinVoice {
             };
             if provider.kind == ProviderKind::Openai
                 && moss_voice::models::models_list_url(&provider.url) == target_list_url
+                && let Some(peer_key) = self.secret(other)?.filter(|value| !value.is_empty())
+            {
+                return Ok(Some(peer_key));
+            }
+            if provider.kind == ProviderKind::Dashscope
+                && moss_voice::models::same_cloud_origin_key(&target_list_url, &provider.url)
                 && let Some(peer_key) = self.secret(other)?.filter(|value| !value.is_empty())
             {
                 return Ok(Some(peer_key));
@@ -915,8 +996,221 @@ impl BuiltinVoice {
                 result
             }
             ProviderKind::Doubao => test_doubao(&resolved),
+            ProviderKind::Dashscope => test_dashscope(&resolved),
         };
         serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+    }
+
+    /// 千问 / 百炼上传本机参考录音创建复刻音色，就绪后自动合成一句试听语音返回（结果不含密钥）。
+    pub fn tts_voice_clone(&self, input: &Value) -> Result<Value, CenterError> {
+        let started = std::time::Instant::now();
+        let raw_url = input
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let typed_key = input
+            .get("api_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let raw_model = input
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let speed = input.get("speed").and_then(Value::as_f64).unwrap_or(1.0);
+        if !(0.5..=2.0).contains(&speed) {
+            return Err(CenterError::new(
+                "model_input_invalid",
+                400,
+                "千问 / 百炼语速须在 0.5 ~ 2.0 之间",
+            ));
+        }
+        let file_name = input
+            .get("file_name")
+            .and_then(Value::as_str)
+            .unwrap_or("moss.wav");
+        let prefix = input
+            .get("prefix")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(file_name);
+        let audio_b64 = input
+            .get("audio_base64")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if moss_voice::models::is_alibaba_token_plan_url(&raw_url)
+            || typed_key.starts_with("sk-sp-")
+        {
+            return Err(CenterError::new(
+                "model_input_invalid",
+                400,
+                "Token Plan 套餐端点与 sk-sp- 密钥仅支持大模型对话；声音克隆请填按量付费地址与 sk- 密钥",
+            ));
+        }
+        let target_model = moss_voice_providers::dashscope::validate_clone_target_model(&raw_model)
+            .map_err(|e| CenterError::new("model_input_invalid", 400, e.to_string()))?;
+        let audio_uri =
+            moss_voice_providers::dashscope::prepare_clone_audio_data_uri(audio_b64, file_name)
+                .map_err(|e| CenterError::new("model_input_invalid", 400, e.to_string()))?;
+
+        let final_url = moss_voice::models::dashscope_tts_url(&raw_url);
+        moss_voice::models::validate_dashscope_url(&final_url).map_err(|msg| {
+            CenterError::new("model_input_invalid", 400, format!("语音合成：{msg}"))
+        })?;
+        let redacted_final_url = moss_voice::redact::redact_line(&final_url);
+
+        let probe_input = SectionInput {
+            kind: ProviderKind::Dashscope,
+            url: raw_url.clone(),
+            api_key: typed_key.clone(),
+            model: target_model.clone(),
+            voice: "placeholder".into(),
+            speed: Some(speed),
+        };
+        let api_key = if !typed_key.is_empty() {
+            typed_key
+        } else {
+            self.secret_or_same_origin(Section::Tts, &probe_input)?
+                .unwrap_or_default()
+        };
+        if api_key.trim().is_empty() {
+            return Err(CenterError::new(
+                "model_input_invalid",
+                400,
+                "请先填写千问 / 百炼 API Key（或先在大模型卡片保存同域名的按量密钥）",
+            ));
+        }
+
+        let outcome = crate::block_on(async {
+            let voice_id = moss_voice_providers::dashscope::enroll_voice(
+                &raw_url,
+                &api_key,
+                &target_model,
+                prefix,
+                &audio_uri,
+            )
+            .await?;
+            let preview_outcome = match DashscopeTts::new(
+                &final_url,
+                &api_key,
+                &target_model,
+                &voice_id,
+                speed as f32,
+            ) {
+                Ok(tts) => match tts.synthesize("你好，我是 MOSS。").await {
+                    Ok(pcm) if !pcm.samples.is_empty() && pcm.sample_rate > 0 => {
+                        let secs = pcm.samples.len() as f64 / pcm.sample_rate as f64;
+                        let wav =
+                            moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+                        Ok((secs, moss_voice::models::audio_data_url(&wav, "audio/wav")))
+                    }
+                    Ok(_) => Err("试听合成未返回有效音频".to_owned()),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            Ok::<_, moss_voice_providers::ProviderError>((voice_id, preview_outcome))
+        });
+
+        match outcome {
+            Ok((voice_id, preview)) => {
+                let (preview_ok, detail, audio_data_url) = match preview {
+                    Ok((secs, url)) => (
+                        true,
+                        format!("音色克隆成功并已生成 {secs:.1} 秒试听语音，可直接点保存生效"),
+                        Some(url),
+                    ),
+                    Err(reason) => (
+                        false,
+                        format!(
+                            "音色已克隆（{voice_id}），但自动试听合成未通过（{reason}）；请点「测试连接」通过后再保存"
+                        ),
+                        None,
+                    ),
+                };
+                Ok(serde_json::json!({
+                    "section": "tts",
+                    "ok": true,
+                    "preview_ok": preview_ok,
+                    "voice_id": voice_id,
+                    "model": target_model,
+                    "final_url": redacted_final_url,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "detail": detail,
+                    "audio_data_url": audio_data_url,
+                }))
+            }
+            Err(err) => Ok(serde_json::json!({
+                "section": "tts",
+                "ok": false,
+                "final_url": redacted_final_url,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "detail": err.to_string(),
+            })),
+        }
+    }
+
+    /// 查询千问 / 百炼账号下已创建的复刻音色列表（结果不含密钥）。
+    pub fn tts_cloned_voices_list(&self, input: &Value) -> Result<Value, CenterError> {
+        let raw_url = input
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let typed_key = input
+            .get("api_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let model = input
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let probe_input = SectionInput {
+            kind: ProviderKind::Dashscope,
+            url: raw_url.clone(),
+            api_key: typed_key.clone(),
+            model: model.clone(),
+            voice: "placeholder".into(),
+            speed: Some(1.0),
+        };
+        let api_key = if !typed_key.is_empty() {
+            typed_key
+        } else {
+            self.secret_or_same_origin(Section::Tts, &probe_input)?
+                .unwrap_or_default()
+        };
+        if api_key.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "voices": [],
+                "detail": "填写密钥后可读取账号下已克隆的音色",
+            }));
+        }
+        let outcome = crate::block_on(moss_voice_providers::dashscope::list_cloned_voices(
+            &raw_url,
+            &api_key,
+            (!model.is_empty()).then_some(model.as_str()),
+        ));
+        match outcome {
+            Ok(voices) => Ok(serde_json::json!({
+                "ok": true,
+                "voices": voices,
+            })),
+            Err(err) => Ok(serde_json::json!({
+                "ok": false,
+                "voices": [],
+                "detail": err.to_string(),
+            })),
+        }
     }
 
     /// 读取一个分区服务商支持的全部模型列表：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
@@ -946,11 +1240,28 @@ impl BuiltinVoice {
             let name = builtin_secret_name(*section).to_owned();
             match change {
                 KeyChange::Keep => {
-                    if let Some(raw_input) = input.section(*section)
-                        && self.secret(*section)?.filter(|v| !v.is_empty()).is_none()
-                        && let Some(peer_key) = self.secret_or_same_origin(*section, raw_input)?
-                    {
-                        changes.push((name, Some(peer_key)));
+                    if let Some(raw_input) = input.section(*section) {
+                        let own_existing = self.secret(*section)?.filter(|v| !v.is_empty());
+                        let saved_matches =
+                            settings.builtin_models.get(*section).is_none_or(|saved| {
+                                moss_voice::models::saved_provider_matches_input(
+                                    *section, saved, raw_input,
+                                )
+                            }) && !own_existing.as_ref().is_some_and(|own| {
+                                raw_input.kind == ProviderKind::Dashscope
+                                    && own.trim().starts_with("sk-sp-")
+                            });
+                        if !saved_matches {
+                            match self.secret_or_same_origin(*section, raw_input)? {
+                                Some(peer_key) => changes.push((name, Some(peer_key))),
+                                None => changes.push((name, None)),
+                            }
+                        } else if own_existing.is_none()
+                            && let Some(peer_key) =
+                                self.secret_or_same_origin(*section, raw_input)?
+                        {
+                            changes.push((name, Some(peer_key)));
+                        }
                     }
                 }
                 KeyChange::Set(value) => changes.push((name, Some(value.clone()))),

@@ -206,6 +206,14 @@ impl BuiltinVoice {
                     Arc::new(tts),
                     format!("豆包 {}{}", cloud.model, fallback_note(&missing_tts)),
                 ))
+            } else if cloud.kind == ProviderKind::Dashscope {
+                let tts =
+                    DashscopeTts::new(&cloud.url, &key, &cloud.model, &cloud.voice, cloud.speed)
+                        .map_err(|e| e.to_string())?;
+                Ok((
+                    Arc::new(tts),
+                    format!("千问 {}{}", cloud.model, fallback_note(&missing_tts)),
+                ))
             } else {
                 let tts = OpenAiTts::new(&cloud.url, &key, &cloud.model, &cloud.voice, cloud.speed)
                     .map_err(|e| e.to_string())?;

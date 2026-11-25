@@ -361,7 +361,7 @@ export function LocalModelsGroup({ builtin }) {
               <span>本地合成语速（0.5 ~ 2.0）</span>
               <input className="text-input" inputMode="decimal" value={form.tts_speed} onChange={(e) => update("tts_speed", e.target.value)} />
               {form.tts_model === "qwen3_tts_0_6b" && (
-                <small className="voice-muted">Qwen3-TTS 当前固定自然语速（1.0x），语速数值仅对 Kokoro / Matcha / ZipVoice 生效</small>
+                <small className="voice-muted">Qwen3-TTS 当前固定自然语速（1.0x），语速数值仅对 Kokoro / Matcha / ZipVoice / MOSS 原声生效</small>
               )}
             </label>
           </div>

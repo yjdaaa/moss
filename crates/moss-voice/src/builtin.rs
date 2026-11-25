@@ -242,6 +242,40 @@ mod tests {
             plan.keys,
             vec![(Section::Tts, KeyChange::Set("doubao-key".into()))]
         );
+
+        // 千问 / 百炼原生合成（n123）：可从大模型 compatible-mode/v1 自动转换到 /api/v1 语音端点，模型留空用默认值
+        let dashscope = ModelsInput {
+            tts: Some(SectionInput {
+                kind: crate::models::ProviderKind::Dashscope,
+                voice: "longanhuan_v3.1".into(),
+                ..input("https://maas.qianwenaiapi.com/compatible-mode/v1", "", "")
+            }),
+            ..ModelsInput::default()
+        };
+        let ds_plan = plan_save(&BuiltinModels::default(), &dashscope, &[]).unwrap();
+        let ds_tts = ds_plan.models.tts.unwrap();
+        assert_eq!(ds_tts.kind, crate::models::ProviderKind::Dashscope);
+        assert_eq!(
+            (
+                ds_tts.url.as_str(),
+                ds_tts.model.as_str(),
+                ds_tts.voice.as_str()
+            ),
+            (
+                crate::models::DASHSCOPE_TTS_URL,
+                crate::models::DASHSCOPE_TTS_MODEL,
+                "longanhuan_v3.1",
+            )
+        );
+        assert_eq!(ds_plan.keys, vec![(Section::Tts, KeyChange::Keep)]);
+        assert!(crate::models::same_cloud_origin_key(
+            "https://maas.qianwenaiapi.com/compatible-mode/v1",
+            &ds_tts.url
+        ));
+        assert!(!crate::models::same_cloud_origin_key(
+            "https://evil.example.com/compatible-mode/v1",
+            &ds_tts.url
+        ));
     }
 
     #[test]

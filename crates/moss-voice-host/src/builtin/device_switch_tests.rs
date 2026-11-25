@@ -388,6 +388,106 @@ fn models_list_uses_stored_section_secret_without_echoing_it() {
             .as_deref(),
         Some("sk-stored-asr-secret")
     );
+
+    // 切换服务商或域名且密钥留空时：严禁将本分区旧服务商密钥发往新域名，若有新域名同源分区密钥则改用新同源密钥，无同源密钥则在保存时清掉旧密钥
+    builtin
+        .models_save(
+            &moss_voice::models::ModelsInput {
+                llm: Some(SectionInput {
+                    url: "https://maas.qianwenaiapi.com/compatible-mode/v1".into(),
+                    api_key: "sk-qianwen-llm-secret".into(),
+                    model: "qwen3.8-flash".into(),
+                    ..Default::default()
+                }),
+                tts: Some(SectionInput {
+                    url: "https://old-tts.example.test/v1".into(),
+                    api_key: "sk-old-tts-vendor-secret".into(),
+                    model: "tts-1".into(),
+                    voice: "alloy".into(),
+                    speed: Some(1.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+    let other_vendor_tts = SectionInput {
+        url: "https://another-vendor.example.test/v1".into(),
+        model: "tts-1".into(),
+        voice: "alloy".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        builtin
+            .secret_or_same_origin(Section::Tts, &other_vendor_tts)
+            .unwrap(),
+        None,
+        "切换第三方域名且留空密钥时不得外泄旧 TTS 密钥"
+    );
+    let dashscope_tts = SectionInput {
+        kind: ProviderKind::Dashscope,
+        url: "https://maas.qianwenaiapi.com/api/v1".into(),
+        model: "qwen-audio-3.1-tts-flash".into(),
+        voice: "longanhuan_v3.1".into(),
+        speed: Some(1.0),
+        ..Default::default()
+    };
+    assert_eq!(
+        builtin
+            .secret_or_same_origin(Section::Tts, &dashscope_tts)
+            .unwrap()
+            .as_deref(),
+        Some("sk-qianwen-llm-secret"),
+        "切到千问合成且留空密钥时应复用同源千问大模型密钥而非旧 TTS 密钥"
+    );
+    builtin
+        .models_save(
+            &moss_voice::models::ModelsInput {
+                tts: Some(dashscope_tts),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        builtin
+            .host
+            .db
+            .lock()
+            .unwrap()
+            .get_secret("voice.tts.main")
+            .unwrap()
+            .as_deref(),
+        Some("sk-qianwen-llm-secret"),
+        "保存新服务商且留空密钥时应覆盖为新同源密钥"
+    );
+    builtin
+        .models_save(
+            &moss_voice::models::ModelsInput {
+                tts: Some(SectionInput {
+                    url: "http://127.0.0.1:11434/v1".into(),
+                    model: "local-tts".into(),
+                    voice: "alloy".into(),
+                    speed: Some(1.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        builtin
+            .host
+            .db
+            .lock()
+            .unwrap()
+            .get_secret("voice.tts.main")
+            .unwrap(),
+        None,
+        "切换到无同源密钥的本机服务且留空密钥时应清掉旧云端密钥"
+    );
 }
 
 #[test]

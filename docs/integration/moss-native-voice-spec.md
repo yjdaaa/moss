@@ -138,7 +138,7 @@
 | LLM 与工具调用 | **流式 + function calling + 递归 5 层** | 无（外部 CLI） | 单轮 | P4 测试校验 `tool_calls` | 按 esp32-server 的设计用 Rust 重写；支持 Ollama，Anthropic 可选 |
 | 切句与合成 | 首句逗号切 | **Markdown 清洗、聚合、强制送出** | — | — | 两者合并 |
 | 本地 TTS | 无（全是外部 HTTP 服务） | 无 | 无 | 无 | sherpa-onnx（Kokoro / VITS / Matcha） |
-| 云端 TTS | 很多 | 5 家流式 | — | P4 测试连接 | OpenAI 兼容 + 豆包流式 |
+| 云端 TTS | 很多 | 5 家流式 | — | P4 测试连接 | OpenAI 兼容 + 豆包流式 + 千问 / 百炼原生流式与声音克隆（n123） |
 
 ### 3.3 工具与扩展
 
@@ -743,10 +743,11 @@
   | `kokoro` | 合成 | Kokoro v1.0 | 334 MB | 合成 1 秒语音约 0.5 秒；音色 45–48 中文女声、49–52 中文男声 |
   | `kokoro_v11` | 合成 | Kokoro v1.1 int8 | 140 MB | 合成 1 秒语音约 1 秒（int8 在本机 CPU 上比 v1.0 慢）；103 个音色，按基频实测 0–2 英文、3–57 中文女声（180–264 Hz）、58–102 中文男声（126–162 Hz），默认 3 |
   | `matcha_zh_en` | 合成 | Matcha（`model-steps-3.onnx` + `vocos-16khz-univ.onnx`） | 79 + 54 MB | 合成 1 秒语音约 0.04 秒；单音色女声，16 kHz |
+  | `moss_vits`（n122 补记） | 合成 | 中文 VITS（`moss.onnx` + sherpa-onnx 官方注音词表与读法规则，两个 Hugging Face 仓库各钉一个提交） | 109 + 2.6 MB | Apple 芯片 Mac 2 线程合成 1 秒语音约 0.1–0.2 秒；电影 MOSS 单音色，16 kHz，只念中文；权重仅限非商用 |
 
   SHA-256 均取自 GitHub 发布页的资产摘要，并与实际下载文件逐一核对一致。Matcha 的声码器在另一个发布标签（`vocoder-models`），作为**附加文件**（`ExtraFile`）与压缩包一起下载：总进度按两者大小合计，各自校验，解压后放进模型目录再整体就位；任何一个校验失败都不安装。许可证：TEN-VAD 为 Apache-2.0 附加条款（不得用于与声网竞争的产品）；X-ASR、Kokoro v1.1、Matcha 中英为 Apache-2.0。
 - **协议 2（历史）**（`moss-voice-local-proto`，2026-10-08）：加载请求带引擎（`load_vad.engine`：`silero` / `ten`；`load_asr.engine`：`sense_voice` / `streaming_transducer`；`load_tts.engine`：`kokoro` / `matcha`；缺省为 NV6 的引擎）；新增流式识别 `asr_open` / `asr_feed`（负载为 16 kHz PCM，辅助程序边收边解码）/ `asr_finish`（返回文字并关闭该路）/ `asr_close`。当时从 1 升为 2；当前 NV8a 协议已是 3，见 §13.11，不能按此历史段落判断当前兼容性。
-- **升级要求：辅助程序与 MOSS 必须一起更新**。上条是2026-10-08协议1→2历史记录，NV8a当时升为3（§13.11）、NV16升为4、n89升为5、n93升为6；当前为**协议 7**（n101 新增 `LoadKws` 命令词检测、`VadEvents.keywords`、流式合成 `short_opener`、`Hello.kws`；协议 6 时 n93 新增 `LoadDenoiser`、`LoadSmartTurn`、`SmartTurnPredict`，`CATALOG` 同步扩至 24 项并新增 `qwen3_tts_0_6b`［Apache-2.0，配 `speech.cpp v0.10.1` MIT 按需运行时］、`zipvoice_distill`［权重 CC-BY-NC-4.0 仅限非商用 / 代码 Apache-2.0］、`qwen3_asr_0_6b` / `firered_asr2_ctc` / `qwen3_5_2b` / `qwen3_5_4b`［Apache-2.0］、`gtcrn_simple` 与 `smart_turn_v3`［BSD-2-Clause］，取代 n91“ZipVoice 未接入”与 n86“smart-turn 未做”），更旧 helper 握手拒绝。需按`apps/moss-voice-local/README.md`重建，并与同一发布的桌面程序配套。NV18专用内部NSIS已实际核对helper/源码/许可资源，最新产物见实施TODO§9；许可对应审核和成品安装仍未通过，不能从封包成功推定可分发。
+- **升级要求：辅助程序与 MOSS 必须一起更新**。上条是2026-10-08协议1→2历史记录，NV8a当时升为3（§13.11）、NV16升为4、n89升为5、n93升为6；当前为**协议 9**（n122 新增 `TtsEngine::Vits` 与 `CATALOG` 第 28 项 `moss_vits`；n110 协议 8 打开判停 / 识别流回 `Opened{denoise}`；协议 7 时 n101 新增 `LoadKws` 命令词检测、`VadEvents.keywords`、流式合成 `short_opener`、`Hello.kws`；协议 6 时 n93 新增 `LoadDenoiser`、`LoadSmartTurn`、`SmartTurnPredict`，`CATALOG` 同步扩至 24 项并新增 `qwen3_tts_0_6b`［Apache-2.0，配 `speech.cpp v0.10.1` MIT 按需运行时］、`zipvoice_distill`［权重 CC-BY-NC-4.0 仅限非商用 / 代码 Apache-2.0］、`qwen3_asr_0_6b` / `firered_asr2_ctc` / `qwen3_5_2b` / `qwen3_5_4b`［Apache-2.0］、`gtcrn_simple` 与 `smart_turn_v3`［BSD-2-Clause］，取代 n91“ZipVoice 未接入”与 n86“smart-turn 未做”），更旧 helper 握手拒绝。需按`apps/moss-voice-local/README.md`重建，并与同一发布的桌面程序配套。NV18专用内部NSIS已实际核对helper/源码/许可资源，最新产物见实施TODO§9；许可对应审核和成品安装仍未通过，不能从封包成功推定可分发。
 - **辅助程序**：识别线程持有整段（`OfflineRecognizer`）或流式（`OnlineRecognizer`，greedy search）识别器；流式模型也支持整段识别（作为流式失败时的退路），当时整段模型拒绝 `asr_open`（**2026-11-13 n88 起已改为 `OfflineAsrBuffer` 周期增量重认支持 `asr_open` / `asr_feed` / `asr_finish`，见修订记录 n88**）。说完补 1.0 秒静音再结束输入：实测 0.66 秒（sherpa 示例值）会丢最后一个字，1.0 秒不丢，只多约 30 ms。合成：Kokoro 按目录里存在的文件选 `model.onnx` / `model.int8.onnx`；目录里有 `phone-zh.fst`、`date-zh.fst`、`number-zh.fst` 时作为读法规则（数字、日期、电话）；单音色模型忽略音色编号。
 - **客户端**：`load_vad` / `load_asr` / `load_tts` 增加引擎参数；`LocalStreamingAsr` 实现 NV7 的 `StreamingAsr`——后台任务打开一路、把到达的音频（上一段还在解码时合并）依次送入、说完取最终文字；任务被中止（打断、重新拾音）时向辅助程序发 `asr_close`。超时：打开 / 送入 5 秒，结束 30 秒。
 - **设置**：`voice.builtin_local` 新增 `vad_model` / `asr_model` / `tts_model`（缺省 `silero_vad` / `sense_voice` / `kokoro`，NV6 保存的设置按原模型读取，行为不变）；`BuiltinLocal::selected(kind)` 只在开关打开且 id 存在、类别相符时返回模型。分区是否可用改为看**选中的**模型是否已安装。`voice_local_save` 拒绝不存在或类别不符的模型 id。

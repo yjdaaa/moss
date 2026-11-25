@@ -353,6 +353,9 @@ pub async fn voice_builtin_models_test(
         if section.trim() == "local_tts" {
             return builtin.local_tts_preview(&input);
         }
+        if section.trim() == "tts_clone" {
+            return builtin.tts_voice_clone(&input);
+        }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
             moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确")
@@ -382,6 +385,9 @@ pub async fn voice_builtin_models_list(
         }
         if section.trim() == "local_tts" {
             return builtin.local_tts_voices_list(&input);
+        }
+        if section.trim() == "tts_voices" {
+            return builtin.tts_cloned_voices_list(&input);
         }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {

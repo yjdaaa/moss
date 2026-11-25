@@ -10,6 +10,7 @@
 
 mod kokoro_prosody;
 mod smart_turn;
+mod vits_zh;
 
 use moss_voice_local_proto::{
     SPEAKER_DIMENSION, SPEAKER_MODEL_BYTES, SPEAKER_MODEL_FILE, SPEAKER_MODEL_ID,
@@ -36,10 +37,10 @@ use sherpa_onnx::{
     OfflineSenseVoiceModelConfig, OfflineSpeechDenoiser, OfflineSpeechDenoiserConfig,
     OfflineSpeechDenoiserDpdfNetModelConfig, OfflineSpeechDenoiserGtcrnModelConfig,
     OfflineSpeechDenoiserModelConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
-    OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsZipvoiceModelConfig,
-    OnlineRecognizer, OnlineRecognizerConfig, OnlineSpeechDenoiser, OnlineSpeechDenoiserConfig,
-    OnlineStream, OnlineTransducerModelConfig, SileroVadModelConfig, TenVadModelConfig,
-    VadModelConfig, VoiceActivityDetector, Wave,
+    OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
+    OfflineTtsZipvoiceModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineSpeechDenoiser,
+    OnlineSpeechDenoiserConfig, OnlineStream, OnlineTransducerModelConfig, SileroVadModelConfig,
+    TenVadModelConfig, VadModelConfig, VoiceActivityDetector, Wave,
 };
 
 type Out = Arc<Mutex<BufWriter<io::Stdout>>>;
@@ -223,9 +224,15 @@ fn first_of(dir: &Path, names: &[&str]) -> Result<String, String> {
         .ok_or_else(|| format!("模型文件不存在：{}", dir.join(names[0]).display()))
 }
 
-/// 中文数字、日期、电话号码的读法规则（模型目录里有就用）。
-fn rule_fsts(dir: &Path) -> Option<String> {
-    let found: Vec<String> = ["phone-zh.fst", "date-zh.fst", "number-zh.fst"]
+/// 中文数字、日期、电话号码的读法规则（模型目录里有就用）。Kokoro 包里带 `-zh` 后缀；
+/// 中文 VITS 用 sherpa 官方中文 VITS 包里不带后缀的那份，只对它启用，免得其他模型包里同名文件悄悄改了读法。
+fn rule_fsts(dir: &Path, engine: TtsEngine) -> Option<String> {
+    let names: &[&str] = if matches!(engine, TtsEngine::Vits) {
+        &["phone.fst", "date.fst", "number.fst"]
+    } else {
+        &["phone-zh.fst", "date-zh.fst", "number-zh.fst"]
+    };
+    let found: Vec<String> = names
         .iter()
         .map(|name| dir.join(name))
         .filter(|path| path.is_file())
@@ -1130,6 +1137,8 @@ struct TtsRuntime {
     tts: OfflineTts,
     speakers: i32,
     kokoro: bool,
+    /// 中文 VITS：送进模型前先整理文字（[`vits_zh::normalize_text`]）
+    vits: bool,
     zipvoice_refs: Option<Vec<ZipVoiceRef>>,
 }
 
@@ -1258,10 +1267,24 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
             debug: false,
             ..Default::default()
         },
+        TtsEngine::Vits => {
+            let files = vits_zh::prepare_vits_files(dir)?;
+            OfflineTtsModelConfig {
+                vits: OfflineTtsVitsModelConfig {
+                    model: Some(native_path_string(&files.model)),
+                    lexicon: Some(native_path_string(&files.lexicon)),
+                    tokens: Some(native_path_string(&files.tokens)),
+                    ..Default::default()
+                },
+                num_threads: inference_threads(),
+                debug: false,
+                ..Default::default()
+            }
+        }
     };
     Ok(OfflineTtsConfig {
         model,
-        rule_fsts: rule_fsts(dir),
+        rule_fsts: rule_fsts(dir, engine),
         ..Default::default()
     })
 }
@@ -1283,6 +1306,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         TtsEngine::Kokoro => "Kokoro",
                         TtsEngine::Matcha => "Matcha",
                         TtsEngine::ZipVoice => "ZipVoice",
+                        TtsEngine::Vits => "MOSS 原声（VITS）",
                     };
                     let created = OfflineTts::create(&config)
                         .ok_or_else(|| format!("{name} 模型加载失败"))?;
@@ -1291,6 +1315,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         tts: created,
                         speakers,
                         kokoro: matches!(engine, TtsEngine::Kokoro),
+                        vits: matches!(engine, TtsEngine::Vits),
                         zipvoice_refs,
                     })
                 })();
@@ -1338,6 +1363,11 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     error(&out, id, "合成已取消");
                     continue;
                 }
+                let text = if rt.vits {
+                    vits_zh::normalize_text(&text)
+                } else {
+                    text
+                };
                 let generated =
                     rt.tts
                         .generate_with_config(&text, &config, Some(loaded.synth.keep_going()));
@@ -1370,6 +1400,11 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     continue;
                 }
                 let mut failed = false;
+                let text = if rt.vits {
+                    vits_zh::normalize_text(&text)
+                } else {
+                    text
+                };
                 let segments = moss_voice_local_proto::synthesis_segments_with(
                     &text,
                     first_max_chars,
@@ -2244,5 +2279,50 @@ mod tests {
         assert!((zv.guidance_scale - 1.0).abs() < 1e-6);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vits_tts_config_uses_derived_files_and_plain_named_rule_fsts() {
+        let root = std::env::temp_dir().join(format!(
+            "moss-voice-local-vits-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let model_dir = root.join("moss-vits-zh");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("moss.onnx"), b"stub").unwrap();
+        std::fs::write(model_dir.join("tokens.txt"), "_ 0\nㄋ 13\n  49\n").unwrap();
+        std::fs::write(model_dir.join("lexicon.txt"), "你 ㄋ ㄧ ˇ\n").unwrap();
+        for fst in ["number.fst", "date.fst", "phone.fst"] {
+            std::fs::write(model_dir.join(fst), b"stub").unwrap();
+        }
+        let cfg = tts_config(&model_dir, TtsEngine::Vits).unwrap();
+        let vits = &cfg.model.vits;
+        let derived = model_dir.join("derived-v1");
+        for (path, name) in [
+            (&vits.model, "model.onnx"),
+            (&vits.tokens, "tokens.txt"),
+            (&vits.lexicon, "lexicon.txt"),
+        ] {
+            assert_eq!(
+                path.as_deref(),
+                Some(native_path_string(&derived.join(name)).as_str())
+            );
+        }
+        // sherpa 默认的 VITS 噪声与时长参数与训练配置一致（0.667 / 0.8 / 1.0）
+        assert!((vits.noise_scale - 0.667).abs() < 1e-6);
+        assert!((vits.length_scale - 1.0).abs() < 1e-6);
+        let fsts = cfg.rule_fsts.unwrap();
+        assert!(
+            ["phone.fst", "date.fst", "number.fst"]
+                .iter()
+                .all(|f| fsts.contains(f))
+        );
+        // 不带后缀的读法规则只给中文 VITS 用，其他引擎照旧只认 `-zh` 那份
+        assert_eq!(rule_fsts(&model_dir, TtsEngine::Matcha), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

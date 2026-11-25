@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 语音合成支持千问 / 百炼原生流式接口（`Qwen-Audio-3.1-TTS-Flash`）与本机录音一键克隆音色（2026-11-25）
+
+- **现象**：千问 AI 平台（`maas.qianwenaiapi.com`）与阿里云百炼不提供 OpenAI `/v1/audio/speech` 接口，填进原有语音合成会报 404，也无法在 MOSS 内上传参考录音克隆专属音色。
+- **根因与修复**：新增 `ProviderKind::Dashscope` 与 `DashscopeTts`，支持将根域名或大模型 `/compatible-mode/v1` 自动转换到 `/api/v1/services/audio/tts/SpeechSynthesizer`（SSE 流式 24 kHz PCM，`streaming_tts = true`）与 `/customization`（`voice-enrollment`），拦截不支持语音的 `token-plan.*` 地址与 `sk-sp-` 密钥，并支持复用同一 HTTPS 主机的大模型密钥；「语音合成」卡片新增“千问 / 百炼（流式合成 · 支持声音克隆）”与“上传录音克隆音色”（本机 WAV/MP3/M4A 录音校验后创建复刻音色、轮询就绪、自动回填 `voice_id` 并生成试听），同时读取账号已有克隆音色列表，默认语音合成配置不变。
+- **验证**：新增 `DashscopeTts` 流式合成 / 音色克隆与列表回环测试 3 项、`moss-voice` 地址转换与同源密钥测试、前端单测与 `voice-center` 浏览器测试克隆音色交互断言；`verify.mjs --finish` 通过。未用真实千问密钥与小智硬件实测（`unverified`）。
+- **关联**：`crates/moss-voice/src/models.rs`（`ProviderKind::Dashscope`）、`crates/moss-voice-providers/src/dashscope.rs`、`crates/moss-voice-host/src/builtin/models.rs`（`tts_voice_clone`）、`frontend/src/components/voice-builtin/BuiltinModelGroup.jsx`、内置语音技术书 n123。
+
+### 新增本地合成模型“MOSS 原声（流浪地球，VITS）”，断网也能用电影 MOSS 的声音播报（2026-11-25）
+
+- **现象**：想让小智用电影 MOSS 的声音说话，之前只能开 Colab T4 联动的 550W 克隆声（要联网、要 Colab），本地合成模型里没有 MOSS 声线。
+- **根因与修复**：`local_models::CATALOG` 新增第 28 项 `moss_vits`（`Engine::Vits`），从 `OpenMOSS/moss-vits-onnx-model` 下载 `moss.onnx`、从 sherpa-onnx 官方中文 VITS 下载同一套注音词表与数字读法规则，两个仓库钉具体提交并逐个校验 SHA-256（新增 `installed_rel_path` 让 `Archive::Directory` 跨仓库装进同一目录）；`moss-voice-local` 新增 `vits_zh`，首次加载在模型目录派生带 ONNX 元数据与词界 `▁` 的文件、合成前整理百分号 / 单位 / MOSS / 大写缩写。辅助程序协议 8 → 9（新增 `TtsEngine::Vits`，须与桌面程序一起升级）；默认合成模型不变；权重仅限非商用，只在用户点下载时从原地址拉取。
+- **验证**：新增 `hf_repo_qualified_paths_install_flat_into_model_dir`、`moss_vits_spec_pulls_two_pinned_hf_repos_with_mirror_fallback`、`vits_zh` 4 项与 `vits_tts_config_uses_derived_files_and_plain_named_rule_fsts`；用真实模型经 `moss-voice-local` 协议加载 0.3 秒、整段与流式合成通过（1 秒语音约 0.1 秒），派生文件与关掉噪声时逐采样一致的对照版本逐字节相同；`verify.mjs --finish` 通过。未在真实小智设备上收听（`unverified`）。
+- **关联**：`crates/moss-voice/src/local_models.rs`、`crates/moss-voice/src/tts_voices.rs`、`crates/moss-voice-local-proto/src/lib.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`（`helper_tts_engine`）、`apps/moss-voice-local/src/vits_zh.rs`、`apps/moss-voice-local/src/main.rs`（`tts_config`、`rule_fsts`）、内置语音技术书 n122。
+
 ### 本地合成音色与语速挪进“语音合成模型包”，选完模型就近调整（2026-11-25）
 
 - **现象**：本地合成的音色编号与语速框放在“本地模型与音色”卡片最底部，和合成模型表隔着视觉理解、声纹等分组，用户在“5. 语音合成模型包”里找不到语速可调。

@@ -45,6 +45,9 @@ pub const DEFAULT_QWEN3_5_2B_BASE: &str =
     "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main";
 pub const DEFAULT_QWEN3_5_4B_BASE: &str =
     "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main";
+/// HuggingFace 根地址：MOSS 原声 VITS（`moss_vits`）的文件分属两个仓库，路径写成
+/// `<组织>/<仓库>/resolve/<修订>/<文件>`，装到模型目录时只留文件名（见 [`installed_rel_path`]）；镜像回退照旧换成 hf-mirror
+pub const HUGGINGFACE_ROOT: &str = "https://huggingface.co";
 /// 尾音语义判停 Smart Turn v3.2（BSD-2-Clause；pipecat-ai 官方 ONNX，n87）
 pub const DEFAULT_SMART_TURN_V3_BASE: &str =
     "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main";
@@ -111,6 +114,8 @@ pub enum Engine {
     ZipVoice,
     /// Qwen3-TTS 0.6B CustomVoice，由 `speech.cpp` 独立 worker 运行（n87）
     SpeechCppTts,
+    /// 单说话人中文 VITS（注音符号输入；MOSS 原声，n122）
+    Vits,
     Laya,
     OneJev,
     CampPlus,
@@ -319,6 +324,36 @@ const XIAOZHI_NOTO_V1_FULL_FILES: [&str; 29] = [
     "30_4/arabic.cbin",
 ];
 
+/// MOSS 原声 VITS 的附加文件：sherpa-onnx 官方中文 VITS（`csukuangfj/vits-zh-hf-fanchen-C`）的注音词表与数字 / 日期 / 电话读法规则。
+/// 它与 MOSS 模型同为 CjangCjengh `chinese_cleaners` 的 50 个符号且顺序一致（`tokens.txt` 与 `moss.json` 符号表逐字节相同，2026-11-25 核对）。
+const MOSS_VITS_EXTRAS: [ExtraFile; 5] = [
+    ExtraFile {
+        path: "csukuangfj/vits-zh-hf-fanchen-C/resolve/a2beb33fb9dd3f20861a7ee09823b2fe0cee7a6d/tokens.txt",
+        sha256: "34b035b9aeb070df6188b022f29c00e0e142c7ade9f25611ced65db5e9cc8402",
+        size: 331,
+    },
+    ExtraFile {
+        path: "csukuangfj/vits-zh-hf-fanchen-C/resolve/a2beb33fb9dd3f20861a7ee09823b2fe0cee7a6d/lexicon.txt",
+        sha256: "9af2824e49e731bf615927c768fdc36bbbe894cac57d8e0088d9c94331b07320",
+        size: 2_457_843,
+    },
+    ExtraFile {
+        path: "csukuangfj/vits-zh-hf-fanchen-C/resolve/a2beb33fb9dd3f20861a7ee09823b2fe0cee7a6d/number.fst",
+        sha256: "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+        size: 64_482,
+    },
+    ExtraFile {
+        path: "csukuangfj/vits-zh-hf-fanchen-C/resolve/a2beb33fb9dd3f20861a7ee09823b2fe0cee7a6d/date.fst",
+        sha256: "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+        size: 59_154,
+    },
+    ExtraFile {
+        path: "csukuangfj/vits-zh-hf-fanchen-C/resolve/a2beb33fb9dd3f20861a7ee09823b2fe0cee7a6d/phone.fst",
+        sha256: "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+        size: 88_630,
+    },
+];
+
 /// 本地视觉模型的主权重与视觉投影文件名（`local_vision` 启动 llama-server 用）。
 pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
     match id {
@@ -332,7 +367,7 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 27] = [
+pub const CATALOG: [ModelSpec; 28] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -703,6 +738,31 @@ pub const CATALOG: [ModelSpec; 27] = [
         }),
     },
     ModelSpec {
+        id: "moss_vits",
+        kind: ModelKind::Tts,
+        engine: Engine::Vits,
+        label: "MOSS 原声（流浪地球，VITS）",
+        note: "电影 MOSS 声线，合成快（1 秒语音约 0.2 秒）；16 kHz 单音色、只念中文，英文单词会跳过，安装后另占约 115 MB 派生文件。注意：权重仅限非商用。",
+        // OpenMOSS/moss-vits-onnx-model（2023-09-09 提交，2026-11-25 实际下载核对）
+        path: "OpenMOSS/moss-vits-onnx-model/resolve/715b76a3fd2b3168fe10be0bdfa0ed9977515030/moss.onnx",
+        sha256: "8d60b3217ed0fbd7e63345eaaade01ebb9925892ba784affb2c037ac31802652",
+        size: 113_731_226,
+        archive: Archive::Directory {
+            dir: "moss-vits-zh",
+            base_url: HUGGINGFACE_ROOT,
+        },
+        required: &[
+            "moss.onnx",
+            "tokens.txt",
+            "lexicon.txt",
+            "number.fst",
+            "date.fst",
+            "phone.fst",
+        ],
+        extras: &MOSS_VITS_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
         id: "qwen3_asr_0_6b",
         kind: ModelKind::Asr,
         engine: Engine::Qwen3Asr,
@@ -851,6 +911,26 @@ pub fn spec_of(id: &str, kind: ModelKind) -> Option<&'static ModelSpec> {
     spec(id).filter(|spec| spec.kind == kind)
 }
 
+/// 目录模型里文件装到哪（相对模型目录）：HuggingFace 仓库限定路径 `<组织>/<仓库>/resolve/<修订>/<文件>`
+/// 只留 `<文件>`，其余原样（如 Laya 的 `encoder/config.json`）。
+pub fn installed_rel_path(path: &str) -> &str {
+    let mut parts = path.splitn(5, '/');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some(org), Some(repo), Some("resolve"), Some(rev), Some(rest))
+            if !org.is_empty() && !repo.is_empty() && !rev.is_empty() && !rest.is_empty() =>
+        {
+            rest
+        }
+        _ => path,
+    }
+}
+
 fn base_name(path: &'static str) -> &'static str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -870,7 +950,7 @@ pub fn install_path(root: &Path, spec: &ModelSpec) -> PathBuf {
 }
 
 fn extra_file_installed(dir: &Path, extra: &ExtraFile) -> bool {
-    let file_path = dir.join(extra.path);
+    let file_path = dir.join(installed_rel_path(extra.path));
     let Ok(meta) = file_path.metadata() else {
         return false;
     };
@@ -917,7 +997,7 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
         Archive::Directory { .. } => {
             path.is_dir()
                 && path
-                    .join(spec.path)
+                    .join(installed_rel_path(spec.path))
                     .metadata()
                     .map(|m| m.is_file() && m.len() == spec.size)
                     .unwrap_or(false)
@@ -1867,7 +1947,7 @@ fn install(
                     if cancel.load(Ordering::SeqCst) {
                         return Err("已取消".to_owned());
                     }
-                    let rel = Path::new(rel_path);
+                    let rel = Path::new(installed_rel_path(rel_path));
                     if !safe_relative(rel) {
                         return Err(format!("模型包含不安全的路径：{}", rel.display()));
                     }
@@ -2042,9 +2122,9 @@ mod tests {
             Archive::File => sized(path, spec.size),
             _ => {
                 if matches!(spec.archive, Archive::Directory { .. }) {
-                    sized(path.join(spec.path), spec.size);
+                    sized(path.join(installed_rel_path(spec.path)), spec.size);
                     for extra in spec.extras {
-                        sized(path.join(extra.path), extra.size);
+                        sized(path.join(installed_rel_path(extra.path)), extra.size);
                     }
                 }
                 for item in spec.required {
@@ -2253,6 +2333,98 @@ mod tests {
     }
 
     #[test]
+    fn hf_repo_qualified_paths_install_flat_into_model_dir() {
+        assert_eq!(
+            installed_rel_path("OpenMOSS/moss-vits-onnx-model/resolve/715b/moss.onnx"),
+            "moss.onnx"
+        );
+        assert_eq!(
+            installed_rel_path("org/repo/resolve/rev/sub/file.txt"),
+            "sub/file.txt"
+        );
+        assert_eq!(
+            installed_rel_path("encoder/config.json"),
+            "encoder/config.json"
+        );
+        assert_eq!(installed_rel_path("a/b/resolve//x"), "a/b/resolve//x");
+        assert_eq!(installed_rel_path("model.onnx"), "model.onnx");
+
+        // 两个仓库的文件装进同一个模型目录，只留文件名；已安装判断与安装位置一致
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("models");
+        let manager = ModelManager::new(root.clone());
+        let model = b"onnx-bytes".to_vec();
+        let lexicon = b"lexicon-bytes".to_vec();
+        let extras: &'static [ExtraFile] = Box::leak(
+            vec![ExtraFile {
+                path: "org/b/resolve/r2/lexicon.txt",
+                sha256: sha(&lexicon),
+                size: lexicon.len() as u64,
+            }]
+            .into_boxed_slice(),
+        );
+        let spec = ModelSpec {
+            extras,
+            ..spec_for(
+                &model,
+                Archive::Directory {
+                    dir: "multi",
+                    base_url: "https://example.test",
+                },
+                "org/a/resolve/r1/model.onnx",
+                &["model.onnx", "lexicon.txt"],
+            )
+        };
+        let url = serve_paths(vec![
+            ("org/a/resolve/r1/model.onnx", model.clone()),
+            ("org/b/resolve/r2/lexicon.txt", lexicon.clone()),
+        ]);
+        manager.download_spec(spec, &url).unwrap();
+        assert_eq!(wait(&manager), None);
+        assert!(installed(&root, &spec));
+        assert_eq!(fs::read(root.join("multi/model.onnx")).unwrap(), model);
+        assert_eq!(fs::read(root.join("multi/lexicon.txt")).unwrap(), lexicon);
+        assert!(!root.join("multi/org").exists(), "不保留仓库层级");
+    }
+
+    #[test]
+    fn moss_vits_spec_pulls_two_pinned_hf_repos_with_mirror_fallback() {
+        let vits = spec_of("moss_vits", ModelKind::Tts).unwrap();
+        assert_eq!(vits.engine, Engine::Vits);
+        assert!(vits.voices.is_none(), "单音色");
+        assert_eq!(
+            vits.download_size(),
+            113_731_226 + 331 + 2_457_843 + 64_482 + 59_154 + 88_630
+        );
+        // 路径都钉在具体提交上（不跟 main 变），装进目录后正好是 required 里的文件
+        let installed_names: Vec<&str> = std::iter::once(vits.path)
+            .chain(vits.extras.iter().map(|e| e.path))
+            .inspect(|p| assert!(!p.contains("/resolve/main/"), "{p}"))
+            .map(installed_rel_path)
+            .collect();
+        for item in vits.required {
+            assert!(installed_names.contains(item), "{item}");
+        }
+        assert_eq!(
+            resolve_download_bases(vits, DEFAULT_BASE),
+            vec![
+                HUGGINGFACE_ROOT.to_owned(),
+                "https://hf-mirror.com".to_owned()
+            ]
+        );
+        assert_eq!(
+            resolve_download_bases(vits, "https://hf-mirror.com"),
+            vec![
+                "https://hf-mirror.com".to_owned(),
+                HUGGINGFACE_ROOT.to_owned()
+            ]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        fake_install(dir.path(), vits);
+        assert!(dir.path().join("moss-vits-zh/moss.onnx").is_file());
+    }
+
+    #[test]
     fn checksum_mismatch_and_truncation_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("models");
@@ -2348,7 +2520,6 @@ mod tests {
         assert_eq!(ids.len(), CATALOG.len(), "模型 id 不重复");
         for spec in CATALOG {
             assert!(spec.size > 0 && !spec.note.is_empty(), "{}", spec.id);
-            // 附加文件只用于压缩包模型，且安装检查包含它
             // 附加文件只用于压缩包或多文件目录模型，且安装检查包含它
             for extra in spec.extras {
                 match spec.archive {
@@ -2357,9 +2528,11 @@ mod tests {
                         "{}",
                         spec.id
                     ),
-                    Archive::Directory { .. } => {
-                        assert!(spec.required.contains(&extra.path), "{}", spec.id)
-                    }
+                    Archive::Directory { .. } => assert!(
+                        spec.required.contains(&installed_rel_path(extra.path)),
+                        "{}",
+                        spec.id
+                    ),
                     Archive::File => panic!("unexpected extra file for {}", spec.id),
                 }
             }
@@ -2374,9 +2547,11 @@ mod tests {
                 | Engine::StreamingTransducer
                 | Engine::Qwen3Asr
                 | Engine::FireRedAsr2Ctc => ModelKind::Asr,
-                Engine::Kokoro | Engine::Matcha | Engine::ZipVoice | Engine::SpeechCppTts => {
-                    ModelKind::Tts
-                }
+                Engine::Kokoro
+                | Engine::Matcha
+                | Engine::ZipVoice
+                | Engine::SpeechCppTts
+                | Engine::Vits => ModelKind::Tts,
                 Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
                 Engine::LlamaVision => ModelKind::Vision,

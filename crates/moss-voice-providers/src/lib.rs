@@ -11,6 +11,7 @@
 //!
 //! 错误信息只描述原因，**不含地址与密钥**（不使用 reqwest 的原始错误描述，它会带上完整地址）。
 
+pub mod dashscope;
 pub mod doubao;
 mod history;
 pub mod local;

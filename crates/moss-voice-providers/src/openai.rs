@@ -15,13 +15,13 @@ use crate::{Asr, BoxFuture, Llm, LlmReply, Pcm, ProviderError, Tts};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 识别与合成单次请求的总超时
-const AUDIO_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const AUDIO_TIMEOUT: Duration = Duration::from_secs(30);
 /// 大模型：等响应头、以及流中两段数据之间的最长间隔
 const LLM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 大模型一次回复的总时长上限
 const LLM_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
-const MAX_ERROR_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_ERROR_BYTES: usize = 64 * 1024;
 
 fn is_alibaba_compat_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
@@ -35,7 +35,7 @@ fn is_alibaba_compat_host(host: &str) -> bool {
         || lower.ends_with(".maas.aliyuncs.com")
 }
 
-fn clean_scheme_and_whitespace(input: &str) -> String {
+pub(crate) fn clean_scheme_and_whitespace(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -109,7 +109,7 @@ pub fn tts_full_url(input: &str) -> String {
     full_url(input, "/audio/speech")
 }
 
-fn client() -> Result<reqwest::Client, ProviderError> {
+pub(crate) fn client() -> Result<reqwest::Client, ProviderError> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
         std::sync::OnceLock::new();
     CLIENT
@@ -129,7 +129,7 @@ fn client() -> Result<reqwest::Client, ProviderError> {
 
 /// 不使用 reqwest 的原始描述（它会带上完整地址）；只取底层原因链（DNS / 拒绝连接 / 证书……）判断具体原因，
 /// 原因链脱敏后放进 `detail`。
-fn describe_send_error(label: &str, error: &reqwest::Error) -> ProviderError {
+pub(crate) fn describe_send_error(label: &str, error: &reqwest::Error) -> ProviderError {
     let mut chain = Vec::new();
     let mut source = std::error::Error::source(error);
     while let Some(inner) = source {
@@ -278,7 +278,7 @@ fn error_upstream(bytes: &[u8]) -> Option<String> {
     crate::upstream_text(&text)
 }
 
-async fn read_body(
+pub(crate) async fn read_body(
     label: &str,
     mut response: reqwest::Response,
     limit: usize,
@@ -297,7 +297,7 @@ async fn read_body(
     Ok(body)
 }
 
-async fn check_status(
+pub(crate) async fn check_status(
     label: &str,
     response: reqwest::Response,
 ) -> Result<reqwest::Response, ProviderError> {

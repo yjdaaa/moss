@@ -234,16 +234,33 @@ try {
             sample_text: "你好，我是 MOSS 语音助手，激光雕刻工作台已就绪。",
             audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=",
           }
-        : {
-            ok: true,
-            elapsed_ms: 180,
-            detail: "合成测试响应",
-            ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
-          }
+        : section === "tts_clone"
+          ? {
+              ok: true,
+              elapsed_ms: 420,
+              voice_id: "qwen-tts-vc-mossclone-voice-001",
+              detail: "音色克隆成功（qwen-tts-vc-mossclone-voice-001）",
+              audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=",
+            }
+          : {
+              ok: true,
+              elapsed_ms: 180,
+              detail: "合成测试响应",
+              ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
+            }
     ),
     voice_builtin_models_list: async ({ section, input }) => {
       if (section === "llm" && String(input?.url || "").includes("slow-list.example.test")) {
         await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      if (section === "tts_voices") {
+        return {
+          ok: true,
+          elapsed_ms: 40,
+          voices: [
+            { voice_id: "qwen-tts-vc-mossclone-voice-001", target_model: input?.model || "qwen-audio-3.1-tts-flash", status: "OK" },
+          ],
+        };
       }
       return section === "local_tts"
         ? {
@@ -648,13 +665,34 @@ try {
   assert.equal(await page.locator("#voice-builtin-model-options-asr").getByRole("option").count(), 1, "输入关键词实时筛出目标语音识别模型");
   await page.locator("#voice-builtin-model-options-asr").getByRole("option", { name: /SenseVoiceSmall/ }).click();
   assert.equal(await page.locator("#voice-builtin-model-name-asr").inputValue(), "FunAudioLLM/SenseVoiceSmall");
-  // 5b-2. 内置语音合成：一键复用地址、点选模型自动填入默认音色、测试通过后显示“试听语音”按钮
+  // 5b-2. 内置语音合成：一键复用地址、点选模型自动填入默认音色、测试通过后显示“试听语音”按钮；
+  // 误填千问大模型地址时提示一键切换千问 / 百炼原生流式合成，并支持上传本机录音克隆音色自动填入 voice_id
   await openGroup("builtin-model-tts");
   await page.locator("#voice-builtin-reuse-peer-tts").click();
   await page.locator("#voice-builtin-model-options-tts").getByRole("option", { name: /MOSS\/TTS-1/ }).click();
   assert.equal(await page.locator("#voice-builtin-model-voice-tts").inputValue(), "alloy", "选定合成模型后自动填入默认音色");
   await page.locator("#voice-builtin-model-test-tts").click();
   await page.locator("#voice-builtin-model-play-tts").waitFor();
+  await page.locator("#voice-builtin-model-url-tts").fill("https://maas.qianwenaiapi.com/compatible-mode/v1");
+  await page.locator("#voice-builtin-alibaba-tts-hint-tts").waitFor();
+  await page.locator("#voice-builtin-use-dashscope-tts").click();
+  assert.equal(await page.locator("#voice-builtin-model-kind-tts").inputValue(), "dashscope", "一键切换为千问 / 百炼原生流式接口");
+  assert.equal(await page.locator("#voice-builtin-model-name-tts").inputValue(), "qwen-audio-3.1-tts-flash");
+  assert.equal(await page.locator("#voice-builtin-model-voice-tts").inputValue(), "longanhuan_v3.1");
+  assert.match(await page.locator("#voice-group-builtin-model-tts .voice-final").innerText(), /SpeechSynthesizer/);
+  await page.locator("#voice-builtin-model-key-tts").fill("sk-test-dashscope");
+  await page.locator("#voice-builtin-voice-clone-input-tts").setInputFiles({
+    name: "moss-sample.wav",
+    mimeType: "audio/wav",
+    buffer: Buffer.from("UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=", "base64"),
+  });
+  await page.locator("#voice-builtin-model-result-tts").filter({ hasText: "音色克隆成功" }).waitFor();
+  assert.equal(last("voice_builtin_models_test").args.section, "tts_clone");
+  assert.equal(await page.locator("#voice-builtin-model-voice-tts").inputValue(), "qwen-tts-vc-mossclone-voice-001", "克隆完成后自动回填专属音色 ID");
+  assert.equal(await page.locator("#voice-builtin-model-save-tts").isDisabled(), false, "克隆并合成试听通过后可直接保存");
+  await page.locator("#voice-builtin-voice-toggle-tts").click();
+  await page.locator("#voice-builtin-voice-options-tts").getByRole("option", { name: /qwen-tts-vc-mossclone-voice-001/ }).waitFor();
+  await page.locator("#voice-builtin-voice-toggle-tts").click();
   // 5c. 顶部四栏自由混搭下拉框（大模型 + 语音识别 + 语音合成 + 拾音判停）：直接在顶部下拉框选本地合成与本地判停，下方卡片仅用于配置模型或下载
   await page.locator("#voice-builtin-mix-select-tts").selectOption("local:kokoro");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为本地语音合成" }).waitFor();

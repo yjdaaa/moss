@@ -276,7 +276,7 @@ fn build_qwen3_tts_speaker(idx: usize) -> TtsSpeakerMeta {
     }
 }
 
-/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en` / `qwen3_tts_0_6b` / `zipvoice_distill`）的语言包与全量音色目录。
+/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en` / `qwen3_tts_0_6b` / `zipvoice_distill` / `moss_vits`）的语言包与全量音色目录。
 pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
     let spec = spec_of(model_id, ModelKind::Tts)?;
     let default_speaker = spec.voices.map(|v| v.default).unwrap_or(0);
@@ -329,6 +329,17 @@ pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
                 recommended_for_zh: true,
             },
         ],
+        "moss_vits" => vec![TtsSpeakerMeta {
+            id: 0,
+            code: "moss",
+            name: "MOSS 原声（流浪地球）".to_owned(),
+            gender: "male",
+            gender_label: "男声",
+            lang: "zh",
+            lang_label: "中文普通话（只念中文）",
+            sample_text: SAMPLE_ZH,
+            recommended_for_zh: true,
+        }],
         _ => return None,
     };
 
