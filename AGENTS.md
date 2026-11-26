@@ -31,6 +31,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust），面向 
 ## 开发约束
 
 - 激光 MCP 工具在 `laser_tools::ToolCatalog` 登记，由 `laser_mcp::dispatch_tool_call_with` 分发；启动编排在 `laser-host`。
+- 行程、轴数、回零 / 软限位、急停引脚、`speed_map`、运动参数等机器能力，以 `laser-device` 从 FluidNC / GRBL 读回的字段为准（握手 `probe.rs`、解析 `protocol.rs`、发送前实时读 `connection.rs`），读不到按“未知”处理，不猜。界面行程按“手填 → 固件 → 默认 100 mm”取值，发送前仍按当场读到的固件行程复核（2026-11-26 用户确认，融合技术书 r65 / r68）。
 - crate 依赖只向下，激光域与语音域互不依赖（[`architecture.md`](docs/developer/architecture.md) §2）；新增 crate 先在 `scripts/check-crate-layers.mjs` 登记。脚本与文档按用途命名，任务代号只写正文。
 - 改契约、默认值、工具注册、提示词或用户可见行为时，同一次改动里同步实现、测试和 `docs/`。
 - 用户在对话中确认的设计决定，写入对应技术书的修订记录（[`docs/integration/revisions/`](docs/integration/revisions/)）并注明日期，后续以此为准。
