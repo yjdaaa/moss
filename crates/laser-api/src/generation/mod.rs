@@ -12,8 +12,8 @@ pub(crate) use draw::generate_draw_artifacts;
 pub(crate) use image_upload::generate_image_or_gcode_artifacts;
 use options::{MachineMotion, ParsedFill, cut_options_json, fill_options_json, parse_path_options};
 pub(crate) use options::{
-    frame_hull_json, merge_layer_options, parse_cut_options, parse_fill_options,
-    parse_machine_motion, time_estimate_json,
+    feed_exceeds_max_rate_warning, frame_hull_json, merge_layer_options, parse_cut_options,
+    parse_fill_options, parse_machine_motion, time_estimate_json,
 };
 pub(crate) use text::generate_text_artifacts;
 
@@ -53,6 +53,21 @@ pub(crate) fn parse_work_area_mm(
     Ok(number)
 }
 
+/// 请求省略 `work_area_*` 时优先取握手记忆的固件行程（同样经过 `parse_work_area_mm` 上限校验），无记录时回退默认 100 mm。
+pub(crate) fn parse_work_area_mm_or(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    remembered_mm: Option<f64>,
+) -> Result<f64, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => match remembered_mm {
+            Some(rem) => parse_work_area_mm(Some(&serde_json::json!(rem)), field),
+            None => Ok(MACHINE_WORK_AREA_MM),
+        },
+        other => parse_work_area_mm(other, field),
+    }
+}
+
 /// 图片横向扫描每侧过扫描（mm），尺寸换算会为它留出余量
 const IMAGE_OVERSCAN_MM: f64 = 1.0;
 
@@ -87,6 +102,96 @@ pub(crate) fn check_job_fits_machine(
         ));
     }
     Ok(())
+}
+
+/// r66（I1）：固件未完整报告 X/Y 行程时 `check_job_fits_machine` 照旧放行，但若软限位确认未开启或状态未知，
+/// 生成风险提示带进发送结果（不阻断发送）。
+pub(crate) fn soft_limit_preflight_warning(limits: &laser_device::MachineLimits) -> Option<String> {
+    if limits.x_travel_mm.is_some() && limits.y_travel_mm.is_some() {
+        return None;
+    }
+    match limits.soft_limits_enabled {
+        Some(true) => None,
+        Some(false) => Some("固件未报告行程且软限位未开启，越界不会被拦截".to_owned()),
+        None => Some("固件未报告行程且软限位状态未知，越界可能不会被拦截".to_owned()),
+    }
+}
+
+/// r66（I2）：仅在回零已开启、轴行程已知、机械坐标范围方向明确且拿到了起点 `MPos` 时，
+/// 按 `起点 MPos + 刀路相对范围` 估算是否会撞到行程尽头；只返回警告，绝不拒绝发送。
+pub(crate) fn estimate_mpos_travel_warning(
+    gcode: &str,
+    origin_mpos: Option<(f64, f64, f64)>,
+    limits: &laser_device::MachineLimits,
+    features: Option<&laser_device::MachineFeatures>,
+) -> Option<String> {
+    let (ox, oy, _) = origin_mpos?;
+    let Ok(Some(extents)) = laser_core::gcode::motion_extents(gcode) else {
+        return None;
+    };
+    const TOLERANCE_MM: f64 = 0.05;
+
+    let axis_bounds = |axis: &'static str, origin: f64| -> Option<(f64, f64)> {
+        let travel = match axis {
+            "X" => limits.x_travel_mm,
+            "Y" => limits.y_travel_mm,
+            _ => None,
+        }
+        .filter(|t| t.is_finite() && *t > 0.0)?;
+        if let Some(feat) = features {
+            let homing = match axis {
+                "X" => feat.x_homing.as_ref(),
+                "Y" => feat.y_homing.as_ref(),
+                _ => None,
+            }?;
+            if homing.cycle.unwrap_or(1) <= 0 {
+                return None;
+            }
+            let mpos_mm = homing.mpos_mm?;
+            let pos_dir = homing.positive_direction?;
+            Some(if pos_dir {
+                (mpos_mm - travel, mpos_mm)
+            } else {
+                (mpos_mm, mpos_mm + travel)
+            })
+        } else {
+            if limits.homing_enabled != Some(true) {
+                return None;
+            }
+            let mask = limits.homing_dir_mask?;
+            let bit = if axis == "X" { 1u8 } else { 2u8 };
+            let negative_home = (mask & bit) != 0;
+            // 标准 GRBL 回零后机械坐标在 [-travel, 0] 内；仅当 $23 设为负向回零且当前 MPos 已处于正区间（HOMING_FORCE_SET_ORIGIN）时取 [0, travel]
+            if negative_home && origin > TOLERANCE_MM {
+                Some((0.0, travel))
+            } else {
+                Some((-travel, 0.0))
+            }
+        }
+    };
+
+    let mut overflow_parts = Vec::new();
+    for (axis, origin, rel_min, rel_max) in [
+        ("X", ox, extents.min_x, extents.max_x),
+        ("Y", oy, extents.min_y, extents.max_y),
+    ] {
+        let Some((bound_min, bound_max)) = axis_bounds(axis, origin) else {
+            continue;
+        };
+        let reach_min = origin + rel_min;
+        let reach_max = origin + rel_max;
+        if reach_min < bound_min - TOLERANCE_MM || reach_max > bound_max + TOLERANCE_MM {
+            overflow_parts.push(format!(
+                "{axis} 轴预计走到 {reach_min:.1} ~ {reach_max:.1} mm（机械坐标范围 {bound_min:.0} ~ {bound_max:.0} mm）"
+            ));
+        }
+    }
+    (!overflow_parts.is_empty()).then(|| {
+        format!(
+            "按当前机械坐标估算，{}，可能撞到行程尽头，请核对起点位置",
+            overflow_parts.join("；")
+        )
+    })
 }
 
 /// 可选的正数尺寸：缺省、null、空串或 0 表示“自动”。

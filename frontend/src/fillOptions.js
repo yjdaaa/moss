@@ -8,9 +8,11 @@
 
 import {
   MACHINE_MOTION_EVENT,
+  MACHINE_MOTION_KEY,
   MAX_SAVED_TARGETS,
   connectionTargetKey,
 } from "./deviceConnection.js";
+export { MACHINE_MOTION_KEY };
 
 export const FILL_SETTINGS_KEY = "moss.fillSettings.v1";
 
@@ -362,7 +364,6 @@ export function fillResultNote(fill, removedDuplicates = 0, cut = null) {
 // 握手（/api/connection/check）读到的 `machine_limits` 里的加速度 / 最大速度记在本机，生成预览时原样转发为
 // `machine_motion`；填充设置里手填的“机器加速度”优先（两轴都用它）。
 
-export const MACHINE_MOTION_KEY = "moss.machineMotion.v1";
 const MOTION_KEYS = ["x_accel_mm_s2", "y_accel_mm_s2", "x_max_rate_mm_per_min", "y_max_rate_mm_per_min", "junction_deviation_mm"];
 
 /** 从握手结果的 `machine_limits` 取出运动参数；一个都没有时返回 null。 */

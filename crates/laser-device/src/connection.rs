@@ -313,6 +313,37 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         Ok(settings)
     }
 
+    /// 握手探测阶段发送只读 `$I` 读取固件版本与 FluidNC `Machine:` 名称（r66，不移动轴、不出光）。
+    /// 仅用于短探测连接（返回后即关闭通道）；旧模拟固件未响应或返回 `error:3` 时静默返回 `None`。
+    pub fn query_identity(&mut self, timeout: Duration) -> Option<crate::DeviceIdentity> {
+        if self.transport.write_line("$I").is_err() {
+            return None;
+        }
+        let deadline = Instant::now() + timeout.min(Duration::from_millis(800));
+        let mut identity = crate::DeviceIdentity::default();
+        while Instant::now() < deadline {
+            match self.transport.read_line() {
+                Ok(Some(line)) => {
+                    self.last_response_at = Instant::now();
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    crate::parse_device_identity_line(trimmed, &mut identity);
+                    if trimmed.eq_ignore_ascii_case("ok")
+                        || trimmed.to_ascii_lowercase().starts_with("error:")
+                        || trimmed.starts_with("ALARM:")
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        (!identity.is_empty()).then_some(identity)
+    }
+
     /// 握手后读取 FluidNC `$CD` 配置并缓存到 `features`。仅旧 GRBL 返回 `error:3`（不支持 `$CD`）时
     /// 静默返回 `Ok(false)` 并保持 `features = None`；复位、报警、断线或超时均返回 `Err`，
     /// 按字段叠加合并行程上限，不擦除 `$$` 已报告的其余轴或运动参数。

@@ -193,7 +193,7 @@ impl ApiService {
                 detail: Some(result["attempts"].to_string()),
             });
         }
-        // n73：工作台（桌面、本机网页、局域网配对）握手成功的连接记下来，语音与接入点默认用它
+        // n73 / r66：工作台（桌面、本机网页、局域网配对）握手成功的连接与固件行程一并记下来，语音与接入点默认用它
         if let Some(spec) = verified
             && matches!(
                 ctx,
@@ -202,7 +202,7 @@ impl ApiService {
                     | laser_contracts::CallerContext::Lan { .. }
             )
         {
-            self.remember_verified_connection(&spec);
+            self.remember_verified_connection_with_limits(&spec, result.get("machine_limits"));
         }
         http_json(200, success(result))
     }

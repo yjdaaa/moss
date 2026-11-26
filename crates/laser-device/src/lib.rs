@@ -12,15 +12,16 @@ pub use connection::{
 };
 pub use diagnose::diagnose_device_message;
 pub use discovery::{
-    ControllerIdentity, DiscoveredController, discover_controllers, discover_controllers_with,
-    identify_controller, identify_grbl, local_lan_ipv4, scan_hosts_port, scan_hosts_port_with,
-    scan_subnet_port, scan_subnet_port_with, subnet_hosts,
+    ControllerIdentity, DeviceIdentity, DiscoveredController, discover_controllers,
+    discover_controllers_with, identify_controller, identify_grbl, local_lan_ipv4,
+    parse_device_identity_line, scan_hosts_port, scan_hosts_port_with, scan_subnet_port,
+    scan_subnet_port_with, subnet_hosts,
 };
 pub use preflight::{SendPreflight, authorize_send};
 pub use probe::{ProbeReport, available_serial_ports, probe_device, probe_opened_device};
 pub use protocol::{
-    MAX_GCODE_LINE_BYTES, MachineActivity, MachineFeatures, MachineLimits, PreparedGcode,
-    SdProgress, StatusReport, extract_device_explanation, is_reset_banner,
+    AxisHoming, MAX_GCODE_LINE_BYTES, MachineActivity, MachineFeatures, MachineLimits,
+    PreparedGcode, SdProgress, StatusReport, extract_device_explanation, is_reset_banner,
     laser_off_on_alarm_warning, parse_fluidnc_yaml, parse_grbl_settings_limits,
     parse_status_report, prepare_gcode_lines, strip_gcode_comments, validate_gcode_line,
 };

@@ -16,6 +16,40 @@ impl MachineMotion {
     }
 }
 
+/// r66：有效雕刻进给速度超过固件两轴最大速度中的较小值时，返回非阻断警告文案（不修改、不夹紧原速度）。
+pub(crate) fn feed_exceeds_max_rate_warning(
+    feed_rate_mm_per_min: f64,
+    motion: &MachineMotion,
+) -> Option<String> {
+    if !feed_rate_mm_per_min.is_finite() || feed_rate_mm_per_min <= 0.0 {
+        return None;
+    }
+    let max_rate = match (
+        motion.profile.max_rate_x_mm_per_min,
+        motion.profile.max_rate_y_mm_per_min,
+    ) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }?;
+    if feed_rate_mm_per_min <= max_rate + 1e-6 {
+        return None;
+    }
+    let fmt = |v: f64| {
+        if (v - v.round()).abs() < 1e-6 {
+            format!("{v:.0}")
+        } else {
+            format!("{v}")
+        }
+    };
+    Some(format!(
+        "雕刻速度 {} mm/min 超过固件最大速度 {} mm/min，固件会自动降速，工时与出光效果会偏离设定",
+        fmt(feed_rate_mm_per_min),
+        fmt(max_rate)
+    ))
+}
+
 pub(crate) fn parse_machine_motion(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<MachineMotion, String> {

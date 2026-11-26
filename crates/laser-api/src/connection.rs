@@ -1,14 +1,32 @@
 use super::*;
 
 /// n73 握手成功的连接 → 记录：`fields` 同时带两套别名（串口 `port`/`baudrate`，网络 `host`/`network_host`、
-/// `telnet_port`/`network_telnet_port`），各工具按自己认的字段名取用。
-fn verified_connection_value(spec: &laser_device::ConnectionSpec, at: u64) -> serde_json::Value {
+/// `telnet_port`/`network_telnet_port`），各工具按自己认的字段名取用；
+/// r66 同时持久化当次握手的固件 X/Y 行程（`machine_limits`），供省略 `work_area_*` 的 AI/语音/MCP 生成路由取用。
+fn verified_connection_value(
+    spec: &laser_device::ConnectionSpec,
+    at: u64,
+    machine_limits: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let saved_limits = machine_limits
+        .and_then(|lim| {
+            let x = lim.get("x_travel_mm").and_then(serde_json::Value::as_f64);
+            let y = lim.get("y_travel_mm").and_then(serde_json::Value::as_f64);
+            (x.is_some() || y.is_some()).then(|| {
+                serde_json::json!({
+                    "x_travel_mm": x,
+                    "y_travel_mm": y,
+                })
+            })
+        })
+        .unwrap_or(serde_json::Value::Null);
     match spec {
         laser_device::ConnectionSpec::Serial { port, baud_rate } => serde_json::json!({
             "mode": "serial",
             "label": format!("串口 {port}（{baud_rate}）"),
             "verified_at": at,
             "fields": {"connection_mode": "serial", "port": port, "baudrate": baud_rate},
+            "machine_limits": saved_limits,
         }),
         laser_device::ConnectionSpec::Tcp { host, port } => serde_json::json!({
             "mode": "network",
@@ -19,6 +37,7 @@ fn verified_connection_value(spec: &laser_device::ConnectionSpec, at: u64) -> se
                 "host": host, "network_host": host,
                 "telnet_port": port, "network_telnet_port": port,
             },
+            "machine_limits": saved_limits,
         }),
     }
 }
@@ -100,13 +119,56 @@ impl ApiService {
 
     /// n73 记住一次握手成功的连接，并写进 `settings.json`（写不进去只影响重启后是否还记得）。
     pub fn remember_verified_connection(&self, spec: &laser_device::ConnectionSpec) {
-        let value = verified_connection_value(spec, unix_seconds());
+        self.remember_verified_connection_with_limits(spec, None);
+    }
+
+    /// r66 记住握手成功的连接及其固件 X/Y 行程（未报行程时清空旧行程记录，避免换机残留）。
+    pub fn remember_verified_connection_with_limits(
+        &self,
+        spec: &laser_device::ConnectionSpec,
+        machine_limits: Option<&serde_json::Value>,
+    ) {
+        let value = verified_connection_value(spec, unix_seconds(), machine_limits);
         if let Ok(mut slot) = self.verified_connection.write() {
             *slot = Some(value.clone());
         }
         let _ = update_runtime_settings(self.runtime_path.as_deref(), |current| {
             current.insert("laser_verified_connection".into(), value);
         });
+    }
+
+    /// r66 读取最近一次工作台握手记下的固件 X/Y 行程（无记录或某轴未报时返回 `None`）。
+    pub(crate) fn remembered_work_area(&self) -> (Option<f64>, Option<f64>) {
+        let Some(record) = self.verified_connection() else {
+            return (None, None);
+        };
+        let lim = &record["machine_limits"];
+        (
+            lim.get("x_travel_mm").and_then(serde_json::Value::as_f64),
+            lim.get("y_travel_mm").and_then(serde_json::Value::as_f64),
+        )
+    }
+
+    /// r66 生成请求未显式传 `work_area_*` 时，补入最近一次握手记下的固件行程（仍交由 `parse_work_area_mm` 做上限校验）。
+    pub(crate) fn with_remembered_work_area<'a>(
+        &self,
+        object: &'a serde_json::Map<String, serde_json::Value>,
+    ) -> std::borrow::Cow<'a, serde_json::Map<String, serde_json::Value>> {
+        let (rem_w, rem_h) = self.remembered_work_area();
+        let missing = |key: &str| matches!(object.get(key), None | Some(serde_json::Value::Null));
+        let fill_w = missing("work_area_width_mm").then_some(rem_w).flatten();
+        let fill_h = missing("work_area_height_mm").then_some(rem_h).flatten();
+        if fill_w.is_none() && fill_h.is_none() {
+            return std::borrow::Cow::Borrowed(object);
+        }
+        let mut cloned = object.clone();
+        if let Some(w) = fill_w {
+            cloned.insert("work_area_width_mm".into(), serde_json::json!(w));
+        }
+        if let Some(h) = fill_h {
+            cloned.insert("work_area_height_mm".into(), serde_json::json!(h));
+        }
+        std::borrow::Cow::Owned(cloned)
     }
 
     /// 局域网扫描（2026-11-09 用户要求）：收集候选后逐台只读识别（`?` + `$I`），只返回按 GRBL / FluidNC
@@ -512,6 +574,7 @@ impl ApiService {
         let mut firmware_settings: Vec<String> = Vec::new();
         let mut machine_limits = None;
         let mut machine_features = None;
+        let mut device_identity = None;
         let mut summary = String::new();
 
         let allow_fallback = parse_bool(
@@ -677,6 +740,7 @@ impl ApiService {
                         firmware_settings: Vec::new(),
                         machine_limits: None,
                         features: None,
+                        identity: None,
                         summary: format!("{label} 连接失败: {error}"),
                     }
                 }
@@ -711,10 +775,24 @@ impl ApiService {
                 firmware_settings = report.firmware_settings.clone();
                 machine_limits = report.machine_limits.clone();
                 machine_features = report.features.clone();
+                device_identity = report.identity.clone();
                 summary = report.summary.clone();
                 break;
             }
         }
+        let soft_limits_enabled = machine_limits
+            .as_ref()
+            .and_then(|lim| lim.soft_limits_enabled);
+        let homing_enabled = machine_limits.as_ref().and_then(|lim| lim.homing_enabled);
+        let homing_json = |h: &Option<laser_device::AxisHoming>| {
+            h.as_ref().map(|cfg| {
+                serde_json::json!({
+                    "cycle": cfg.cycle,
+                    "mpos_mm": cfg.mpos_mm,
+                    "positive_direction": cfg.positive_direction,
+                })
+            })
+        };
         let result = serde_json::json!({
             "preferred_mode": preferred,
             "selected_mode": selected,
@@ -724,6 +802,13 @@ impl ApiService {
             "network_connected": network_connected,
             "connected": serial_connected || network_connected,
             "firmware_settings": firmware_settings,
+            "soft_limits_enabled": soft_limits_enabled,
+            "homing_enabled": homing_enabled,
+            "identity": device_identity.map(|id| serde_json::json!({
+                "firmware": id.firmware,
+                "version": id.version,
+                "machine_name": id.machine_name,
+            })),
             "machine_limits": machine_limits.map(|lim| serde_json::json!({
                 "x_travel_mm": lim.x_travel_mm,
                 "y_travel_mm": lim.y_travel_mm,
@@ -733,6 +818,9 @@ impl ApiService {
                 "x_accel_mm_s2": lim.x_accel_mm_s2,
                 "y_accel_mm_s2": lim.y_accel_mm_s2,
                 "junction_deviation_mm": lim.junction_deviation_mm,
+                "soft_limits_enabled": lim.soft_limits_enabled,
+                "homing_enabled": lim.homing_enabled,
+                "homing_dir_mask": lim.homing_dir_mask,
             })),
             "features": machine_features.map(|feat| serde_json::json!({
                 "axes": feat.axes,
@@ -740,6 +828,11 @@ impl ApiService {
                 "has_door": feat.has_door,
                 "has_estop_or_fault_pin": feat.has_estop_or_fault_pin,
                 "speed_map": feat.speed_map,
+                "x_soft_limits": feat.x_soft_limits,
+                "y_soft_limits": feat.y_soft_limits,
+                "x_homing": homing_json(&feat.x_homing),
+                "y_homing": homing_json(&feat.y_homing),
+                "z_homing": homing_json(&feat.z_homing),
             })),
             "timeout_seconds": timeout_secs,
             "summary": summary,

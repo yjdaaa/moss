@@ -11,6 +11,13 @@
 - **验证**：前端 `dxfImport.test.mjs` 5 项、`svgImport.test.mjs` 8 项，浏览器 `svg-import`（留白裁框）、`usability-layout`（真实画板导入 DXF 并随场景发送）、`camera`（设为底图后跳到画板并放入）；`laser-api` 新增 `camera_reference_images_are_never_carved`。未在真机出光验证，摄像头与激光平台无标定。
 - **关联**：`frontend/src/{dxfImport.js,svgImport.js,drawReference.js,drawConnection.js}`、`frontend/src/pages/{DrawPage.jsx,CameraPage.jsx}`、`crates/laser-api/src/sketch.rs`。
 
+### 补齐硬件证据链五项能力：软限位与机械坐标越界提示、同地址换机重置、AI 记忆固件行程与超速提示（2026-11-26）
+
+- **现象**：固件未报行程且未开软限位时发送缺乏风险提醒，回零机台起点靠边时缺少机械坐标越界预警，同一地址更换另一台雕刻机后仍沿用旧行程与运动参数，AI / 语音省略 `work_area_*` 生成时固定按 100 mm 限制，雕刻速度超过固件最大速度时也无降速偏离提示。
+- **根因与修复**：`laser-device` 解析 GRBL `$20/$22/$23`、FluidNC `$CD` 的 `soft_limits` 与 `homing`（`cycle`/`mpos_mm`/`positive_direction`）并在握手发只读 `$I` 读取 `{firmware, version, machine_name}`；`/api/connection/check` 返回 `soft_limits_enabled`、`homing_enabled`、`identity` 并随 `laser_verified_connection` 持久化固件 X/Y 行程供省略 `work_area_*` 的文字、图片、画板、矩阵与测试图案生成路由取用（无记录回退 100 mm，前端显式传参仍手填优先）；发送预检在行程未知且软限位未开/未知或满足回零条件估算机械坐标越界时写入 `send_result.warnings`（只警告不阻断，确认框同步提示）；前端按目标比对 `identity` 在同地址换机时清空旧行程与运动参数并提示，生成预览在速度超过 `machine_motion` 最小轴上限时返回 `warnings` 而不夹紧原速度。默认门禁与 `confirmed` 契约不变。
+- **验证**：`laser-device` 新增软限位/回零解析与 `$I` 身份读取测试，`laser-api` 新增发送风险提示不拦截、握手记忆固件行程、超速提示不夹紧三项测试，黄金样本同步新字段，前端 `deviceConnection.test.mjs` 覆盖换机重置；`node scripts/verify.mjs --finish` 通过（Rust 1583 项、前端单测 424 项、浏览器测试 20 个文件、回环 E2E 41 项，已快更）。工作台确认框尚未接入软限位/越界提示（画板与 AI 预览已接）；真实 FluidNC 软限位、回零与 `$I` 上报未实机复测（`unverified`）。
+- **关联**：`crates/laser-device/src/{protocol.rs,discovery.rs,connection.rs,probe.rs}`、`crates/laser-api/src/{connection.rs,send.rs,feedback.rs,material_lab_patterns.rs}`、`crates/laser-api/src/generation/{mod.rs,options.rs,text.rs,image_upload.rs,draw.rs}`、`frontend/src/{deviceConnection.js,aiPreviewState.js}`、`frontend/src/components/draw/SendConfirmDialog.jsx`。
+
 ### 工作台矢量文字支持多行与外框铭牌，新增最近任务回填并合并重复点动面板（2026-11-26）
 
 - **现象**：工作台矢量文字只有 24 字的单行输入，后端已有的外框 / 铭牌只能靠语音触发；想按昨天的参数再刻一次只能凭记忆重填；监视舱里“现场移头”和“两点对位”各有一套步长与确认方式不同的方向键。

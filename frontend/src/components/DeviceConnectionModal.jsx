@@ -243,7 +243,7 @@ function DeviceConnectionModalBody({
       if (!mountedRef.current || probeEpochRef.current !== epoch) return;
       setConnectionStatus?.(outcome.status);
       if (outcome.connected) {
-        syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm);
+        syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm, undefined, outcome.handshakeMeta);
         syncHardwareMachineFeatures(outcome.status?.features ?? null, probeForm);
         writeMachineMotion(outcome.machineLimits, probeForm);
       }

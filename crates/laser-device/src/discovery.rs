@@ -105,6 +105,23 @@ pub fn discover_controllers_with(
     list
 }
 
+/// 握手时通过只读 `$I`（及可选欢迎横幅）识别出的控制器固件与机器名称（r66，用于识别同地址换机）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    /// 固件家族名，如 `FluidNC`、`Grbl`、`GrblHAL`
+    pub firmware: Option<String>,
+    /// 固件版本串，如 `v4.1.1`、`1.1h.20190825`
+    pub version: Option<String>,
+    /// FluidNC `$I` 输出的 `[MSG:Machine: <配置名>]`
+    pub machine_name: Option<String>,
+}
+
+impl DeviceIdentity {
+    pub fn is_empty(&self) -> bool {
+        self.firmware.is_none() && self.version.is_none() && self.machine_name.is_none()
+    }
+}
+
 /// 局域网扫描时识别出的控制器信息（2026-11-09，只读识别）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControllerIdentity {
@@ -117,18 +134,75 @@ pub struct ControllerIdentity {
 }
 
 /// `FluidNC` 后面紧跟的版本号（`v4.1.1`），去掉结尾的 `:` / `]`。
-fn fluidnc_version(text: &str) -> Option<String> {
+fn fluidnc_version_token(text: &str) -> Option<String> {
     let rest = &text[text.find("FluidNC")? + "FluidNC".len()..];
     let version = rest
         .split_whitespace()
         .next()
         .unwrap_or("")
         .trim_end_matches([':', ']']);
+    Some(version.to_owned())
+}
+
+fn fluidnc_version(text: &str) -> Option<String> {
+    let version = fluidnc_version_token(text)?;
     Some(if version.is_empty() {
         "FluidNC".to_owned()
     } else {
         format!("FluidNC {version}")
     })
+}
+
+/// 解析单行 `$I` 或启动横幅中的固件家族、版本号与 FluidNC `Machine:` 名称（r66）。
+pub fn parse_device_identity_line(line: &str, identity: &mut DeviceIdentity) {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix("[VER:") {
+        if rest.contains("FluidNC") {
+            identity.firmware = Some("FluidNC".to_owned());
+            if let Some(ver) = fluidnc_version_token(rest).filter(|v| !v.is_empty()) {
+                identity.version = Some(ver);
+            }
+        } else {
+            let family = if rest.to_ascii_lowercase().contains("grblhal") {
+                "GrblHAL"
+            } else {
+                "Grbl"
+            };
+            identity.firmware = Some(family.to_owned());
+            let ver = rest.split([':', ' ', ']']).next().unwrap_or("").trim();
+            if !ver.is_empty() {
+                identity.version = Some(ver.to_owned());
+            }
+        }
+        return;
+    }
+    if let Some(name) = trimmed
+        .strip_prefix("[MSG:Machine:")
+        .map(|rest| rest.trim_end_matches(']').trim())
+        .filter(|name| !name.is_empty())
+    {
+        identity.machine_name = Some(name.to_owned());
+        return;
+    }
+    if (trimmed.starts_with("Grbl ") || trimmed.starts_with("GrblHAL "))
+        && identity.firmware.is_none()
+    {
+        if trimmed.contains("[FluidNC") {
+            identity.firmware = Some("FluidNC".to_owned());
+            if let Some(ver) = fluidnc_version_token(trimmed).filter(|v| !v.is_empty()) {
+                identity.version = Some(ver);
+            }
+        } else {
+            let head = trimmed.split(" [").next().unwrap_or(trimmed).trim();
+            let mut parts = head.split_whitespace();
+            if let Some(fw) = parts.next() {
+                identity.firmware = Some(fw.to_owned());
+            }
+            if let Some(ver) = parts.next().filter(|v| !v.is_empty()) {
+                identity.version = Some(ver.to_owned());
+            }
+        }
+    }
 }
 
 /// `[VER:...]` / 启动横幅 → 可读的固件名（2026-11-09 按 FluidNC 源码格式核对）。

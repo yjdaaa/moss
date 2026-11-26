@@ -1008,3 +1008,225 @@ fn send_job_progress_trace_emits_deciles_from_lines_sent_and_stops_before_job_en
         "job_progress 必须排在 job_end 之前"
     );
 }
+
+#[test]
+fn send_preflight_attaches_soft_limit_and_mpos_travel_warnings_without_blocking_send() {
+    use crate::generation::{estimate_mpos_travel_warning, soft_limit_preflight_warning};
+
+    // 1) I1 单元测试：行程未知 + 软限位关/未知时返回提示；软限位开启或双轴行程已知时不提示
+    let unknown_travel_soft_off = laser_device::MachineLimits {
+        soft_limits_enabled: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(
+        soft_limit_preflight_warning(&unknown_travel_soft_off).as_deref(),
+        Some("固件未报告行程且软限位未开启，越界不会被拦截")
+    );
+    let unknown_travel_soft_unknown = laser_device::MachineLimits::default();
+    assert_eq!(
+        soft_limit_preflight_warning(&unknown_travel_soft_unknown).as_deref(),
+        Some("固件未报告行程且软限位状态未知，越界可能不会被拦截")
+    );
+    let unknown_travel_soft_on = laser_device::MachineLimits {
+        soft_limits_enabled: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(soft_limit_preflight_warning(&unknown_travel_soft_on), None);
+    let known_travel = laser_device::MachineLimits {
+        x_travel_mm: Some(300.0),
+        y_travel_mm: Some(200.0),
+        soft_limits_enabled: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(soft_limit_preflight_warning(&known_travel), None);
+
+    // 2) I2 单元测试：会越界、不越界、条件不足跳过三种情况（含 GRBL 与 FluidNC）
+    let gcode = "G90\nG21\nG92 X0 Y0\nG1 X50 Y30 F1200 S300\nM5\n";
+    let grbl_homed = laser_device::MachineLimits {
+        x_travel_mm: Some(200.0),
+        y_travel_mm: Some(200.0),
+        homing_enabled: Some(true),
+        homing_dir_mask: Some(0),
+        ..Default::default()
+    };
+    // 起点 MPos (-20, -100) + X50 = +30 > 0：会越界，返回警告
+    let warn = estimate_mpos_travel_warning(gcode, Some((-20.0, -100.0, 0.0)), &grbl_homed, None)
+        .expect("应警告 X 轴机械坐标越界");
+    assert!(warn.contains("X 轴"), "{warn}");
+    assert!(warn.contains("可能撞到行程尽头"), "{warn}");
+
+    // 起点 MPos (-120, -100) + (50, 30) = (-70, -70) ∈ [-200, 0]：不越界，无警告
+    assert_eq!(
+        estimate_mpos_travel_warning(gcode, Some((-120.0, -100.0, 0.0)), &grbl_homed, None),
+        None
+    );
+
+    // 条件不足（未开回零 / 缺少 $23 / 缺少 MPos）：跳过不警告
+    let grbl_no_home = laser_device::MachineLimits {
+        homing_enabled: Some(false),
+        ..grbl_homed.clone()
+    };
+    assert_eq!(
+        estimate_mpos_travel_warning(gcode, Some((-20.0, -100.0, 0.0)), &grbl_no_home, None),
+        None
+    );
+    let grbl_no_mask = laser_device::MachineLimits {
+        homing_dir_mask: None,
+        ..grbl_homed.clone()
+    };
+    assert_eq!(
+        estimate_mpos_travel_warning(gcode, Some((-20.0, -100.0, 0.0)), &grbl_no_mask, None),
+        None
+    );
+    assert_eq!(
+        estimate_mpos_travel_warning(gcode, None, &grbl_homed, None),
+        None
+    );
+
+    // FluidNC：positive_direction=false、mpos_mm=0 → [0, 300]，起点 270 + 50 = 320 > 300 警告
+    let fluid_features = laser_device::MachineFeatures {
+        axes: vec!["x".into(), "y".into()],
+        x_homing: Some(laser_device::AxisHoming {
+            cycle: Some(2),
+            mpos_mm: Some(0.0),
+            positive_direction: Some(false),
+        }),
+        y_homing: Some(laser_device::AxisHoming {
+            cycle: Some(1),
+            mpos_mm: Some(0.0),
+            positive_direction: Some(false),
+        }),
+        ..Default::default()
+    };
+    let fluid_warn = estimate_mpos_travel_warning(
+        gcode,
+        Some((270.0, 50.0, 0.0)),
+        &known_travel,
+        Some(&fluid_features),
+    )
+    .expect("FluidNC 正向区间越界应警告");
+    assert!(
+        fluid_warn.contains("0 ~ 300") && fluid_warn.contains("X 轴"),
+        "{fluid_warn}"
+    );
+
+    // 3) 真实 confirm_send 集成验证：
+    // Case A：行程未知 + $20=0 软限位关闭 → 发送照常通过（200 OK），send_result.warnings 含软限位提醒
+    // Case B：回零已开 + 机械坐标估算越界 → 绝不拒绝发送（200 OK），send_result.warnings 含越界警告
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("gen");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let gcode_path = temp.path().join("warn_check.gcode");
+    std::fs::write(&gcode_path, gcode).unwrap();
+
+    for (idx, settings_lines, mpos_line, expected_substr) in [
+        (
+            1,
+            "$10=3\r\n$20=0\r\n$22=0\r\n$30=1000\r\n$32=1\r\nok\r\n",
+            "<Idle|MPos:0.000,0.000,0.000|Bf:15,128>\r\n",
+            "固件未报告行程且软限位未开启",
+        ),
+        (
+            2,
+            "$10=3\r\n$20=1\r\n$22=1\r\n$23=0\r\n$30=1000\r\n$32=1\r\n$130=200.0\r\n$131=200.0\r\nok\r\n",
+            "<Idle|MPos:-20.000,-100.000,0.000|Bf:15,128>\r\n",
+            "可能撞到行程尽头",
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+                let mut buf = [0u8; 1];
+                let mut line = Vec::new();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+                while std::time::Instant::now() < deadline {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let b = buf[0];
+                            if b == b'?' {
+                                let _ = stream.write_all(mpos_line.as_bytes());
+                            } else if b == b'\n' {
+                                let text = String::from_utf8_lossy(&line).trim().to_string();
+                                line.clear();
+                                if text == "$$" {
+                                    let _ = stream.write_all(settings_lines.as_bytes());
+                                } else if text == "$CD" {
+                                    let _ = stream.write_all(b"error:3\r\n");
+                                } else if !text.is_empty() {
+                                    let _ = stream.write_all(b"ok\r\n");
+                                }
+                            } else if b != b'\r' {
+                                line.push(b);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        });
+        let wf_id = format!("wf-warn-{idx}");
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_preview_roots(vec![temp.path().to_path_buf()])
+        .with_generated_root(gen_dir.clone());
+        let created = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "workflow_id": wf_id,
+                "source_type": "gcode",
+                "gcode_file": "warn_check.gcode",
+                "material": "椴木",
+                "thickness_mm": 3,
+            }),
+        );
+        assert_eq!(created["success"], true, "{created}");
+        let sent = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "confirm_send",
+                "workflow_id": wf_id,
+                "confirmed": true,
+                "connection_mode": "network",
+                "network_host": "127.0.0.1",
+                "network_telnet_port": port,
+            }),
+        );
+        assert_eq!(sent["success"], true, "风险提示绝不阻断发送: {sent}");
+        let warnings = sent["result"]["send_result"]["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("send_result 应带 warnings: {sent}"));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains(expected_substr)),
+            "warnings 应包含 `{expected_substr}`: {warnings:?}"
+        );
+        for _ in 0..40 {
+            let st = post_json(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({"action": "status", "workflow_id": wf_id}),
+            );
+            if st["result"]["status"] == "completed" {
+                let term_warnings = st["result"]["send_result"]["warnings"].as_array().unwrap();
+                assert!(
+                    term_warnings
+                        .iter()
+                        .any(|w| w.as_str().unwrap_or("").contains(expected_substr)),
+                    "终态 send_result 也应保留 warnings: {st}"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}

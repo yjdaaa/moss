@@ -151,10 +151,10 @@ function App() {
       if (!sameTarget) return;
       setConnectionStatus(outcome.status);
       if (outcome.connected) {
-        syncHardwareWorkspaceLimits(outcome.machineLimits, saved);
+        syncHardwareWorkspaceLimits(outcome.machineLimits, saved, undefined, outcome.handshakeMeta);
         syncHardwareMachineFeatures(outcome.status?.features ?? null, saved);
         writeMachineMotion(outcome.machineLimits, saved);
-        emitDeviceLog("DEVICE", outcome.text, "ok");
+        emitDeviceLog("DEVICE", outcome.text, outcome.logLevel || "ok");
       }
     }, 600);
     return () => {

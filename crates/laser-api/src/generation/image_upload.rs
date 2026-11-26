@@ -472,6 +472,9 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             "time_estimate".into(),
             time_estimate_json(&estimate, &motion),
         );
+        if let Some(warning) = feed_exceeds_max_rate_warning(params.feed, &motion) {
+            res.insert("warnings".into(), serde_json::json!([warning]));
+        }
         return Ok(Some(res));
     } else if source_type == "gcode" {
         let gcode_file = object

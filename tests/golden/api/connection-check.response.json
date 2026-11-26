@@ -23,6 +23,9 @@
         }
       ],
       "connected": false,
+      "soft_limits_enabled": null,
+      "homing_enabled": null,
+      "identity": null,
       "machine_limits": null,
       "features": null,
       "firmware_settings": [],

@@ -40,6 +40,7 @@ export const SERIAL_BAUDRATES = Object.freeze([
   921600,
 ]);
 export const DEVICE_CONNECTION_EVENT = "moss:device-connection";
+export const MACHINE_MOTION_KEY = "moss.machineMotion.v1";
 export const MACHINE_MOTION_EVENT = "moss:machine-motion";
 export const WORKSPACE_LIMITS_KEY = "moss_yisu_workspace_limits_v1";
 export const WORKSPACE_LIMITS_EVENT = "moss:workspace-limits";
@@ -51,6 +52,8 @@ export const DEFAULT_Z_TRAVEL_MM = 20;
 export const MAX_XY_TRAVEL_MM = 2000;
 export const MAX_Z_TRAVEL_MM = 500;
 export const DEVICE_LOG_EVENT = "moss:device-log";
+
+const HANDSHAKE_META_SYMBOL = Symbol("mossHandshakeMeta");
 
 const USE_DEFAULT_STORAGE = Symbol("defaultStorage");
 let sessionFallbackForm = null;
@@ -158,6 +161,81 @@ function nextUpdatedAt(targets) {
   return maxTs;
 }
 
+function normalizeDeviceIdentity(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = {};
+  if (typeof raw.firmware === "string" && raw.firmware.trim()) out.firmware = raw.firmware.trim();
+  if (typeof raw.version === "string" && raw.version.trim()) out.version = raw.version.trim();
+  const machineName = raw.machine_name ?? raw.machine;
+  if (typeof machineName === "string" && machineName.trim()) out.machine_name = machineName.trim();
+  return Object.keys(out).length ? out : null;
+}
+
+export function formatDeviceIdentity(identity) {
+  const clean = normalizeDeviceIdentity(identity);
+  if (!clean) return "";
+  const head = [clean.firmware, clean.version]
+    .filter(Boolean)
+    .reduce((acc, part) => (acc.includes(part) ? acc : `${acc ? `${acc} ` : ""}${part}`), "");
+  if (head && clean.machine_name) return `${head} (${clean.machine_name})`;
+  return head || clean.machine_name || "";
+}
+
+export function isSameDeviceIdentity(a, b) {
+  const ia = normalizeDeviceIdentity(a);
+  const ib = normalizeDeviceIdentity(b);
+  if (!ia || !ib) return true;
+  return (
+    (ia.firmware || "") === (ib.firmware || "")
+    && (ia.version || "") === (ib.version || "")
+    && (ia.machine_name || "") === (ib.machine_name || "")
+  );
+}
+
+function formatTargetAddressFromKey(targetKey) {
+  const key = String(targetKey || "").trim();
+  if (key.startsWith("network:")) return key.slice("network:".length);
+  if (key.startsWith("serial:")) {
+    const rest = key.slice("serial:".length);
+    const colonIdx = rest.lastIndexOf(":");
+    return colonIdx > 0 ? rest.slice(0, colonIdx) : rest;
+  }
+  return key;
+}
+
+function normalizeSafetyMeta(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = {};
+  if (raw.probed === true) out.probed = true;
+  if (typeof raw.soft_limits_enabled === "boolean" || raw.soft_limits_enabled === null) {
+    out.soft_limits_enabled = raw.soft_limits_enabled;
+  }
+  if (typeof raw.homing_enabled === "boolean" || raw.homing_enabled === null) {
+    out.homing_enabled = raw.homing_enabled;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function clearMachineMotionForTargetKey(targetKey, storage) {
+  if (!targetKey) return;
+  try {
+    const raw = storage?.getItem?.(MACHINE_MOTION_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.targets || typeof parsed.targets !== "object" || Array.isArray(parsed.targets)) return;
+    if (!(targetKey in parsed.targets)) return;
+    const nextTargets = { ...parsed.targets };
+    delete nextTargets[targetKey];
+    const nextStore = { targets: nextTargets };
+    storage?.setItem?.(MACHINE_MOTION_KEY, JSON.stringify(nextStore));
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: nextStore }));
+    }
+  } catch (_error) {
+    // ignore storage errors
+  }
+}
+
 function defaultWorkspaceLimits(targetKey = "") {
   return {
     x_travel_mm: DEFAULT_XY_TRAVEL_MM,
@@ -166,6 +244,9 @@ function defaultWorkspaceLimits(targetKey = "") {
     sources: { x: "default", y: "default", z: "default" },
     hardware: { x: null, y: null, z: null },
     manual_values: { x: null, y: null, z: null },
+    identity: null,
+    safety: null,
+    identity_changed_notice: "",
     has_manual: false,
     has_hardware: false,
     from_hardware: false,
@@ -185,12 +266,17 @@ function parseWorkspaceLimitsStoreObject(parsed) {
       if (!key || !item || typeof item !== "object") continue;
       const hardware = normalizeAxisTriple(item.hardware);
       const manual = normalizeAxisTriple(item.manual);
-      if (!Object.keys(hardware).length && !Object.keys(manual).length) continue;
-      normalized[key] = {
+      const identity = normalizeDeviceIdentity(item.identity);
+      const safety = normalizeSafetyMeta(item.safety);
+      if (!Object.keys(hardware).length && !Object.keys(manual).length && !identity && !safety) continue;
+      const entry = {
         hardware,
         manual,
         updated_at: Number.isFinite(Number(item.updated_at)) ? Number(item.updated_at) : 0,
       };
+      if (identity) entry.identity = identity;
+      if (safety) entry.safety = safety;
+      normalized[key] = entry;
     }
     return { targets: pruneTargetMap(normalized) };
   }
@@ -276,6 +362,9 @@ export function resolveWorkspaceLimitsForTarget(storeOrLimits, target) {
     sources,
     hardware: { x: hw.x ?? null, y: hw.y ?? null, z: hw.z ?? null },
     manual_values: { x: man.x ?? null, y: man.y ?? null, z: man.z ?? null },
+    identity: normalizeDeviceIdentity(entry.identity),
+    safety: normalizeSafetyMeta(entry.safety),
+    identity_changed_notice: "",
     has_manual: hasManual,
     has_hardware: hasHardware,
     from_hardware: sources.x === "hardware" || sources.y === "hardware" || sources.z === "hardware",
@@ -338,14 +427,17 @@ export function writeManualWorkspaceLimits(patch = {}, targetOrStorage = undefin
   applyAxis(patch?.z ?? patch?.z_travel_mm, "z", 5, MAX_Z_TRAVEL_MM);
 
   const nextTargets = { ...store.targets };
-  if (!Object.keys(prev.hardware || {}).length && !Object.keys(nextManual).length) {
+  if (!Object.keys(prev.hardware || {}).length && !Object.keys(nextManual).length && !prev.identity && !prev.safety) {
     delete nextTargets[targetKey];
   } else {
-    nextTargets[targetKey] = {
+    const entry = {
       hardware: { ...(prev.hardware || {}) },
       manual: nextManual,
       updated_at: nextUpdatedAt(store.targets),
     };
+    if (prev.identity) entry.identity = prev.identity;
+    if (prev.safety) entry.safety = prev.safety;
+    nextTargets[targetKey] = entry;
   }
   const savedStore = persistWorkspaceLimitsStore({ targets: nextTargets }, resolvedStorage);
   return resolveWorkspaceLimitsForTarget(savedStore, targetKey);
@@ -363,31 +455,53 @@ export function clearManualWorkspaceLimits(targetOrStorage = undefined, maybeSto
     return defaultWorkspaceLimits(targetKey);
   }
   const nextTargets = { ...store.targets };
-  if (!Object.keys(prev.hardware || {}).length) {
+  if (!Object.keys(prev.hardware || {}).length && !prev.identity && !prev.safety) {
     delete nextTargets[targetKey];
   } else {
-    nextTargets[targetKey] = {
+    const entry = {
       hardware: { ...prev.hardware },
       manual: {},
       updated_at: nextUpdatedAt(store.targets),
     };
+    if (prev.identity) entry.identity = prev.identity;
+    if (prev.safety) entry.safety = prev.safety;
+    nextTargets[targetKey] = entry;
   }
   const savedStore = persistWorkspaceLimitsStore({ targets: nextTargets }, resolvedStorage);
   return resolveWorkspaceLimitsForTarget(savedStore, targetKey);
 }
 
 /**
- * 硬件握手成功后同步当前连接目标的固件行程：
- * - 只写入该目标的 `hardware` 槽位，绝不覆盖用户已填写的 `manual` 值；
+ * 硬件握手成功后同步当前连接目标的固件行程、身份与软限位/回零状态：
+ * - 同一目标的 `identity` 与此前记录两边都有值且不一致时，判定同地址换了机器：清空旧固件值、手填值与运动参数，并返回提示文案；
+ * - 未换机时只写入该目标的 `hardware` 槽位，绝不覆盖用户已填写的 `manual` 值；
  * - 握手未报行程或某轴未报时，清空该轴 `hardware`，无手填值时自动回退默认 100/20 mm。
  */
-export function syncHardwareWorkspaceLimits(machineLimits, targetOrStorage = undefined, maybeStorage = undefined) {
+export function syncHardwareWorkspaceLimits(
+  machineLimits,
+  targetOrStorage = undefined,
+  maybeStorage = undefined,
+  handshakeMeta = undefined,
+) {
   const { resolvedStorage, targetKey } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
   if (!targetKey) {
     return defaultWorkspaceLimits("");
   }
   const store = readWorkspaceLimitsStore(resolvedStorage);
   const prev = store.targets[targetKey] || { hardware: {}, manual: {}, updated_at: 0 };
+  const attachedMeta = (machineLimits && typeof machineLimits === "object" && machineLimits[HANDSHAKE_META_SYMBOL]) || null;
+  const metaSource = handshakeMeta && typeof handshakeMeta === "object" ? handshakeMeta : attachedMeta;
+
+  const incomingIdentity = normalizeDeviceIdentity(metaSource?.identity ?? machineLimits?.identity);
+  const prevIdentity = normalizeDeviceIdentity(prev.identity);
+  const machineSwapped = Boolean(prevIdentity && incomingIdentity && !isSameDeviceIdentity(prevIdentity, incomingIdentity));
+  let identityChangedNotice = "";
+  if (machineSwapped) {
+    clearMachineMotionForTargetKey(targetKey, resolvedStorage);
+    const addr = formatTargetAddressFromKey(targetKey);
+    identityChangedNotice = `检测到 ${addr} 上的机器已更换（原 ${formatDeviceIdentity(prevIdentity)} → 新 ${formatDeviceIdentity(incomingIdentity)}），已重置行程与运动参数`;
+  }
+
   const nextHardware = {};
   const x = validAxisValue(machineLimits?.x_travel_mm, 20, MAX_XY_TRAVEL_MM);
   const y = validAxisValue(machineLimits?.y_travel_mm, 20, MAX_XY_TRAVEL_MM);
@@ -396,19 +510,75 @@ export function syncHardwareWorkspaceLimits(machineLimits, targetOrStorage = und
   if (y !== undefined) nextHardware.y = y;
   if (z !== undefined) nextHardware.z = z;
 
+  const rawSoft = metaSource?.softLimitsEnabled !== undefined
+    ? metaSource.softLimitsEnabled
+    : metaSource?.soft_limits_enabled !== undefined
+      ? metaSource.soft_limits_enabled
+      : machineLimits?.soft_limits_enabled;
+  const rawHoming = metaSource?.homingEnabled !== undefined
+    ? metaSource.homingEnabled
+    : metaSource?.homing_enabled !== undefined
+      ? metaSource.homing_enabled
+      : machineLimits?.homing_enabled;
+  const hasSafetySignal = Boolean(metaSource) || typeof rawSoft === "boolean" || typeof rawHoming === "boolean";
+  const nextSafety = hasSafetySignal
+    ? {
+        probed: true,
+        soft_limits_enabled: typeof rawSoft === "boolean" ? rawSoft : null,
+        homing_enabled: typeof rawHoming === "boolean" ? rawHoming : null,
+      }
+    : (machineSwapped ? null : normalizeSafetyMeta(prev.safety));
+  const nextIdentity = incomingIdentity || (machineSwapped ? null : prevIdentity);
+
   const nextTargets = { ...store.targets };
-  const nextManual = { ...(prev.manual || {}) };
-  if (!Object.keys(nextHardware).length && !Object.keys(nextManual).length) {
+  const nextManual = machineSwapped ? {} : { ...(prev.manual || {}) };
+  if (!Object.keys(nextHardware).length && !Object.keys(nextManual).length && !nextIdentity && !nextSafety) {
     delete nextTargets[targetKey];
   } else {
-    nextTargets[targetKey] = {
+    const entry = {
       hardware: nextHardware,
       manual: nextManual,
       updated_at: nextUpdatedAt(store.targets),
     };
+    if (nextIdentity) entry.identity = nextIdentity;
+    if (nextSafety) entry.safety = nextSafety;
+    nextTargets[targetKey] = entry;
   }
   const savedStore = persistWorkspaceLimitsStore({ targets: nextTargets }, resolvedStorage);
-  return resolveWorkspaceLimitsForTarget(savedStore, targetKey);
+  const resolved = resolveWorkspaceLimitsForTarget(savedStore, targetKey);
+  return {
+    ...resolved,
+    identity_changed_notice: identityChangedNotice,
+  };
+}
+
+/**
+ * r66（I1）：当前连接目标已完成过握手，且固件未完整报告 X/Y 行程、软限位确认未开启或状态未知时，
+ * 返回发送确认框要展示的风险提示（不阻断发送）；其余情况返回空串。
+ */
+export function resolveSoftLimitSendWarning(
+  targetOrStorage = undefined,
+  maybeStorage = undefined,
+  liveStatus = null,
+) {
+  const { resolvedStorage, targetKey } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
+  if (!targetKey) return "";
+  const store = readWorkspaceLimitsStore(resolvedStorage);
+  const resolved = resolveWorkspaceLimitsForTarget(store, targetKey);
+  const safety = resolved.safety;
+  const probed = Boolean(safety?.probed || liveStatus?.connected);
+  if (!probed) return "";
+  if (Number.isFinite(resolved.hardware?.x) && Number.isFinite(resolved.hardware?.y)) {
+    return "";
+  }
+  const softLimits = typeof liveStatus?.softLimitsEnabled === "boolean" || liveStatus?.softLimitsEnabled === null
+    ? liveStatus.softLimitsEnabled
+    : (safety?.soft_limits_enabled ?? null);
+  if (softLimits === true) return "";
+  if (softLimits === false) {
+    return "固件未报告行程且软限位未开启，越界不会被拦截";
+  }
+  return "固件未报告行程且软限位状态未知，越界可能不会被拦截";
 }
 
 /** 生成界面显示的行程来源短文案（如“固件 300×200”、“手填 400×300”、“默认 100”）。 */
@@ -671,9 +841,36 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
       const result = res.data.result || {};
       const connected = mode === "serial" ? Boolean(result.serial_connected) : Boolean(result.network_connected);
       const summary = result.summary || (connected ? "控制器已连接 ($32=1 就绪)" : "未检测到控制器连接");
-      const text = connected
+      const identity = normalizeDeviceIdentity(result.identity);
+      const softLimitsEnabled = typeof result.soft_limits_enabled === "boolean" ? result.soft_limits_enabled : null;
+      const homingEnabled = typeof result.homing_enabled === "boolean" ? result.homing_enabled : null;
+      const handshakeMeta = {
+        probed: connected,
+        identity,
+        softLimitsEnabled,
+        homingEnabled,
+      };
+      const rawLimits = result.machine_limits || null;
+      if (connected && rawLimits && typeof rawLimits === "object") {
+        Object.defineProperty(rawLimits, HANDSHAKE_META_SYMBOL, {
+          value: handshakeMeta,
+          enumerable: false,
+          configurable: true,
+        });
+      }
+      let swapPreviewNotice = "";
+      if (connected && identity) {
+        const targetKey = connectionTargetKey(form);
+        const prevIdentity = readWorkspaceLimitsStore()?.targets?.[targetKey]?.identity;
+        if (prevIdentity && !isSameDeviceIdentity(prevIdentity, identity)) {
+          const addr = formatTargetAddressFromKey(targetKey);
+          swapPreviewNotice = `检测到 ${addr} 上的机器已更换（原 ${formatDeviceIdentity(prevIdentity)} → 新 ${formatDeviceIdentity(identity)}），已重置行程与运动参数`;
+        }
+      }
+      const baseText = connected
         ? `硬件握手通过：${summary}；语音和 AI 发送时没指定串口或 IP 就用这个连接`
         : summary;
+      const text = swapPreviewNotice ? `${baseText}；${swapPreviewNotice}` : baseText;
       return {
         connected,
         status: {
@@ -682,11 +879,19 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
           checkedAt: now,
           isFluidnc: Boolean(result.features),
           features: result.features || null,
+          identity,
+          softLimitsEnabled,
+          homingEnabled,
         },
-        bannerTone: connected ? "ok" : "bad",
-        logLevel: connected ? "ok" : "warn",
+        bannerTone: connected ? (swapPreviewNotice ? "warn" : "ok") : "bad",
+        logLevel: connected ? (swapPreviewNotice ? "warn" : "ok") : "warn",
         text,
-        machineLimits: result.machine_limits || null,
+        machineLimits: rawLimits,
+        identity,
+        softLimitsEnabled,
+        homingEnabled,
+        handshakeMeta,
+        identityChangedNotice: swapPreviewNotice,
       };
     }
     const errMsg = res?.data?.result || "探测失败：未检测到控制器连接";

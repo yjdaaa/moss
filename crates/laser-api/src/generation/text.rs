@@ -231,8 +231,9 @@ pub(crate) fn generate_text_artifacts(
         .map_err(|error| error.to_string())?;
 
     let gcode_sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
+    let speed_warning = feed_exceeds_max_rate_warning(params.feed, &motion);
 
-    Ok(serde_json::json!({
+    let mut map = serde_json::json!({
         "gcode_file": gcode_path.file_name().and_then(|value| value.to_str()).unwrap_or(""),
         "gcode_sha256": gcode_sha,
         "actual_params": params.json(),
@@ -274,5 +275,9 @@ pub(crate) fn generate_text_artifacts(
         "text_box": text_box.map(|b| serde_json::json!({"x_mm": b.x_mm, "y_mm": b.y_mm, "width_mm": b.width_mm, "height_mm": b.height_mm})),
         "weld": artifacts.weld.map(|w| serde_json::json!({"contours_before": w.before, "contours_after": w.after})),
         "time_estimate": time_estimate_json(&estimate, &motion)
-    }).as_object().cloned().unwrap_or_default())
+    }).as_object().cloned().unwrap_or_default();
+    if let Some(warning) = speed_warning {
+        map.insert("warnings".into(), serde_json::json!([warning]));
+    }
+    Ok(map)
 }

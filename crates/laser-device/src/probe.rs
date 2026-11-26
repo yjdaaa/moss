@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use crate::{
-    ConnectionSpec, DeviceConnection, DeviceState, DeviceTransport, MachineFeatures, MachineLimits,
-    laser_off_on_alarm_warning, open_transport, parse_grbl_settings_limits,
+    ConnectionSpec, DeviceConnection, DeviceIdentity, DeviceState, DeviceTransport,
+    MachineFeatures, MachineLimits, laser_off_on_alarm_warning, open_transport,
+    parse_grbl_settings_limits,
 };
 
-/// 握手探测报告：只发 `$$` 读取固件设置，不移动轴、不出光。
+/// 握手探测报告：只发 `$$` / `$CD` / `$I` 读取固件设置与身份，不移动轴、不出光。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbeReport {
     pub mode: &'static str,
@@ -15,6 +16,7 @@ pub struct ProbeReport {
     pub firmware_settings: Vec<String>,
     pub machine_limits: Option<MachineLimits>,
     pub features: Option<MachineFeatures>,
+    pub identity: Option<DeviceIdentity>,
     pub summary: String,
 }
 
@@ -51,6 +53,7 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
                 firmware_settings: Vec::new(),
                 machine_limits: None,
                 features: None,
+                identity: None,
                 summary: format!("{label} 连接失败: {error}"),
             };
         }
@@ -92,6 +95,7 @@ pub fn probe_opened_device(
                         firmware_settings: Vec::new(),
                         machine_limits: None,
                         features: None,
+                        identity: None,
                         summary: if alarm {
                             format!("已连接 {target}，但读取 $CD 时触发报警: {error}")
                         } else {
@@ -100,6 +104,7 @@ pub fn probe_opened_device(
                     };
                 }
             };
+            let identity = device.query_identity(timeout);
             let mut merged_limits = fallback_limits;
             if let Some(l) = yaml_limits {
                 merged_limits.merge_prefer(&l);
@@ -132,6 +137,7 @@ pub fn probe_opened_device(
                 firmware_settings: settings,
                 machine_limits: limits,
                 features,
+                identity,
                 summary,
             }
         }
@@ -145,6 +151,7 @@ pub fn probe_opened_device(
                 firmware_settings: Vec::new(),
                 machine_limits: None,
                 features: None,
+                identity: None,
                 summary: if alarm {
                     format!("已连接 {target}，但 {error}")
                 } else {
@@ -276,5 +283,61 @@ mod tests {
         assert_eq!(report.machine_limits.unwrap().x_travel_mm, Some(100.0));
         assert!(report.summary.contains("$10"), "{}", report.summary);
         assert!(report.summary.contains("自动宏"), "{}", report.summary);
+    }
+
+    #[test]
+    fn probe_reads_dollar_i_identity_for_fluidnc_and_grbl() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                    match line.trim() {
+                        "$$" => {
+                            let _ = write!(writer, "$20=1\r\n$22=1\r\n$23=3\r\n$32=1\r\nok\r\n");
+                        }
+                        "$CD" => {
+                            let _ = write!(
+                                writer,
+                                "axes:\r\n  x:\r\n    max_travel_mm: 300\r\n    soft_limits: true\r\n  y:\r\n    max_travel_mm: 200\r\n    soft_limits: true\r\nok\r\n"
+                            );
+                        }
+                        "$I" => {
+                            let _ = write!(
+                                writer,
+                                "[VER:4.1 FluidNC v4.1.1 (esp32-wifi) :g1234]\r\n[MSG:Machine: Yisu-3020]\r\nok\r\n"
+                            );
+                        }
+                        _ => {
+                            let _ = write!(writer, "ok\r\n");
+                        }
+                    }
+                    line.clear();
+                }
+            }
+        });
+        let report = probe_device(
+            &ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            Duration::from_secs(2),
+        );
+        assert!(report.connected, "{}", report.summary);
+        assert_eq!(
+            report.identity,
+            Some(DeviceIdentity {
+                firmware: Some("FluidNC".into()),
+                version: Some("v4.1.1".into()),
+                machine_name: Some("Yisu-3020".into()),
+            })
+        );
+        let lim = report.machine_limits.expect("limits");
+        assert_eq!(lim.soft_limits_enabled, Some(true));
+        assert_eq!(lim.homing_dir_mask, Some(3));
     }
 }

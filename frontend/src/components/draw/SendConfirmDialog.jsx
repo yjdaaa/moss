@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Send, Wifi, X } from "lucide-react";
 import { isTopmostModalBackdrop } from "../AppDialog.jsx";
+import { readUnifiedConnection, resolveSoftLimitSendWarning } from "../../deviceConnection.js";
 import { OriginBadge, inferOriginKind } from "../OriginBadge.jsx";
 import { useModalFocusTrap } from "../useModalFocusTrap.js";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
@@ -20,6 +21,7 @@ export function SendConfirmDialog({
   requireMovedAck = false,
   movedAcknowledged = false,
   onMovedAckChange,
+  safetyWarning,
 }) {
   // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开脱机文件支持时默认脱机直接报错失败
   const [offlineSdChoice, setOfflineSd] = React.useState(false);
@@ -30,6 +32,9 @@ export function SendConfirmDialog({
   // SD 脱机只能经网口上传；串口只能逐行发送
   const offlineSd = sdAvailable && offlineSdChoice;
   const canConfirm = !requireMovedAck || movedAcknowledged;
+  const effectiveSafetyWarning = safetyWarning !== undefined
+    ? String(safetyWarning || "").trim()
+    : resolveSoftLimitSendWarning(readUnifiedConnection());
 
   useModalFocusTrap({ backdropRef, dialogRef, initialFocusRef: cancelBtnRef });
 
@@ -84,6 +89,11 @@ export function SendConfirmDialog({
           <Wifi size={17} />
           <span>设备：{target}</span>
         </div>
+        {effectiveSafetyWarning ? (
+          <div className="wb-stale-notice" id="draw-confirm-soft-limit-warning" role="note">
+            {effectiveSafetyWarning}
+          </div>
+        ) : null}
         {sdAvailable ? (
           <label className="checkbox-row confirm-moved-ack draw-label">
             <input

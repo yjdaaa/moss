@@ -1,3 +1,11 @@
+/// FluidNC `$CD` 中单轴 `homing:` 段的解析结果（r66，未配置的字段保持 `None`）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AxisHoming {
+    pub cycle: Option<i32>,
+    pub mpos_mm: Option<f64>,
+    pub positive_direction: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MachineLimits {
     pub x_travel_mm: Option<f64>,
@@ -11,6 +19,12 @@ pub struct MachineLimits {
     pub y_accel_mm_s2: Option<f64>,
     /// 转角偏差（mm）：GRBL `$11`，FluidNC `junction_deviation_mm`
     pub junction_deviation_mm: Option<f64>,
+    /// 软限位开关：GRBL `$20=1/0`，FluidNC `axes.{x,y}.soft_limits`（全部已配 X/Y 轴开启才为 `true`，任一轴明确 `false` 为 `false`）
+    pub soft_limits_enabled: Option<bool>,
+    /// 回零开关：GRBL `$22=1/0`，FluidNC `axes.{x,y,z}` 是否存在有效 `homing:` 段
+    pub homing_enabled: Option<bool>,
+    /// GRBL `$23` 回零方向掩码（bit0=X, bit1=Y, bit2=Z；`0` 为正方向尽头，`1` 为负方向尽头）
+    pub homing_dir_mask: Option<u8>,
 }
 
 impl MachineLimits {
@@ -40,6 +54,15 @@ impl MachineLimits {
         if preferred.junction_deviation_mm.is_some() {
             self.junction_deviation_mm = preferred.junction_deviation_mm;
         }
+        if preferred.soft_limits_enabled.is_some() {
+            self.soft_limits_enabled = preferred.soft_limits_enabled;
+        }
+        if preferred.homing_enabled.is_some() {
+            self.homing_enabled = preferred.homing_enabled;
+        }
+        if preferred.homing_dir_mask.is_some() {
+            self.homing_dir_mask = preferred.homing_dir_mask;
+        }
     }
 
     pub fn has_xy_travel(&self) -> bool {
@@ -51,6 +74,11 @@ impl MachineLimits {
 pub struct MachineFeatures {
     /// `$CD` 的 `axes:` 段下实际配置的轴名（小写，如 `["x", "y", "z"]`）
     pub axes: Vec<String>,
+    pub x_homing: Option<AxisHoming>,
+    pub y_homing: Option<AxisHoming>,
+    pub z_homing: Option<AxisHoming>,
+    pub x_soft_limits: Option<bool>,
+    pub y_soft_limits: Option<bool>,
     pub has_air_assist: bool,
     pub has_door: bool,
     pub speed_map: Option<String>,
@@ -333,11 +361,25 @@ pub fn laser_off_on_alarm_warning(features: &MachineFeatures) -> Option<&'static
     )
 }
 
+fn parse_yaml_bool(val: &str) -> Option<bool> {
+    if val.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if val.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
     let mut limits = MachineLimits::default();
     let mut features = MachineFeatures::default();
     let mut current_section = "";
     let mut current_axis = "";
+    let mut axis_indent = 0usize;
+    let mut current_axis_sub = "";
+    let mut axis_sub_indent = 0usize;
+    let mut top_soft_limits: Option<bool> = None;
 
     for line in yaml.lines() {
         let trimmed = line.trim();
@@ -348,28 +390,54 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
         if indent == 0 && trimmed.ends_with(':') {
             current_section = trimmed.trim_end_matches(':').trim();
             current_axis = "";
+            current_axis_sub = "";
             features.has_laser |= current_section.eq_ignore_ascii_case("laser");
             continue;
         }
-        if current_section == "axes" && indent <= 4 && trimmed.ends_with(':') {
-            // 只认轴名（x / y / z / a / b / c）；同级非轴段重置 current_axis，`homing:`/`motor0:` 子段不改当前轴
+        if current_section == "axes" && trimmed.ends_with(':') {
             let raw_name = trimmed.trim_end_matches(':').trim();
-            let axis_key = match raw_name.to_ascii_lowercase().as_str() {
-                "x" => Some("x"),
-                "y" => Some("y"),
-                "z" => Some("z"),
-                "a" => Some("a"),
-                "b" => Some("b"),
-                "c" => Some("c"),
-                _ => None,
-            };
+            let axis_key = (indent <= 4)
+                .then(|| match raw_name.to_ascii_lowercase().as_str() {
+                    "x" => Some("x"),
+                    "y" => Some("y"),
+                    "z" => Some("z"),
+                    "a" => Some("a"),
+                    "b" => Some("b"),
+                    "c" => Some("c"),
+                    _ => None,
+                })
+                .flatten();
             if let Some(axis) = axis_key {
                 if !features.axes.iter().any(|existing| existing == axis) {
                     features.axes.push(axis.to_string());
                 }
                 current_axis = axis;
-            } else if indent <= 2 {
+                axis_indent = indent;
+                current_axis_sub = "";
+                axis_sub_indent = 0;
+            } else if !current_axis.is_empty() && indent > axis_indent {
+                if raw_name.eq_ignore_ascii_case("homing") {
+                    current_axis_sub = "homing";
+                    axis_sub_indent = indent;
+                    match current_axis {
+                        "x" => {
+                            features.x_homing.get_or_insert_with(AxisHoming::default);
+                        }
+                        "y" => {
+                            features.y_homing.get_or_insert_with(AxisHoming::default);
+                        }
+                        "z" => {
+                            features.z_homing.get_or_insert_with(AxisHoming::default);
+                        }
+                        _ => {}
+                    }
+                } else if current_axis_sub.is_empty() || indent <= axis_sub_indent {
+                    current_axis_sub = "other";
+                    axis_sub_indent = indent;
+                }
+            } else if indent <= 2 || indent <= axis_indent {
                 current_axis = "";
+                current_axis_sub = "";
             }
             continue;
         }
@@ -377,6 +445,13 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
         if let Some((k, v)) = trimmed.split_once(':') {
             let key = k.trim();
             let val = v.trim();
+            if current_section == "axes"
+                && !current_axis.is_empty()
+                && !current_axis_sub.is_empty()
+                && indent <= axis_sub_indent
+            {
+                current_axis_sub = "";
+            }
             let pin_wired = !val.is_empty() && !val.eq_ignore_ascii_case("no_pin");
             if current_section == "macros" {
                 let has_body = !val.is_empty() && val != "\"\"" && val != "''";
@@ -410,8 +485,38 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
                         features.verbose_errors = val.eq_ignore_ascii_case("true");
                         features.verbose_errors_disabled = val.eq_ignore_ascii_case("false");
                     }
+                    "soft_limits" => top_soft_limits = parse_yaml_bool(val),
                     _ => {}
                 }
+            }
+            if current_section == "axes" && current_axis_sub == "homing" {
+                let target = match current_axis {
+                    "x" => features.x_homing.as_mut(),
+                    "y" => features.y_homing.as_mut(),
+                    "z" => features.z_homing.as_mut(),
+                    _ => None,
+                };
+                if let Some(homing) = target {
+                    match key {
+                        "cycle" => homing.cycle = val.parse::<i32>().ok(),
+                        "mpos_mm" => {
+                            homing.mpos_mm = val.parse::<f64>().ok().filter(|n| n.is_finite())
+                        }
+                        "positive_direction" => homing.positive_direction = parse_yaml_bool(val),
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            if current_section == "axes" && current_axis_sub.is_empty() && key == "soft_limits" {
+                if let Some(enabled) = parse_yaml_bool(val) {
+                    match current_axis {
+                        "x" => features.x_soft_limits = Some(enabled),
+                        "y" => features.y_soft_limits = Some(enabled),
+                        _ => {}
+                    }
+                }
+                continue;
             }
             let positive = || {
                 val.parse::<f64>()
@@ -457,11 +562,40 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
             }
         }
     }
+
+    let has_x = features.axes.iter().any(|a| a == "x");
+    let has_y = features.axes.iter().any(|a| a == "y");
+    limits.soft_limits_enabled =
+        if features.x_soft_limits == Some(false) || features.y_soft_limits == Some(false) {
+            Some(false)
+        } else if (has_x || has_y)
+            && (!has_x || features.x_soft_limits == Some(true))
+            && (!has_y || features.y_soft_limits == Some(true))
+        {
+            Some(true)
+        } else {
+            top_soft_limits
+        };
+
+    let axis_homed =
+        |h: &Option<AxisHoming>| h.as_ref().is_some_and(|cfg| cfg.cycle.unwrap_or(1) > 0);
+    limits.homing_enabled = if axis_homed(&features.x_homing)
+        || axis_homed(&features.y_homing)
+        || axis_homed(&features.z_homing)
+    {
+        Some(true)
+    } else if !features.axes.is_empty() {
+        Some(false)
+    } else {
+        None
+    };
+
     (limits, features)
 }
 
 /// 从标准 GRBL $$ 设置行中提取 X/Y 行程（$130 为 X 行程，$131 为 Y 行程），
-/// 以及 `$110/$111` 最大速度、`$120/$121` 加速度、`$11` 转角偏差（2026-11-16）
+/// `$110/$111` 最大速度、`$120/$121` 加速度、`$11` 转角偏差（2026-11-16），
+/// 以及 `$20` 软限位、`$22` 回零开关、`$23` 回零方向掩码（2026-11-26 r66）
 pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
     let mut limits = MachineLimits::default();
     for line in settings {
@@ -469,6 +603,11 @@ pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
             line.strip_prefix(prefix)
                 .and_then(|val| val.trim().parse::<f64>().ok())
                 .filter(|v| v.is_finite() && *v > 0.0)
+        };
+        let flag_01 = |raw: &str| match raw.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
         };
         for (prefix, slot) in [
             ("$110=", &mut limits.x_max_rate_mm_per_min),
@@ -481,7 +620,13 @@ pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
                 *slot = positive(prefix);
             }
         }
-        if let Some(val) = line.strip_prefix("$130=") {
+        if let Some(val) = line.strip_prefix("$20=") {
+            limits.soft_limits_enabled = flag_01(val);
+        } else if let Some(val) = line.strip_prefix("$22=") {
+            limits.homing_enabled = flag_01(val);
+        } else if let Some(val) = line.strip_prefix("$23=") {
+            limits.homing_dir_mask = val.trim().parse::<u8>().ok();
+        } else if let Some(val) = line.strip_prefix("$130=") {
             limits.x_travel_mm = val
                 .trim()
                 .parse::<f64>()
@@ -570,6 +715,75 @@ control:
         assert_eq!(grbl_limits.x_travel_mm, Some(280.0));
         assert_eq!(grbl_limits.y_travel_mm, Some(180.0));
         assert_eq!(grbl_limits.z_travel_mm, Some(45.0));
+    }
+
+    #[test]
+    fn parse_grbl_and_fluidnc_soft_limits_and_homing_settings() {
+        let grbl_on = parse_grbl_settings_limits(&[
+            "$20=1".to_string(),
+            "$22=1".to_string(),
+            "$23=3".to_string(),
+        ]);
+        assert_eq!(grbl_on.soft_limits_enabled, Some(true));
+        assert_eq!(grbl_on.homing_enabled, Some(true));
+        assert_eq!(grbl_on.homing_dir_mask, Some(3));
+
+        let grbl_off = parse_grbl_settings_limits(&[
+            "$20=0".to_string(),
+            "$22=0".to_string(),
+            "$23=0".to_string(),
+        ]);
+        assert_eq!(grbl_off.soft_limits_enabled, Some(false));
+        assert_eq!(grbl_off.homing_enabled, Some(false));
+        assert_eq!(grbl_off.homing_dir_mask, Some(0));
+
+        let fluid_yaml = r#"
+axes:
+  x:
+    max_travel_mm: 300.0
+    soft_limits: true
+    homing:
+      cycle: 2
+      mpos_mm: 0.0
+      positive_direction: true
+    motor0:
+      limit_pos_pin: gpio.17
+  y:
+    max_travel_mm: 200.0
+    soft_limits: false
+    homing:
+      cycle: 1
+      mpos_mm: -200.0
+      positive_direction: false
+"#;
+        let (limits, features) = parse_fluidnc_yaml(fluid_yaml);
+        assert_eq!(
+            limits.soft_limits_enabled,
+            Some(false),
+            "任一 X/Y 轴关闭软限位即视为未开启"
+        );
+        assert_eq!(limits.homing_enabled, Some(true));
+        assert_eq!(
+            features.x_homing,
+            Some(AxisHoming {
+                cycle: Some(2),
+                mpos_mm: Some(0.0),
+                positive_direction: Some(true),
+            })
+        );
+        assert_eq!(
+            features.y_homing,
+            Some(AxisHoming {
+                cycle: Some(1),
+                mpos_mm: Some(-200.0),
+                positive_direction: Some(false),
+            })
+        );
+
+        let no_homing_yaml = "axes:\n  x:\n    max_travel_mm: 100.0\n    soft_limits: true\n  y:\n    max_travel_mm: 100.0\n    soft_limits: true\n";
+        let (no_home_limits, _) = parse_fluidnc_yaml(no_homing_yaml);
+        assert_eq!(no_home_limits.soft_limits_enabled, Some(true));
+        assert_eq!(no_home_limits.homing_enabled, Some(false));
     }
 
     /// 2026-11-09：FluidNC `Laser.off_on_alarm` 默认 false，配置了激光段却没开时握手摘要给出提醒。

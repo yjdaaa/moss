@@ -559,6 +559,9 @@ pub(crate) fn generate_draw_artifacts(
         "time_estimate".into(),
         time_estimate_json(&estimate, &motion),
     );
+    if let Some(warning) = feed_exceeds_max_rate_warning(params.feed, &motion) {
+        res_map.insert("warnings".into(), serde_json::json!([warning]));
+    }
     res_map.insert("fingerprint".into(), serde_json::Value::String(fingerprint));
 
     Ok(res_map)

@@ -95,6 +95,7 @@ struct SendPreflightOutcome {
     scale_factor: f64,
     origin_mpos: Option<(f64, f64, f64)>,
     current_mpos: Option<(f64, f64, f64)>,
+    warnings: Vec<String>,
 }
 
 struct SendWorkerParams {
@@ -112,6 +113,7 @@ struct SendWorkerParams {
     start_from_line: usize,
     origin_mpos: Option<(f64, f64, f64)>,
     current_mpos: Option<(f64, f64, f64)>,
+    warnings: Vec<String>,
     raw_estimate: Option<f64>,
     runtime_path: Option<std::path::PathBuf>,
     object: serde_json::Map<String, serde_json::Value>,
@@ -467,6 +469,11 @@ fn build_terminal_send_outcome(
     }
     if let (Some(raw), Some(map)) = (last_status_report, send_result.as_object_mut()) {
         map.insert("last_status_report".into(), serde_json::json!(raw));
+    }
+    if !params.warnings.is_empty()
+        && let Some(map) = send_result.as_object_mut()
+    {
+        map.insert("warnings".into(), serde_json::json!(params.warnings));
     }
     if status == "completed" {
         let note = crate::time_calibration::record_job_timing(
@@ -1299,11 +1306,24 @@ impl ApiService {
             }
             recorded_origin
         };
+        let mut warnings = Vec::new();
+        if let Some(w) = crate::generation::soft_limit_preflight_warning(&device.travel_limits) {
+            warnings.push(w);
+        }
+        if let Some(w) = crate::generation::estimate_mpos_travel_warning(
+            &verified.text,
+            origin_mpos,
+            &device.travel_limits,
+            device.features.as_ref(),
+        ) {
+            warnings.push(w);
+        }
         Ok(SendPreflightOutcome {
             verified,
             scale_factor: device_scale / 1000.0,
             origin_mpos,
             current_mpos,
+            warnings,
         })
     }
 
@@ -1453,6 +1473,18 @@ impl ApiService {
             .as_ref()
             .and_then(|store| store.get(kind, workflow_id).ok().flatten())
             .and_then(|record| crate::time_calibration::record_raw_estimate(&record.payload));
+        let preflight_warnings = preflight.warnings;
+        for warning in &preflight_warnings {
+            emit_laser_event(
+                &self.event_sink,
+                LaserEvent {
+                    level: LaserEventLevel::Warn,
+                    text: format!("加工风险提醒（{}）：{warning}", plan.target),
+                    hint: None,
+                    detail: None,
+                },
+            );
+        }
         let total = preflight.verified.lines.len();
         let worker_params = SendWorkerParams {
             kind,
@@ -1469,6 +1501,7 @@ impl ApiService {
             start_from_line: plan.start_from_line,
             origin_mpos: preflight.origin_mpos,
             current_mpos: preflight.current_mpos,
+            warnings: preflight_warnings.clone(),
             raw_estimate,
             runtime_path: self.runtime_path.clone(),
             object: object.clone(),
@@ -1495,7 +1528,7 @@ impl ApiService {
                 }
                 (500, failure(format!("无法启动发送线程: {e}"), None))
             })?;
-        Ok(serde_json::json!({
+        let mut initial_result = serde_json::json!({
             "success": true,
             "running": true,
             "mode": plan.mode,
@@ -1504,7 +1537,13 @@ impl ApiService {
             "total_lines": total,
             "resumed": plan.start_from_line > 0,
             "elapsed_ms": 0,
-        }))
+        });
+        if !preflight_warnings.is_empty()
+            && let Some(map) = initial_result.as_object_mut()
+        {
+            map.insert("warnings".into(), serde_json::json!(preflight_warnings));
+        }
+        Ok(initial_result)
     }
 
     /// 发送门禁允许解析 G-code 刀路的目录集合：预览根 + 生成目录 + 上传目录

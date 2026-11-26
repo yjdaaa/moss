@@ -159,8 +159,9 @@ impl ApiService {
                     );
                 }
             };
+            let generation_input = self.with_remembered_work_area(&object);
             match generate_text_artifacts(
-                &object,
+                &generation_input,
                 self.generated_root
                     .as_deref()
                     .or(self.upload_root.as_deref()),
@@ -227,8 +228,9 @@ impl ApiService {
                             );
                         }
                     };
+                    let generation_input = self.with_remembered_work_area(&object);
                     match generate_image_or_gcode_artifacts(
-                        &object,
+                        &generation_input,
                         self.upload_root.as_deref(),
                         self.generated_root.as_deref(),
                         &self.preview_roots,
@@ -308,8 +310,9 @@ impl ApiService {
                 );
             }
         };
+        let generation_input = self.with_remembered_work_area(&object);
         let mut artifacts = match generate_draw_artifacts(
-            &object,
+            &generation_input,
             self.generated_root
                 .as_deref()
                 .or(self.upload_root.as_deref()),

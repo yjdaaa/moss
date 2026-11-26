@@ -357,3 +357,192 @@ test("雕刻机有效行程按连接目标分桶保存：手填优先于固件�
   assert.equal(savedKeys.includes("network:192.0.2.2:23"), false, "最旧目标 #2 应被淘汰");
   assert.equal(savedKeys.includes("network:192.0.2.18:23"), true);
 });
+
+test("r68 硬件证据链：同地址换机重置行程与运动参数、软限位风险提示与超速警告展示", async () => {
+  const path = (await import("node:path")).default;
+  const { fileURLToPath } = await import("node:url");
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { createServer } = await import("vite");
+  const {
+    formatDeviceIdentity,
+    probeControllerConnection,
+    readWorkspaceLimits,
+    resolveSoftLimitSendWarning,
+    syncHardwareWorkspaceLimits,
+    writeManualWorkspaceLimits,
+  } = await import("../src/deviceConnection.js");
+  const { readMachineMotion, writeMachineMotion } = await import("../src/fillOptions.js");
+  const { aiPreviewNotes } = await import("../src/aiPreviewState.js");
+  const { summaryDisplayWarnings } = await import("../src/jobSummaryView.js");
+
+  const store = memoryStorage();
+  const target = { connection_mode: "network", network_host: "192.0.2.10", network_telnet_port: "23" };
+
+  // 1) 未握手时软限位风险未知、尚不误报“固件未报告行程”
+  assert.equal(resolveSoftLimitSendWarning(target, store), "");
+
+  // 2) 机器 A 握手：上报 300×200、FluidNC v3.7.8 (Laser-A)、加速度 1500，用户再手填 400×300
+  syncHardwareWorkspaceLimits(
+    { x_travel_mm: 300, y_travel_mm: 200, x_accel_mm_s2: 1500 },
+    target,
+    store,
+    {
+      probed: true,
+      identity: { firmware: "FluidNC", version: "v3.7.8", machine_name: "Laser-A" },
+      softLimitsEnabled: true,
+      homingEnabled: true,
+    },
+  );
+  writeManualWorkspaceLimits({ x_travel_mm: 400, y_travel_mm: 300 }, target, store);
+  writeMachineMotion({ x_accel_mm_s2: 1500, x_max_rate_mm_per_min: 6000 }, target, store);
+  assert.equal(readWorkspaceLimits(store, target).x_travel_mm, 400);
+  assert.deepEqual(readMachineMotion(target, store), { x_accel_mm_s2: 1500, x_max_rate_mm_per_min: 6000 });
+  assert.equal(resolveSoftLimitSendWarning(target, store), "", "固件已上报双轴行程时不提示软限位缺失");
+
+  // 3) 同一机器再次握手（identity 一致），保留手填 400×300 与运动参数，不报换机
+  const sameMachine = syncHardwareWorkspaceLimits(
+    { x_travel_mm: 300, y_travel_mm: 200 },
+    target,
+    store,
+    {
+      probed: true,
+      identity: { firmware: "FluidNC", version: "v3.7.8", machine_name: "Laser-A" },
+      softLimitsEnabled: true,
+      homingEnabled: true,
+    },
+  );
+  assert.equal(sameMachine.identity_changed_notice, "");
+  assert.equal(sameMachine.x_travel_mm, 400);
+  assert.deepEqual(readMachineMotion(target, store), { x_accel_mm_s2: 1500, x_max_rate_mm_per_min: 6000 });
+
+  // 4) 新握手未返回 identity（null）时不误判换机，保留手填值
+  const missingIdentity = syncHardwareWorkspaceLimits(
+    { x_travel_mm: 300, y_travel_mm: 200 },
+    target,
+    store,
+    { probed: true, identity: null, softLimitsEnabled: true, homingEnabled: true },
+  );
+  assert.equal(missingIdentity.identity_changed_notice, "");
+  assert.equal(missingIdentity.x_travel_mm, 400);
+
+  // 5) 同一地址换成机器 B（Grbl 1.1h.20190825，未上报行程且 $20=0 软限位未开启）：
+  //    清空旧固件值、手填值与运动参数，回退默认 100×100，并返回换机提示与软限位风险提示
+  assert.equal(
+    formatDeviceIdentity({ firmware: "FluidNC", version: "v3.7.8", machine_name: "Laser-A" }),
+    "FluidNC v3.7.8 (Laser-A)",
+  );
+  const swapped = syncHardwareWorkspaceLimits(
+    null,
+    target,
+    store,
+    {
+      probed: true,
+      identity: { firmware: "Grbl", version: "1.1h.20190825", machine_name: null },
+      softLimitsEnabled: false,
+      homingEnabled: false,
+    },
+  );
+  assert.equal(
+    swapped.identity_changed_notice,
+    "检测到 192.0.2.10:23 上的机器已更换（原 FluidNC v3.7.8 (Laser-A) → 新 Grbl 1.1h.20190825），已重置行程与运动参数",
+  );
+  assert.equal(swapped.x_travel_mm, 100);
+  assert.equal(swapped.y_travel_mm, 100);
+  assert.equal(swapped.has_manual, false);
+  assert.equal(readMachineMotion(target, store), null, "换机后应清空按目标保存的旧机器运动参数");
+  assert.equal(
+    resolveSoftLimitSendWarning(target, store),
+    "固件未报告行程且软限位未开启，越界不会被拦截",
+  );
+
+  // 软限位未知时返回对应提示；软限位开启时不提示
+  syncHardwareWorkspaceLimits(null, target, store, {
+    probed: true,
+    identity: { firmware: "Grbl", version: "1.1h.20190825" },
+    softLimitsEnabled: null,
+    homingEnabled: null,
+  });
+  assert.equal(
+    resolveSoftLimitSendWarning(target, store),
+    "固件未报告行程且软限位状态未知，越界可能不会被拦截",
+  );
+  syncHardwareWorkspaceLimits(null, target, store, {
+    probed: true,
+    identity: { firmware: "Grbl", version: "1.1h.20190825" },
+    softLimitsEnabled: true,
+    homingEnabled: false,
+  });
+  assert.equal(resolveSoftLimitSendWarning(target, store), "");
+
+  // 6) probeControllerConnection 透传 identity、softLimitsEnabled、homingEnabled
+  const probeOut = await probeControllerConnection(
+    async () => ({
+      ok: true,
+      data: {
+        success: true,
+        result: {
+          network_connected: true,
+          summary: "Grbl Ready",
+          soft_limits_enabled: false,
+          homing_enabled: true,
+          identity: { firmware: "Grbl", version: "1.1h", machine_name: null },
+          machine_limits: null,
+        },
+      },
+    }),
+    target,
+    999,
+  );
+  assert.equal(probeOut.softLimitsEnabled, false);
+  assert.equal(probeOut.homingEnabled, true);
+  assert.deepEqual(probeOut.identity, { firmware: "Grbl", version: "1.1h" });
+
+  // 7) 发送确认框与预览摘要同时展示软限位提示与超速警告
+  const speedWarn = "雕刻速度 4500 mm/min 超过固件最大速度 3000 mm/min，固件会自动降速，工时与出光效果会偏离设定";
+  const summary = {
+    material: "椴木",
+    thickness_mm: 3,
+    actual_width_mm: 40,
+    actual_height_mm: 20,
+    power: 400,
+    speed: 4500,
+    passes: 1,
+    estimated_display: "12.0 秒",
+    can_send: true,
+    mode: "vector",
+    task_type: "engrave",
+    warnings: [speedWarn],
+  };
+  assert.deepEqual(summaryDisplayWarnings(summary), [speedWarn]);
+  assert.ok(aiPreviewNotes({ artifacts: { warnings: [speedWarn] } }).includes(speedWarn));
+
+  const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const ssrServer = await createServer({
+    root: frontendRoot,
+    configFile: false,
+    appType: "custom",
+    logLevel: "silent",
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true, hmr: false, watch: null },
+  });
+  let html = "";
+  try {
+    const { SendConfirmDialog } = await ssrServer.ssrLoadModule("/src/components/draw/SendConfirmDialog.jsx");
+    html = renderToStaticMarkup(
+      React.createElement(SendConfirmDialog, {
+        summary,
+        target: "192.0.2.10:23",
+        sendAllowed: true,
+        safetyWarning: "固件未报告行程且软限位未开启，越界不会被拦截",
+        onCancel: () => {},
+        onConfirm: () => {},
+      }),
+    );
+  } finally {
+    await ssrServer.close();
+  }
+  assert.match(html, /draw-confirm-soft-limit-warning/);
+  assert.match(html, /固件未报告行程且软限位未开启，越界不会被拦截/);
+  assert.match(html, /超过固件最大速度 3000 mm\/min/);
+});

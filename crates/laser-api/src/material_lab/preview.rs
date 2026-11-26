@@ -101,16 +101,19 @@ impl ApiService {
                 failure("表面通用条目只能存雕刻参数，切割标定必须按真实厚度", None),
             ));
         }
-        let optional_work_area = |key: &str| -> Result<Option<f64>, (u16, serde_json::Value)> {
-            match object.get(key) {
-                None | Some(serde_json::Value::Null) => Ok(None),
-                Some(raw) => crate::generation::parse_work_area_mm(Some(raw), key)
-                    .map(Some)
-                    .map_err(|e| (400, failure(e, None))),
-            }
-        };
-        let work_area_w = optional_work_area("work_area_width_mm")?;
-        let work_area_h = optional_work_area("work_area_height_mm")?;
+        let (rem_w, rem_h) = self.remembered_work_area();
+        let max_work_area_w = crate::generation::parse_work_area_mm_or(
+            object.get("work_area_width_mm"),
+            "work_area_width_mm",
+            rem_w,
+        )
+        .map_err(|e| (400, failure(e, None)))?;
+        let max_work_area_h = crate::generation::parse_work_area_mm_or(
+            object.get("work_area_height_mm"),
+            "work_area_height_mm",
+            rem_h,
+        )
+        .map_err(|e| (400, failure(e, None)))?;
         let rows = parse_int(
             object.get("rows"),
             "rows",
@@ -368,15 +371,11 @@ impl ApiService {
             labels_enabled.then_some(&label_spec),
         )
         .map_err(|e| invalid(format!("标定标注参数无效: {e}")))?;
-        if work_area_w.is_some() || work_area_h.is_some() {
-            let max_w = work_area_w.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
-            let max_h = work_area_h.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
-            if layout.width_mm > max_w + 0.01 || layout.height_mm > max_h + 0.01 {
-                return Err(invalid(format!(
-                    "矩阵约 {:.1}×{:.1} mm，超出当前行程 {:.0}×{:.0} mm，请减少行列或缩小单元",
-                    layout.width_mm, layout.height_mm, max_w, max_h
-                )));
-            }
+        if layout.width_mm > max_work_area_w + 0.01 || layout.height_mm > max_work_area_h + 0.01 {
+            return Err(invalid(format!(
+                "矩阵约 {:.1}×{:.1} mm，超出当前行程 {:.0}×{:.0} mm，请减少行列或缩小单元",
+                layout.width_mm, layout.height_mm, max_work_area_w, max_work_area_h
+            )));
         }
         let cells = layout.cells;
         let gcode = laser_core::material::build_material_test_gcode(
@@ -546,6 +545,14 @@ impl ApiService {
         });
         if let (Some(map), serde_json::Value::Object(meta)) = (record.as_object_mut(), test_meta) {
             map.extend(meta);
+            if let Some(warning) =
+                crate::generation::feed_exceeds_max_rate_warning(speed_max as f64, &motion)
+            {
+                map.insert("warnings".into(), serde_json::json!([warning.clone()]));
+                if let Some(art) = map.get_mut("artifacts").and_then(|v| v.as_object_mut()) {
+                    art.insert("warnings".into(), serde_json::json!([warning]));
+                }
+            }
         }
         self.apply_time_calibration(record.get_mut("time_estimate"), object);
         self.save_calibration(&record)

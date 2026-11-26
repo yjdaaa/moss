@@ -170,12 +170,22 @@ fn interval_and_passes_axes_write_the_chosen_interval_and_passes_back() {
 fn interval_test_generates_one_labelled_row_and_saves_the_interval() {
     let temp = tempfile::tempdir().unwrap();
     let service = lab_service(&temp);
-    let res = post_json(
+    // 默认 9 格线距测试宽 104 mm：未握手且未传 work_area_* 时按 100 mm 默认行程拦截；传入 ≥104 mm 幅面可正常生成
+    let default_blocked = post_json(
         &service,
         "/api/material-lab/preview",
         &serde_json::json!({
             "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "engraving_mode": "raster",
             "test_type": "interval"
+        }),
+    );
+    assert_eq!(default_blocked["success"], false, "{default_blocked}");
+    let res = post_json(
+        &service,
+        "/api/material-lab/preview",
+        &serde_json::json!({
+            "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "engraving_mode": "raster",
+            "test_type": "interval", "work_area_width_mm": 120
         }),
     );
     assert_eq!(res["success"], true, "{res}");

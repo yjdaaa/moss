@@ -1632,3 +1632,234 @@ fn system_info_and_stop_targets_expose_caller_capability_flags() {
     assert_eq!(lan_info["result"]["can_write_reference_data"], false);
     assert_eq!(lan_info["result"]["can_acknowledge_stop"], false);
 }
+
+#[test]
+fn connection_check_reports_soft_limits_homing_identity_and_remembers_firmware_work_area() {
+    use std::io::{BufRead, BufReader, Write};
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let service = cors_test_service()
+        .with_runtime_path(temp.path().to_path_buf())
+        .with_generated_root(gen_dir);
+
+    // 1) 未握手记下固件行程时，省略 work_area_* 回退默认 100 mm：180 mm 宽矩阵被拦截，而显式带 work_area 时按请求值放行
+    let matrix_150 = serde_json::json!({
+        "material": "椴木",
+        "thickness_mm": 3,
+        "laser_mode": "engrave",
+        "engraving_mode": "raster",
+        "rows": 2,
+        "columns": 12,
+        "cell_size_mm": 10.0,
+        "cell_gap_mm": 2.0
+    });
+    let unprobed_body = matrix_150.to_string();
+    let unprobed_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                unprobed_body.len(),
+                unprobed_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        unprobed_resp["success"], false,
+        "未记下固件行程且未传 work_area 时应回退 100 mm 拦截: {unprobed_resp}"
+    );
+    assert!(
+        unprobed_resp["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("100×100"),
+        "{unprobed_resp}"
+    );
+
+    let mut explicit_matrix = matrix_150.clone();
+    explicit_matrix["work_area_width_mm"] = serde_json::json!(220);
+    explicit_matrix["work_area_height_mm"] = serde_json::json!(150);
+    let explicit_body = explicit_matrix.to_string();
+    let explicit_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                explicit_body.len(),
+                explicit_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        explicit_resp["success"], true,
+        "显式传 work_area_* 时优先按请求值校验: {explicit_resp}"
+    );
+
+    // 2) 工作台握手成功后，返回 soft_limits_enabled、homing_enabled、identity，并将固件 X/Y 行程持久化到 laser_verified_connection
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                match line.trim() {
+                    "$$" => {
+                        let _ = write!(
+                            writer,
+                            "$20=0\r\n$22=1\r\n$23=0\r\n$32=1\r\n$130=320.0\r\n$131=220.0\r\nok\r\n"
+                        );
+                    }
+                    "$CD" => {
+                        let _ = write!(writer, "error:3\r\n");
+                    }
+                    "$I" => {
+                        let _ = write!(writer, "[VER:1.1h.20190825:]\r\n[OPT:V,15,128]\r\nok\r\n");
+                    }
+                    _ => {
+                        let _ = write!(writer, "ok\r\n");
+                    }
+                }
+                line.clear();
+            }
+        }
+    });
+    let check_body = format!(
+        r#"{{"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":{port},"network_timeout":2}}"#
+    );
+    let check_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/connection/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                check_body.len(),
+                check_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(check_resp["result"]["connected"], true, "{check_resp}");
+    assert_eq!(check_resp["result"]["soft_limits_enabled"], false);
+    assert_eq!(check_resp["result"]["homing_enabled"], true);
+    assert_eq!(
+        check_resp["result"]["identity"],
+        serde_json::json!({
+            "firmware": "Grbl",
+            "version": "1.1h.20190825",
+            "machine_name": null
+        })
+    );
+    let remembered = service.verified_connection().expect("verified_connection");
+    assert_eq!(remembered["machine_limits"]["x_travel_mm"], 320.0);
+    assert_eq!(remembered["machine_limits"]["y_travel_mm"], 220.0);
+
+    // 3) 之后省略 work_area_* 的生成路由（矩阵、文字等）自动采用记下的 320×220 mm 固件行程；重启后同样生效
+    let reloaded = cors_test_service()
+        .with_runtime_path(temp.path().to_path_buf())
+        .with_generated_root(temp.path().join("generated"));
+    let remembered_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                unprobed_body.len(),
+                unprobed_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        remembered_resp["success"], true,
+        "省略 work_area_* 且已握手时应采用记忆的 320×220 mm 固件行程: {remembered_resp}"
+    );
+
+    // 显式传更小的 work_area_width_mm=120 时仍以请求参数为准，不拿 320 mm 覆盖请求值
+    let mut smaller_explicit = matrix_150;
+    smaller_explicit["work_area_width_mm"] = serde_json::json!(120);
+    smaller_explicit["work_area_height_mm"] = serde_json::json!(120);
+    let smaller_body = smaller_explicit.to_string();
+    let smaller_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                smaller_body.len(),
+                smaller_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        smaller_resp["success"], false,
+        "显式传 work_area 时不得被记忆的固件行程覆盖: {smaller_resp}"
+    );
+}
+
+#[test]
+fn preview_warns_when_feed_exceeds_firmware_max_rate_without_clamping() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let service = cors_test_service().with_generated_root(gen_dir);
+
+    let text_req = serde_json::json!({
+        "text": "MOSS",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "manual_params": {"power_percent": 40, "feed_rate": 4500, "passes": 1},
+        "machine_motion": {
+            "x_max_rate_mm_per_min": 5000,
+            "y_max_rate_mm_per_min": 3000
+        }
+    })
+    .to_string();
+    let text_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                text_req.len(),
+                text_req
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(text_resp["success"], true, "{text_resp}");
+    assert_eq!(
+        text_resp["result"]["artifacts"]["actual_params"]["feed_rate"].as_f64(),
+        Some(4500.0),
+        "速度不得被夹紧改动"
+    );
+    let warnings = text_resp["result"]["artifacts"]["warnings"]
+        .as_array()
+        .expect("应返回超速警告数组");
+    assert_eq!(
+        warnings[0].as_str(),
+        Some(
+            "雕刻速度 4500 mm/min 超过固件最大速度 3000 mm/min，固件会自动降速，工时与出光效果会偏离设定"
+        )
+    );
+
+    // 未超过两轴较小最大速度时不返回超速警告
+    let ok_req = serde_json::json!({
+        "text": "MOSS",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "manual_params": {"power_percent": 40, "feed_rate": 2800, "passes": 1},
+        "machine_motion": {
+            "x_max_rate_mm_per_min": 5000,
+            "y_max_rate_mm_per_min": 3000
+        }
+    })
+    .to_string();
+    let ok_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                ok_req.len(),
+                ok_req
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(ok_resp["success"], true, "{ok_resp}");
+    assert!(ok_resp["result"]["artifacts"]["warnings"].is_null());
+}

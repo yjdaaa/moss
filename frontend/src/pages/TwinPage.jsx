@@ -48,6 +48,7 @@ import {
   clearManualWorkspaceLimits,
   connectionSummaryView,
   connectionTargetKey,
+  emitDeviceLog,
   formatWorkspaceLimitsLabel,
   readMachineFeaturesStore,
   readUnifiedConnection,
@@ -610,21 +611,35 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       if (res.ok && res.data?.success) {
         const r = res.data.result || {};
         const isConn = Boolean(r.connected || r.serial_connected || r.network_connected);
-        setConnectionStatus?.({
-          connected: isConn,
-          summary: r.summary || (isConn ? "硬件握手通过" : "未连接"),
-          checkedAt: Date.now(),
-          isFluidnc: Boolean(r.features),
-          features: r.features || null,
-        });
+        let syncedSwapNotice = "";
         if (isConn) {
           const conn = readUnifiedConnection();
-          syncHardwareWorkspaceLimits(r.machine_limits, conn);
+          const synced = syncHardwareWorkspaceLimits(r.machine_limits, conn, undefined, {
+            probed: true,
+            identity: r.identity || null,
+            softLimitsEnabled: typeof r.soft_limits_enabled === "boolean" ? r.soft_limits_enabled : null,
+            homingEnabled: typeof r.homing_enabled === "boolean" ? r.homing_enabled : null,
+          });
+          syncedSwapNotice = synced?.identity_changed_notice || "";
           syncHardwareMachineFeatures(r.features || null, conn);
           writeMachineMotion(r.machine_limits, conn);
           setWorkspaceLimitsStore(readWorkspaceLimitsStore());
           setFeaturesStore(readMachineFeaturesStore());
+          if (syncedSwapNotice) {
+            emitDeviceLog("DEVICE", syncedSwapNotice, "warn");
+          }
         }
+        const summaryText = r.summary || (isConn ? "硬件握手通过" : "未连接");
+        setConnectionStatus?.({
+          connected: isConn,
+          summary: syncedSwapNotice ? `${summaryText}；${syncedSwapNotice}` : summaryText,
+          checkedAt: Date.now(),
+          isFluidnc: Boolean(r.features),
+          features: r.features || null,
+          identity: r.identity || null,
+          softLimitsEnabled: typeof r.soft_limits_enabled === "boolean" ? r.soft_limits_enabled : null,
+          homingEnabled: typeof r.homing_enabled === "boolean" ? r.homing_enabled : null,
+        });
         setLiveFeatures(r.features || null);
       } else {
         const msg = (typeof res.data?.result === "string" && res.data.result) || "读取实机行程失败，请检查设备连接";

@@ -228,25 +228,24 @@ impl ApiService {
             )
         };
 
-        let optional_work_area = |key: &str| -> Result<Option<f64>, (u16, serde_json::Value)> {
-            match object.get(key) {
-                None | Some(serde_json::Value::Null) => Ok(None),
-                Some(raw) => crate::generation::parse_work_area_mm(Some(raw), key)
-                    .map(Some)
-                    .map_err(|e| (400, failure(e, None))),
-            }
-        };
-        let work_area_w = optional_work_area("work_area_width_mm")?;
-        let work_area_h = optional_work_area("work_area_height_mm")?;
-        if work_area_w.is_some() || work_area_h.is_some() {
-            let max_w = work_area_w.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
-            let max_h = work_area_h.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
-            if width_mm > max_w + 0.01 || height_mm > max_h + 0.01 {
-                return Err(invalid(format!(
-                    "测试图案约 {:.1}×{:.1} mm，超出当前行程 {:.0}×{:.0} mm",
-                    width_mm, height_mm, max_w, max_h
-                )));
-            }
+        let (rem_w, rem_h) = self.remembered_work_area();
+        let max_w = crate::generation::parse_work_area_mm_or(
+            object.get("work_area_width_mm"),
+            "work_area_width_mm",
+            rem_w,
+        )
+        .map_err(|e| (400, failure(e, None)))?;
+        let max_h = crate::generation::parse_work_area_mm_or(
+            object.get("work_area_height_mm"),
+            "work_area_height_mm",
+            rem_h,
+        )
+        .map_err(|e| (400, failure(e, None)))?;
+        if width_mm > max_w + 0.01 || height_mm > max_h + 0.01 {
+            return Err(invalid(format!(
+                "测试图案约 {:.1}×{:.1} mm，超出当前行程 {:.0}×{:.0} mm",
+                width_mm, height_mm, max_w, max_h
+            )));
         }
 
         let root = self
@@ -322,6 +321,18 @@ impl ApiService {
             map.insert("next_actions".into(), serde_json::json!(["send"]));
             map.insert("created_at".into(), serde_json::json!(now));
             map.insert("updated_at".into(), serde_json::json!(now));
+            let max_pattern_speed = map
+                .get("speed_max")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(speed as f64);
+            if let Some(warning) =
+                crate::generation::feed_exceeds_max_rate_warning(max_pattern_speed, &motion)
+            {
+                map.insert("warnings".into(), serde_json::json!([warning.clone()]));
+                if let Some(art) = map.get_mut("artifacts").and_then(|v| v.as_object_mut()) {
+                    art.insert("warnings".into(), serde_json::json!([warning]));
+                }
+            }
         }
         self.apply_time_calibration(record.get_mut("time_estimate"), object);
         self.save_calibration(&record)

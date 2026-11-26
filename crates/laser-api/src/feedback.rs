@@ -753,6 +753,9 @@ impl ApiService {
         input.remove("_artifacts");
         input.remove("manual_params");
         input.insert("feedback_params".into(), params.json());
+        if let std::borrow::Cow::Owned(with_limits) = self.with_remembered_work_area(&input) {
+            input = with_limits;
+        }
         let effective_library = self.effective_material_library()?;
         let mut artifacts = match workflow["source_type"].as_str() {
             Some("text") => generate_text_artifacts(
@@ -914,16 +917,25 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
     } else {
         "engrave"
     };
+    let view_warnings = artifacts
+        .get("warnings")
+        .and_then(Value::as_array)
+        .filter(|arr| !arr.is_empty())
+        .cloned();
+    let mut job_summary = json!({
+        "material": artifacts["material"], "requested_thickness_mm": artifacts["thickness_mm"],
+        "actual_width_mm": artifacts["width_mm"], "actual_height_mm": artifacts["height_mm"],
+        "power": artifacts["actual_params"]["laser_max_power"],
+        "speed": artifacts["actual_params"]["feed_rate"], "passes": artifacts["actual_params"]["passes"],
+        "estimated_display": format!("{seconds:.1} 秒"), "can_send": true,
+        "mode": actual_mode, "task_type": task_type, "vector_style": artifacts["vector_style"],
+        "pixel_size_mm": artifacts["pixel_size_mm"]
+    });
+    if let (Some(warnings), Some(summary_map)) = (view_warnings, job_summary.as_object_mut()) {
+        summary_map.insert("warnings".into(), Value::Array(warnings));
+    }
     let view = json!({
-        "job_summary": {
-            "material": artifacts["material"], "requested_thickness_mm": artifacts["thickness_mm"],
-            "actual_width_mm": artifacts["width_mm"], "actual_height_mm": artifacts["height_mm"],
-            "power": artifacts["actual_params"]["laser_max_power"],
-            "speed": artifacts["actual_params"]["feed_rate"], "passes": artifacts["actual_params"]["passes"],
-            "estimated_display": format!("{seconds:.1} 秒"), "can_send": true,
-            "mode": actual_mode, "task_type": task_type, "vector_style": artifacts["vector_style"],
-            "pixel_size_mm": artifacts["pixel_size_mm"]
-        },
+        "job_summary": job_summary,
         "content_fingerprint": artifacts["fingerprint"]
     });
     let web = json!({
