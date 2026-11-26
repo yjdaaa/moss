@@ -1191,3 +1191,63 @@ fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
     assert_eq!(server.shared.active_aggregate_pulse(), (None, 0));
     server.stop();
 }
+
+#[test]
+fn removed_device_old_valid_hmac_token_cannot_open_ws_session_and_staged_assets_clear() {
+    let (server, registry) = start();
+    registry.set(DEVICE, DeviceStatus::Allowed);
+
+    // 设备在已允许状态完成开机 OTA，拿到签名与有效期均合法的真实 HMAC token
+    let (ota_code, ota_body) = ota(&server, Some(DEVICE));
+    assert_eq!(ota_code, 200);
+    let old_token = ota_body["websocket"]["token"]
+        .as_str()
+        .expect("allowed 设备 OTA 应签发 token")
+        .to_owned();
+    assert!(!old_token.is_empty());
+
+    // 同时模拟给该设备与另一台设备暂存了待下载的唤醒词/画风资源包
+    let staged_removed = server
+        .shared
+        .assets_store
+        .stage(DEVICE, vec![1, 2, 3, 4])
+        .unwrap();
+    let staged_other = server
+        .shared
+        .assets_store
+        .stage("11:22:33:44:55:66", vec![9, 8, 7])
+        .unwrap();
+
+    // 模拟桌面端“移除设备”：删掉登记记录并清理服务端该设备内存态
+    registry.devices.lock().unwrap().remove(DEVICE);
+    server.clear_device_state(DEVICE);
+
+    assert!(
+        server.shared.assets_store.fetch(&staged_removed).is_none(),
+        "移除设备后，仅针对该设备的内存待下载资源包须已清除"
+    );
+    assert!(
+        server.shared.assets_store.fetch(&staged_other).is_some(),
+        "其他设备的待下载资源包不受影响"
+    );
+
+    // 设备携带移除前拿到的合法未过期 token 重新连入 WebSocket：
+    // 须按新设备重新登记为 Pending，提示“等待允许”并断开，不得建立会话
+    let mut ws = connect(&server, &device_headers(Some(&old_token), 1));
+    let server_hello = hello(&mut ws, 1);
+    assert_eq!(server_hello["type"], "hello");
+    let alert = read_json(&mut ws);
+    assert_eq!(alert["type"], "alert");
+    assert_eq!(alert["status"], "等待允许");
+    expect_closed(&mut ws);
+    assert!(
+        server.status().sessions.is_empty(),
+        "携带旧有效 token 的已移除设备不得建立会话"
+    );
+    assert_eq!(
+        registry.status(DEVICE),
+        Some(DeviceStatus::Pending),
+        "移除后再来访须重新登记为 Pending"
+    );
+    server.stop();
+}

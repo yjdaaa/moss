@@ -37,6 +37,7 @@ fn main() {
         "voice_colab_export_notebook",
         "voice_device_set_status",
         "voice_device_rename",
+        "voice_device_remove",
         "voice_device_request",
         "voice_music_pick_directory",
         "voice_music_status",

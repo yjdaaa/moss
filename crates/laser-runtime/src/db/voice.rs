@@ -11,6 +11,14 @@ use super::{
 
 const VOICE_SNAPSHOT_MAX_BYTES: usize = 8 * 1024;
 
+/// `RuntimeDb::delete_voice_device` 的执行结果（n134）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteVoiceDeviceOutcome {
+    Deleted,
+    NotFound,
+    Revoked,
+}
+
 const VOICE_DEVICE_COLUMNS: &str = "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at, status_revision";
 
 fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDeviceRecord> {
@@ -696,5 +704,51 @@ impl RuntimeDb {
             "UPDATE voice_devices SET name=?2 WHERE device_id=?1",
             params![device_id, name],
         )? > 0)
+    }
+
+    /// 移除已允许或待允许的小智设备记录（n134）：
+    /// - 同一事务内先检查当前状态，`revoked` 设备禁止移除（防止删库绕过撤销拦截）；
+    /// - 作废该设备尚未消费的语音审批（与撤销一致）；
+    /// - 清理仅针对该设备的待推送固件记录并作废未上报的下载令牌；
+    /// - 删除 `voice_devices` 行（含同行 `info/hello/status/listen` 快照），保留对话记录、长期记忆与声纹资料。
+    pub fn delete_voice_device(
+        &self,
+        device_id: &str,
+        now: f64,
+    ) -> Result<DeleteVoiceDeviceOutcome, SchemaError> {
+        if !now.is_finite() {
+            return Err(SchemaError::InvalidRecord("移除设备时间戳无效".into()));
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM voice_devices WHERE device_id=?1",
+                [device_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            tx.commit()?;
+            return Ok(DeleteVoiceDeviceOutcome::NotFound);
+        };
+        if status == VOICE_DEVICE_REVOKED {
+            tx.commit()?;
+            return Ok(DeleteVoiceDeviceOutcome::Revoked);
+        }
+        tx.execute(
+            "UPDATE approvals SET status='expired', updated_at=?2 WHERE source='voice' AND session_id=?1 AND status IN ('pending','approved')",
+            params![device_id, now],
+        )?;
+        tx.execute(
+            "DELETE FROM voice_firmware_delivery WHERE device_id=?1 AND download_status='pending' AND device_report_status='not_reported'",
+            [device_id],
+        )?;
+        tx.execute(
+            "UPDATE voice_firmware_delivery SET token=NULL, expires_at=?2, revision=revision+1, updated_at=?2 WHERE device_id=?1 AND device_report_status='not_reported' AND token IS NOT NULL",
+            params![device_id, now],
+        )?;
+        tx.execute("DELETE FROM voice_devices WHERE device_id=?1", [device_id])?;
+        tx.commit()?;
+        Ok(DeleteVoiceDeviceOutcome::Deleted)
     }
 }

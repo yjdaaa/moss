@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-device-remove"
+description = "Enables the voice_device_remove command without any pre-configured scope."
+commands.allow = ["voice_device_remove"]
+
+[[permission]]
+identifier = "deny-voice-device-remove"
+description = "Denies the voice_device_remove command without any pre-configured scope."
+commands.deny = ["voice_device_remove"]

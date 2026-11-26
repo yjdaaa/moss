@@ -58,7 +58,9 @@ import {
   voiceCenterAvailable,
   voiceErrorText,
   builtinDeviceView,
+  partitionBuiltinDevices,
   allowDeviceConfirmText,
+  removeDeviceConfirmText,
   builtinModeView,
   builtinModelForm,
   builtinKeyPlaceholder,
@@ -204,18 +206,41 @@ test("内置服务设备：状态、显示名与可用操作（内置语音技�
   assert.equal(pending.title, "aa:bb");
   assert.equal(pending.canAllow, true);
   assert.equal(pending.canRevoke, true);
+  assert.equal(pending.canRemove, true, "待允许设备支持移除");
   const allowed = builtinDeviceView({ device_id: "aa:bb", status: "allowed", name: " 工作台小智 " });
   assert.equal(allowed.title, "工作台小智");
   assert.equal(allowed.canAllow, false);
+  assert.equal(allowed.canRemove, true, "已允许设备支持移除");
   const revoked = builtinDeviceView({ device_id: "aa:bb", status: "revoked" });
   assert.equal(revoked.canRevoke, false);
   assert.equal(revoked.canAllow, true);
+  assert.equal(revoked.canRemove, false, "已撤销设备禁止移除，避免绕过撤销");
   assert.equal(builtinDeviceView(null).status, "pending");
+  const split = partitionBuiltinDevices([
+    { device_id: "d1", status: "allowed" },
+    { device_id: "d2", status: "revoked" },
+    { device_id: "d3", status: "pending" },
+    { device_id: "d4", status: "revoked" },
+  ]);
+  assert.deepEqual(split.activeDevices.map((d) => d.device_id), ["d1", "d3"]);
+  assert.deepEqual(split.revokedDevices.map((d) => d.device_id), ["d2", "d4"]);
   const text = allowDeviceConfirmText({ device_id: "aa:bb", model: "lichuang-dev", firmware_version: "" });
   assert.match(text, /设备：aa:bb/);
   assert.match(text, /型号：lichuang-dev/);
   assert.doesNotMatch(text, /固件：/);
   assert.match(text, /重启设备/);
+  const removeOff = removeDeviceConfirmText(
+    { device_id: "aa:bb", name: "书桌小智", model: "lichuang-dev", firmware_version: "2.2.0" },
+    false,
+  );
+  assert.match(removeOff, /设备：书桌小智/);
+  assert.match(removeOff, /立即断开当前连接/);
+  assert.match(removeOff, /删除这台设备的登记记录与快捷控制偏好/);
+  assert.match(removeOff, /不会删除对话记录/);
+  assert.match(removeOff, /重新弹窗确认/);
+  assert.match(removeOff, /自动允许局域网新设备连接.*直接放行/);
+  const removeOn = removeDeviceConfirmText({ device_id: "aa:bb", status: "allowed" }, true);
+  assert.match(removeOn, /当前已开启「自动允许局域网新设备连接」.*直接放行/);
 });
 
 test("NV5: 内置服务的模式、表单预填与密钥占位（不回显密钥）", () => {

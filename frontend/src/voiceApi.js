@@ -28,6 +28,7 @@ const BUILTIN_STATUS_COMMANDS = new Set([
   "voice_builtin_stop",
   "voice_device_set_status",
   "voice_device_rename",
+  "voice_device_remove",
   "voice_local_save",
 ]);
 
@@ -126,6 +127,7 @@ export const voiceApi = {
   builtinStop: () => invokeVoice("voice_builtin_stop"),
   deviceSetStatus: (deviceId, status) => invokeVoice("voice_device_set_status", { deviceId, status }),
   deviceRename: (deviceId, name) => invokeVoice("voice_device_rename", { deviceId, name }),
+  deviceRemove: (deviceId) => invokeVoice("voice_device_remove", { deviceId }),
   /** 直接向一台在线设备发即时请求（`refresh_info` / `reboot` / `set_volume` / `set_brightness` / `set_theme` / `push_preview` / `capture_photo` / `camera_frame` / `clear_camera_frame`）。 */
   deviceRequest: (deviceId, request, value = undefined) =>
     invokeVoice("voice_device_request", value === undefined ? { deviceId, request } : { deviceId, request, value }),

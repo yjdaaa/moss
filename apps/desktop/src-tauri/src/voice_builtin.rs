@@ -329,6 +329,22 @@ pub async fn voice_device_rename(
     result
 }
 
+/// n134：移除已允许或待允许的小智设备（断开在线会话、作废待消费审批、删除设备记录与快捷偏好；已撤销设备拒绝移除）。
+#[tauri::command]
+pub async fn voice_device_remove(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |builtin| builtin.remove_device(&device_id)).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, window, device_id));
+    result
+}
+
 /// 测试内置服务的一个模型分区（`llm` / `asr` / `tts` / `jev` / `colab`）；密钥留空时用已保存的密钥。
 #[tauri::command]
 pub async fn voice_builtin_models_test(
@@ -1043,7 +1059,7 @@ pub async fn voice_plugins_save(
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 44] = [
+pub const COMMANDS: [&str; 45] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -1078,6 +1094,7 @@ pub const COMMANDS: [&str; 44] = [
     "voice_colab_export_notebook",
     "voice_device_set_status",
     "voice_device_rename",
+    "voice_device_remove",
     "voice_device_request",
     "voice_builtin_models_test",
     "voice_builtin_models_list",

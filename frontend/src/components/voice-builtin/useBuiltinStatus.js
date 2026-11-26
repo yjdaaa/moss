@@ -80,7 +80,7 @@ export function useBuiltinStatus() {
       if (
         mounted.current &&
         next &&
-        (cmd === "voice_device_set_status" || cmd === "voice_device_rename" || cmd === "voice_local_save")
+        (cmd === "voice_device_set_status" || cmd === "voice_device_rename" || cmd === "voice_device_remove" || cmd === "voice_local_save")
       ) {
         setStatus(next);
       }

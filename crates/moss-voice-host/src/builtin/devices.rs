@@ -554,4 +554,68 @@ impl BuiltinVoice {
         }
         Ok(self.status())
     }
+
+    /// n134：移除已允许（`allowed`）或待允许（`pending`）设备；已撤销（`revoked`）设备拒绝移除以免绕过撤销。
+    pub fn remove_device(&self, device_id: &str) -> Result<Value, CenterError> {
+        let device_id = device_id.trim();
+        if device_id.is_empty() || device_id.len() > 128 {
+            return Err(CenterError::new(
+                "voice_device_invalid",
+                400,
+                "设备编号不能为空",
+            ));
+        }
+        let outcome = self
+            .personal
+            .device_changed(device_id, || {
+                self.memory.device_changed(device_id, || {
+                    let db = self
+                        .host
+                        .db
+                        .lock()
+                        .map_err(|_| "语音设备数据库不可用".to_owned())?;
+                    let outcome = db.delete_voice_device(device_id, now()).map_err(db_error)?;
+                    if outcome == laser_runtime::DeleteVoiceDeviceOutcome::Deleted {
+                        self.host.api_service.revoke_voice_sessions(device_id);
+                    }
+                    Ok(outcome)
+                })
+            })
+            .map_err(internal)?;
+        self.context.device_changed(device_id);
+        match outcome {
+            laser_runtime::DeleteVoiceDeviceOutcome::Revoked => {
+                return Err(CenterError::new(
+                    "voice_device_revoked",
+                    409,
+                    "已撤销的设备不能移除，以免绕过撤销限制；如需恢复连接请点“允许”",
+                ));
+            }
+            laser_runtime::DeleteVoiceDeviceOutcome::NotFound => {
+                return Err(CenterError::new(
+                    "voice_device_not_found",
+                    404,
+                    "找不到该设备",
+                ));
+            }
+            laser_runtime::DeleteVoiceDeviceOutcome::Deleted => {}
+        }
+        if let Ok(guard) = self.server.lock()
+            && let Some(server) = guard.as_ref()
+        {
+            server.clear_device_state(device_id);
+        }
+        let settings_file = self.settings_file();
+        if moss_voice::settings::load(&settings_file)
+            .builtin_device_prefs
+            .contains_key(device_id)
+        {
+            moss_voice::settings::update_voice(&settings_file, |s| {
+                s.builtin_device_prefs.remove(device_id);
+                Ok(())
+            })
+            .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+        }
+        Ok(self.status())
+    }
 }

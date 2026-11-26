@@ -21,6 +21,7 @@ mod secrets;
 mod voice;
 
 pub use materials::{MaterialConflictPolicy, MaterialImportCounts, parse_param_cell_from_value};
+pub use voice::DeleteVoiceDeviceOutcome;
 
 /// 当前 schema 版本（v4：桌面审批 `approvals` 表与审计索引；v5：`approvals.request` 执行参数列，技术书 §7；
 /// v6：内置语音服务的设备登记表 `voice_devices`，内置语音技术书 NV1）。

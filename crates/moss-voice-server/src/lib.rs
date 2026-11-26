@@ -945,6 +945,13 @@ impl VoiceServer {
         self.shared.camera_preview.clear_device(device_id);
     }
 
+    /// 移除设备时清理服务端内存中绑定该设备的摄像头缓存、待接进对话的照片与待下载唤醒词/画风包（n134）。
+    pub fn clear_device_state(&self, device_id: &str) {
+        self.shared.camera_preview.clear_device(device_id);
+        let _ = self.shared.vision_photos.take(device_id);
+        self.shared.assets_store.clear_device(device_id);
+    }
+
     /// 动态开关仅内存对话排障流（无需重启服务；关闭时立即清空内存缓冲）。
     pub fn set_debug_enabled(&self, enabled: bool) {
         self.shared.state.set_debug_enabled(enabled);

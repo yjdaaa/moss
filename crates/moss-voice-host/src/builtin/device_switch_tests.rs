@@ -1456,3 +1456,380 @@ fn auto_allow_devices_and_tokenless_grace_period_for_bound_allowed_device() {
         "已被手动撤销的设备不因自动允许开关而放行"
     );
 }
+
+#[test]
+fn remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_reenters_pending() {
+    use laser_contracts::{ApprovalKind, ApprovalRecord, ApprovalSource, ApprovalStatus};
+
+    let temp = tempfile::tempdir().unwrap();
+    let host =
+        Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+    let builtin = init(Some(host.clone())).0.unwrap();
+    let registry = DbRegistry {
+        db: host.db.clone(),
+        host: host.clone(),
+        settings_file: builtin.settings_file(),
+        chat_log_enabled: builtin.debug_trace_enabled.clone(),
+        chat_log_epoch: builtin.chat_log_epoch.clone(),
+    };
+
+    let visit_allowed = DeviceVisit {
+        device_id: "aa:bb:cc:00:01:01".into(),
+        client_id: "client-allowed-1".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.21".into(),
+    };
+    let visit_pending = DeviceVisit {
+        device_id: "aa:bb:cc:00:01:02".into(),
+        client_id: "client-pending-2".into(),
+        model: "box-3".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.22".into(),
+    };
+    let visit_revoked = DeviceVisit {
+        device_id: "aa:bb:cc:00:01:03".into(),
+        client_id: "client-revoked-3".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.1.0".into(),
+        ip: "192.0.2.23".into(),
+    };
+    let visit_keep = DeviceVisit {
+        device_id: "aa:bb:cc:00:01:04".into(),
+        client_id: "client-keep-4".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.24".into(),
+    };
+    for v in [&visit_allowed, &visit_pending, &visit_revoked, &visit_keep] {
+        assert_eq!(registry.seen(v).unwrap(), DeviceStatus::Pending);
+    }
+    builtin
+        .set_device_status(&visit_allowed.device_id, "allowed")
+        .unwrap();
+    builtin
+        .set_device_status(&visit_revoked.device_id, "revoked")
+        .unwrap();
+    builtin
+        .set_device_status(&visit_keep.device_id, "allowed")
+        .unwrap();
+
+    // 写入四类快照、在线会话租约、有效设备 HMAC token、快捷控制偏好（含唤醒词/画风待下载标记）、
+    // 待推送固件记录、未处理语音审批，以及不应被删除的对话记录与设备记忆摘要
+    for (kind, payload) in [
+        (
+            moss_voice_server::SNAPSHOT_INFO,
+            r#"{"application":{"version":"2.2.0"}}"#,
+        ),
+        (
+            moss_voice_server::SNAPSHOT_HELLO,
+            r#"{"protocol_version":1,"mcp":true}"#,
+        ),
+        (
+            moss_voice_server::SNAPSHOT_STATUS,
+            r#"{"audio_speaker":{"volume":55}}"#,
+        ),
+        (moss_voice_server::SNAPSHOT_LISTEN, r#"{"mode":"realtime"}"#),
+    ] {
+        registry.device_snapshot(&visit_allowed.device_id, kind, payload);
+    }
+    let live_lease = registry
+        .open_session(
+            &visit_allowed.device_id,
+            &visit_allowed.client_id,
+            "sess-live-1",
+        )
+        .unwrap();
+    let keep_lease = registry
+        .open_session(&visit_keep.device_id, &visit_keep.client_id, "sess-keep-4")
+        .unwrap();
+    let secret = registry.token_secret().unwrap();
+    let signer = moss_xiaozhi_proto::TokenSigner::new(secret);
+    let issued_at = (now() as u64).max(1);
+    let old_valid_token = signer.issue(
+        &visit_allowed.client_id,
+        &visit_allowed.device_id,
+        issued_at,
+    );
+    assert!(signer.verify(
+        &old_valid_token,
+        &visit_allowed.client_id,
+        &visit_allowed.device_id,
+        issued_at + 10,
+    ));
+
+    moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+        let p1 = s
+            .builtin_device_prefs
+            .entry(visit_allowed.device_id.clone())
+            .or_default();
+        p1.volume = Some(35);
+        p1.brightness = Some(70);
+        p1.theme = Some("dark".into());
+        p1.talk_mode = Some("press_to_talk".into());
+        p1.wake_target = Some("default".into());
+        p1.screen_pack_pending = Some("moss-screen-2:moss_hud".into());
+        p1.screen_pack_pending_at = Some(1_790_000_000);
+        let p4 = s
+            .builtin_device_prefs
+            .entry(visit_keep.device_id.clone())
+            .or_default();
+        p4.volume = Some(80);
+        Ok(())
+    })
+    .unwrap();
+
+    let make_approval = |id: &str, dev_id: &str, status: ApprovalStatus| ApprovalRecord {
+        approval_id: id.into(),
+        status,
+        kind: ApprovalKind::WorkflowConfirmSend,
+        target_record: "wf-test".into(),
+        digest: "sha256:test".into(),
+        summary: "测试语音审批".into(),
+        source: ApprovalSource::Voice,
+        session_id: Some(dev_id.into()),
+        request_id: None,
+        connection: None,
+        created_at: 1000.0,
+        decided_at: None,
+        expires_at: 2000.0,
+        updated_at: 1000.0,
+        outcome: None,
+        request: None,
+    };
+    {
+        let db = host.db.lock().unwrap();
+        db.insert_approval(&make_approval(
+            "appr-pending-1",
+            &visit_allowed.device_id,
+            ApprovalStatus::Pending,
+        ))
+        .unwrap();
+        db.insert_approval(&make_approval(
+            "appr-approved-1",
+            &visit_allowed.device_id,
+            ApprovalStatus::Approved,
+        ))
+        .unwrap();
+        db.insert_approval(&make_approval(
+            "appr-keep-4",
+            &visit_keep.device_id,
+            ApprovalStatus::Pending,
+        ))
+        .unwrap();
+
+        let sha_a = "a".repeat(64);
+        let sha_b = "b".repeat(64);
+        db.add_firmware_artifact(&sha_a, "2.3.0", "", 1024, 1000.0)
+            .unwrap();
+        db.add_firmware_artifact(&sha_b, "2.3.1", "", 1024, 1000.0)
+            .unwrap();
+        db.create_firmware_offer(
+            "deliv-inflight-1",
+            &visit_allowed.device_id,
+            &sha_a,
+            "2.3.0",
+            &"2".repeat(32),
+            9_999_999_999.0,
+            1000.0,
+        )
+        .unwrap();
+        assert!(
+            db.update_firmware_download_if_revision("deliv-inflight-1", 0, "downloading", 1000.5)
+                .unwrap()
+        );
+        db.create_firmware_offer(
+            "deliv-pending-1",
+            &visit_allowed.device_id,
+            &sha_b,
+            "2.3.1",
+            &"1".repeat(32),
+            9_999_999_999.0,
+            1001.0,
+        )
+        .unwrap();
+        db.create_firmware_offer(
+            "deliv-keep-4",
+            &visit_keep.device_id,
+            &sha_a,
+            "2.3.0",
+            &"4".repeat(32),
+            9_999_999_999.0,
+            1001.0,
+        )
+        .unwrap();
+
+        db.ensure_voice_memory(&visit_allowed.device_id, 1000.0)
+            .unwrap();
+        db.update_voice_memory_if_revision(&visit_allowed.device_id, 0, "偏好 3mm 椴木", 1001.0)
+            .unwrap();
+        db.append_voice_chat_log(&laser_runtime::VoiceChatLogRecord {
+            id: 0,
+            at_ms: 1_790_000_000_000,
+            device_id: visit_allowed.device_id.clone(),
+            session_id: "sess-live-1".into(),
+            turn: 1,
+            raw_asr: "你好".into(),
+            corrected_asr: "你好".into(),
+            reply: "我在".into(),
+            spoken: "我在".into(),
+            tools_json: "[]".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+        })
+        .unwrap();
+    }
+
+    // 1. 移除 allowed 设备成功：会话断开、审批过期、设备行与快照删除、偏好与待推送固件清理、对话记录与记忆保留
+    let after_allowed = builtin.remove_device(&visit_allowed.device_id).unwrap();
+    assert!(
+        !live_lease.load(std::sync::atomic::Ordering::Acquire),
+        "移除设备须立即断开其在线会话租约"
+    );
+    assert!(
+        !host
+            .api_service
+            .voice_session_allowed(&visit_allowed.device_id, "sess-live-1")
+    );
+    assert!(
+        keep_lease.load(std::sync::atomic::Ordering::Acquire),
+        "其他设备的在线会话不受影响"
+    );
+    assert!(
+        !after_allowed["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["device_id"] == visit_allowed.device_id)
+    );
+    let prefs_after = moss_voice::settings::load(&builtin.settings_file()).builtin_device_prefs;
+    assert!(
+        !prefs_after.contains_key(&visit_allowed.device_id),
+        "移除后须删掉该设备的快捷控制与唤醒词/画风待推送偏好"
+    );
+    assert_eq!(prefs_after[&visit_keep.device_id].volume, Some(80));
+    {
+        let db = host.db.lock().unwrap();
+        assert!(
+            db.voice_device(&visit_allowed.device_id).unwrap().is_none(),
+            "voice_devices 记录及同行快照须已删除"
+        );
+        assert_eq!(
+            db.get_approval("appr-pending-1").unwrap().unwrap().status,
+            ApprovalStatus::Expired
+        );
+        assert_eq!(
+            db.get_approval("appr-approved-1").unwrap().unwrap().status,
+            ApprovalStatus::Expired
+        );
+        assert_eq!(
+            db.get_approval("appr-keep-4").unwrap().unwrap().status,
+            ApprovalStatus::Pending
+        );
+        let deliveries = db.list_firmware_deliveries().unwrap();
+        assert!(
+            !deliveries
+                .iter()
+                .any(|d| d.delivery_id == "deliv-pending-1"),
+            "仅针对该设备的待推送固件记录须已删除"
+        );
+        assert!(
+            deliveries.iter().any(|d| d.delivery_id == "deliv-keep-4"),
+            "其他设备的待推送固件记录须保留"
+        );
+        assert!(
+            db.firmware_offer_by_token(&"2".repeat(32), 1002.0)
+                .unwrap()
+                .is_none(),
+            "该设备未上报的下载中固件令牌须同步作废"
+        );
+        assert_eq!(
+            db.voice_memory(&visit_allowed.device_id)
+                .unwrap()
+                .unwrap()
+                .summary,
+            "偏好 3mm 椴木",
+            "设备记忆等用户数据不删除"
+        );
+        assert_eq!(
+            db.list_voice_chat_logs(10).unwrap().len(),
+            1,
+            "对话记录不删除"
+        );
+    }
+
+    // 2. 移除后设备持有的旧有效 HMAC token 不能建立会话
+    assert!(
+        registry
+            .open_session(
+                &visit_allowed.device_id,
+                &visit_allowed.client_id,
+                "sess-replay-1"
+            )
+            .is_err(),
+        "设备记录被移除后，即使旧 HMAC token 签名未过期也不能建立会话"
+    );
+    assert_eq!(
+        registry
+            .authorize_http(&visit_allowed.device_id, &visit_allowed.client_id)
+            .unwrap(),
+        None
+    );
+
+    // 3. 移除 pending 设备同样成功
+    builtin.remove_device(&visit_pending.device_id).unwrap();
+    assert!(
+        host.db
+            .lock()
+            .unwrap()
+            .voice_device(&visit_pending.device_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // 4. 移除 revoked 设备被后端 409 拒绝，记录保持 revoked 不变（防止删记录绕过撤销）
+    let err = builtin.remove_device(&visit_revoked.device_id).unwrap_err();
+    assert_eq!(err.status, 409);
+    assert_eq!(err.code, "voice_device_revoked");
+    assert_eq!(
+        host.db
+            .lock()
+            .unwrap()
+            .voice_device(&visit_revoked.device_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        laser_runtime::VOICE_DEVICE_REVOKED
+    );
+
+    // 不存在的设备返回 404 voice_device_not_found
+    let not_found = builtin.remove_device("aa:bb:cc:99:99:99").unwrap_err();
+    assert_eq!(not_found.status, 404);
+    assert_eq!(not_found.code, "voice_device_not_found");
+
+    // 5. 移除后的设备再次来访：关闭自动允许时重新登记为 Pending（旧有效 token 仍建不了会话）；开启自动允许时直接放行为 Allowed
+    assert_eq!(
+        registry.seen(&visit_allowed).unwrap(),
+        DeviceStatus::Pending,
+        "移除后再来访视为新设备，重新进入 Pending"
+    );
+    assert!(
+        registry
+            .open_session(
+                &visit_allowed.device_id,
+                &visit_allowed.client_id,
+                "sess-replay-2"
+            )
+            .is_err(),
+        "重新进入 Pending 后未允许前，旧 token 依然不能建立会话"
+    );
+    builtin
+        .local_save(&serde_json::json!({"auto_allow_devices": true}))
+        .unwrap();
+    assert_eq!(
+        registry.seen(&visit_pending).unwrap(),
+        DeviceStatus::Allowed,
+        "已开启自动允许时，移除后的设备再次连入按新设备直接放行"
+    );
+}

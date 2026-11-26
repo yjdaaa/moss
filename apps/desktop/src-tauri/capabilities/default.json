@@ -39,6 +39,7 @@
     "allow-voice-colab-export-notebook",
     "allow-voice-device-set-status",
     "allow-voice-device-rename",
+    "allow-voice-device-remove",
     "allow-voice-device-request",
     "allow-voice-builtin-models-test",
     "allow-voice-builtin-models-list",

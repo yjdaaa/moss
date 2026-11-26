@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 已连接小智设备支持移除并将已撤销设备折叠收起（2026-11-26）
+
+- **现象**：语音中心「已连接设备」中，不再使用的已允许或误触发的待允许小智设备只能撤销而无法从列表移除，已撤销记录混排在主表中也影响日常查看。
+- **根因与修复**：`RuntimeDb::delete_voice_device`、`BuiltinVoice::remove_device` 与桌面主窗口命令 `voice_device_remove` 支持移除 `allowed` / `pending` 设备——立即断开在线会话，同事务作废未消费语音审批、删除仅针对该设备的待推送固件与内存资源包、删除 `voice_devices` 行（含四类快照）及 `builtin_device_prefs` 快捷偏好，保留对话记录、长期记忆与声纹资料；移除后旧 token 因连接校验 `allowed` 记录而自然失效，设备再次连入按新设备进入 `pending`（开启自动允许时直接放行）。`revoked` 设备在后端事务内拒绝移除（409 `voice_device_revoked`）以防绕过撤销；前端仅在 `allowed` / `pending` 行显示需确认的「移除」按钮，并将 `revoked` 设备统一收入底部默认折叠的「已撤销（N 台）」分组（保留「重新允许」）。
+- **验证**：新增 `remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_reenters_pending`（moss-voice-host）与 `removed_device_old_valid_hmac_token_cannot_open_ws_session_and_staged_assets_clear`（moss-voice-server），前端补 `voiceState`、`uiModalAndScrollFixes` 与 `voice-center.browser.mjs` 断言；`node scripts/verify.mjs --finish --no-update` 通过（Rust 1570 项、前端单测 404 项、浏览器测试 19 个文件、回环 E2E 全部通过；因工作区含其他会话未提交改动未快更）。真实小智移除后重连未实机复测（`unverified`）。
+- **关联**：`crates/laser-runtime/src/db/voice.rs`、`crates/moss-voice-server/src/{lib.rs,wake_assets.rs}`、`crates/moss-voice-host/src/builtin/devices.rs`、`apps/desktop/src-tauri/src/{voice_builtin.rs,lib.rs}`、`frontend/src/{voiceApi.js,voiceState/devices.js}`、`frontend/src/components/voice-builtin/{BuiltinDevicesPanel.jsx,useBuiltinStatus.js}`、内置语音技术书 n134。
+
 ### 修复数字孪生开关状态误报、Colab 旧模型残留、画板覆盖切割选择、手机网页隐藏串口及画板光栅参数丢失（2026-11-26）
 
 - **现象**：数字孪生页在 FluidNC 接了急停但未接安全门或未返回完整特征时误报“无限位或控制开关”；Colab 联动去掉自定义模型输入框后仍回传历史自定义模型名；创作画板插入图片或切换表面通用材料时写回覆盖用户原选的“切割”；安卓浏览器访问电脑端时串口连接被隐藏且被强制改为网络；画板新增的网点与灰度光栅参数未被后端持久化保留。

@@ -252,7 +252,42 @@ export function builtinDeviceView(device) {
     title: (device?.name || "").trim() || device?.device_id || "未知设备",
     canAllow: status !== "allowed",
     canRevoke: status !== "revoked",
+    canRemove: status === "allowed" || status === "pending",
   };
+}
+
+/** 拆分正常设备（已允许 / 待允许）与已撤销设备（n134：已撤销设备统一折叠在列表底部）。 */
+export function partitionBuiltinDevices(devices) {
+  const list = Array.isArray(devices) ? devices : [];
+  const activeDevices = [];
+  const revokedDevices = [];
+  for (const device of list) {
+    if (!device) continue;
+    if (builtinDeviceView(device).status === "revoked") {
+      revokedDevices.push(device);
+    } else {
+      activeDevices.push(device);
+    }
+  }
+  return { activeDevices, revokedDevices };
+}
+
+/** 移除设备前的确认文字（n134）。 */
+export function removeDeviceConfirmText(device, autoAllow = false) {
+  const facts = [
+    `设备：${builtinDeviceView(device).title}`,
+    device?.model ? `型号：${device.model}` : "",
+    device?.firmware_version ? `固件：${device.firmware_version}` : "",
+  ].filter(Boolean);
+  const reconnectNote = autoAllow
+    ? "设备再次连入时原本会重新弹窗确认；但当前已开启「自动允许局域网新设备连接」，再次连入会被直接放行（如需拦截此设备，请改用「撤销」）。"
+    : "设备再次连入时会重新弹窗确认；若已开启「自动允许局域网新设备连接」，则会被直接放行。";
+  return [
+    ...facts,
+    "",
+    "移除后会立即断开当前连接，删除这台设备的登记记录与快捷控制偏好；不会删除对话记录、长期记忆和人物资料。",
+    reconnectNote,
+  ].join("\n");
 }
 
 /** 开启「自动允许局域网新设备连接」前的局域网信任确认文案与弹窗选项（设备面板与新设备居中弹窗共用，n133）。 */

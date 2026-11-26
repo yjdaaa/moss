@@ -510,3 +510,52 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     await server.close();
   }
 });
+
+test("n134：BuiltinDevicesPanel 仅在 allowed / pending 设备显示移除按钮，已撤销设备默认折叠在底部并保留重新允许", async () => {
+  const server = await createServer({
+    root: path.resolve(TEST_DIR, ".."),
+    server: { middlewareMode: true },
+    appType: "custom",
+    logLevel: "silent",
+  });
+  try {
+    const { BuiltinDevicesPanel } = await server.ssrLoadModule("/src/components/voice-builtin/BuiltinDevicesPanel.jsx");
+    const status = {
+      running: true,
+      mode: "chat",
+      link_mode: "builtin",
+      ws_port: 8000,
+      http_port: 8003,
+      sessions: [],
+      device_prefs: {},
+      local: { settings: { auto_allow_devices: false } },
+      devices: [
+        { device_id: "aa:bb:cc:00:00:01", name: "书房小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_100 },
+        { device_id: "aa:bb:cc:00:00:02", name: "", model: "box-3", firmware_version: "2.2.0", status: "pending", last_seen: 1_790_000_090 },
+        { device_id: "aa:bb:cc:00:00:03", name: "旧测试机一", model: "lichuang-dev", firmware_version: "2.1.0", status: "revoked", last_seen: 1_790_000_050 },
+        { device_id: "aa:bb:cc:00:00:04", name: "旧测试机二", model: "box-3", firmware_version: "2.0.0", status: "revoked", last_seen: 1_790_000_040 },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      React.createElement(BuiltinDevicesPanel, { builtin: { status, busy: "", act: () => {} } }),
+    );
+
+    const removeIds = [...html.matchAll(/data-device-remove="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(
+      removeIds,
+      ["aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"],
+      "移除按钮只出现在 allowed 与 pending 设备上，不出现在 revoked 设备上",
+    );
+
+    const foldIdx = html.indexOf('id="voice-revoked-devices"');
+    assert.ok(foldIdx > 0, "存在已撤销设备时须渲染底部折叠分组");
+    const foldTag = html.slice(html.lastIndexOf("<details", foldIdx), html.indexOf(">", foldIdx) + 1);
+    assert.doesNotMatch(foldTag, /\bopen\b/i, "已撤销设备分组须默认折叠收起");
+    const foldHtml = html.slice(foldIdx);
+    assert.match(foldHtml, /<summary>已撤销（2 台）<\/summary>/, "已撤销分组计数须准确");
+    assert.match(foldHtml, /重新允许/, "已撤销分组内须保留重新允许按钮");
+    assert.doesNotMatch(foldHtml, /data-device-remove=/, "已撤销分组内不渲染移除按钮");
+  } finally {
+    await server.close();
+  }
+});

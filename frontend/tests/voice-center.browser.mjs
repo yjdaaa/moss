@@ -422,6 +422,46 @@ try {
       if (action === "cancel") state.builtin.local.laya_setup = { state: "cancelled" };
       return structuredClone(state.builtin);
     },
+    voice_device_set_status: ({ deviceId, status }) => {
+      const target = state.builtin.devices.find((item) => item.device_id === deviceId);
+      if (!target) {
+        const err = new Error("找不到该设备");
+        err.code = "voice_device_not_found";
+        throw err;
+      }
+      target.status = status;
+      if (status === "revoked") {
+        state.builtin.sessions = state.builtin.sessions.filter((item) => item.device_id !== deviceId);
+      }
+      return structuredClone(state.builtin);
+    },
+    voice_device_rename: ({ deviceId, name }) => {
+      const target = state.builtin.devices.find((item) => item.device_id === deviceId);
+      if (!target) {
+        const err = new Error("找不到该设备");
+        err.code = "voice_device_not_found";
+        throw err;
+      }
+      target.name = String(name || "").trim().slice(0, 32);
+      return structuredClone(state.builtin);
+    },
+    voice_device_remove: ({ deviceId }) => {
+      const target = state.builtin.devices.find((item) => item.device_id === deviceId);
+      if (!target) {
+        const err = new Error("找不到该设备");
+        err.code = "voice_device_not_found";
+        throw err;
+      }
+      if (target.status === "revoked") {
+        const err = new Error("已撤销的设备不能移除，以免绕过撤销限制；如需恢复连接请点“允许”");
+        err.code = "voice_device_revoked";
+        throw err;
+      }
+      state.builtin.devices = state.builtin.devices.filter((item) => item.device_id !== deviceId);
+      state.builtin.sessions = state.builtin.sessions.filter((item) => item.device_id !== deviceId);
+      delete state.builtin.device_prefs[deviceId];
+      return structuredClone(state.builtin);
+    },
     voice_device_request: ({ deviceId, request, value }) => {
       if (request === "set_volume" && value && typeof value.volume === "number") {
         state.builtin.device_prefs[deviceId] = { ...(state.builtin.device_prefs[deviceId] || {}), volume: value.volume };

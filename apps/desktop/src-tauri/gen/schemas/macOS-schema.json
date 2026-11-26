@@ -345,6 +345,12 @@
           "markdownDescription": "Enables the voice_context_pick_folder command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_device_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-device-remove",
+          "markdownDescription": "Enables the voice_device_remove command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_device_rename command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-device-rename",
@@ -787,6 +793,12 @@
           "type": "string",
           "const": "deny-voice-context-pick-folder",
           "markdownDescription": "Denies the voice_context_pick_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_device_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-device-remove",
+          "markdownDescription": "Denies the voice_device_remove command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_device_rename command without any pre-configured scope.",

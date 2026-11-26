@@ -1469,4 +1469,15 @@ button.conn-pill:hover {
   flex: none;
   white-space: nowrap;
 }
+.voice-device-remove-btn:hover:not(:disabled) {
+  color: var(--ob-red);
+  border-color: color-mix(in srgb, var(--ob-red) 40%, var(--ob-line-2));
+  background: var(--ob-red-bg);
+}
+.voice-revoked-fold {
+  margin-top: 10px;
+}
+.voice-revoked-tbl {
+  margin-top: 8px;
+}
 

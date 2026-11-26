@@ -54,6 +54,13 @@ impl AssetsStore {
             .filter(|s| s.expires > Instant::now())
             .map(|s| (s.device_id.clone(), s.bytes.clone()))
     }
+
+    /// 移除指定设备的内存待下载唤醒词 / 画风资源包（n134）。
+    pub fn clear_device(&self, device_id: &str) {
+        if let Ok(mut map) = self.staged.lock() {
+            map.retain(|_, s| s.device_id != device_id);
+        }
+    }
 }
 
 /// 资源包分块下发：连接用完释放时，所有分块都已交给连接才通知宿主“设备下载完了”
