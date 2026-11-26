@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复机器行程跨目标沿用、断点续雕行号偏差及画板严格模式取消门禁（2026-11-26）
+
+- **现象**：连接过大幅面机器或在孪生页手填大行程后切换到不报 `$130/$131` 的 100 mm 机器时，创作画板仍沿用旧行程并可能生成超幅面刀路，后端 `/api/draw/preview` 也未限制 `work_area_*` 上限；断点续雕按 `lines_sent + 1` 而非设备确认的 `resumable_from_line + 1` 显示起始行且对 `failed` / 无边界任务误显按钮；严格模式审批通过或发送遇到 `HTTP 0` 时画板隐藏「取消任务」，孪生页运行中切回演示刀路会清掉急停目标任务，语音套系缺模型时未隐藏「用这套」，孪生页还在 `setMachineLimits` 回调内写存储。
+- **根因与修复**：`deviceConnection.js` 与 `TwinPage` 将实机握手和手填行程绑定到连接目标 `target_key`，目标不一致、握手未报行程或单轴缺失时对应轴回退 100 mm，并将 `writeWorkspaceLimits` 移出状态回调；后端 `/api/draw/preview` 对 `work_area_width_mm` / `work_area_height_mm` 增加 `(0, 2000]` 有限数校验，越界或非有限数直接返回 400（保持 `check_job_fits_machine` 未知放行不变）。`estopResumeState.js`、`HomePage` 与 `DrawPage` 统一改用 `resumable_from_line + 1` 并对齐后端 `cancelled` + `can_resume` + `device_hold_ln` 门禁；画板在 `202 approval_required` 后保留预览结果、轮询作业状态并联动 `activeJobs`，状态未知时保留「取消任务」；孪生页运行中禁用并拒绝切回演示刀路，`ModelPairingGuide` 缺模型分支移除「用这套」按钮。
+- **验证**：`laser-api` 新增 `draw_preview_rejects_out_of_range_or_invalid_work_area_with_400`，前端 `deviceConnection`、`estopResumeState`、`twinState`、`modelPairingGuide`、`uiPolishB` 与 `voice-center.browser.mjs` 补齐行程绑定目标回退、续雕门禁与起始行、严格模式取消按钮及缺模型隐藏断言；`node scripts/verify.mjs --finish` 通过（Rust 1571 项、前端单测 405 项、浏览器测试 19 个文件、回环 E2E 全部通过并已快更）。真实大幅面控制器行程上报与断点续雕未实机出光复测（`unverified`）。
+- **关联**：`crates/laser-api/src/generation/{mod.rs,draw.rs}`、`frontend/src/{deviceConnection.js,estopResumeState.js,twinState.js,main.jsx}`、`frontend/src/pages/{DrawPage.jsx,HomePage.jsx,TwinPage.jsx}`、`frontend/src/components/{ApprovalCenter.jsx,DeviceConnectionModal.jsx,draw/DrawSendCard.jsx,voice-builtin/ModelPairingGuide.jsx}`、融合技术书 r64。
+
 ### 统一雕刻工作台及全站各页面选择框高度、网格列数与边缘对齐（2026-11-26）
 
 - **现象**：雕刻工作台「矢量文字」三列参数因“对刀起点”带 20px 图标导致下拉框下沉错位，「图片处理」套用 3 列网格导致右侧留出 1/3 空洞，「填充与走刀设置」长标签折行把同行输入框顶成一高一低，「材质与参数」内嵌额外描边套框使左边缘缩进 16px 且隐藏厚度时只占半宽，「加工反馈」卡内重复出现两次标题；此外创作画板光栅转换方式与行间距未并排且材料库下方存在双倍间距，材料实验室非光栅模式与双轴矩阵存在列尾空洞，语音中心与连接弹窗并排下拉框和输入框/按钮存在 2px 高度差。

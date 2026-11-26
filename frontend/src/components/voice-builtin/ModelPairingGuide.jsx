@@ -68,15 +68,6 @@ export function ModelPairingGuide({ settings, models, busy, onApply, onDownload 
                       下载缺的模型
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    id={`voice-combo-apply-${combo.id}`}
-                    disabled={Boolean(busy)}
-                    onClick={() => apply(combo)}
-                  >
-                    用这套
-                  </button>
                 </span>
               ) : (
                 <button

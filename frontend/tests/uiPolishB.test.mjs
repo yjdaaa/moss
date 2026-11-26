@@ -800,14 +800,110 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.match(runningSendHtml, /id="draw-cancel-job-btn"[\s\S]*?取消任务/, "运行态显示取消任务按钮");
     assert.doesNotMatch(runningSendHtml, /id="draw-resume-send-btn"/);
 
+    const { isDrawJobActive } = await server.ssrLoadModule("/src/components/draw/DrawSendCard.jsx");
     const cancelledSendHtml = renderToStaticMarkup(
       React.createElement(DrawSendCard, {
         ...baseSendProps,
-        result: { result: { status: "cancelled", send_result: { lines_sent: 25, total_lines: 100 } } },
+        result: {
+          result: {
+            status: "cancelled",
+            send_result: {
+              can_resume: true,
+              resumable_from_line: 25,
+              lines_completed: 25,
+              lines_sent: 28,
+              total_lines: 100,
+              resume_boundary_source: "device_hold_ln",
+              mode: "stream",
+            },
+          },
+        },
       }),
     );
     assert.doesNotMatch(cancelledSendHtml, /id="draw-cancel-job-btn"/, "已取消终态隐藏取消任务按钮");
-    assert.match(cancelledSendHtml, /id="draw-resume-send-btn"[\s\S]*?从第 26 行继续加工 \(断点续雕\)/, "中断有断点时显示断点续雕按钮");
+    assert.match(
+      cancelledSendHtml,
+      /id="draw-resume-send-btn"[\s\S]*?从第 26 行继续加工 \(断点续雕\)/,
+      "中断有精确完成边界时按 resumable_from_line + 1 显示第 26 行续雕（而非 lines_sent + 1 的第 29 行）",
+    );
+
+    const failedSendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: {
+          result: {
+            status: "failed",
+            send_result: {
+              can_resume: true,
+              resumable_from_line: 25,
+              lines_completed: 25,
+              lines_sent: 28,
+              total_lines: 100,
+              resume_boundary_source: "device_hold_ln",
+            },
+          },
+        },
+      }),
+    );
+    assert.doesNotMatch(failedSendHtml, /id="draw-resume-send-btn"/, "failed 状态隐藏续雕按钮");
+
+    const unprovenCancelledHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: {
+          result: {
+            status: "cancelled",
+            send_result: {
+              can_resume: false,
+              resumable_from_line: 0,
+              lines_sent: 28,
+              total_lines: 100,
+              resume_boundary_source: "unproven",
+            },
+          },
+        },
+      }),
+    );
+    assert.doesNotMatch(unprovenCancelledHtml, /id="draw-resume-send-btn"/, "无设备 Hold Ln 边界时隐藏续雕按钮");
+
+    // 严格模式审批与 HTTP 0 状态未知时取消任务按钮门禁（G4）
+    assert.equal(
+      isDrawJobActive({
+        result: { result: { status: "preview_ready" } },
+        workflowId: "draw-1",
+        jobStatusUnknown: false,
+        activeJobs: [],
+      }),
+      false,
+      "严格模式尚未批准执行前不显示取消任务按钮",
+    );
+    assert.equal(
+      isDrawJobActive({
+        result: { result: { status: "preview_ready" } },
+        workflowId: "draw-1",
+        jobStatusUnknown: false,
+        activeJobs: [{ job_id: "draw-1" }],
+      }),
+      true,
+      "严格模式批准后 activeJobs 出现该任务即判定运行中",
+    );
+    const approvedActiveSendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: { result: { status: "preview_ready" } },
+        activeJobs: [{ job_id: "draw-1" }],
+      }),
+    );
+    assert.match(approvedActiveSendHtml, /id="draw-cancel-job-btn"[\s\S]*?取消任务/, "严格模式批准开跑后显示取消任务按钮");
+
+    const unknownSendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: { result: { status: "preview_ready" } },
+        jobStatusUnknown: true,
+      }),
+    );
+    assert.match(unknownSendHtml, /id="draw-cancel-job-btn"[\s\S]*?取消任务/, "请求结果未知（HTTP 0 / 轮询失联）时保留取消任务按钮");
 
     const dirtyParamsHtml = renderToStaticMarkup(
       React.createElement(LabParamsPanel, {

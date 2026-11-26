@@ -248,36 +248,69 @@ test("串口可用性按后端宿主判定：仅 Tauri 安卓本地宿主隐藏�
   assert.equal(isHostSerialAvailable({ win: tauriDesktopWin, nav: macNav, remote: false }), true);
 });
 
-test("雕刻机有效行程全局读写与硬件握手自动同步", async () => {
+test("雕刻机有效行程绑定连接目标，目标切换、未报行程或单轴缺失时回退 100mm", async () => {
   const {
+    connectionTargetKey,
     readWorkspaceLimits,
+    resolveWorkspaceLimitsForTarget,
     syncHardwareWorkspaceLimits,
     writeWorkspaceLimits,
   } = await import("../src/deviceConnection.js");
   const store = memoryStorage();
+  const targetA = { connection_mode: "network", network_host: "192.0.2.10", network_telnet_port: "23" };
+  const targetB = { connection_mode: "serial", port: "COM3", baudrate: "115200" };
+
+  assert.equal(connectionTargetKey(targetA), "network:192.0.2.10:23");
+  assert.equal(connectionTargetKey(targetB), "serial:COM3:115200");
   assert.deepEqual(readWorkspaceLimits(store), {
     x_travel_mm: 100,
     y_travel_mm: 100,
     z_travel_mm: 20,
     from_hardware: false,
+    manual: false,
+    target_key: "",
   });
 
-  const manual = writeWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90, manual: true }, store);
-  assert.equal(manual.x_travel_mm, 90);
-  assert.equal(manual.y_travel_mm, 90);
+  // 孪生页手动填写行程绑定到当前连接目标 targetA；换到 targetB 或未配置目标时回退到 100mm
+  const manual = writeWorkspaceLimits(
+    { x_travel_mm: 320, y_travel_mm: 240, manual: true, target: targetA },
+    store,
+  );
+  assert.equal(manual.x_travel_mm, 320);
+  assert.equal(manual.y_travel_mm, 240);
   assert.equal(manual.manual, true);
-  assert.equal(readWorkspaceLimits(store).x_travel_mm, 90);
+  assert.equal(manual.target_key, "network:192.0.2.10:23");
+  assert.equal(readWorkspaceLimits(store, targetA).x_travel_mm, 320);
+  assert.equal(readWorkspaceLimits(store, targetB).x_travel_mm, 100);
+  assert.equal(readWorkspaceLimits(store, targetB).y_travel_mm, 100);
+  assert.equal(resolveWorkspaceLimitsForTarget(manual, targetB).x_travel_mm, 100);
+  assert.equal(
+    resolveWorkspaceLimitsForTarget(manual, { connection_mode: "network", network_host: "" }).x_travel_mm,
+    100,
+  );
 
-  // 硬件握手未返回行程时不覆盖已保存设置
-  assert.equal(syncHardwareWorkspaceLimits({ x_accel_mm_s2: 1200 }, store), null);
-  assert.equal(readWorkspaceLimits(store).x_travel_mm, 90);
-
-  // 硬件握手返回实机行程（如 220×180mm）时自动同步更新
-  const synced = syncHardwareWorkspaceLimits({ x_travel_mm: 220, y_travel_mm: 180 }, store);
+  // 硬件握手返回双轴行程（220×180mm）时更新并绑定 targetA；切换到 targetB 仍回退 100mm
+  const synced = syncHardwareWorkspaceLimits({ x_travel_mm: 220, y_travel_mm: 180 }, targetA, store);
   assert.equal(synced.x_travel_mm, 220);
   assert.equal(synced.y_travel_mm, 180);
   assert.equal(synced.from_hardware, true);
   assert.equal(synced.manual, false);
-  assert.equal(readWorkspaceLimits(store).x_travel_mm, 220);
-  assert.equal(readWorkspaceLimits(store).y_travel_mm, 180);
+  assert.equal(readWorkspaceLimits(store, targetA).x_travel_mm, 220);
+  assert.equal(readWorkspaceLimits(store, targetA).y_travel_mm, 180);
+  assert.equal(resolveWorkspaceLimitsForTarget(synced, targetB).x_travel_mm, 100);
+  assert.equal(resolveWorkspaceLimitsForTarget(synced, targetB).y_travel_mm, 100);
+
+  // 只报单轴（仅 X=260mm）时，未报的 Y 轴回退默认 100mm，不沿用旧机器的 180mm
+  const singleAxis = syncHardwareWorkspaceLimits({ x_travel_mm: 260 }, targetA, store);
+  assert.equal(singleAxis.x_travel_mm, 260);
+  assert.equal(singleAxis.y_travel_mm, 100);
+  assert.equal(singleAxis.from_hardware, true);
+
+  // 握手未报任何行程（如不报 $130/$131 的 100mm 机台）时重置回 100×100mm，不保留上一台的大行程
+  const reset = syncHardwareWorkspaceLimits({ x_accel_mm_s2: 1200 }, targetA, store);
+  assert.equal(reset.x_travel_mm, 100);
+  assert.equal(reset.y_travel_mm, 100);
+  assert.equal(reset.from_hardware, false);
+  assert.equal(readWorkspaceLimits(store, targetA).x_travel_mm, 100);
+  assert.equal(readWorkspaceLimits(store, targetA).y_travel_mm, 100);
 });

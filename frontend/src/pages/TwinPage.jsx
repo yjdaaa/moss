@@ -35,6 +35,7 @@ import {
   MAX_XY_TRAVEL_MM,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
+  canResetTwinToDemo,
   twinEstopContext,
 } from "../twinState.js";
 import { TERMINAL_STATUSES, normalizeWorkflowStatus } from "../state/statusNormalize.js";
@@ -44,8 +45,11 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import {
   WORKSPACE_LIMITS_EVENT,
   connectionSummaryView,
+  connectionTargetKey,
   readUnifiedConnection,
   readWorkspaceLimits,
+  resolveWorkspaceLimitsForTarget,
+  syncHardwareWorkspaceLimits,
   writeWorkspaceLimits,
 } from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
@@ -113,8 +117,8 @@ const DEMO_GCODE = [
 const SIM_FRAME_MS = 1000 / 30;
 const MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
 
-function loadSavedWorkspaceLimits() {
-  return readWorkspaceLimits();
+function loadSavedWorkspaceLimits(target = readUnifiedConnection()) {
+  return readWorkspaceLimits(undefined, target);
 }
 
 function loadSavedMaterialConfig() {
@@ -197,17 +201,30 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   const [jobSendResult, setJobSendResult] = useState(null);
   const [jobStatus, setJobStatus] = useState("preview_ready");
 
-  // 控制器硬件行程与实时遥测状态（默认对齐大鱼 DIY 翼宿 V1.0 的 100×100mm 可调范围）
-  const [machineLimits, setMachineLimits] = useState(() => loadSavedWorkspaceLimits());
+  // 控制器硬件行程与实时遥测状态（默认对齐大鱼 DIY 翼宿 V1.0 的 100×100mm 可调范围；严格绑定当前连接目标）
+  const currentConnForm = useMemo(
+    () => ({
+      connection_mode: connectionMode,
+      port: serialPort,
+      baudrate: String(baudrate),
+      network_host: networkHost,
+      network_telnet_port: String(telnetPort),
+    }),
+    [connectionMode, serialPort, baudrate, networkHost, telnetPort],
+  );
+  const [machineLimits, setMachineLimits] = useState(() => loadSavedWorkspaceLimits(currentConnForm));
+  const machineLimitsRef = useRef(machineLimits);
+  machineLimitsRef.current = machineLimits;
   const [machineFeatures, setMachineFeatures] = useState(() => connectionStatus?.features || null);
-  const connTargetKey = `${connectionMode}|${serialPort}|${baudrate}|${networkHost}|${telnetPort}`;
+  const connTargetKey = connectionTargetKey(currentConnForm);
   const prevConnTargetRef = useRef(connTargetKey);
   useEffect(() => {
     if (prevConnTargetRef.current !== connTargetKey) {
       prevConnTargetRef.current = connTargetKey;
       setMachineFeatures(null);
+      setMachineLimits(loadSavedWorkspaceLimits(currentConnForm));
     }
-  }, [connTargetKey]);
+  }, [connTargetKey, currentConnForm]);
   useEffect(() => {
     if (connectionStatus && "features" in connectionStatus) {
       setMachineFeatures(connectionStatus.features || null);
@@ -234,27 +251,30 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     });
   }, []);
   const updateWorkspaceLimits = useCallback((patch) => {
-    setMachineLimits((prev) => {
-      const base = prev || loadSavedWorkspaceLimits();
-      const normalized = normalizeWorkspaceLimits(patch, base);
-      return writeWorkspaceLimits(normalized);
-    });
+    const conn = readUnifiedConnection();
+    const targetKey = connectionTargetKey(conn);
+    const base = machineLimitsRef.current || loadSavedWorkspaceLimits(conn);
+    const normalized = normalizeWorkspaceLimits(patch, base);
+    const next = writeWorkspaceLimits({ ...normalized, target_key: targetKey });
+    setMachineLimits(next);
   }, []);
   useEffect(() => {
     const onLimits = (e) => {
       if (e?.detail) {
+        const resolved = resolveWorkspaceLimitsForTarget(e.detail, readUnifiedConnection());
         setMachineLimits((prev) => {
           if (
             prev
-            && prev.x_travel_mm === e.detail.x_travel_mm
-            && prev.y_travel_mm === e.detail.y_travel_mm
-            && prev.z_travel_mm === e.detail.z_travel_mm
-            && Boolean(prev.from_hardware) === Boolean(e.detail.from_hardware)
-            && Boolean(prev.manual) === Boolean(e.detail.manual)
+            && prev.x_travel_mm === resolved.x_travel_mm
+            && prev.y_travel_mm === resolved.y_travel_mm
+            && prev.z_travel_mm === resolved.z_travel_mm
+            && Boolean(prev.from_hardware) === Boolean(resolved.from_hardware)
+            && Boolean(prev.manual) === Boolean(resolved.manual)
+            && (prev.target_key || "") === (resolved.target_key || "")
           ) {
             return prev;
           }
-          return e.detail;
+          return resolved;
         });
       }
     };
@@ -347,6 +367,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   }, [toolpath, workspace]);
 
   const resetToDemoToolpath = useCallback(() => {
+    if (!canResetTwinToDemo({ jobStatus, jobSendResult })) return false;
     workflowLoadSeqRef.current += 1;
     setLoadingWorkflow(false);
     setActiveWorkflow(null);
@@ -358,7 +379,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     setSimProgress(0);
     setSimPlaying(true);
     setDriveMode("sim");
-  }, []);
+    return true;
+  }, [jobStatus, jobSendResult]);
 
   // 加载指定 workflow 的 G-code 刀路文件。请求序号守卫（2026-11-05）：快速切换任务时，
   // 旧任务较慢返回的刀路不得覆盖新选中的任务。
@@ -590,12 +612,9 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
           isFluidnc: Boolean(r.features),
           features: r.features || null,
         });
-        if (r.machine_limits) {
-          updateWorkspaceLimits({
-            ...r.machine_limits,
-            from_hardware: true,
-            manual: false,
-          });
+        if (isConn) {
+          const synced = syncHardwareWorkspaceLimits(r.machine_limits, readUnifiedConnection());
+          setMachineLimits(synced);
         }
         setMachineFeatures(r.features || null);
       } else {
@@ -1128,7 +1147,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   className="select-input twin-select"
                   aria-label="选择历史或当前工作流任务"
                 >
-                  <option value="">
+                  <option value="" disabled={isJobRunning}>
                     {recentWorkflows.length > 0 ? "内置演示刀路 (60×60mm)" : "暂无工作流记录 (使用演示刀路)"}
                   </option>
                   {recentWorkflows.map((wf) => (

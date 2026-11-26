@@ -41,6 +41,7 @@ test("按场景选一套模型：选着但没下载完的组合写明缺什么�
     assert.match(missingHtml, new RegExp(`id="voice-combo-missing-${first.id}"`));
     assert.match(missingHtml, /还没下载：[^<]*Qwen3-ASR（下载中）/);
     assert.match(missingHtml, new RegExp(`id="voice-combo-download-${first.id}"`), "还有没开始下载的，给一键下载");
+    assert.doesNotMatch(missingHtml, new RegExp(`id="voice-combo-apply-${first.id}"`), "缺模型时不渲染用这套按钮");
     assert.doesNotMatch(missingHtml.split(`id="voice-combo-${MODEL_COMBOS[1].id}"`)[0], /✓ 正在用/, "没下载完不算正在用");
 
     const ready = [first.vad, first.kws, first.asr, first.tts].map((id) => ({ id, label: id, installed: true }));
@@ -48,5 +49,6 @@ test("按场景选一套模型：选着但没下载完的组合写明缺什么�
     assert.match(readyHtml, /✓ 正在用/);
     assert.doesNotMatch(readyHtml, /voice-combo-missing-/);
     assert.match(readyHtml, new RegExp(`id="voice-combo-need-${MODEL_COMBOS[1].id}"`), "未激活套系缺模型时直接列出缺失项并提供下载，不误显示用这套");
+    assert.doesNotMatch(readyHtml, new RegExp(`id="voice-combo-apply-${MODEL_COMBOS[1].id}"`), "缺模型分支不显示用这套按钮");
   });
 });

@@ -150,7 +150,9 @@ function App() {
             && String(saved.network_telnet_port) === String(current.network_telnet_port));
       if (!sameTarget) return;
       setConnectionStatus(outcome.status);
-      syncHardwareWorkspaceLimits(outcome.machineLimits);
+      if (outcome.connected) {
+        syncHardwareWorkspaceLimits(outcome.machineLimits, saved);
+      }
       const motion = machineMotionFromLimits(outcome.machineLimits);
       if (motion) {
         writeMachineMotion(motion);
@@ -556,6 +558,7 @@ function App() {
                 active={drawActive}
                 connectionStatus={connectionStatus}
                 onOpenConnection={openConnectionModal}
+                activeJobs={activeJobs}
               />
             </Suspense>
           </div>

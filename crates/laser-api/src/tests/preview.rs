@@ -254,6 +254,86 @@ fn draw_preview_generates_real_gcode_and_confirm_send_succeeds() {
     assert_eq!(send_json["result"]["status"], "sending");
 }
 
+#[test]
+fn draw_preview_rejects_out_of_range_or_invalid_work_area_with_400() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(laser_runtime::MemoryStore::new());
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_store(store)
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir]);
+
+    let post_draw_preview = |body: &serde_json::Value| -> (u16, serde_json::Value) {
+        let payload = body.to_string();
+        let req = format!(
+            "POST /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        let raw = service.handle_http(req.as_bytes());
+        let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let first_line = std::str::from_utf8(&raw[..sep])
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
+        let status: u16 = first_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&raw[sep + 4..]).unwrap();
+        (status, json)
+    };
+
+    let dummy_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    for invalid_patch in [
+        serde_json::json!({"work_area_width_mm": 2001.0}),
+        serde_json::json!({"work_area_height_mm": 2500}),
+        serde_json::json!({"work_area_width_mm": 0}),
+        serde_json::json!({"work_area_height_mm": -10}),
+        serde_json::json!({"work_area_width_mm": "NaN"}),
+        serde_json::json!({"work_area_height_mm": "inf"}),
+        serde_json::json!({"work_area_width_mm": ""}),
+    ] {
+        let mut body = serde_json::json!({
+            "image_data_url": dummy_png,
+            "material": "椴木",
+            "thickness_mm": 3.0,
+            "mode": "raster",
+            "scene_json": {"type": "excalidraw", "version": 2}
+        });
+        for (k, v) in invalid_patch.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let (status, json) = post_draw_preview(&body);
+        assert_eq!(
+            status, 400,
+            "越界或非有限 work_area 必须返回 400，实际 {status}: {json}"
+        );
+        assert_eq!(json["success"], false);
+    }
+
+    let valid_body = serde_json::json!({
+        "image_data_url": dummy_png,
+        "material": "椴木",
+        "thickness_mm": 3.0,
+        "mode": "raster",
+        "work_area_width_mm": 220.0,
+        "work_area_height_mm": 180.0,
+        "scene_json": {"type": "excalidraw", "version": 2}
+    });
+    let (ok_status, ok_json) = post_draw_preview(&valid_body);
+    assert_eq!(ok_status, 200, "{ok_json}");
+    assert_eq!(ok_json["success"], true);
+}
+
 /// 200×100 像素、中间一块黑色矩形的 PNG data URL。
 pub(super) fn draw_test_png() -> String {
     use base64::Engine;

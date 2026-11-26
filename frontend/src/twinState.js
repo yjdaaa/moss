@@ -992,6 +992,14 @@ export function twinEstopContext({
 }
 
 /**
+ * 判断数字孪生页当前是否允许切换回内置演示刀路：
+ * 有任务正在发送或运行中时禁止切回演示刀路，以免清空 `selectedWorkflowId` / `jobSendResult` 导致急停丢失原任务通道。
+ */
+export function canResetTwinToDemo({ jobStatus = "", jobSendResult = null } = {}) {
+  return !(jobStatus === "sending" || jobStatus === "running" || Boolean(jobSendResult?.running));
+}
+
+/**
  * 根据后端实际返回的行程（`z_travel_mm`）与实时坐标判断机台是否具备有效 Z 轴：
  * 不读取后端不存在的 `features.axes` 字段。
  */

@@ -228,16 +228,19 @@ function DeviceConnectionModalBody({
       setTelnetPort(effectiveTelnetPort);
     }
     try {
-      const outcome = await probeControllerConnection(postJson, {
+      const probeForm = {
         connection_mode: connectionMode,
         port: serialPort,
         baudrate,
         network_host: networkHost.trim(),
         network_telnet_port: effectiveTelnetPort,
-      });
+      };
+      const outcome = await probeControllerConnection(postJson, probeForm);
       if (!mountedRef.current || probeEpochRef.current !== epoch) return;
       setConnectionStatus?.(outcome.status);
-      syncHardwareWorkspaceLimits(outcome.machineLimits);
+      if (outcome.connected) {
+        syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm);
+      }
       const motion = machineMotionFromLimits(outcome.machineLimits);
       if (motion) {
         writeMachineMotion(motion);

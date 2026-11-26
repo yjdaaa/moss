@@ -21,8 +21,37 @@ pub(crate) use text::generate_text_artifacts;
 const DRAW_PIXEL_MM: f64 = 0.1;
 
 /// 图片任务默认机器幅面（翼宿 V1.0，`docs/laser/hardware-bom.md`）；请求可用 `work_area_width_mm` /
-/// `work_area_height_mm` 传入连接检查读到的实际行程。发送前另按固件行程复核。
+/// `work_area_height_mm` 传入连接检查读到的实际行程（上限 `MAX_WORK_AREA_MM`）。发送前另按固件行程复核。
 const MACHINE_WORK_AREA_MM: f64 = 100.0;
+const MAX_WORK_AREA_MM: f64 = 2000.0;
+
+/// 解析画板 `work_area_width_mm` / `work_area_height_mm`：缺省或 null 用默认 100 mm；
+/// 显式给出时必须是 `(0, 2000]` 内的有限数字，非数字、非正数、非有限数或超上限直接报错（HTTP 400），不静默回退。
+pub(crate) fn parse_work_area_mm(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<f64, String> {
+    let number = match value {
+        None | Some(serde_json::Value::Null) => return Ok(MACHINE_WORK_AREA_MM),
+        Some(serde_json::Value::Number(num)) => num.as_f64().ok_or_else(|| {
+            format!("{field} 必须是大于 0 且不超过 {MAX_WORK_AREA_MM:.0} mm 的有限数字")
+        })?,
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().map_err(|_| {
+            format!("{field} 必须是大于 0 且不超过 {MAX_WORK_AREA_MM:.0} mm 的有限数字")
+        })?,
+        Some(_) => {
+            return Err(format!(
+                "{field} 必须是大于 0 且不超过 {MAX_WORK_AREA_MM:.0} mm 的有限数字"
+            ));
+        }
+    };
+    if !number.is_finite() || number <= 0.0 || number > MAX_WORK_AREA_MM {
+        return Err(format!(
+            "{field} 必须是大于 0 且不超过 {MAX_WORK_AREA_MM:.0} mm 的有限数字"
+        ));
+    }
+    Ok(number)
+}
 
 /// 图片横向扫描每侧过扫描（mm），尺寸换算会为它留出余量
 const IMAGE_OVERSCAN_MM: f64 = 1.0;

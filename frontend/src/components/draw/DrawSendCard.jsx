@@ -2,7 +2,7 @@ import React from "react";
 import { Eye, Flame, Save, Send, Square, UploadCloud } from "lucide-react";
 import { writeFramingShape } from "../../aiPreviewState.js";
 import { drawTargetMissingText } from "../../drawConnection.js";
-import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
+import { canResumeJob, formatResumeActionLabel, sendProgressFromResult } from "../../estopResumeState.js";
 import { REGISTRATION_DRAW_SESSION_KEY, drawOriginNote } from "../../registrationState.js";
 import { FeedbackPanel } from "../FeedbackPanel.jsx";
 import { FoldHeader } from "../FoldHeader.jsx";
@@ -13,6 +13,26 @@ import { JobSummaryCard } from "./JobSummaryCard.jsx";
 import { PreviewImage } from "./PreviewImage.jsx";
 
 const ACTIVE_STATUSES = ["sending", "running", "preparing", "awaiting_completion"];
+
+/**
+ * 判断画板当前任务是否应显示「取消任务」按钮：
+ * - 状态为运行态（`sending` / `running` / `preparing` / `awaiting_completion`）或明确 `unknown`；
+ * - 或发送/续雕请求返回 HTTP 0 / 轮询失联（`jobStatusUnknown === true`）：状态未知时保留取消入口；
+ * - 或后端活动任务表 `activeJobs`（含严格模式审批刚放行启动的任务）已包含当前 `workflowId`。
+ */
+export function isDrawJobActive({ result = null, workflowId = "", jobStatusUnknown = false, activeJobs = [] } = {}) {
+  const status = result?.result?.status;
+  if (ACTIVE_STATUSES.includes(status) || status === "unknown") return true;
+  if (jobStatusUnknown && Boolean(workflowId)) return true;
+  if (
+    workflowId
+    && Array.isArray(activeJobs)
+    && activeJobs.some((job) => (job?.workflowId || job?.workflow_id || job?.jobId || job?.job_id) === workflowId)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * 当前最该看的一条提示（r49 布局）：旧预览 > 没设连接目标 > 不可发送；都没有时为 null。
@@ -67,15 +87,14 @@ export function DrawSendCard({
   adoptRegistered,
   adoptFeedbackWorkflow,
   downloadFromUrl,
+  jobStatusUnknown = false,
+  activeJobs = [],
 }) {
   const status = result?.result?.status;
-  const jobActive = ACTIVE_STATUSES.includes(status);
-  const sendResult = result?.result?.send_result;
-  const sendProgress = sendResult
-    ? { sent: Number(sendResult.lines_sent) || 0, total: Number(sendResult.total_lines) || 0 }
-    : null;
+  const jobActive = isDrawJobActive({ result, workflowId, jobStatusUnknown, activeJobs });
+  const sendProgress = sendProgressFromResult(result?.result?.send_result);
   const canResume = Boolean(
-    canActOnWorkflow && !previewStale && hostReady && canResumeJob(sendProgress, status),
+    canActOnWorkflow && !previewStale && hostReady && !jobActive && canResumeJob(sendProgress, status),
   );
   const notice = drawSendNotice({ canActOnWorkflow, previewStale, hostReady, summaryAllowsSend, form });
   const pathUrl = web.gcode_preview_url || web.image_preview_url;

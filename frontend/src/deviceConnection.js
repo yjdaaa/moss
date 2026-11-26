@@ -89,8 +89,67 @@ function clampTravel(val, min, max, fallback) {
   return Math.min(max, Math.max(min, num));
 }
 
-/** 读取本机保存的雕刻机有效行程（默认对齐翼宿 V1.0 100×100×20mm）。 */
-export function readWorkspaceLimits(storage = defaultStorage()) {
+function isStorageLike(candidate) {
+  return Boolean(
+    candidate
+    && typeof candidate === "object"
+    && (typeof candidate.getItem === "function" || typeof candidate.setItem === "function"),
+  );
+}
+
+/**
+ * 规范化当前连接目标键（串口 `serial:<port>:<baud>`，网络 `network:<host>:<telnetPort>`；未填目标返回 `""`）。
+ * 用于将探测或手动填写的机器行程严格绑定到对应设备，切换设备后自动回退默认 100 mm。
+ */
+export function connectionTargetKey(form) {
+  if (typeof form === "string") return form.trim();
+  if (!form || typeof form !== "object") return "";
+  const mode = form.connection_mode === "serial" ? "serial" : "network";
+  if (mode === "serial") {
+    const port = String(form.port ?? "").trim();
+    if (!port) return "";
+    const baud = Number(form.baudrate) || Number(DEFAULT_BAUDRATE);
+    return `serial:${port}:${baud}`;
+  }
+  const host = String(form.network_host ?? "").trim();
+  if (!host) return "";
+  const telnet = Number(form.network_telnet_port) || Number(DEFAULT_TELNET_PORT);
+  return `network:${host}:${telnet}`;
+}
+
+function defaultWorkspaceLimits(targetKey = "") {
+  return {
+    x_travel_mm: DEFAULT_XY_TRAVEL_MM,
+    y_travel_mm: DEFAULT_XY_TRAVEL_MM,
+    z_travel_mm: DEFAULT_Z_TRAVEL_MM,
+    from_hardware: false,
+    manual: false,
+    target_key: targetKey,
+  };
+}
+
+/**
+ * 按当前连接目标解析有效机器行程：仅当已保存行程的 `target_key` 非空且与当前目标严格一致时才采用，
+ * 否则一律回退到默认 100×100×20 mm，防止切换设备后沿用旧大幅面行程。
+ */
+export function resolveWorkspaceLimitsForTarget(limits, target) {
+  const expectedKey = connectionTargetKey(target);
+  if (!limits || typeof limits !== "object" || !expectedKey || limits.target_key !== expectedKey) {
+    return defaultWorkspaceLimits(expectedKey);
+  }
+  return {
+    x_travel_mm: clampTravel(limits.x_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
+    y_travel_mm: clampTravel(limits.y_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
+    z_travel_mm: clampTravel(limits.z_travel_mm, 5, MAX_Z_TRAVEL_MM, DEFAULT_Z_TRAVEL_MM),
+    from_hardware: Boolean(limits.from_hardware),
+    manual: Boolean(limits.manual),
+    target_key: expectedKey,
+  };
+}
+
+/** 读取本机保存的雕刻机有效行程（传入 `target` 时校验目标一致性，不一致则回退默认 100×100×20mm）。 */
+export function readWorkspaceLimits(storage = defaultStorage(), target = undefined) {
+  let stored = null;
   try {
     const raw = storage?.getItem?.(WORKSPACE_LIMITS_KEY);
     if (raw) {
@@ -99,35 +158,45 @@ export function readWorkspaceLimits(storage = defaultStorage()) {
       const y = Number(parsed?.y_travel_mm);
       const z = Number(parsed?.z_travel_mm);
       if (x >= 20 && x <= MAX_XY_TRAVEL_MM && y >= 20 && y <= MAX_XY_TRAVEL_MM) {
-        return {
+        stored = {
           x_travel_mm: x,
           y_travel_mm: y,
           z_travel_mm: z >= 5 && z <= MAX_Z_TRAVEL_MM ? z : DEFAULT_Z_TRAVEL_MM,
           from_hardware: Boolean(parsed?.from_hardware),
           manual: Boolean(parsed?.manual),
+          target_key: typeof parsed?.target_key === "string" ? parsed.target_key : "",
         };
       }
     }
   } catch (_error) {
     // 存储不可用时回退默认行程
   }
-  return {
-    x_travel_mm: DEFAULT_XY_TRAVEL_MM,
-    y_travel_mm: DEFAULT_XY_TRAVEL_MM,
-    z_travel_mm: DEFAULT_Z_TRAVEL_MM,
-    from_hardware: false,
-  };
+  if (target !== undefined) {
+    return resolveWorkspaceLimitsForTarget(stored, target);
+  }
+  return stored || defaultWorkspaceLimits("");
 }
 
-/** 写入雕刻机有效行程并广播事件，使创作画板与数字孪生实时同步最大雕刻范围。 */
+/** 写入雕刻机有效行程（绑定 `target_key`）并广播事件，使创作画板与数字孪生实时同步最大雕刻范围。 */
 export function writeWorkspaceLimits(patch = {}, storage = defaultStorage()) {
-  const base = readWorkspaceLimits(storage);
+  const saved = readWorkspaceLimits(storage);
+  const nextTargetKey =
+    patch?.target !== undefined
+      ? connectionTargetKey(patch.target)
+      : typeof patch?.target_key === "string"
+        ? patch.target_key.trim()
+        : saved.target_key || "";
+  const base = nextTargetKey && saved.target_key === nextTargetKey ? saved : defaultWorkspaceLimits(nextTargetKey);
+  const { target: _ignoredTarget, ...restPatch } = patch || {};
   const next = {
     ...base,
-    ...patch,
+    ...restPatch,
     x_travel_mm: clampTravel(patch?.x_travel_mm ?? base.x_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
     y_travel_mm: clampTravel(patch?.y_travel_mm ?? base.y_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
     z_travel_mm: clampTravel(patch?.z_travel_mm ?? base.z_travel_mm, 5, MAX_Z_TRAVEL_MM, DEFAULT_Z_TRAVEL_MM),
+    from_hardware: Boolean(patch?.from_hardware ?? base.from_hardware),
+    manual: Boolean(patch?.manual ?? base.manual),
+    target_key: nextTargetKey,
   };
   try {
     storage?.setItem?.(WORKSPACE_LIMITS_KEY, JSON.stringify(next));
@@ -144,21 +213,37 @@ export function writeWorkspaceLimits(patch = {}, storage = defaultStorage()) {
   return next;
 }
 
-/** 当硬件握手返回实机行程（`$130/$131` 或 FluidNC `max_travel_mm`）时，自动同步到全局行程配置。 */
-export function syncHardwareWorkspaceLimits(machineLimits, storage = defaultStorage()) {
-  if (!machineLimits || typeof machineLimits !== "object") return null;
-  const x = Number(machineLimits.x_travel_mm);
-  const y = Number(machineLimits.y_travel_mm);
-  if (!(x > 0) && !(y > 0)) return null;
+/**
+ * 硬件握手成功后同步当前连接目标的机器行程：
+ * - 绑定到当前连接目标 `target_key`；
+ * - 握手未返回行程或某一轴未返回时，未返回的那一轴重置为默认 100 mm（Z 轴重置为 20 mm），绝不沿用旧机器行程。
+ */
+export function syncHardwareWorkspaceLimits(machineLimits, targetOrStorage = undefined, maybeStorage = undefined) {
+  const hasStorageSecondArg = isStorageLike(targetOrStorage) && maybeStorage === undefined;
+  const resolvedStorage = hasStorageSecondArg
+    ? targetOrStorage
+    : maybeStorage !== undefined
+      ? maybeStorage
+      : defaultStorage();
+  const targetKey = hasStorageSecondArg || targetOrStorage === undefined
+    ? connectionTargetKey(readUnifiedConnection(resolvedStorage))
+    : connectionTargetKey(targetOrStorage);
+  const x = Number(machineLimits?.x_travel_mm);
+  const y = Number(machineLimits?.y_travel_mm);
+  const z = Number(machineLimits?.z_travel_mm);
+  const hasX = Number.isFinite(x) && x > 0;
+  const hasY = Number.isFinite(y) && y > 0;
+  const hasZ = Number.isFinite(z) && z > 0;
   return writeWorkspaceLimits(
     {
-      ...(x > 0 ? { x_travel_mm: x } : {}),
-      ...(y > 0 ? { y_travel_mm: y } : {}),
-      ...(Number(machineLimits.z_travel_mm) > 0 ? { z_travel_mm: Number(machineLimits.z_travel_mm) } : {}),
-      from_hardware: true,
+      x_travel_mm: hasX ? x : DEFAULT_XY_TRAVEL_MM,
+      y_travel_mm: hasY ? y : DEFAULT_XY_TRAVEL_MM,
+      z_travel_mm: hasZ ? z : DEFAULT_Z_TRAVEL_MM,
+      from_hardware: hasX || hasY,
       manual: false,
+      target_key: targetKey,
     },
-    storage,
+    resolvedStorage,
   );
 }
 

@@ -230,14 +230,11 @@ pub(crate) fn generate_draw_artifacts(
         .map_or(IMAGE_OVERSCAN_MM, |scan| scan.options.overscan_mm);
 
     // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素。
-    // 2026-11-06 起按机器幅面（默认 100 mm，请求可传 work_area_*）而不是 400 mm 画布限制；光栅模式宽度另留两侧过扫描
-    let area = |key: &str| {
-        parse_float(object.get(key), key, MACHINE_WORK_AREA_MM)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(MACHINE_WORK_AREA_MM)
-    };
-    let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
+    // 2026-11-06 起按机器幅面（默认 100 mm，请求可传 work_area_*，上限 2000 mm）而不是 400 mm 画布限制；光栅模式宽度另留两侧过扫描
+    let (area_w, area_h) = (
+        parse_work_area_mm(object.get("work_area_width_mm"), "work_area_width_mm")?,
+        parse_work_area_mm(object.get("work_area_height_mm"), "work_area_height_mm")?,
+    );
     let usable_w = if mode == "outline" || mode == "vector" {
         area_w
     } else {

@@ -978,13 +978,12 @@ try {
   await page.locator("#voice-local-pick-dpdfnet_baseline").click();
   await page.locator("#voice-local-group-denoise tr").filter({ hasText: "DPDFNet" }).getByText("已选，开启后使用").waitFor();
   if (process.env.VOICE_QA_DIR) await page.locator("#voice-local-group-vad").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-local-vad.png") });
-  // 按场景推荐的整套模型：每种场景一行；模型没下全时点“用这套”只提示要下载什么，不保存
+  // 按场景推荐的整套模型：每种场景一行；缺模型的套系直接列出缺失项与一键下载，隐藏“用这套”按钮
   await page.locator("#voice-model-pairing-guide > summary").click();
   assert.ok((await page.locator("#voice-model-pairing-guide .voice-combo-row").count()) >= 4, "列出几种场景组合");
-  const savesBeforeCombo = calls.filter((c) => c.command === "voice_local_save").length;
-  await page.locator("#voice-combo-apply-quiet").click();
-  await page.locator('#voice-model-pairing-guide [role="status"]').getByText(/还需要先下载/).waitFor();
-  assert.equal(calls.filter((c) => c.command === "voice_local_save").length, savesBeforeCombo, "缺模型时不保存半套组合");
+  await page.locator("#voice-combo-need-quiet").waitFor();
+  assert.equal(await page.locator("#voice-combo-apply-quiet").count(), 0, "缺模型时隐藏用这套按钮");
+  assert.equal(await page.locator("#voice-combo-download-quiet").count(), 1, "缺模型时提供一键下载按钮");
   await openGroup("experience");
   assert.equal(await page.locator("#voice-screen-card-style").count(), 0, "n69：对话体验里不再有画风下拉（只在设备 › 副屏预览切换）");
   assert.equal(await page.locator("#voice-jev-filter-enabled").count(), 0, "n69：对话体验里不再有 Jev 开关勾选框");

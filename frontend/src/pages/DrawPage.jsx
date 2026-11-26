@@ -63,13 +63,14 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { manualParamsPayload, workbenchResumeSendPrompt } from "../workbenchParams.js";
-import { canResumeJob } from "../estopResumeState.js";
+import { canResumeJob, getResumeStartLine, sendProgressFromResult } from "../estopResumeState.js";
 import { applyImagePreset } from "../qualityPresets.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
 import {
   connectionSummaryView,
   MACHINE_MOTION_EVENT,
   readWorkspaceLimits,
+  resolveWorkspaceLimitsForTarget,
   WORKSPACE_LIMITS_EVENT,
 } from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
@@ -155,6 +156,7 @@ export function DrawPage({
   active = true,
   connectionStatus = null,
   onOpenConnection = null,
+  activeJobs = [],
 }) {
   // r49：关掉 MOSS 再打开也接着画——上次的画布（含插入的图片，超量时只存图形）从本机存储恢复
   const [initialScene] = useState(() => parseDrawScene(readStored(safeBrowserStorage(), DRAW_SCENE_KEY)));
@@ -217,6 +219,7 @@ export function DrawPage({
   const [drawSyncWarning, setDrawSyncWarning] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [result, setResult] = useState(null);
+  const [jobStatusUnknown, setJobStatusUnknown] = useState(false);
   const [sceneRev, setSceneRev] = useState(() => computeSceneRevision(initialScene?.elements));
   // 一键清空画布后的“撤销清空”：清空前的图形，画了新东西后作废
   const clearedSceneRef = useRef(null);
@@ -252,7 +255,7 @@ export function DrawPage({
     window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
     return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
   }, []);
-  // 雕刻机最大雕刻范围（与数字孪生、硬件握手共用本机行程记录，默认 100×100 mm）
+  // 雕刻机最大雕刻范围（仅当保存行程的 target_key 与当前连接目标一致时才采用，否则回退默认 100×100 mm）
   const [workspaceLimits, setWorkspaceLimits] = useState(() => readWorkspaceLimits());
   useEffect(() => {
     const onLimits = (e) => {
@@ -261,8 +264,9 @@ export function DrawPage({
     window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
     return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
   }, []);
-  const maxWidthMm = Number(workspaceLimits?.x_travel_mm) > 0 ? Number(workspaceLimits.x_travel_mm) : 100;
-  const maxHeightMm = Number(workspaceLimits?.y_travel_mm) > 0 ? Number(workspaceLimits.y_travel_mm) : 100;
+  const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimits, form);
+  const maxWidthMm = effectiveWorkspaceLimits.x_travel_mm;
+  const maxHeightMm = effectiveWorkspaceLimits.y_travel_mm;
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
@@ -943,11 +947,43 @@ export function DrawPage({
     }
   }
 
-  function startDrawJobPolling(targetWorkflowId, inFlight) {
-    let pollState = { id: targetWorkflowId, kind: "workflow", status: "sending", progress: null };
+  function startDrawJobPolling(
+    targetWorkflowId,
+    inFlight,
+    { waitForApproval = false, initialStatus = "", initialUpdatedAt = 0, expiresAt = 0 } = {},
+  ) {
+    inFlight.stop?.();
+    let awaitingApproval = Boolean(waitForApproval);
+    let pollState = { id: targetWorkflowId, kind: "workflow", status: awaitingApproval ? "pending" : "sending", progress: null };
     const stop = startJobPolling(
       (signal) => postJson("/api/workflow", { action: "status", workflow_id: targetWorkflowId }, { signal }),
       (res) => {
+        if (awaitingApproval) {
+          const wf = res?.ok && res?.data?.success ? res.data.result : null;
+          if (!wf) {
+            if (expiresAt > 0 && Date.now() / 1000 > expiresAt + 5) {
+              stop();
+              inFlightJobsRef.current.delete(targetWorkflowId);
+            }
+            return;
+          }
+          const rawStatus = wf.status || "";
+          const updatedAt = Number(wf.updated_at) || 0;
+          const startedNow =
+            rawStatus === "sending"
+            || rawStatus === "running"
+            || rawStatus === "preparing"
+            || (TERMINAL_STATUSES.has(rawStatus)
+              && (rawStatus !== initialStatus || (initialUpdatedAt > 0 && updatedAt > initialUpdatedAt)));
+          if (!startedNow) {
+            if (expiresAt > 0 && Date.now() / 1000 > expiresAt + 5) {
+              stop();
+              inFlightJobsRef.current.delete(targetWorkflowId);
+            }
+            return;
+          }
+          awaitingApproval = false;
+        }
         pollState = applyJobPoll(pollState, targetWorkflowId, "workflow", res);
         const terminal = TERMINAL_STATUSES.has(pollState.status);
         if (terminal) {
@@ -957,9 +993,11 @@ export function DrawPage({
         // 换预览只切换展示，原作业仍跟踪到终态，供隐藏画板急停。
         if (workflowIdRef.current !== targetWorkflowId) return;
         if (pollState.connectionLost) {
+          setJobStatusUnknown(true);
           setStatus("状态未知：无法查询设备，机器可能仍在运行（请到设备旁确认，顶栏急停随时可用）");
           return;
         }
+        setJobStatusUnknown(false);
         if (res?.ok && res.data) {
           setResult(res.data);
           const sr = res.data.result?.send_result || {};
@@ -990,6 +1028,45 @@ export function DrawPage({
     );
     inFlight.stop = stop;
   }
+
+  // 严格模式审批卡批准执行、或全局活动作业表出现当前画板 workflow 时，自动接管状态轮询以便显示进度与取消任务按钮
+  const startDrawJobPollingRef = useRef(null);
+  startDrawJobPollingRef.current = startDrawJobPolling;
+  useEffect(() => {
+    const onApprovalExecuted = (event) => {
+      const detail = event?.detail;
+      const targetId = detail?.target_record;
+      if (!targetId || targetId !== workflowIdRef.current) return;
+      if (detail?.result && typeof detail.result === "object") {
+        setJobStatusUnknown(false);
+        setResult((prev) => ({
+          success: true,
+          result: {
+            ...(prev?.result || {}),
+            ...detail.result,
+          },
+        }));
+      }
+      setStatus("桌面审批已批准，正在同步加工进度...");
+      const existing = inFlightJobsRef.current.get(targetId);
+      const inFlight = existing || { jobId: targetId, target: estopTargetArgs(formRef.current) };
+      inFlightJobsRef.current.set(targetId, inFlight);
+      startDrawJobPollingRef.current?.(targetId, inFlight);
+    };
+    window.addEventListener("moss:approval-executed", onApprovalExecuted);
+    return () => window.removeEventListener("moss:approval-executed", onApprovalExecuted);
+  }, []);
+
+  useEffect(() => {
+    if (!workflowId || !Array.isArray(activeJobs) || activeJobs.length === 0) return;
+    const matched = activeJobs.some(
+      (job) => (job?.workflowId || job?.workflow_id || job?.jobId || job?.job_id) === workflowId,
+    );
+    if (!matched || inFlightJobsRef.current.has(workflowId)) return;
+    const inFlight = { jobId: workflowId, target: estopTargetArgs(formRef.current) };
+    inFlightJobsRef.current.set(workflowId, inFlight);
+    startDrawJobPollingRef.current?.(workflowId, inFlight);
+  }, [workflowId, activeJobs]);
 
   async function exportScene({ forLaser = false } = {}) {
     if (!excalidrawAPI) {
@@ -1129,6 +1206,7 @@ export function DrawPage({
       }
       const res = await postJson("/api/draw/preview", payload);
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
+      setJobStatusUnknown(false);
       setResult(data);
       const nextWorkflowId = res.ok && data.success
         ? data?.result?.workflow_id || data?.result?.workflow?.workflow_id || ""
@@ -1220,34 +1298,42 @@ export function DrawPage({
         wait_for_response: true,
       });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
-      if (isApprovalRequiredResponse(res)) {
-        setResult(data);
-        setConfirmOpen(false);
-        setStatus(approvalPendingMessage(res, "发送任务"));
-        return;
-      }
-      setResult(data);
       setConfirmOpen(false);
-      const safeData = res.ok ? data : { ...data, success: false };
-      setRepeatSend((current) => applyConfirmSendResponse(current, safeData, safeBrowserStorage()));
-      if (isNestedSenderAccepted(safeData)) {
-        const fp = String(result?.result?.draw_lab?.content_fingerprint || repeatSend.currentFingerprint || "").trim().toLowerCase();
-        if (/^[0-9a-f]{64}$/.test(fp)) {
-          localSessionAcceptedRef.current = true;
-          syncDrawStateToBackend({ last_accepted_fingerprint: fp });
-        }
-      }
-      if (res.ok && data.success) {
-        setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度..."));
-        startDrawJobPolling(workflowId, inFlight);
+      if (isApprovalRequiredResponse(res)) {
+        setStatus(approvalPendingMessage(res, "发送任务"));
+        startDrawJobPolling(workflowId, inFlight, {
+          waitForApproval: true,
+          initialStatus: result?.result?.status || "",
+          initialUpdatedAt: Number(result?.result?.updated_at) || 0,
+          expiresAt: Number(data?.result?.expires_at) || 0,
+        });
       } else if (res.status === 0) {
-        setStatus("发送结果未知，正在查询原任务。顶栏急停仍可按原设备发送。");
+        setJobStatusUnknown(true);
+        setStatus("发送结果未知，正在查询原任务。取消任务与顶栏急停仍可使用。");
         startDrawJobPolling(workflowId, inFlight);
       } else {
-        setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
+        setJobStatusUnknown(false);
+        setResult(data);
+        const safeData = res.ok ? data : { ...data, success: false };
+        setRepeatSend((current) => applyConfirmSendResponse(current, safeData, safeBrowserStorage()));
+        if (isNestedSenderAccepted(safeData)) {
+          const fp = String(result?.result?.draw_lab?.content_fingerprint || repeatSend.currentFingerprint || "").trim().toLowerCase();
+          if (/^[0-9a-f]{64}$/.test(fp)) {
+            localSessionAcceptedRef.current = true;
+            syncDrawStateToBackend({ last_accepted_fingerprint: fp });
+          }
+        }
+        if (res.ok && data.success) {
+          setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度..."));
+          startDrawJobPolling(workflowId, inFlight);
+        } else {
+          setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
+        }
       }
     } catch (error) {
-      setStatus(`请求失败：${error.message || error}`);
+      setJobStatusUnknown(true);
+      setStatus(`发送请求异常（${error.message || error}），状态未知，正在查询原任务；必要时请点取消任务或顶栏急停。`);
+      startDrawJobPolling(workflowId, inFlight);
     } finally {
       if (!inFlight.stop) inFlightJobsRef.current.delete(workflowId);
       setBusy(false);
@@ -1267,12 +1353,11 @@ export function DrawPage({
       });
       return;
     }
-    const sr = result?.result?.send_result || {};
-    const sendProgress = { sent: Number(sr.lines_sent) || 0, total: Number(sr.total_lines) || 0 };
+    const sendProgress = sendProgressFromResult(result?.result?.send_result);
     if (!canResumeJob(sendProgress, result?.result?.status)) return;
     if (inFlightJobsRef.current.has(workflowId)) return;
 
-    const startLine = sendProgress.sent + 1;
+    const startLine = getResumeStartLine(sendProgress);
     const resumePrompt = workbenchResumeSendPrompt({
       workflow: result?.result,
       material: form.material,
@@ -1308,22 +1393,33 @@ export function DrawPage({
       });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
       if (isApprovalRequiredResponse(res)) {
-        setResult(data);
         setStatus(approvalPendingMessage(res, "断点续雕"));
+        startDrawJobPolling(workflowId, inFlight, {
+          waitForApproval: true,
+          initialStatus: result?.result?.status || "",
+          initialUpdatedAt: Number(result?.result?.updated_at) || 0,
+          expiresAt: Number(data?.result?.expires_at) || 0,
+        });
         return;
       }
+      if (res.status === 0) {
+        setJobStatusUnknown(true);
+        setStatus("断点续雕请求结果未知，正在查询原任务状态，请勿重复续雕；必要时请点取消任务或顶栏急停。");
+        startDrawJobPolling(workflowId, inFlight);
+        return;
+      }
+      setJobStatusUnknown(false);
       setResult(data);
       if (res.ok && data.success) {
         setStatus(data.result?.speech || `断点续雕已启动：正在从第 ${startLine} 行继续执行...`);
-        startDrawJobPolling(workflowId, inFlight);
-      } else if (res.status === 0) {
-        setStatus("断点续雕请求结果未知，正在查询原任务状态，请勿重复续雕；必要时请按顶栏急停。");
         startDrawJobPolling(workflowId, inFlight);
       } else {
         setStatus((typeof data.result === "string" && data.result) || "断点恢复失败");
       }
     } catch (error) {
-      setStatus(`请求失败：${error.message || error}`);
+      setJobStatusUnknown(true);
+      setStatus(`断点续雕请求异常（${error.message || error}），状态未知，正在查询原任务；必要时请点取消任务或顶栏急停。`);
+      startDrawJobPolling(workflowId, inFlight);
     } finally {
       if (!inFlight.stop) inFlightJobsRef.current.delete(workflowId);
       setBusy(false);
@@ -1410,6 +1506,7 @@ export function DrawPage({
       return;
     }
     previewActionSeqRef.current += 1;
+    setJobStatusUnknown(false);
     setWorkflowId(adopted.workflowId);
     setResult(adopted.result);
     setPreviewSnap(guard.inheritedSnap);
@@ -1435,7 +1532,10 @@ export function DrawPage({
     try {
       const res = await postJson("/api/workflow", { action: "cancel", workflow_id: workflowId });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
-      setResult(data);
+      if (res.ok && data.success) {
+        setJobStatusUnknown(false);
+        setResult(data);
+      }
       setStatus(
         res.ok && data.success
           ? data.result?.speech || "已更新"
@@ -1853,6 +1953,8 @@ export function DrawPage({
           adoptRegistered={adoptRegistered}
           adoptFeedbackWorkflow={adoptFeedbackWorkflow}
           downloadFromUrl={downloadFromUrl}
+          jobStatusUnknown={jobStatusUnknown}
+          activeJobs={activeJobs}
         />
         </WorkbenchCanvas>
       </section>

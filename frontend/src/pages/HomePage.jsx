@@ -37,6 +37,7 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { estopTargetArgs, visibleEstopContext } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
+import { canResumeJob, getResumeStartLine, sendProgressFromResult } from "../estopResumeState.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { applyImagePreset } from "../qualityPresets.js";
 import { effectiveTextStyle } from "../engraveRoute.js";
@@ -536,7 +537,9 @@ export function HomePage({
     const outcome = await probeControllerConnection(postJson, connectionForm);
     if (probeEpochRef.current !== epoch) return false;
     setConnectionStatus(outcome.status);
-    syncHardwareWorkspaceLimits(outcome.machineLimits);
+    if (outcome.connected) {
+      syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm);
+    }
     const motion = machineMotionFromLimits(outcome.machineLimits);
     if (motion) {
       writeMachineMotion(motion);
@@ -1034,7 +1037,7 @@ export function HomePage({
     }
   };
 
-  // Resume Send (断点续雕：从中断的断点行继续下发剩余 G-code)
+  // Resume Send (断点续雕：从设备证实完成的断点行之后继续下发剩余 G-code)
   const handleResumeSend = async () => {
     if (!currentWorkflow?.workflow_id) return;
     if (previewStale) {
@@ -1045,8 +1048,9 @@ export function HomePage({
       );
       return;
     }
+    if (!canResumeJob(sendProgress, overlayStatus)) return;
 
-    const startLine = (sendProgress?.sent || 0) + 1;
+    const startLine = getResumeStartLine(sendProgress);
     const totalLines = sendProgress?.total || 0;
     const targetName = drawTargetReady(connectionForm) ? drawTargetLabel(connectionForm) : "";
     const resumePrompt = workbenchResumeSendPrompt({
@@ -1108,8 +1112,8 @@ export function HomePage({
         const sr = res.data.result?.send_result || {};
         const total = sr.total_lines || sendProgress?.total || 0;
         const sent = sr.lines_sent || sendProgress?.sent || 0;
-        setSendProgress({ sent, total, target: sr.target || "" });
-        addLog("STREAM", `断点续雕已启动：正在从第 ${sent + 1}/${total} 行继续执行`, "ok");
+        setSendProgress(sendProgressFromResult(sr) || { sent, total, target: sr.target || "" });
+        addLog("STREAM", `断点续雕已启动：正在从第 ${startLine}/${total} 行继续执行`, "ok");
         setOverlayStatus("running");
         startStatusPolling(currentWorkflow.workflow_id);
       } else if (res.status === 0) {
@@ -1155,7 +1159,15 @@ export function HomePage({
         }
         setPollSafetyNotice((notice) => notice.startsWith("状态未知") ? "" : notice);
         const sr = res.data.result?.send_result || {};
-        if (state.progress) {
+        const fromSr = sendProgressFromResult(sr);
+        if (fromSr && fromSr.total > 0) {
+          setSendProgress(fromSr);
+          const pct = Math.min(100, Math.round(fromSr.sent / fromSr.total * 100));
+          if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {
+            lastLoggedPctRef.current = pct;
+            addLog("STREAM", `进度同步: ${pct}% (${fromSr.sent} 行)`, "info");
+          }
+        } else if (state.progress) {
           setSendProgress({ ...state.progress, target:sr.target || "", phase:sr.phase });
           const pct = Math.min(100, Math.round(state.progress.sent / state.progress.total * 100));
           if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {

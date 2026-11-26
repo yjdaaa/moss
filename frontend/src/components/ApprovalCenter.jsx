@@ -208,6 +208,15 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     if (approval.kind === "workflow_confirm_send") {
       const info = extractWorkflowInfo(result);
       setJob({ kind: "workflow", id: approval.target_record, status: info.status || "sending", progress: null, target: result?.send_result?.target });
+      try {
+        window.dispatchEvent(
+          new CustomEvent("moss:approval-executed", {
+            detail: { kind: approval.kind, target_record: approval.target_record, result },
+          }),
+        );
+      } catch {
+        // 非浏览器环境忽略事件广播
+      }
     } else if (approval.kind === "calibration_send") {
       setJob({ kind: "calibration", id: approval.target_record, status: "sending", progress: null, target: result?.send_result?.target });
     } else {

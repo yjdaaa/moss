@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   parseGcodeWords,
   parseGcodeToolpath,
@@ -10,6 +13,7 @@ import {
   resolveTwinHeadPose,
   resolveTwinHasZAxis,
   resolveTwinSafetySwitchStatus,
+  canResetTwinToDemo,
   YISU_V1_PROFILE,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
@@ -408,5 +412,26 @@ test("数字孪生：安全开关状态仅根据后端真实 features 判定，�
       telemetry: { wpos: { x: 10, y: 20, z: -1.5 } },
     }),
     true,
+  );
+});
+
+test("数字孪生运行态禁止切回演示刀路，且更新行程不在 setMachineLimits 回调内触发存储广播", () => {
+  assert.equal(canResetTwinToDemo({ jobStatus: "sending", jobSendResult: null }), false);
+  assert.equal(canResetTwinToDemo({ jobStatus: "running", jobSendResult: null }), false);
+  assert.equal(canResetTwinToDemo({ jobStatus: "preview_ready", jobSendResult: { running: true } }), false);
+  assert.equal(canResetTwinToDemo({ jobStatus: "preview_ready", jobSendResult: null }), true);
+  assert.equal(canResetTwinToDemo({ jobStatus: "cancelled", jobSendResult: { running: false } }), true);
+  assert.equal(canResetTwinToDemo({ jobStatus: "completed", jobSendResult: { running: false } }), true);
+
+  const twinSource = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/pages/TwinPage.jsx"),
+    "utf8",
+  );
+  assert.match(twinSource, /<option value="" disabled=\{isJobRunning\}>/);
+  assert.match(twinSource, /if \(!canResetTwinToDemo\(\{ jobStatus, jobSendResult \}\)\) return false;/);
+  assert.doesNotMatch(
+    twinSource,
+    /setMachineLimits\(\s*\([^)]*\)\s*=>\s*\{[\s\S]*?writeWorkspaceLimits/,
+    "writeWorkspaceLimits 不能放在 setMachineLimits 状态回调内执行",
   );
 });
