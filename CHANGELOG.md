@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 修复数字孪生开关状态误报、Colab 旧模型残留、画板覆盖切割选择、手机网页隐藏串口及画板光栅参数丢失（2026-11-26）
+
+- **现象**：数字孪生页在 FluidNC 接了急停但未接安全门或未返回完整特征时误报“无限位或控制开关”；Colab 联动去掉自定义模型输入框后仍回传历史自定义模型名；创作画板插入图片或切换表面通用材料时写回覆盖用户原选的“切割”；安卓浏览器访问电脑端时串口连接被隐藏且被强制改为网络；画板新增的网点与灰度光栅参数未被后端持久化保留。
+- **根因与修复**：`/api/connection/check` 的 `features` 补齐 `has_estop_or_fault_pin`，`TwinPage` 去掉对不存在的 `homing_enabled` / `axes` 的读取并在未连接、GRBL 或旧后端缺 `features` 时将状态记为 `unknown`，不再给出“无限位或控制开关”否定判断；Colab 笔记本固定忽略请求模型字段，`colabSettingsForm` 与 `colabSavePayload` 统一归一写入 `qwen3-vl-8b`、`qwen3-tts`、`moss`；`DrawPage` 移除覆写 `form.vector_style` 的副作用，统一通过 `effectiveDrawVectorStyle` 计算当前生效刻法，删图后自动恢复“切割”；`DeviceConnectionModal` 改用 `isHostSerialAvailable`，仅在 Tauri 安卓本地宿主（非 `isRemoteMode()`）隐藏串口；`draw_state.rs` 的 `FORM_KEYS` 补齐 `halftone_cell_mm`、`halftone_angle_deg`、`gray_min_power_percent`。
+- **验证**：`laser-api` 新增 FluidNC `has_estop_or_fault_pin` 暴露与画板光栅参数往返保存单测，`twinState`、`voiceState`、`drawConnection`、`deviceConnection` 与 `uiModalAndScrollFixes` 补齐前端单测（含两轴机 Z 行程等于易速默认值时不显示 Z 轴）；`node scripts/verify.mjs --finish` 通过（Rust 1568 项、前端单测 400 项、浏览器测试 19 个文件、回环 E2E 全部通过并已快更）。真实 FluidNC 急停接线与安卓手机浏览器串口未实机复测（`unverified`）。
+- **关联**：`crates/laser-api/src/{connection.rs,draw_state.rs}`、`docs/developer/api-contracts.md`、`frontend/src/{twinState,drawConnection,deviceConnection,authSession}.js`、`frontend/src/voiceState/localModels.js`、`frontend/src/pages/{TwinPage,DrawPage}.jsx`、`frontend/src/components/DeviceConnectionModal.jsx`。
+
+### 新增小智新设备接入全局居中确认弹窗、允许后宽限期免重启直连与可选自动允许新设备开关（2026-11-26）
+
+- **现象**：新小智首次连入内置语音服务记为“待允许”时，只有打开“语音中心 → 设备”才能看到允许按钮，在工作台或画板等页面缺少居中弹窗提示；点击允许后设备因开机 OTA 未拿到 token，必须手动按硬件重启键才能连上；多设备测试场景下缺少可选的自动允许新设备开关。
+- **根因与修复**：顶层 `main.jsx` 挂载 Portal 居中模态框 `VoiceDeviceAllowModal`（防冒认核对提示、多台排队切换、备注名、允许并记住、拒绝接入或经确认开启自动允许，初始焦点落在备注名防回车误放行，允许成功 1.5 秒反馈，允许后改名/保存开关失败单独分段提示）；`DbRegistry::allow_tokenless_session` 仅在 `allowed`、非空 `client_id` 严格一致、`decided_at` 7 天宽限期内且允许后尚未完成绑定 OTA（`info_at` 为空或早于 `decided_at`）时放行无 token WebSocket 直连（带无效/过期 token 照旧拒绝，无 token 会话不下发拍照识图）；`BuiltinLocal` 新增 `auto_allow_devices`（默认 `false`，开启须确认，仅对后续新连入设备生效，不放行存量 `pending` 与 `revoked` 设备）。
+- **验证**：`moss-voice-host` 新增 `auto_allow_devices_and_tokenless_grace_period_for_bound_allowed_device` 单测，`uiModalAndScrollFixes.test.mjs` 新增 `VoiceDeviceAllowModal`、`selectPendingVoiceDevices` 与 `executeAllowVoiceDevice` 确认及分段报错断言，新增 `voice-device-allow.browser.mjs` 覆盖初始焦点、回车防误放行、多台队列草稿隔离、360px 无溢出与成功反馈；`node scripts/verify.mjs --finish` 通过（Rust 1568 项、前端单测 400 项、浏览器测试 19 个文件、回环 E2E 全部通过并已快更）。真实小智固件在宽限期内无 token 免重启唤醒未实机复测（`unverified`）。
+- **关联**：`crates/moss-voice/src/settings.rs`、`crates/moss-voice-server/src/{lib.rs,ota.rs,session/connect.rs}`、`crates/moss-voice-host/src/builtin/{devices.rs,models.rs}`、`frontend/src/components/VoiceDeviceAllowModal.jsx`、`frontend/src/components/voice-builtin/BuiltinDevicesPanel.jsx`、`frontend/src/voiceState/devices.js`、内置语音技术书 n133。
+
 ### 清理全站无效参数框并按模型、设备与访问身份精确门禁控件（2026-11-26）
 
 - **现象**：材料实验室与 Colab 联动保留了后端未消费的参数框，且工作台、创作画板、数字孪生、偏好设置与语音中心在当前模式、硬件固件、模型能力或局域网只读身份不支持时仍渲染无效选项或置灰死按钮。

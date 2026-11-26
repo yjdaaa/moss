@@ -27,6 +27,7 @@ import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "./api/client.js";
 import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
 import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
 import { AiPreviewCenter } from "./components/AiPreviewCenter.jsx";
+import { VoiceDeviceAllowModal } from "./components/VoiceDeviceAllowModal.jsx";
 import { JobProgressDock } from "./components/JobProgressDock.jsx";
 import { VoiceActivityDock } from "./components/VoiceActivityDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
@@ -663,6 +664,12 @@ function App() {
         onWaitingChange={setAiPreviewWaiting}
         reopenNonce={aiPreviewReopen}
         onOpenConnection={openConnectionModal}
+      />
+
+      <VoiceDeviceAllowModal
+        voiceEnabled={voiceEnabled}
+        voiceStatus={voiceStatus}
+        currentPath={currentPath}
       />
 
       {/* 右下角浮层堆叠：小智雕刻同步小窗在上，雕刻任务浮层在下，互不遮挡 */}

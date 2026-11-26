@@ -8,6 +8,8 @@ import {
   parseGrblStatusReport,
   resolveMachineWorkspace,
   resolveTwinHeadPose,
+  resolveTwinHasZAxis,
+  resolveTwinSafetySwitchStatus,
   YISU_V1_PROFILE,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
@@ -326,4 +328,85 @@ test("数字孪生急停：任务通道失败时按页面连接目标补发 0x18
     { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, job_id: "wf-live-2", connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
     { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
   ]);
+});
+
+test("数字孪生：安全开关状态仅根据后端真实 features 判定，缺特征记为 unknown 且绝不误报无限位开关；Z 轴不读不存在的 axes", () => {
+  const offlineUnknown = resolveTwinSafetySwitchStatus({
+    telemetry: { online: false },
+    machineFeatures: null,
+  });
+  assert.equal(offlineUnknown.state, "unknown");
+  assert.equal(offlineUnknown.text, "尚未读取控制器状态");
+  assert.doesNotMatch(offlineUnknown.text, /无限位或控制开关/);
+
+  const grblOnline = resolveTwinSafetySwitchStatus({
+    telemetry: { online: true },
+    machineFeatures: null,
+  });
+  assert.equal(grblOnline.state, "unknown");
+  assert.equal(grblOnline.text, "开关配置未知 · 当前无触发信号");
+  assert.doesNotMatch(grblOnline.text, /无限位或控制开关/);
+
+  const oldBackendFeatures = resolveTwinSafetySwitchStatus({
+    telemetry: { online: true },
+    machineFeatures: { has_door: false, has_air_assist: false },
+  });
+  assert.equal(oldBackendFeatures.state, "unknown");
+  assert.equal(oldBackendFeatures.text, "开关配置未知 · 当前无触发信号");
+  assert.doesNotMatch(oldBackendFeatures.text, /无限位或控制开关/);
+
+  const estopOnlyFluidnc = resolveTwinSafetySwitchStatus({
+    telemetry: { online: true },
+    machineFeatures: { has_door: false, has_estop_or_fault_pin: true },
+  });
+  assert.equal(estopOnlyFluidnc.state, "ok");
+  assert.equal(estopOnlyFluidnc.text, "急停/故障输入正常 · 当前无触发信号");
+
+  const doorAndEstopFluidnc = resolveTwinSafetySwitchStatus({
+    telemetry: { online: true },
+    machineFeatures: { has_door: true, has_estop_or_fault_pin: true },
+  });
+  assert.equal(doorAndEstopFluidnc.state, "ok");
+  assert.equal(doorAndEstopFluidnc.text, "安全门、急停/故障输入正常 · 当前无触发信号");
+
+  const neitherPinFluidnc = resolveTwinSafetySwitchStatus({
+    telemetry: { online: true },
+    machineFeatures: { has_door: false, has_estop_or_fault_pin: false },
+  });
+  assert.equal(neitherPinFluidnc.state, "unknown");
+  assert.doesNotMatch(neitherPinFluidnc.text, /无限位或控制开关/);
+
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: false },
+      machineLimits: { z_travel_mm: YISU_V1_PROFILE.zTravelMm },
+      telemetry: { wpos: { x: 0, y: 0, z: 0 }, mpos: { x: 0, y: 0, z: 0 } },
+    }),
+    false,
+  );
+  // z_travel_mm 等于翼宿默认值且实时坐标 Z 为 0 时，即使已同步硬件行程也判定为没有 Z 轴
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: true },
+      machineLimits: { z_travel_mm: YISU_V1_PROFILE.zTravelMm, from_hardware: true },
+      telemetry: { wpos: { x: 12, y: 8, z: 0 }, mpos: { x: 12, y: 8, z: 0 } },
+    }),
+    false,
+  );
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: true },
+      machineLimits: { z_travel_mm: 50, from_hardware: true },
+      telemetry: { wpos: { x: 0, y: 0, z: 0 }, mpos: { x: 0, y: 0, z: 0 } },
+    }),
+    true,
+  );
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: false },
+      machineLimits: { z_travel_mm: YISU_V1_PROFILE.zTravelMm },
+      telemetry: { wpos: { x: 10, y: 20, z: -1.5 } },
+    }),
+    true,
+  );
 });

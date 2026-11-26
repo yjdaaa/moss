@@ -134,13 +134,20 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         firmware_version: String::new(),
         ip: identity.ip.clone(),
     };
-    // 登记走本地 SQLite（同步锁）：和 open_session 一样放到阻塞线程，不占 tokio 工作线程
+    // 登记与免 token 宽限复核均走本地 SQLite（同步锁）：放到阻塞线程，不占 tokio 工作线程
     let registry = shared.registry.clone();
-    let seen = tokio::task::spawn_blocking(move || registry.seen(&visit))
-        .await
-        .unwrap_or_else(|error| Err(format!("登记任务失败：{error}")));
-    let status = match seen {
-        Ok(status) => status,
+    let has_auth_header = identity.authorization.is_some();
+    let seen = tokio::task::spawn_blocking(move || {
+        let status = registry.seen(&visit)?;
+        let tokenless_ok = !has_auth_header
+            && status == DeviceStatus::Allowed
+            && registry.allow_tokenless_session(&visit.device_id, &visit.client_id);
+        Ok::<_, String>((status, tokenless_ok))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("登记任务失败：{error}")));
+    let (status, tokenless_ok) = match seen {
+        Ok(pair) => pair,
         Err(error) => {
             shared.state.event_in_flow(
                 EventRecord::error(
@@ -156,15 +163,12 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         }
     };
     let token_ok = status == DeviceStatus::Allowed
-        && identity
-            .authorization
-            .as_deref()
-            .map(|token| {
-                shared
-                    .signer
-                    .verify(token, &client_id, &device_id, unix_now())
-            })
-            .unwrap_or(false);
+        && match identity.authorization.as_deref() {
+            Some(token) => shared
+                .signer
+                .verify(token, &client_id, &device_id, unix_now()),
+            None => tokenless_ok,
+        };
     let Some((hello_version, uplink, device_mcp, device_aec, text_font_cap)) =
         wait_hello(&mut socket).await
     else {
@@ -227,7 +231,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         let (status_text, message, log) = match status {
             DeviceStatus::Pending => (
                 "等待允许",
-                "请在电脑 MOSS 语音中心允许此设备，然后重启设备",
+                "请在电脑 MOSS 弹窗或语音中心允许此设备，允许后直接唤醒即可",
                 "待允许，已提示用户在电脑上允许",
             ),
             DeviceStatus::Revoked => (
@@ -237,8 +241,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             ),
             DeviceStatus::Allowed => (
                 "需要重新授权",
-                "请重启设备，从 MOSS 重新获取授权",
-                "已允许但 token 缺失或无效（允许后尚未重启设备？），已提示重启",
+                "免重启宽限已过或 token 无效，请重启设备重新取得授权",
+                "已允许但免重启宽限已过或 token 无效，已提示重启设备重新取得授权",
             ),
         };
         let record = if status == DeviceStatus::Pending {

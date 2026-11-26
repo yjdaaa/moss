@@ -3,9 +3,9 @@ import { RefreshCw } from "lucide-react";
 import { isReadOnlyReferenceClient } from "../../authSession.js";
 import {
   DRAW_IMAGE_STRATEGIES,
-  DRAW_VECTOR_STYLES,
+  availableDrawVectorStyles,
+  effectiveDrawVectorStyle,
   normalizeDrawImageStrategy,
-  normalizeDrawVectorStyle,
 } from "../../drawConnection.js";
 import { materialLayerHint } from "../../fillOptions.js";
 import { CUSTOM_OPTION_LABEL, CUSTOM_OPTION_VALUE, findMaterialOption } from "../../materialSelectState.js";
@@ -72,12 +72,11 @@ export function DrawMaterialCard({
   const isSurfaceOnly = Boolean(
     matchedMaterial && (matchedMaterial.thicknesses || []).length === 0 && matchedMaterial.surface,
   );
-  const vectorStyles = hasSceneImages || isSurfaceOnly
-    ? DRAW_VECTOR_STYLES.filter((opt) => opt.value !== "cut")
-    : DRAW_VECTOR_STYLES;
-  const effectiveVectorStyle = vectorStyles.some((opt) => opt.value === normalizeDrawVectorStyle(form.vector_style))
-    ? normalizeDrawVectorStyle(form.vector_style)
-    : "outline";
+  const vectorStyles = availableDrawVectorStyles({ hasSceneImages, surfaceOnly: isSurfaceOnly });
+  const effectiveVectorStyle = effectiveDrawVectorStyle(form.vector_style, {
+    hasSceneImages,
+    surfaceOnly: isSurfaceOnly,
+  });
   const rasterImageMode = normalizeImageMode(form.image_mode);
   const rasterModeFields = imageModeFields(rasterImageMode);
   return (

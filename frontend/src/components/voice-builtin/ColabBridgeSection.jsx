@@ -60,11 +60,17 @@ function ColabBridgeSection({ builtin }) {
     }));
   }, [baselineSig]);
 
+  const hasLegacyModelOverride = Boolean(
+    (colab.llm_model && colab.llm_model !== baseline.llm_model) ||
+      (colab.tts_model && colab.tts_model !== baseline.tts_model) ||
+      (colab.tts_voice && colab.tts_voice !== baseline.tts_voice),
+  );
   const dirty =
     form.enabled !== baseline.enabled ||
     form.url.trim() !== baseline.url.trim() ||
     String(form.tts_speed).trim() !== String(baseline.tts_speed).trim() ||
-    Boolean(form.api_key.trim());
+    Boolean(form.api_key.trim()) ||
+    hasLegacyModelOverride;
   const validationError = colabSettingsError(form, keyConfigured, cliLoggedIn);
 
   const updateField = (key, value) => {

@@ -38,6 +38,14 @@ export function isRemoteMode() {
   return remoteMode;
 }
 
+/** 当前页面是否运行在 Tauri 原生宿主窗口内（桌面端或 Android App，非外部浏览器）。 */
+export function isTauriHost(win = globalThis.window) {
+  if (!win) return false;
+  if (typeof win.__TAURI__?.core?.invoke === "function") return true;
+  const loc = win.location;
+  return loc?.protocol === "tauri:" || loc?.hostname === "tauri.localhost";
+}
+
 /** 浏览器是否通过局域网 / 非回环地址访问（后端归为 `CallerContext::Lan`，参考数据与系统设置只读）。 */
 export function isNonLoopbackWebHost(win = globalThis.window) {
   const loc = win?.location;

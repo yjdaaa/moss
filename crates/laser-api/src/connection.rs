@@ -737,6 +737,7 @@ impl ApiService {
             "features": machine_features.map(|feat| serde_json::json!({
                 "has_air_assist": feat.has_air_assist,
                 "has_door": feat.has_door,
+                "has_estop_or_fault_pin": feat.has_estop_or_fault_pin,
                 "speed_map": feat.speed_map,
             })),
             "timeout_seconds": timeout_secs,

@@ -990,3 +990,55 @@ export function twinEstopContext({
   const jobId = isJobRunning && typeof selectedWorkflowId === "string" ? selectedWorkflowId.trim() : "";
   return visibleEstopContext(jobId, estopTargetArgs(connectionPayload), recordedTarget);
 }
+
+/**
+ * 根据后端实际返回的行程（`z_travel_mm`）与实时坐标判断机台是否具备有效 Z 轴：
+ * 不读取后端不存在的 `features.axes` 字段。
+ */
+export function resolveTwinHasZAxis({ workspace = null, machineLimits = null, telemetry = null } = {}) {
+  return (
+    (Boolean(workspace?.hasHardwareLimits)
+      && Number(machineLimits?.z_travel_mm) > 0
+      && Number(machineLimits?.z_travel_mm) !== YISU_V1_PROFILE.zTravelMm)
+    || Math.abs(Number(telemetry?.wpos?.z) || 0) > 1e-4
+    || Math.abs(Number(telemetry?.mpos?.z) || 0) > 1e-4
+  );
+}
+
+/**
+ * 根据后端 `/api/connection/check` 确实提供的 `features.{has_door, has_estop_or_fault_pin}` 与实时 `<...|Pn:...>` 报告，
+ * 计算数字孪生“限位与安全开关”状态：
+ * - 未连接、经典 GRBL 或旧后端未返回完整 `features` 时，`state` 记为 `"unknown"`；
+ * - 后端未解析限位开关引脚，绝不给出“无限位或控制开关”这类否定判断。
+ */
+export function resolveTwinSafetySwitchStatus({ telemetry = null, machineFeatures = null } = {}) {
+  const hasDoorField = typeof machineFeatures?.has_door === "boolean";
+  const hasEstopField = typeof machineFeatures?.has_estop_or_fault_pin === "boolean";
+  const configured = [];
+  if (machineFeatures?.has_door === true) configured.push("安全门");
+  if (machineFeatures?.has_estop_or_fault_pin === true) configured.push("急停/故障输入");
+
+  const featuresKnown = hasDoorField && hasEstopField;
+  if (!telemetry?.online) {
+    return {
+      state: featuresKnown || configured.length > 0 ? "idle" : "unknown",
+      text: "尚未读取控制器状态",
+    };
+  }
+  if (configured.length > 0) {
+    return {
+      state: "ok",
+      text: `${configured.join("、")}正常 · 当前无触发信号`,
+    };
+  }
+  if (!featuresKnown) {
+    return {
+      state: "unknown",
+      text: "开关配置未知 · 当前无触发信号",
+    };
+  }
+  return {
+    state: "unknown",
+    text: "未配置安全门或急停输入 · 当前无触发信号",
+  };
+}

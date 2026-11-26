@@ -200,6 +200,7 @@ impl BuiltinVoice {
             "screen_preview_sync",
             "persona_risk_notes",
             "screen_pack_auto_keep",
+            "auto_allow_devices",
         ] {
             if let Some(value) = patch.get(key) {
                 bool_patches.push((
@@ -524,6 +525,7 @@ impl BuiltinVoice {
                                 "screen_preview_sync" => local.screen_preview_sync = *val,
                                 "persona_risk_notes" => local.persona_risk_notes = *val,
                                 "screen_pack_auto_keep" => local.screen_pack_auto_keep = *val,
+                                "auto_allow_devices" => local.auto_allow_devices = *val,
                                 _ => {}
                             }
                         }
@@ -689,6 +691,7 @@ impl BuiltinVoice {
                             | "custom_personas"
                             | "persona_risk_notes"
                             | "screen_pack_auto_keep"
+                            | "auto_allow_devices"
                     )
                 })
         });

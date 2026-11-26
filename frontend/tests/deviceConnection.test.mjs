@@ -7,6 +7,7 @@ import {
   clearBufferedDeviceLogs,
   connectionSummaryView,
   emitDeviceLog,
+  isHostSerialAvailable,
   probeControllerConnection,
   readBufferedDeviceLogs,
   readConnectionForm,
@@ -209,4 +210,40 @@ test("共享波特率常量、统一握手探测提示文案与终端日志缓�
   assert.equal(logs[0].tag, "DEVICE");
   assert.equal(logs[0].level, "ok");
   clearBufferedDeviceLogs();
+});
+
+test("串口可用性按后端宿主判定：仅 Tauri 安卓本地宿主隐藏串口，安卓浏览器访问电脑端保留串口", async () => {
+  const { isTauriHost } = await import("../src/authSession.js");
+  const androidNav = {
+    userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/126.0.0.0 Mobile Safari/537.36",
+    platform: "Linux armv81",
+  };
+  const macNav = {
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)",
+    platform: "MacIntel",
+  };
+
+  // 1. 安卓手机浏览器通过 http://<device-ip>:<port> 访问电脑端：宿主是电脑，必须保留串口
+  const androidBrowserWin = { location: { protocol: "http:", hostname: "192.0.2.10", port: "9666" } };
+  assert.equal(isTauriHost(androidBrowserWin), false);
+  assert.equal(isHostSerialAvailable({ win: androidBrowserWin, nav: androidNav, remote: false }), true);
+
+  // 2. Tauri 安卓 App 本机模式（非连接电脑模式）：本机无 USB 串口后端，隐藏串口
+  const tauriAndroidWin = {
+    __TAURI__: { core: { invoke: () => {} } },
+    location: { protocol: "http:", hostname: "tauri.localhost" },
+  };
+  assert.equal(isTauriHost(tauriAndroidWin), true);
+  assert.equal(isHostSerialAvailable({ win: tauriAndroidWin, nav: androidNav, remote: false }), false);
+
+  // 3. Tauri 安卓 App 开启“连接电脑 MOSS”远程模式：后端在电脑上，保留串口
+  assert.equal(isHostSerialAvailable({ win: tauriAndroidWin, nav: androidNav, remote: true }), true);
+
+  // 4. 电脑 Tauri 桌面端：保留串口
+  const tauriDesktopWin = {
+    __TAURI__: { core: { invoke: () => {} } },
+    location: { protocol: "tauri:", hostname: "localhost" },
+  };
+  assert.equal(isTauriHost(tauriDesktopWin), true);
+  assert.equal(isHostSerialAvailable({ win: tauriDesktopWin, nav: macNav, remote: false }), true);
 });

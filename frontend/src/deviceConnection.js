@@ -5,6 +5,9 @@
 // - 创作画板一组（`laserLab.*`）：画板自己的记忆，没填时回退工作台那一组（见 drawConnection.js）。
 // 存储被禁用或读写抛错时逐项退回默认值 / 静默跳过，页面照常工作，急停路径也不会因此中断。
 
+import { isRemoteMode, isTauriHost } from "./authSession.js";
+import { detectClientOs } from "./platform.js";
+
 /** 连接表单字段 → 工作台存储键。 */
 export const WORKBENCH_CONNECTION_KEYS = Object.freeze({
   connection_mode: "laser-forge-conn-mode",
@@ -261,6 +264,21 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
       machineLimits: null,
     };
   }
+}
+
+/**
+ * 当前连接的后端宿主是否支持 USB 串口：
+ * 串口能力属于后端宿主——仅当运行在 Tauri Android App 内且未开启“连接电脑 MOSS”时隐藏串口；
+ * 电脑桌面端、电脑浏览器，以及安卓手机浏览器通过 `http://<device-ip>:<port>` 访问电脑端时均保留串口。
+ */
+export function isHostSerialAvailable({
+  win = globalThis.window,
+  nav = globalThis.navigator,
+  remote = isRemoteMode(),
+} = {}) {
+  if (remote) return true;
+  const inLocalAndroidApp = isTauriHost(win) && detectClientOs(nav) === "android";
+  return !inLocalAndroidApp;
 }
 
 /** 工作台连接卡、画板连接卡与画板底部操作条共用的紧凑连接摘要视图。 */

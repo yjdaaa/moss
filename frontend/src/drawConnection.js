@@ -30,6 +30,23 @@ export function normalizeDrawVectorStyle(style) {
   return DRAW_VECTOR_STYLES.some((opt) => opt.value === style) ? style : "outline";
 }
 
+/** 按画布是否含位图或材料是否仅为表面通用条目，返回当前可选的矢量刻法列表。 */
+export function availableDrawVectorStyles({ hasSceneImages = false, surfaceOnly = false } = {}) {
+  return hasSceneImages || surfaceOnly
+    ? DRAW_VECTOR_STYLES.filter((opt) => opt.value !== "cut")
+    : DRAW_VECTOR_STYLES;
+}
+
+/**
+ * 计算当前实际生效的矢量刻法（不改写用户已保存的 `form.vector_style`）：
+ * 画布含位图或材料只有表面通用条目时临时回退为 `"outline"`，删掉图片或换回带厚度材料后自动恢复原选的 `"cut"`。
+ */
+export function effectiveDrawVectorStyle(style, options = {}) {
+  const normalized = normalizeDrawVectorStyle(style);
+  const allowed = availableDrawVectorStyles(options);
+  return allowed.some((opt) => opt.value === normalized) ? normalized : "outline";
+}
+
 /** 查材料推荐用哪一档：光栅扫描与矢量“填充”用填充（raster）参数，矢量“切割”用切割参数，其余用描边参数。 */
 export function drawRecommendEngravingMode(mode, vectorStyle) {
   if (mode === "raster") return "raster";

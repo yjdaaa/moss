@@ -19,6 +19,9 @@ const FORM_KEYS: &[&str] = &[
     "vector_style",
     "image_mode",
     "line_interval_scale",
+    "halftone_cell_mm",
+    "halftone_angle_deg",
+    "gray_min_power_percent",
     "vector_simplify_factor",
 ];
 const MAX_FORM_VALUE_BYTES: usize = 4096;

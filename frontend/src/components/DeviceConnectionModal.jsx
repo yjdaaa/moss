@@ -4,10 +4,14 @@ import { AlertTriangle, CheckCircle2, RefreshCw, Wifi, X, Zap } from "lucide-rea
 import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "../api/client.js";
 import { showPrompt } from "../appDialog.js";
 import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
-import { MACHINE_MOTION_EVENT, SERIAL_BAUDRATES, probeControllerConnection } from "../deviceConnection.js";
+import {
+  MACHINE_MOTION_EVENT,
+  SERIAL_BAUDRATES,
+  isHostSerialAvailable,
+  probeControllerConnection,
+} from "../deviceConnection.js";
 import { machineMotionFromLimits, writeMachineMotion } from "../fillOptions.js";
-import { isRemoteMode } from "../authSession.js";
-import { defaultSerialPortHint, detectClientOs } from "../platform.js";
+import { defaultSerialPortHint } from "../platform.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
@@ -49,7 +53,7 @@ function DeviceConnectionModalBody({
   const [notice, setNotice] = useState(null);
   const [telnetPortText, setTelnetPortText] = useState(() => String(telnetPort || 23));
 
-  const serialAvailable = isRemoteMode() || detectClientOs() !== "android";
+  const serialAvailable = isHostSerialAvailable();
   const effectiveMode = serialAvailable ? connectionMode : "network";
 
   useEffect(() => {

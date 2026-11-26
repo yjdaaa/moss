@@ -478,17 +478,22 @@ export function visionRuntimeText(runtime) {
   }
 }
 
+export const COLAB_FIXED_LLM_MODEL = "qwen3-vl-8b";
+export const COLAB_FIXED_TTS_MODEL = "qwen3-tts";
+export const COLAB_FIXED_TTS_VOICE = "moss";
+
 /**
  * n80 Colab T4 专属联动表单（默认关闭；开启后只临时接管大模型、摄像头看图与 550W 克隆语音合成，关闭即恢复原配置）。
+ * Colab 笔记本固定使用 `qwen3-vl-8b` 与 `qwen3-tts` 克隆音色，忽略请求模型字段，因此表单与保存载荷统一归一为固定常量。
  */
 export function colabSettingsForm(colab) {
   const c = colab || {};
   return {
     enabled: Boolean(c.enabled),
     url: String(c.url || ""),
-    llm_model: String(c.llm_model || "qwen3-vl-8b"),
-    tts_model: String(c.tts_model || "qwen3-tts"),
-    tts_voice: String(c.tts_voice || "moss"),
+    llm_model: COLAB_FIXED_LLM_MODEL,
+    tts_model: COLAB_FIXED_TTS_MODEL,
+    tts_voice: COLAB_FIXED_TTS_VOICE,
     tts_speed: String(c.tts_speed ?? 1),
     api_key: "",
   };
@@ -543,14 +548,6 @@ export function colabSettingsError(form, keyConfigured = false, cliLoggedIn = fa
   if (enabled && !hasKey && !cliLoggedIn) {
     return "开启 Colab 联动前请先登录 Colab CLI，或手动填写 API 密钥";
   }
-  for (const [label, val] of [
-    ["大模型名", f.llm_model],
-    ["合成模型名", f.tts_model],
-    ["合成音色", f.tts_voice],
-  ]) {
-    const s = String(val || "").trim();
-    if (s.length > 120 || /\s/.test(s)) return `Colab ${label}不能包含空格且不超过 120 个字符`;
-  }
   const speed = Number(f.tts_speed ?? 1);
   if (!Number.isFinite(speed) || speed < 0.25 || speed > 4.0) {
     return "Colab 合成语速须在 0.25 ~ 4.0 之间";
@@ -558,15 +555,15 @@ export function colabSettingsError(form, keyConfigured = false, cliLoggedIn = fa
   return "";
 }
 
-/** 构造提交给 `voice_local_save({ colab })` 的载荷。 */
+/** 构造提交给 `voice_local_save({ colab })` 的载荷（固定写入 Colab 笔记本模型与音色常量，使历史自定义遗留值在保存时归一）。 */
 export function colabSavePayload(form) {
   const f = form || {};
   const payload = {
     enabled: Boolean(f.enabled),
     url: String(f.url || "").trim(),
-    llm_model: String(f.llm_model || "qwen3-vl-8b").trim() || "qwen3-vl-8b",
-    tts_model: String(f.tts_model || "qwen3-tts").trim() || "qwen3-tts",
-    tts_voice: String(f.tts_voice || "moss").trim() || "moss",
+    llm_model: COLAB_FIXED_LLM_MODEL,
+    tts_model: COLAB_FIXED_TTS_MODEL,
+    tts_voice: COLAB_FIXED_TTS_VOICE,
     tts_speed: Number(f.tts_speed ?? 1),
   };
   const key = String(f.api_key || "").trim();

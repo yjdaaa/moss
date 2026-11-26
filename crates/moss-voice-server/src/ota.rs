@@ -382,7 +382,7 @@ async fn ota_post(
         match status {
             DeviceStatus::Allowed if bound => "已允许，已下发连接地址与 token",
             DeviceStatus::Allowed => "设备编号已登记但 Client-Id 不一致，未下发 token",
-            DeviceStatus::Pending => "待允许：请在语音中心允许后重启设备",
+            DeviceStatus::Pending => "待允许：允许后直接唤醒即可",
             DeviceStatus::Revoked => "已撤销，不下发 token",
         }
     ));

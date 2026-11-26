@@ -321,6 +321,81 @@ fn workbench_handshake_success_is_remembered_for_ai_tools() {
 }
 
 #[test]
+fn connection_check_exposes_fluidnc_has_estop_or_fault_pin_and_null_features_for_plain_grbl() {
+    let grbl_port = fake_grbl_handshake(1);
+    let service = cors_test_service();
+    let grbl_body = format!(
+        r#"{{"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":{grbl_port},"network_timeout":2}}"#
+    );
+    let grbl_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/connection/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                grbl_body.len(),
+                grbl_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(grbl_resp["result"]["connected"], true, "{grbl_resp}");
+    assert!(
+        grbl_resp["result"]["features"].is_null(),
+        "普通 GRBL 不返回 $CD YAML，features 应保持 null: {grbl_resp}"
+    );
+
+    let fluid_port = {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() && line.trim() == "$$" {
+                    let _ = write!(writer, "$0=10\r\n$32=1\r\nok\r\n");
+                    line.clear();
+                    if reader.read_line(&mut line).is_ok() && line.trim() == "$CD" {
+                        let _ = write!(
+                            writer,
+                            "axes:\r\n  x:\r\n    max_travel_mm: 220\r\n  y:\r\n    max_travel_mm: 180\r\ncontrol:\r\n  estop_pin: gpio.4:low\r\n  safety_door_pin: NO_PIN\r\nLaser:\r\n  speed_map: 0=0% 1000=100%\r\n  off_on_alarm: true\r\nok\r\n"
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        port
+    };
+    let fluid_body = format!(
+        r#"{{"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":{fluid_port},"network_timeout":2}}"#
+    );
+    let fluid_resp = parse_json_response(
+        &service.handle_http(
+            format!(
+                "POST /api/connection/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                fluid_body.len(),
+                fluid_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(fluid_resp["result"]["connected"], true, "{fluid_resp}");
+    assert_eq!(
+        fluid_resp["result"]["features"]["has_estop_or_fault_pin"], true,
+        "{fluid_resp}"
+    );
+    assert_eq!(
+        fluid_resp["result"]["features"]["has_door"], false,
+        "{fluid_resp}"
+    );
+    assert_eq!(
+        fluid_resp["result"]["features"]["speed_map"], "0=0% 1000=100%",
+        "{fluid_resp}"
+    );
+}
+
+#[test]
 fn system_info_tools_count_matches_actual_catalog() {
     let service = cors_test_service();
     let value = parse_json_response(
@@ -1028,7 +1103,13 @@ fn draw_state_persists_across_port_changes_and_enforces_caller_and_validation_bo
         Some(&serde_json::json!({
             "scene": "{\"version\":1,\"elements\":[{\"id\":\"r1\"}]}",
             "last_preview": "{\"workflowId\":\"wf-1\",\"sceneRev\":\"r1:1:1\",\"formSig\":\"{}\"}",
-            "form": { "material": "椴木", "width_mm": "80" },
+            "form": {
+                "material": "椴木",
+                "width_mm": "80",
+                "halftone_cell_mm": "0.8",
+                "halftone_angle_deg": "45",
+                "gray_min_power_percent": "12",
+            },
             "last_accepted_fingerprint": fp.to_ascii_uppercase(),
         })),
         None,
@@ -1036,6 +1117,9 @@ fn draw_state_persists_across_port_changes_and_enforces_caller_and_validation_bo
     assert_eq!(code, 200, "{saved}");
     assert_eq!(saved["result"]["exists"], true);
     assert_eq!(saved["result"]["last_accepted_fingerprint"], fp);
+    assert_eq!(saved["result"]["form"]["halftone_cell_mm"], "0.8");
+    assert_eq!(saved["result"]["form"]["halftone_angle_deg"], "45");
+    assert_eq!(saved["result"]["form"]["gray_min_power_percent"], "12");
 
     // 部分字段补丁不得清掉已保存的画布和预览指针
     let (code, patched) = desktop_request(
@@ -1054,6 +1138,9 @@ fn draw_state_persists_across_port_changes_and_enforces_caller_and_validation_bo
     );
     assert_eq!(patched["result"]["form"]["material"], "椴木");
     assert_eq!(patched["result"]["form"]["width_mm"], "120");
+    assert_eq!(patched["result"]["form"]["halftone_cell_mm"], "0.8");
+    assert_eq!(patched["result"]["form"]["halftone_angle_deg"], "45");
+    assert_eq!(patched["result"]["form"]["gray_min_power_percent"], "12");
 
     // 模拟桌面端端口回退重启后的新 ApiService 实例（仅共享同一 RuntimeRoot）
     let restarted = cors_test_service().with_runtime_path(runtime_path);
@@ -1065,6 +1152,9 @@ fn draw_state_persists_across_port_changes_and_enforces_caller_and_validation_bo
         "{\"workflowId\":\"wf-1\",\"sceneRev\":\"r1:1:1\",\"formSig\":\"{}\"}"
     );
     assert_eq!(reloaded["result"]["form"]["material"], "椴木");
+    assert_eq!(reloaded["result"]["form"]["halftone_cell_mm"], "0.8");
+    assert_eq!(reloaded["result"]["form"]["halftone_angle_deg"], "45");
+    assert_eq!(reloaded["result"]["form"]["gray_min_power_percent"], "12");
     assert_eq!(reloaded["result"]["last_accepted_fingerprint"], fp);
 
     // 失败路径：非法参数返回 400；局域网（LAN）读写与语音/MCP 桥全部 403

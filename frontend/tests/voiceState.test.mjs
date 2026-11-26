@@ -2459,3 +2459,56 @@ test("n132 全站语音能力门禁：千问克隆/系统音色、快速回答�
   assert.equal(groupedTools(tools, { hideDesktop: true }).some((g) => g.id === "desktop"), false);
 });
 
+test("Colab T4 固定模型归一：笔记本忽略请求模型字段，表单与保存载荷固定写入标准常量", async () => {
+  const { readFileSync } = await import("node:fs");
+  const {
+    COLAB_FIXED_LLM_MODEL,
+    COLAB_FIXED_TTS_MODEL,
+    COLAB_FIXED_TTS_VOICE,
+    colabSavePayload,
+    colabSettingsError,
+    colabSettingsForm,
+  } = await import("../src/voiceState.js");
+
+  const form = colabSettingsForm({
+    enabled: true,
+    url: "https://demo-colab.trycloudflare.com/v1",
+    llm_model: "legacy-custom-llm",
+    tts_model: "legacy-custom-tts",
+    tts_voice: "legacy-custom-voice",
+    tts_speed: 1.25,
+  });
+  assert.equal(form.llm_model, COLAB_FIXED_LLM_MODEL);
+  assert.equal(form.tts_model, COLAB_FIXED_TTS_MODEL);
+  assert.equal(form.tts_voice, COLAB_FIXED_TTS_VOICE);
+  assert.equal(form.llm_model, "qwen3-vl-8b");
+  assert.equal(form.tts_model, "qwen3-tts");
+  assert.equal(form.tts_voice, "moss");
+  assert.equal(form.tts_speed, "1.25");
+  assert.equal(colabSettingsError(form, true, false), "");
+
+  const payload = colabSavePayload({
+    ...form,
+    llm_model: "tampered-llm",
+    tts_model: "tampered-tts",
+    tts_voice: "tampered-voice",
+    api_key: " moss-secret-key-123456 ",
+  });
+  assert.deepEqual(payload, {
+    enabled: true,
+    url: "https://demo-colab.trycloudflare.com/v1",
+    llm_model: "qwen3-vl-8b",
+    tts_model: "qwen3-tts",
+    tts_voice: "moss",
+    tts_speed: 1.25,
+    api_key: "moss-secret-key-123456",
+  });
+
+  const colabSectionSrc = readFileSync(
+    new URL("../src/components/voice-builtin/ColabBridgeSection.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(colabSectionSrc, /hasLegacyModelOverride/, "已存有历史自定义模型值时允许直接点保存归一");
+});
+
+

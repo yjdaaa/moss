@@ -402,6 +402,7 @@ try {
         "custom_personas",
         "persona_risk_notes",
         "screen_pack_auto_keep",
+        "auto_allow_devices",
       ].includes(k));
       return { ...structuredClone(state.builtin), restarted: false, hot_applied: hotOnly };
     },

@@ -121,6 +121,12 @@ pub trait DeviceRegistry: Send + Sync {
     fn authorize_http(&self, _device: &str, _client: &str) -> Result<Option<u64>, String> {
         Ok(None)
     }
+    /// n133：设备在 `Pending` 状态下已跑过开机 OTA（当时未获发 token），随后用户在桌面端点击了「允许」：
+    /// 宿主可在宽限期内（允许后 7 天内且尚未完成下次已绑定的开机 OTA）按已绑定的 `(device_id, client_id)` 放行无 token WebSocket 连接，
+    /// 使设备免去手动重启即可直接唤醒对话；默认返回 `false`。
+    fn allow_tokenless_session(&self, _device: &str, _client: &str) -> bool {
+        false
+    }
     fn close_session(&self, session: &str);
     /// 已连接（通过授权）的设备会话数变化（NV5：桌面端据此更新顶栏的设备状态）。
     fn sessions_changed(&self, _count: usize) {}

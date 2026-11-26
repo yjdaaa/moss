@@ -1313,3 +1313,146 @@ fn helper_observer_traces_output_and_exit_with_secrets_scrubbed() {
     );
     assert_eq!(lines[2]["step"], "语义判停程序停了：意外退出（退出码 3）");
 }
+
+#[test]
+fn auto_allow_devices_and_tokenless_grace_period_for_bound_allowed_device() {
+    let temp = tempfile::tempdir().unwrap();
+    let host =
+        Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+    let builtin = init(Some(host.clone())).0.unwrap();
+    assert!(!builtin.settings().builtin_local.auto_allow_devices);
+
+    let registry = DbRegistry {
+        db: host.db.clone(),
+        host: host.clone(),
+        settings_file: builtin.settings_file(),
+        chat_log_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        chat_log_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
+
+    // 1. 默认关闭自动允许：新设备首次连入为 Pending，不允许无 token 建会话
+    let visit_a = DeviceVisit {
+        device_id: "aa:bb:cc:00:00:01".into(),
+        client_id: "client-uuid-a".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.10".into(),
+    };
+    assert_eq!(registry.seen(&visit_a).unwrap(), DeviceStatus::Pending);
+    assert!(!registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"));
+
+    // 2. 允许后、OTA 快照写入前：放行；冒用或空 Client-Id 仍拒绝
+    builtin
+        .set_device_status("aa:bb:cc:00:00:01", "allowed")
+        .unwrap();
+    assert!(registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"));
+    assert!(!registry.allow_tokenless_session("aa:bb:cc:00:00:01", "spoofed-client"));
+    assert!(!registry.allow_tokenless_session("aa:bb:cc:00:00:01", ""));
+
+    // 3. 设备重启完成已绑定 OTA（写入 SNAPSHOT_INFO 快照并获签 token）后：宽限期自动关闭，无 token 拒绝
+    registry.device_snapshot(
+        "aa:bb:cc:00:00:01",
+        moss_voice_server::SNAPSHOT_INFO,
+        r#"{"application":{"version":"2.2.0"}}"#,
+    );
+    assert!(
+        !registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"),
+        "已完成绑定 OTA 的设备须携带有效 token，不能继续免 token 直连"
+    );
+
+    // 4. 撤销后再重新允许：宽限期重新打开，直到下一次绑定 OTA
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    builtin
+        .set_device_status("aa:bb:cc:00:00:01", "revoked")
+        .unwrap();
+    assert!(!registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"));
+    builtin
+        .set_device_status("aa:bb:cc:00:00:01", "allowed")
+        .unwrap();
+    assert!(
+        registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"),
+        "撤销后再允许应重新打开免 token 宽限期"
+    );
+    registry.device_snapshot(
+        "aa:bb:cc:00:00:01",
+        moss_voice_server::SNAPSHOT_INFO,
+        r#"{"application":{"version":"2.2.1"}}"#,
+    );
+    assert!(
+        !registry.allow_tokenless_session("aa:bb:cc:00:00:01", "client-uuid-a"),
+        "重新允许后一旦完成下次 OTA，宽限期再次关闭"
+    );
+
+    // 5. decided_at 超过 7 天（即使从未写过 SNAPSHOT_INFO）：拒绝无 token 连接
+    let visit_expired = DeviceVisit {
+        device_id: "aa:bb:cc:00:00:09".into(),
+        client_id: "client-uuid-expired".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.19".into(),
+    };
+    assert_eq!(
+        registry.seen(&visit_expired).unwrap(),
+        DeviceStatus::Pending
+    );
+    host.db
+        .lock()
+        .unwrap()
+        .set_voice_device_status(
+            "aa:bb:cc:00:00:09",
+            laser_runtime::VOICE_DEVICE_ALLOWED,
+            now() - TOKENLESS_GRACE_SECS - 1.0,
+        )
+        .unwrap();
+    assert!(
+        !registry.allow_tokenless_session("aa:bb:cc:00:00:09", "client-uuid-expired"),
+        "decided_at 超过 7 天宽限期后须拒绝无 token 连接"
+    );
+
+    // 6. 开启 auto_allow_devices 后：不批量放行已在排队的存量 Pending 设备（仍需逐台允许），
+    //    仅对之后新连入的陌生设备自动设为 Allowed，且已手动 Revoked 的设备仍保持 Revoked
+    builtin
+        .set_device_status("aa:bb:cc:00:00:01", "revoked")
+        .unwrap();
+    let visit_b = DeviceVisit {
+        device_id: "aa:bb:cc:00:00:02".into(),
+        client_id: "client-uuid-b".into(),
+        model: "lichuang-dev".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.11".into(),
+    };
+    assert_eq!(registry.seen(&visit_b).unwrap(), DeviceStatus::Pending);
+
+    let saved = builtin
+        .local_save(&serde_json::json!({"auto_allow_devices": true}))
+        .unwrap();
+    assert_eq!(saved["local"]["settings"]["auto_allow_devices"], true);
+    assert_eq!(saved["restarted"], false, "自动允许开关热生效，不重启服务");
+    assert!(
+        !registry.allow_tokenless_session("aa:bb:cc:00:00:02", "client-uuid-b"),
+        "开启自动允许时不得批量放行已在排队的存量 Pending 设备"
+    );
+    assert_eq!(
+        registry.seen(&visit_b).unwrap(),
+        DeviceStatus::Pending,
+        "存量 Pending 设备重连时仍保持 Pending，需由用户逐台确认"
+    );
+
+    let visit_c = DeviceVisit {
+        device_id: "aa:bb:cc:00:00:03".into(),
+        client_id: "client-uuid-c".into(),
+        model: "box-3".into(),
+        firmware_version: "2.2.0".into(),
+        ip: "192.0.2.12".into(),
+    };
+    assert_eq!(
+        registry.seen(&visit_c).unwrap(),
+        DeviceStatus::Allowed,
+        "开启自动允许后新连入设备直接记为 Allowed"
+    );
+    assert_eq!(
+        registry.seen(&visit_a).unwrap(),
+        DeviceStatus::Revoked,
+        "已被手动撤销的设备不因自动允许开关而放行"
+    );
+}

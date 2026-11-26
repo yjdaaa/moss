@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showAlert } from "../../appDialog.js";
-import { voiceApi } from "../../voiceApi.js";
+import { VOICE_BUILTIN_STATUS_EVENT, voiceApi } from "../../voiceApi.js";
 import { createPollRunner } from "../../pollGuard.js";
 import {
   VOICE_POLL_MS,
@@ -74,11 +74,28 @@ export function useBuiltinStatus() {
   useEffect(() => {
     mounted.current = true;
     void refresh();
+    const onExternalStatus = (event) => {
+      const cmd = event?.detail?.command;
+      const next = event?.detail?.status;
+      if (
+        mounted.current &&
+        next &&
+        (cmd === "voice_device_set_status" || cmd === "voice_device_rename" || cmd === "voice_local_save")
+      ) {
+        setStatus(next);
+      }
+    };
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener(VOICE_BUILTIN_STATUS_EVENT, onExternalStatus);
+    }
     return () => {
       mounted.current = false;
       pollRef.current?.invalidate();
+      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+        window.removeEventListener(VOICE_BUILTIN_STATUS_EVENT, onExternalStatus);
+      }
     };
-  }, [refresh]);
+  }, [refresh, setStatus]);
 
   useEffect(() => {
     const intervalMs = activeTurn ? 140 : VOICE_POLL_MS;

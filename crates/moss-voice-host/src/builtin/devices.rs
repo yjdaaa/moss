@@ -25,10 +25,23 @@ pub(super) fn ensure_device_token_secret(db: &laser_runtime::RuntimeDb) -> Resul
     Ok(secret.into_bytes())
 }
 
+/// 允许设备后的免 token 直连宽限期（7 天，单位秒）。
+/// 设备在 `pending` 态跑过开机 OTA 未获发 token，用户在桌面端点击「允许」后无需按硬件重启键即可在宽限期内唤醒直连；
+/// 一旦设备在 `decided_at` 之后完成首次已绑定的开机 OTA（`ota.rs` 写入 `VOICE_SNAPSHOT_INFO` 快照并签发 token）或距 `decided_at` 超过 7 天，
+/// 宽限期自动关闭，防止无 token 连接长期绕过 HMAC token 与 30 天过期校验。
+pub(super) const TOKENLESS_GRACE_SECS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
+
 impl DeviceRegistry for DbRegistry {
     fn seen(&self, visit: &DeviceVisit) -> Result<DeviceStatus, String> {
+        let auto_allow = moss_voice::settings::load(&self.settings_file)
+            .builtin_local
+            .auto_allow_devices;
         let db = self.db.lock().map_err(|_| "数据库锁失败".to_owned())?;
-        let record = db
+        let is_new = db
+            .voice_device(&visit.device_id)
+            .map_err(db_error)?
+            .is_none();
+        let mut record = db
             .voice_device_seen(
                 &visit.device_id,
                 &visit.client_id,
@@ -38,6 +51,16 @@ impl DeviceRegistry for DbRegistry {
                 now(),
             )
             .map_err(db_error)?;
+        if is_new && record.status == laser_runtime::VOICE_DEVICE_PENDING && auto_allow {
+            let ts = now();
+            if db
+                .set_voice_device_status(&visit.device_id, laser_runtime::VOICE_DEVICE_ALLOWED, ts)
+                .map_err(db_error)?
+            {
+                record.status = laser_runtime::VOICE_DEVICE_ALLOWED.to_owned();
+                record.decided_at = Some(ts);
+            }
+        }
         drop(db);
         if !record.is_allowed() {
             self.host
@@ -61,6 +84,30 @@ impl DeviceRegistry for DbRegistry {
                 })
             })
             .map_err(db_error)
+    }
+
+    fn allow_tokenless_session(&self, device: &str, client: &str) -> bool {
+        if client.trim().is_empty() {
+            return false;
+        }
+        let Ok(db) = self.db.lock() else {
+            return false;
+        };
+        let Ok(Some(row)) = db.voice_device(device) else {
+            return false;
+        };
+        if !row.is_allowed() || row.client_id.trim().is_empty() || row.client_id != client {
+            return false;
+        }
+        let Some(decided_at) = row.decided_at.filter(|ts| ts.is_finite() && *ts > 0.0) else {
+            return false;
+        };
+        let current = now();
+        if current < decided_at - 60.0 || current - decided_at > TOKENLESS_GRACE_SECS {
+            return false;
+        }
+        row.info_at
+            .is_none_or(|info_at| info_at.is_finite() && info_at < decided_at)
     }
     fn open_session(
         &self,

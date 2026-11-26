@@ -745,6 +745,10 @@ pub struct BuiltinLocal {
     /// 没装画风包（或包版本过旧）就在它空闲时自动推送，不再逐次确认；每台一天最多自动推一次
     #[serde(default)]
     pub screen_pack_auto_keep: bool,
+    /// 自动允许局域网新小智设备连接（2026-11-26 n133 用户决定，默认关）：
+    /// 开启后仅对之后首次连入的新设备直接登记为 `allowed` 并下发 token；存量 `pending` 仍需逐台确认，已撤销设备仍拒绝。
+    #[serde(default)]
+    pub auto_allow_devices: bool,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
     /// 旁人说话不接话（2026-11-15 n100 / n101，默认开）：自动 / 实时拾音时允许大模型判断“这句不是对小智说的”
@@ -833,6 +837,7 @@ impl Default for BuiltinLocal {
             screen_preview_sync: true,
             screen_card_style: default_screen_card_style(),
             screen_pack_auto_keep: false,
+            auto_allow_devices: false,
             job_done_announce: true,
             ignore_bystanders: true,
             chat_log_enabled: true,

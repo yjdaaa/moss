@@ -56,6 +56,7 @@ test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
   assert.match(css, /#mat-modal\s*\{\s*z-index:\s*110;\s*\}/, "材料模态框层级应为 110");
   assert.match(css, /\.settings-box\s*\{\s*z-index:\s*115;\s*\}/, "偏好设置层级应为 115，低于安全审批中心 (125)");
   assert.match(css, /\.device-conn-backdrop\s*\{\s*z-index:\s*126;\s*\}/, "统一设备连接弹窗层级应为 126，高于 AI 预览窗 (125) 以便就地配连接，低于严格模式审批卡 (128)");
+  assert.match(css, /\.voice-device-allow-backdrop\s*\{\s*z-index:\s*127;\s*\}/, "小智新设备接入居中弹窗层级应为 127");
   assert.match(css, /\.tts-voices-backdrop\s*\{\s*z-index:\s*115;\s*\}/, "本地合成音色弹窗层级应与设置弹窗对齐为 115");
   assert.match(css, /\.auth-box\s*\{\s*z-index:\s*132;\s*\}/, "局域网配对框层级应高于设置/材料/审批框");
   assert.match(css, /\.close-confirm-box\s*\{\s*z-index:\s*140;\s*\}/, "关闭窗口确认框层级应高于普通业务弹窗");
@@ -81,6 +82,7 @@ test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖�
     "components/LocalTtsVoicesModal.jsx",
     "components/ApprovalCenter.jsx",
     "components/AiPreviewCenter.jsx",
+    "components/VoiceDeviceAllowModal.jsx",
   ]) {
     const src = fs.readFileSync(path.join(SRC_DIR, rel), "utf8");
     assert.match(src, /createPortal\(content,\s*document\.body\)/, `${rel} 须通过 createPortal 挂载到 document.body，逃逸 .main-content-viewport 层叠上下文`);
@@ -208,6 +210,47 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     assert.match(connHtml, /id="device-connection-modal"/);
     assert.match(connHtml, /设备连接/);
 
+    // 安卓手机浏览器访问电脑端 http://<device-ip>:<port> 时，保留串口选项且不覆盖已存的 serial 模式
+    const prevWin = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const prevNav = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const prevStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const storeMap = new Map([
+      ["laser-forge-conn-mode", "serial"],
+      ["laser-forge-serial-port", "COM3"],
+      ["laser-forge-baud", "115200"],
+    ]);
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { protocol: "http:", hostname: "192.0.2.10", port: "9666" } },
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/126.0.0.0 Mobile Safari/537.36" },
+    });
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
+        setItem: (k, v) => storeMap.set(k, String(v)),
+        removeItem: (k) => storeMap.delete(k),
+      },
+    });
+    try {
+      const androidLanConnHtml = renderToStaticMarkup(
+        React.createElement(DeviceConnectionModal, { visible: true, onClose: () => {} }),
+      );
+      assert.match(androidLanConnHtml, /<option value="serial"[^>]*>串口 \(USB \/ Serial\)<\/option>/);
+      assert.match(androidLanConnHtml, /id="conn-serial-port"/, "已存 serial 模式在安卓手机网页上保持串口表单");
+      assert.equal(storeMap.get("laser-forge-conn-mode"), "serial");
+    } finally {
+      if (prevWin) Object.defineProperty(globalThis, "window", prevWin);
+      else delete globalThis.window;
+      if (prevNav) Object.defineProperty(globalThis, "navigator", prevNav);
+      else delete globalThis.navigator;
+      if (prevStorage) Object.defineProperty(globalThis, "localStorage", prevStorage);
+      else delete globalThis.localStorage;
+    }
+
     const { buildSelectOptions } = await server.ssrLoadModule("/src/components/ObsidianSelectHost.jsx");
     const parsedOpts = buildSelectOptions({
       options: [
@@ -221,6 +264,248 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     assert.equal(parsedOpts[0].badge, "女声");
     assert.equal(parsedOpts[1].group, "中文 · 方言 / 口音");
     assert.equal(parsedOpts[2].group, "");
+
+    const {
+      ALLOW_SUCCESS_DETAIL,
+      ALLOW_SUCCESS_FEEDBACK_MS,
+      ALLOW_SUCCESS_HEADLINE,
+      ANTI_SPOOF_PROMPT_TEXT,
+      VoiceDeviceAllowModal,
+      executeAllowVoiceDevice,
+      formatRelativeUnixSeconds,
+      nextPendingDeviceIdAfterAction,
+      readDeviceAllowDraft,
+      resolvePendingDeviceQueue,
+      selectPendingVoiceDevices,
+      stepPendingQueueDeviceId,
+      voiceDeviceAllowHeading,
+      writeDeviceAllowDraft,
+    } = await server.ssrLoadModule("/src/components/VoiceDeviceAllowModal.jsx");
+    const { AUTO_ALLOW_DEVICES_CONFIRM_TEXT } = await server.ssrLoadModule("/src/voiceState.js");
+    const builtinDevicesSrc = fs.readFileSync(
+      path.join(SRC_DIR, "components/voice-builtin/BuiltinDevicesPanel.jsx"),
+      "utf8",
+    );
+    assert.match(
+      builtinDevicesSrc,
+      /AUTO_ALLOW_DEVICES_CONFIRM_TEXT/,
+      "BuiltinDevicesPanel 与弹窗须共用同一份自动允许局域网信任确认文案常量",
+    );
+    assert.match(
+      AUTO_ALLOW_DEVICES_CONFIRM_TEXT,
+      /只对之后新连入.*已在排队的设备仍需逐台允许/s,
+      "自动允许确认文案须写明只对之后新连入设备生效、已在排队的仍需逐台允许",
+    );
+
+    const dismissed = new Map([["aa:bb:01", 100]]);
+    const statusWithPending = {
+      local: { settings: { auto_allow_devices: false } },
+      devices: [
+        { device_id: "aa:bb:01", status: "pending", last_seen: 100, model: "lichuang-dev", firmware_version: "2.2.0" },
+        { device_id: "aa:bb:02", status: "pending", last_seen: 120, model: "lichuang-dev", firmware_version: "2.2.0", last_ip: "<device-ip>" },
+        { device_id: "aa:bb:03", status: "allowed", last_seen: 130 },
+      ],
+    };
+    assert.deepEqual(
+      selectPendingVoiceDevices(statusWithPending, dismissed).map((d) => d.device_id),
+      ["aa:bb:02"],
+      "同一次来访已点稍后处理的设备不重复弹出，只弹出新待允许设备",
+    );
+    assert.deepEqual(
+      selectPendingVoiceDevices({ ...statusWithPending, local: { settings: { auto_allow_devices: true } } }, dismissed).map((d) => d.device_id),
+      ["aa:bb:02"],
+      "开启自动允许后仅对后续新设备生效，存量待允许设备仍照常弹窗逐台确认",
+    );
+
+    // 勾选“以后自动允许”时必须先弹局域网信任确认，取消则整体不执行
+    const cancelCalls = [];
+    const cancelledRes = await executeAllowVoiceDevice({
+      device: { device_id: "aa:bb:02", name: "" },
+      nameDraft: "工作台小智",
+      autoAllowAll: true,
+      confirm: async (msg) => {
+        cancelCalls.push(msg);
+        return false;
+      },
+      api: {
+        deviceSetStatus: async () => {
+          throw new Error("取消确认时不得调用 deviceSetStatus");
+        },
+      },
+      alert: async () => {
+        throw new Error("取消确认时不得报错弹窗");
+      },
+    });
+    assert.equal(cancelledRes.cancelled, true);
+    assert.equal(cancelledRes.allowed, false);
+    assert.deepEqual(cancelCalls, [AUTO_ALLOW_DEVICES_CONFIRM_TEXT]);
+
+    // deviceSetStatus 本身失败时提示“允许设备失败”
+    const allowFailAlerts = [];
+    const allowFailRes = await executeAllowVoiceDevice({
+      device: { device_id: "aa:bb:02", name: "" },
+      nameDraft: "工作台小智",
+      autoAllowAll: false,
+      api: {
+        deviceSetStatus: async () => {
+          throw new Error("数据库繁忙");
+        },
+      },
+      alert: async (msg, opts) => {
+        allowFailAlerts.push({ msg, opts });
+      },
+    });
+    assert.equal(allowFailRes.allowed, false);
+    assert.equal(allowFailAlerts.length, 1);
+    assert.equal(allowFailAlerts[0].opts.title, "允许设备失败");
+
+    // 允许成功后改名或自动允许保存失败时，分段提示“设备已允许，但备注名 / 自动允许开关保存失败”
+    const partialAlerts = [];
+    const partialRes = await executeAllowVoiceDevice({
+      device: { device_id: "aa:bb:02", name: "" },
+      nameDraft: "工作台小智",
+      autoAllowAll: true,
+      confirm: async () => true,
+      api: {
+        deviceSetStatus: async () => ({ devices: [{ device_id: "aa:bb:02", status: "allowed" }] }),
+        deviceRename: async () => {
+          throw new Error("名称含非法字符");
+        },
+        localSave: async () => {
+          throw new Error("写盘失败");
+        },
+      },
+      alert: async (msg, opts) => {
+        partialAlerts.push({ msg, opts });
+      },
+    });
+    assert.equal(partialRes.allowed, true);
+    assert.equal(partialAlerts.length, 1);
+    assert.equal(partialAlerts[0].opts.title, "设备已允许，但备注名和自动允许开关保存失败");
+    assert.match(partialAlerts[0].msg, /设备已允许，但备注名和自动允许开关保存失败/);
+
+    const multiPendingStatus = {
+      local: { settings: { auto_allow_devices: false } },
+      devices: [
+        {
+          device_id: "aa:bb:01",
+          name: "",
+          status: "pending",
+          first_seen: 1700,
+          last_seen: 1995,
+          model: "lichuang-dev",
+          firmware_version: "2.2.0",
+        },
+        {
+          device_id: "aa:bb:02",
+          name: "书桌小智",
+          status: "pending",
+          first_seen: 1000,
+          last_seen: 1960,
+          model: "esp32-s3-box",
+          firmware_version: "2.3.1",
+          last_ip: "<device-ip>",
+        },
+      ],
+    };
+
+    // C2 标题区名称回退与相对时间计算
+    assert.equal(voiceDeviceAllowHeading(multiPendingStatus.devices[0]), "lichuang-dev", "无备注名时标题区显示型号");
+    assert.equal(voiceDeviceAllowHeading(multiPendingStatus.devices[1]), "书桌小智", "有备注名时标题区优先显示名称");
+    assert.equal(formatRelativeUnixSeconds(1995, 2000), "刚刚");
+    assert.equal(formatRelativeUnixSeconds(1960, 2000), "40 秒前");
+    assert.equal(formatRelativeUnixSeconds(1700, 2000), "5 分钟前");
+    assert.equal(formatRelativeUnixSeconds(0, 2000), "—");
+
+    // C3 多台排队切换、草稿按 device_id 隔离、允许/拒绝后自动衔接下一台
+    const pendingTwo = selectPendingVoiceDevices(multiPendingStatus);
+    assert.equal(resolvePendingDeviceQueue(pendingTwo, "").index, 0);
+    const secondId = stepPendingQueueDeviceId(pendingTwo, "aa:bb:01", 1);
+    assert.equal(secondId, "aa:bb:02");
+    assert.equal(stepPendingQueueDeviceId(pendingTwo, secondId, -1), "aa:bb:01");
+    assert.equal(nextPendingDeviceIdAfterAction(pendingTwo, "aa:bb:01"), "aa:bb:02");
+    assert.equal(nextPendingDeviceIdAfterAction(pendingTwo, "aa:bb:02"), "aa:bb:01");
+
+    let drafts = {};
+    drafts = writeDeviceAllowDraft(drafts, pendingTwo[0], { nameDraft: "工作台小智草稿", autoAllowAll: true });
+    assert.deepEqual(readDeviceAllowDraft(drafts, pendingTwo[0]), {
+      nameDraft: "工作台小智草稿",
+      autoAllowAll: true,
+    });
+    assert.deepEqual(
+      readDeviceAllowDraft(drafts, pendingTwo[1]),
+      { nameDraft: "书桌小智", autoAllowAll: false },
+      "切换到第二台设备时不得串入第一台的备注草稿与自动允许勾选状态",
+    );
+
+    const allowModalHtml = renderToStaticMarkup(
+      React.createElement(VoiceDeviceAllowModal, {
+        voiceEnabled: true,
+        initialStatus: multiPendingStatus,
+        initialDrafts: drafts,
+        nowSeconds: 2000,
+      }),
+    );
+    // C1 防冒认提示出现在设备信息 <dl> 上方
+    assert.ok(allowModalHtml.includes(ANTI_SPOOF_PROMPT_TEXT), "须包含防冒认核对提示");
+    assert.ok(
+      allowModalHtml.indexOf('id="voice-device-allow-verify-tip"') < allowModalHtml.indexOf('class="approval-kv'),
+      "防冒认提示须排在设备信息列表上方",
+    );
+    // C2 型号标题、等宽 MAC + 复制按钮、首次出现 / 最近来访相对时间
+    assert.match(allowModalHtml, /id="voice-device-allow-heading">lichuang-dev</);
+    assert.match(allowModalHtml, /发现小智设备请求连接/);
+    assert.match(allowModalHtml, /<code class="mono" id="voice-device-allow-mac">aa:bb:01<\/code>/);
+    assert.match(allowModalHtml, /id="voice-device-allow-copy-mac"/);
+    assert.match(allowModalHtml, /id="voice-device-allow-seen"[^>]*>5 分钟前 \/ 刚刚</);
+    // C3 可切换队列（第 1 / 2 台，上一台禁用、下一台可点）及草稿回显
+    assert.match(allowModalHtml, /第 <b class="mono">1<\/b> \/ <b class="mono">2<\/b> 台待允许设备/);
+    assert.match(allowModalHtml, /id="voice-device-allow-prev"[^>]*disabled=""/);
+    assert.doesNotMatch(allowModalHtml, /id="voice-device-allow-next"[^>]*disabled/);
+    assert.match(allowModalHtml, /id="voice-device-allow-name"[^>]*value="工作台小智草稿"/);
+    assert.match(allowModalHtml, /id="voice-device-allow-auto-all"[^>]*checked=""/);
+
+    // 切到第 2 台渲染：草稿完全隔离，不串入第 1 台输入与勾选
+    const secondModalHtml = renderToStaticMarkup(
+      React.createElement(VoiceDeviceAllowModal, {
+        voiceEnabled: true,
+        initialStatus: multiPendingStatus,
+        initialSelectedId: "aa:bb:02",
+        initialDrafts: drafts,
+        nowSeconds: 2000,
+      }),
+    );
+    assert.match(secondModalHtml, /id="voice-device-allow-heading">书桌小智</);
+    assert.match(secondModalHtml, /第 <b class="mono">2<\/b> \/ <b class="mono">2<\/b> 台待允许设备/);
+    assert.doesNotMatch(secondModalHtml, /id="voice-device-allow-prev"[^>]*disabled/);
+    assert.match(secondModalHtml, /id="voice-device-allow-next"[^>]*disabled=""/);
+    assert.match(secondModalHtml, /id="voice-device-allow-name"[^>]*value="书桌小智"/);
+    assert.doesNotMatch(secondModalHtml, /工作台小智草稿/);
+    assert.doesNotMatch(secondModalHtml, /id="voice-device-allow-auto-all"[^>]*checked/);
+
+    // C4 按钮层级（主按钮在最右侧、拒绝按钮不用实心 .btn-danger、初始焦点不在允许按钮上）与 C5/C6 契约
+    const laterPos = allowModalHtml.indexOf('id="voice-device-allow-later"');
+    const rejectPos = allowModalHtml.indexOf('id="voice-device-allow-reject"');
+    const confirmPos = allowModalHtml.indexOf('id="voice-device-allow-confirm"');
+    assert.ok(laterPos > 0 && rejectPos > laterPos && confirmPos > rejectPos, "主按钮允许并记住此设备须排在最右侧");
+    assert.match(allowModalHtml, /class="btn voice-device-allow-reject" id="voice-device-allow-reject"/);
+    assert.doesNotMatch(allowModalHtml, /btn-danger/, "拒绝接入按钮须改为描边次要危险样式，不使用实心 btn-danger");
+    assert.doesNotMatch(allowModalHtml, /id="voice-device-allow-confirm"[^>]*autofocus/i, "允许按钮不得带初始焦点");
+    assert.match(
+      allowModalHtml,
+      /aria-describedby="voice-device-allow-verify-tip voice-device-allow-desc"/,
+      "对话框须具备 aria-describedby 指向防冒认提示与底部说明",
+    );
+    assert.equal(ALLOW_SUCCESS_FEEDBACK_MS, 1500);
+    assert.match(ALLOW_SUCCESS_HEADLINE, /已允许，现在唤醒小智即可对话/);
+    assert.match(ALLOW_SUCCESS_DETAIL, /常连模式.*重启设备/s);
+    assert.match(ALLOW_SUCCESS_DETAIL, /拍照识图.*下次重启后才可用/s);
+
+    const addendaCss = fs.readFileSync(path.join(SRC_DIR, "styles/15-addenda-2026-11.css"), "utf8");
+    const n133Css = addendaCss.slice(addendaCss.indexOf("/* 2026-11-26（n133）"));
+    assert.match(n133Css, /\.voice-device-allow-reject\s*\{[^}]*background:\s*transparent;[^}]*color:\s*var\(--ob-red\);/s);
+    assert.match(n133Css, /\.voice-device-allow-foot\s*\{[^}]*flex-wrap:\s*wrap;/s);
+    assert.doesNotMatch(n133Css, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, "n133 弹窗样式颜色只使用已有 CSS 变量，兼容深浅主题");
   } finally {
     await server.close();
   }

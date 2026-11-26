@@ -30,6 +30,8 @@ import {
   parseGrblStatusReport,
   resolveMachineWorkspace,
   resolveTwinHeadPose,
+  resolveTwinHasZAxis,
+  resolveTwinSafetySwitchStatus,
   YISU_V1_PROFILE,
   MAX_XY_TRAVEL_MM,
   MAX_Z_TRAVEL_MM,
@@ -848,19 +850,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     setSimProgress(ratio);
   };
 
-  const hasZAxis =
-    (machineFeatures?.axes
-      ? String(machineFeatures.axes).toUpperCase().includes("Z")
-      : Boolean(
-          workspace.hasHardwareLimits
-          && Number(machineLimits?.z_travel_mm) > 0
-          && Number(machineLimits?.z_travel_mm) !== YISU_V1_PROFILE.zTravelMm,
-        ))
-    || Math.abs(Number(telemetry.wpos?.z) || 0) > 1e-4
-    || Math.abs(Number(telemetry.mpos?.z) || 0) > 1e-4;
-  const hasSafetySwitchHardware = Boolean(
-    machineFeatures?.has_door || machineFeatures?.has_estop_or_fault_pin || machineLimits?.homing_enabled,
-  );
+  const hasZAxis = resolveTwinHasZAxis({ workspace, machineLimits, telemetry });
+  const safetySwitchStatus = resolveTwinSafetySwitchStatus({ telemetry, machineFeatures });
   const hasBufferTelemetry = telemetry.bf?.plannerFree != null || telemetry.bf?.rxBufferFree != null;
 
   return (
@@ -1661,17 +1652,9 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     ))}
                   </div>
                 ) : (
-                  <div className="twin-pin-ok">
+                  <div className="twin-pin-ok" data-switch-state={safetySwitchStatus.state}>
                     <CheckCircle2 size={13} />
-                    <span>
-                      {!telemetry.online
-                        ? "尚未读取控制器状态"
-                        : hasSafetySwitchHardware
-                          ? "限位、安全门与急停均正常"
-                          : machineFeatures
-                            ? "无限位或控制开关"
-                            : "当前无报警或开关触发信号"}
-                    </span>
+                    <span>{safetySwitchStatus.text}</span>
                   </div>
                 )}
               </div>

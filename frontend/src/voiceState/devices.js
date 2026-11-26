@@ -255,6 +255,17 @@ export function builtinDeviceView(device) {
   };
 }
 
+/** 开启「自动允许局域网新设备连接」前的局域网信任确认文案与弹窗选项（设备面板与新设备居中弹窗共用，n133）。 */
+export const AUTO_ALLOW_DEVICES_CONFIRM_TEXT =
+  "开启后，只对之后新连入局域网的小智设备生效（自动设为“已允许”并直接接通对话，不再弹出确认框）；已在排队的设备仍需逐台允许，已被你手动“撤销”的设备仍会拦截。\n" +
+  "仅建议在受信任的家庭或工作室网络开启；在公共 Wi-Fi 下请保持关闭。确定开启？";
+
+export const AUTO_ALLOW_DEVICES_CONFIRM_OPTIONS = {
+  title: "开启自动允许新设备连接？",
+  tone: "warning",
+  confirmText: "开启自动允许",
+};
+
 /** 允许设备前的确认文字。 */
 export function allowDeviceConfirmText(device) {
   const facts = [

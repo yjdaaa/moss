@@ -4,6 +4,8 @@ import { showAlert, showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { VoiceGroup } from "../VoiceLayout.jsx";
 import {
+  AUTO_ALLOW_DEVICES_CONFIRM_OPTIONS,
+  AUTO_ALLOW_DEVICES_CONFIRM_TEXT,
   allowDeviceConfirmText,
   builtinDeviceControlsView,
   builtinDeviceInfoView,
@@ -25,10 +27,24 @@ export function BuiltinDevicesPanel({ builtin }) {
 
   const devices = Array.isArray(status.devices) ? status.devices : [];
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
+  const autoAllow = status.local?.settings?.auto_allow_devices === true;
   const pending = devices.filter((device) => builtinDeviceView(device).status === "pending").length;
   const summary = devices.length
     ? [`${devices.length} 台`, `${sessions.length} 台在线`, pending ? `${pending} 台待允许` : ""].filter(Boolean).join(" · ")
     : "还没有设备连接过";
+
+  const toggleAutoAllow = async (on) => {
+    if (on) {
+      const ok = await showConfirm(
+        AUTO_ALLOW_DEVICES_CONFIRM_TEXT,
+        AUTO_ALLOW_DEVICES_CONFIRM_OPTIONS,
+      );
+      if (!ok) return;
+    }
+    await act(on ? "开启自动允许新设备" : "关闭自动允许新设备", () =>
+      voiceApi.localSave({ auto_allow_devices: on }),
+    );
+  };
 
   const allow = async (device) => {
     if (!(await showConfirm(allowDeviceConfirmText(device), { title: "允许此设备？", tone: "warning", confirmText: "允许" }))) return;
@@ -87,9 +103,23 @@ export function BuiltinDevicesPanel({ builtin }) {
 
   return (
     <VoiceGroup id="builtin-devices" title="已连接设备" summary={summary} tone={pending ? "warn" : undefined} defaultOpen>
-      <p className="voice-muted" style={{ marginTop: 0, marginBottom: 8 }}>
-        新设备首次连入为“待允许”，允许后才能对话。点“控制与信息”可调音量、亮度、深浅屏与说话方式，设置会记住并在重连后恢复。
-      </p>
+      <div className="voice-device-policy-bar">
+        <p className="voice-muted" style={{ margin: 0 }}>
+          {autoAllow
+            ? "已开启自动允许：之后新连入局域网的小智自动设为“已允许”并永久记住；已在排队的仍需逐台允许，已撤销设备仍拒绝连接。"
+            : "新设备首次连入时会在屏幕中央弹窗确认，允许一次即永久记住，无需重启小智即可直接唤醒对话。"}
+        </p>
+        <label className="voice-check voice-device-auto-allow">
+          <input
+            type="checkbox"
+            id="voice-device-auto-allow-switch"
+            checked={autoAllow}
+            disabled={Boolean(busy)}
+            onChange={(e) => void toggleAutoAllow(e.target.checked)}
+          />
+          <span>自动允许局域网新设备连接</span>
+        </label>
+      </div>
       <div id="voice-builtin-devices">
         <div className="ob-tbl voice-tbl">
           <table>

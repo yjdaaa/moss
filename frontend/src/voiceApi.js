@@ -20,6 +20,17 @@ export function isVoiceCenterAvailable() {
   });
 }
 
+export const VOICE_BUILTIN_STATUS_EVENT = "moss:voice-builtin-status";
+
+const BUILTIN_STATUS_COMMANDS = new Set([
+  "voice_builtin_status",
+  "voice_builtin_start",
+  "voice_builtin_stop",
+  "voice_device_set_status",
+  "voice_device_rename",
+  "voice_local_save",
+]);
+
 /**
  * @param {string} command
  * @param {Record<string, *>=} args
@@ -33,7 +44,26 @@ export async function invokeVoice(command, args = {}) {
     throw error;
   }
   try {
-    return await invoke(command, args);
+    const res = await invoke(command, args);
+    if (
+      BUILTIN_STATUS_COMMANDS.has(command) &&
+      res &&
+      typeof res === "object" &&
+      Array.isArray(res.devices) &&
+      typeof window !== "undefined" &&
+      typeof window.dispatchEvent === "function"
+    ) {
+      try {
+        window.dispatchEvent(
+          new CustomEvent(VOICE_BUILTIN_STATUS_EVENT, {
+            detail: { command, status: res },
+          }),
+        );
+      } catch {
+        // 非浏览器测试环境忽略事件广播
+      }
+    }
+    return res;
   } catch (raw) {
     const error = new Error(typeof raw === "string" ? raw : raw?.message || "操作失败");
     error.code = raw?.code || "";

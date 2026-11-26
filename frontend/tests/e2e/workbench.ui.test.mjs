@@ -492,8 +492,11 @@ test("[UI-08] 工作台现场移头与对刀原点: 未探测时按钮禁用，�
     await page.locator("#wb-jog-x-plus").click();
     await page.getByTestId("app-dialog").getByRole("button", { name: "确认移动", exact: true }).click();
     await waitFor(
-      () => rec.lines.slice(linesBefore).includes("G0 X5.000 Y0.000 F1000"),
-      "确认点动后模拟器必须收到 5mm 相对移动指令",
+      () => {
+        const lines = rec.lines.slice(linesBefore);
+        return lines.includes("G0 X5.000 Y0.000 F1000") && lines.includes("G90");
+      },
+      "确认点动后模拟器必须收到 5mm 相对移动指令与 G90 恢复",
     );
     const jogLines = rec.lines.slice(linesBefore);
     assert.ok(jogLines.includes("M5") && jogLines.includes("G91") && jogLines.includes("G90"), `点动须包含关光与 G91/G90 恢复: ${jogLines.join(" | ")}`);

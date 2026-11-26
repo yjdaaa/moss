@@ -111,7 +111,7 @@ import {
   drawRecommendEngravingMode,
   drawRequestMode,
   drawVectorLayerFlags,
-  normalizeDrawVectorStyle,
+  effectiveDrawVectorStyle,
   drawSizeValue,
   drawTargetLabel,
   drawTargetMissingText,
@@ -620,6 +620,16 @@ export function DrawPage({
   }, [form]);
 
   const vectorRasterFallback = drawMode === "vector" && hasSceneImages;
+  const matchedLibraryMaterial = materialMode === "library"
+    ? findMaterialOption(materialLibrary, form.material)
+    : null;
+  const isSurfaceOnlyLibMat = Boolean(
+    matchedLibraryMaterial && (matchedLibraryMaterial.thicknesses || []).length === 0 && matchedLibraryMaterial.surface,
+  );
+  const effectiveVectorStyle = effectiveDrawVectorStyle(form.vector_style, {
+    hasSceneImages,
+    surfaceOnly: isSurfaceOnlyLibMat,
+  });
 
   // 联动查询当前材质、厚度与生成策略对应的材料库推荐功率、速度与遍数
   useEffect(() => {
@@ -631,7 +641,7 @@ export function DrawPage({
       return undefined;
     }
     // 插入图片触发光栅回退时按光栅（填充）档查推荐；切割查该厚度的切割参数，其余按刻法查雕刻档
-    const recMode = vectorRasterFallback ? "raster" : drawRecommendEngravingMode(drawMode, form.vector_style);
+    const recMode = vectorRasterFallback ? "raster" : drawRecommendEngravingMode(drawMode, effectiveVectorStyle);
     const query = new URLSearchParams(
       recMode === "cut"
         ? { material: mat, thickness_mm: thick, laser_mode: "cut" }
@@ -666,27 +676,12 @@ export function DrawPage({
     return () => {
       cancelled = true;
     };
-  }, [form.material, form.thickness_mm, drawMode, form.vector_style, vectorRasterFallback, recRefreshTick]);
-
-  const matchedLibraryMaterial = materialMode === "library"
-    ? findMaterialOption(materialLibrary, form.material)
-    : null;
-  const isSurfaceOnlyLibMat = Boolean(
-    matchedLibraryMaterial && (matchedLibraryMaterial.thicknesses || []).length === 0 && matchedLibraryMaterial.surface,
-  );
-  useEffect(() => {
-    if ((hasSceneImages || isSurfaceOnlyLibMat) && normalizeDrawVectorStyle(form.vector_style) === "cut") {
-      setForm((current) => ({ ...current, vector_style: "outline" }));
-    }
-    if (hasSceneImages && selectedOnly) {
-      setSelectedOnly(false);
-    }
-  }, [hasSceneImages, isSurfaceOnlyLibMat, form.vector_style, selectedOnly]);
+  }, [form.material, form.thickness_mm, drawMode, effectiveVectorStyle, vectorRasterFallback, recRefreshTick]);
 
   // r40：把当前填充或切割设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
   const saveFillToMaterial = async () => {
     if (!materialLayer) return;
-    const isCutStyle = drawIsCut(drawMode, form.vector_style);
+    const isCutStyle = drawIsCut(drawMode, effectiveVectorStyle);
     const kindLabel = isCutStyle ? "切割" : "填充";
     const payload = materialLayerPayload(
       fillSettings,
@@ -712,7 +707,7 @@ export function DrawPage({
     }
   };
 
-  const currentFormSig = drawGenerationSignature(form, {
+  const currentFormSig = drawGenerationSignature({ ...form, vector_style: effectiveVectorStyle }, {
     enabled: customParams,
     power: customPower,
     feed: customFeed,
@@ -721,7 +716,7 @@ export function DrawPage({
     vectorRasterFallback,
     // 矢量看填充设置与选区，光栅扫描（含插入图片触发光栅回退）看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
     fill: drawMode === "vector" && !vectorRasterFallback
-      ? fillSettingsSignature(fillSettings, drawVectorLayerFlags(form.vector_style)) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
+      ? fillSettingsSignature(fillSettings, drawVectorLayerFlags(effectiveVectorStyle)) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
       : drawMode === "raster" || vectorRasterFallback
         ? rasterScanSignature(fillSettings) + JSON.stringify(motionPayload)
         : "",
@@ -1050,7 +1045,7 @@ export function DrawPage({
     const modeSnapshot = drawMode;
     // 矢量带整套填充设置；光栅扫描带扫描子集（过扫描、双向、扫描偏移表）与转换方式；只刻选中的图形只在矢量下可用
     const fillPayload = modeSnapshot === "vector" && !vectorRasterFallback
-      ? fillSettingsPayload(fillSettings, drawVectorLayerFlags(form.vector_style))
+      ? fillSettingsPayload(fillSettings, drawVectorLayerFlags(effectiveVectorStyle))
       : modeSnapshot === "raster" || vectorRasterFallback
         ? rasterScanPayload(fillSettings)
         : {};
@@ -1063,7 +1058,7 @@ export function DrawPage({
       void showAlert(imagePayload.error, { title: "转图片设置不对", tone: "warning" });
       return;
     }
-    if (selectedOnly && modeSnapshot === "vector" && selection.length === 0) {
+    if (selectedOnly && modeSnapshot === "vector" && !vectorRasterFallback && selection.length === 0) {
       setStatus("请先在画布上选中要刻的图形，或取消“只刻选中的图形”");
       void showAlert("请先在画布上选中要刻的图形（可框选或按住 Shift 多选），或取消勾选“只刻选中的图形”。", {
         title: "没有选中图形",
@@ -1092,8 +1087,8 @@ export function DrawPage({
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
         mode: modeSnapshot,
-        ...(modeSnapshot === "vector" ? { vector_style: normalizeDrawVectorStyle(form.vector_style) } : {}),
-        ...(drawIsCut(modeSnapshot, form.vector_style) ? { laser_mode: "cut" } : {}),
+        ...(modeSnapshot === "vector" ? { vector_style: effectiveVectorStyle } : {}),
+        ...(drawIsCut(modeSnapshot, effectiveVectorStyle) ? { laser_mode: "cut" } : {}),
         ...imagePayload,
         ...fillPayload,
         ...motionPayload,

@@ -293,3 +293,40 @@ test("#16/#17 画板派生预览沿用原快照、拦截过期采用，且严格
   assert.match(drawPageSrc, /isApprovalRequiredResponse\(res\)/, "画板发送前必须识别 202 待审批");
   assert.match(drawSendCardSrc, /disabled=\{busy \|\| previewStale \|\| jobActive\}/, "画板预览过期时必须禁用反馈调参");
 });
+
+test("画板矢量刻法不覆盖已保存切割选择：含位图或表面通用材料临时回退轮廓，移除限制后自动恢复切割", async () => {
+  const { readFileSync } = await import("node:fs");
+  const {
+    availableDrawVectorStyles,
+    effectiveDrawVectorStyle,
+  } = await import("../src/drawConnection.js");
+
+  assert.deepEqual(
+    availableDrawVectorStyles({ hasSceneImages: false, surfaceOnly: false }).map((o) => o.value),
+    ["outline", "fill", "cut"],
+  );
+  assert.deepEqual(
+    availableDrawVectorStyles({ hasSceneImages: true, surfaceOnly: false }).map((o) => o.value),
+    ["outline", "fill"],
+  );
+  assert.deepEqual(
+    availableDrawVectorStyles({ hasSceneImages: false, surfaceOnly: true }).map((o) => o.value),
+    ["outline", "fill"],
+  );
+
+  // 用户原选“切割”保存在 form.vector_style 中，插入图片或切到表面通用材料时只临时计算为 outline，删图后自动恢复 cut
+  const savedStyle = "cut";
+  assert.equal(effectiveDrawVectorStyle(savedStyle, { hasSceneImages: false, surfaceOnly: false }), "cut");
+  assert.equal(effectiveDrawVectorStyle(savedStyle, { hasSceneImages: true, surfaceOnly: false }), "outline");
+  assert.equal(effectiveDrawVectorStyle(savedStyle, { hasSceneImages: false, surfaceOnly: true }), "outline");
+  assert.equal(effectiveDrawVectorStyle(savedStyle, { hasSceneImages: false, surfaceOnly: false }), "cut");
+  assert.equal(effectiveDrawVectorStyle("fill", { hasSceneImages: true, surfaceOnly: true }), "fill");
+
+  const drawPageSrc = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    drawPageSrc,
+    /setForm\([^)]*vector_style:\s*"outline"/,
+    "DrawPage 不得用 useEffect 把用户的切割选择永久覆写为 outline",
+  );
+  assert.match(drawPageSrc, /const effectiveVectorStyle = effectiveDrawVectorStyle\(form\.vector_style/);
+});
