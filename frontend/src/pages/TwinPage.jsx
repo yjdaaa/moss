@@ -32,8 +32,8 @@ import {
   resolveTwinHeadPose,
   resolveTwinHasZAxis,
   resolveTwinSafetySwitchStatus,
+  describeMachinePeripherals,
   MAX_XY_TRAVEL_MM,
-  normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
   canResetTwinToDemo,
   twinEstopContext,
@@ -43,15 +43,23 @@ import { workflowDetails } from "../approvalState.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import {
+  MACHINE_FEATURES_EVENT,
   WORKSPACE_LIMITS_EVENT,
+  clearManualWorkspaceLimits,
   connectionSummaryView,
   connectionTargetKey,
+  formatWorkspaceLimitsLabel,
+  readMachineFeaturesStore,
   readUnifiedConnection,
-  readWorkspaceLimits,
+  readWorkspaceLimitsStore,
+  resolveMachineFeaturesForTarget,
   resolveWorkspaceLimitsForTarget,
+  syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
-  writeWorkspaceLimits,
+  workspaceLimitsExceedsHardwareWarning,
+  writeManualWorkspaceLimits,
 } from "../deviceConnection.js";
+import { writeMachineMotion } from "../fillOptions.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
 const TWIN_STATUS_LABELS = {
@@ -116,10 +124,6 @@ const DEMO_GCODE = [
 
 const SIM_FRAME_MS = 1000 / 30;
 const MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
-
-function loadSavedWorkspaceLimits(target = readUnifiedConnection()) {
-  return readWorkspaceLimits(undefined, target);
-}
 
 function loadSavedMaterialConfig() {
   try {
@@ -201,7 +205,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   const [jobSendResult, setJobSendResult] = useState(null);
   const [jobStatus, setJobStatus] = useState("preview_ready");
 
-  // 控制器硬件行程与实时遥测状态（默认对齐大鱼 DIY 翼宿 V1.0 的 100×100mm 可调范围；严格绑定当前连接目标）
+  // 控制器硬件行程与固件能力（同一连接目标按“手填 → 固件 → 默认 100×100mm”取值）
   const currentConnForm = useMemo(
     () => ({
       connection_mode: connectionMode,
@@ -212,24 +216,46 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     }),
     [connectionMode, serialPort, baudrate, networkHost, telnetPort],
   );
-  const [machineLimits, setMachineLimits] = useState(() => loadSavedWorkspaceLimits(currentConnForm));
-  const machineLimitsRef = useRef(machineLimits);
-  machineLimitsRef.current = machineLimits;
-  const [machineFeatures, setMachineFeatures] = useState(() => connectionStatus?.features || null);
+  const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
+  useEffect(() => {
+    const onLimits = (e) => {
+      if (e?.detail) setWorkspaceLimitsStore(e.detail);
+    };
+    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+  }, []);
+  const machineLimits = useMemo(
+    () => resolveWorkspaceLimitsForTarget(workspaceLimitsStore, currentConnForm),
+    [workspaceLimitsStore, currentConnForm],
+  );
+
+  const [featuresStore, setFeaturesStore] = useState(() => readMachineFeaturesStore());
+  useEffect(() => {
+    const onFeatures = (e) => {
+      if (e?.detail) setFeaturesStore(e.detail);
+    };
+    window.addEventListener(MACHINE_FEATURES_EVENT, onFeatures);
+    return () => window.removeEventListener(MACHINE_FEATURES_EVENT, onFeatures);
+  }, []);
+  const storedFeatures = useMemo(
+    () => resolveMachineFeaturesForTarget(featuresStore, currentConnForm),
+    [featuresStore, currentConnForm],
+  );
+  const [liveFeatures, setLiveFeatures] = useState(() => connectionStatus?.features || null);
   const connTargetKey = connectionTargetKey(currentConnForm);
   const prevConnTargetRef = useRef(connTargetKey);
   useEffect(() => {
     if (prevConnTargetRef.current !== connTargetKey) {
       prevConnTargetRef.current = connTargetKey;
-      setMachineFeatures(null);
-      setMachineLimits(loadSavedWorkspaceLimits(currentConnForm));
+      setLiveFeatures(null);
     }
-  }, [connTargetKey, currentConnForm]);
+  }, [connTargetKey]);
   useEffect(() => {
     if (connectionStatus && "features" in connectionStatus) {
-      setMachineFeatures(connectionStatus.features || null);
+      setLiveFeatures(connectionStatus.features || null);
     }
   }, [connectionStatus]);
+  const machineFeatures = liveFeatures || storedFeatures;
 
   // 材料外框尺寸、台面摆放起点 (offsetX, offsetY) 与激光雕刻文字在材料内的位置 (textOffsetX, textOffsetY)
   const [materialConfig, setMaterialConfig] = useState(() => loadSavedMaterialConfig());
@@ -250,36 +276,15 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       return next;
     });
   }, []);
-  const updateWorkspaceLimits = useCallback((patch) => {
+  const updateManualWorkspaceLimits = useCallback((patch) => {
     const conn = readUnifiedConnection();
-    const targetKey = connectionTargetKey(conn);
-    const base = machineLimitsRef.current || loadSavedWorkspaceLimits(conn);
-    const normalized = normalizeWorkspaceLimits(patch, base);
-    const next = writeWorkspaceLimits({ ...normalized, target_key: targetKey });
-    setMachineLimits(next);
+    writeManualWorkspaceLimits(patch, conn);
+    setWorkspaceLimitsStore(readWorkspaceLimitsStore());
   }, []);
-  useEffect(() => {
-    const onLimits = (e) => {
-      if (e?.detail) {
-        const resolved = resolveWorkspaceLimitsForTarget(e.detail, readUnifiedConnection());
-        setMachineLimits((prev) => {
-          if (
-            prev
-            && prev.x_travel_mm === resolved.x_travel_mm
-            && prev.y_travel_mm === resolved.y_travel_mm
-            && prev.z_travel_mm === resolved.z_travel_mm
-            && Boolean(prev.from_hardware) === Boolean(resolved.from_hardware)
-            && Boolean(prev.manual) === Boolean(resolved.manual)
-            && (prev.target_key || "") === (resolved.target_key || "")
-          ) {
-            return prev;
-          }
-          return resolved;
-        });
-      }
-    };
-    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
-    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+  const handleRestoreHardwareLimits = useCallback(() => {
+    const conn = readUnifiedConnection();
+    clearManualWorkspaceLimits(conn);
+    setWorkspaceLimitsStore(readWorkspaceLimitsStore());
   }, []);
   const [telemetry, setTelemetry] = useState(() => parseGrblStatusReport(""));
   const [pollingTelemetry, setPollingTelemetry] = useState(false);
@@ -613,10 +618,14 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
           features: r.features || null,
         });
         if (isConn) {
-          const synced = syncHardwareWorkspaceLimits(r.machine_limits, readUnifiedConnection());
-          setMachineLimits(synced);
+          const conn = readUnifiedConnection();
+          syncHardwareWorkspaceLimits(r.machine_limits, conn);
+          syncHardwareMachineFeatures(r.features || null, conn);
+          writeMachineMotion(r.machine_limits, conn);
+          setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+          setFeaturesStore(readMachineFeaturesStore());
         }
-        setMachineFeatures(r.features || null);
+        setLiveFeatures(r.features || null);
       } else {
         const msg = (typeof res.data?.result === "string" && res.data.result) || "读取实机行程失败，请检查设备连接";
         setConnectionStatus?.({
@@ -626,7 +635,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
           isFluidnc: false,
           features: null,
         });
-        setMachineFeatures(null);
+        setLiveFeatures(null);
         setTelemetry(parseGrblStatusReport("", msg));
       }
     } catch (err) {
@@ -639,7 +648,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
         isFluidnc: false,
         features: null,
       });
-      setMachineFeatures(null);
+      setLiveFeatures(null);
       setTelemetry(parseGrblStatusReport("", msg));
     } finally {
       if (mountedRef.current) setProbingDevice(false);
@@ -877,8 +886,11 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     setSimProgress(ratio);
   };
 
-  const hasZAxis = resolveTwinHasZAxis({ workspace, machineLimits, telemetry });
+  const hasZAxis = resolveTwinHasZAxis({ workspace, machineLimits, machineFeatures, telemetry });
   const safetySwitchStatus = resolveTwinSafetySwitchStatus({ telemetry, machineFeatures });
+  const peripherals = describeMachinePeripherals(machineFeatures);
+  const limitsSourceLabel = formatWorkspaceLimitsLabel(machineLimits);
+  const limitsExceedWarning = workspaceLimitsExceedsHardwareWarning(machineLimits);
   const hasBufferTelemetry = telemetry.bf?.plannerFree != null || telemetry.bf?.rxBufferFree != null;
 
   return (
@@ -1690,6 +1702,29 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 )}
               </div>
 
+              {peripherals && (
+                <div className="twin-pins-box" id="twin-machine-peripherals">
+                  <span className="twin-field-label">固件外设与功率映射</span>
+                  <div className="twin-pin-ok">
+                    <span>
+                      {peripherals.airAssistLabel ? `气泵：${peripherals.airAssistLabel}` : ""}
+                      {peripherals.airAssistLabel && peripherals.speedMap ? " · " : ""}
+                      {peripherals.speedMap ? (
+                        <span>
+                          speed_map：<code>{peripherals.speedMap}</code>
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                  {peripherals.speedMapWarning ? (
+                    <div className="twin-bounds-alert" id="twin-speed-map-warning" role="note" style={{ marginTop: "6px" }}>
+                      <AlertTriangle size={14} />
+                      <span>{peripherals.speedMapWarning}</span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
               {telemetry.raw && (
                 <code className="twin-raw-status" title="控制器原始状态报告">
                   {telemetry.raw}
@@ -1706,26 +1741,37 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 <button
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 100 && workspace.yTravelMm === 100 ? "active" : ""}`}
-                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100, from_hardware: false, manual: false })}
-                  title="设为默认 100×100 mm 满行程"
+                  onClick={() => updateManualWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100 })}
+                  title="手动设为 100×100 mm 行程"
                 >
                   <span>100×100 满行程</span>
                 </button>
                 <button
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 90 && workspace.yTravelMm === 90 ? "active" : ""}`}
-                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90, from_hardware: false, manual: true })}
+                  onClick={() => updateManualWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90 })}
                   title="四周预留 5mm 安全边距 (90×90 mm 安全雕刻区)"
                 >
                   <span>90×90 安全区</span>
                 </button>
+                {machineLimits.has_manual ? (
+                  <button
+                    type="button"
+                    id="btn-twin-restore-hardware-limits"
+                    className="btn btn-ghost twin-speed-btn"
+                    onClick={handleRestoreHardwareLimits}
+                    title="清除本连接目标的手填行程，恢复为固件上报值（未上报时回退默认 100×100 mm）"
+                  >
+                    <span>恢复为固件值</span>
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="btn btn-ghost"
                   onClick={handleSyncMachineCapabilities}
                   disabled={probingDevice}
                   id="btn-twin-sync-limits"
-                  title="从已连接的 FluidNC / GRBL 控制器读取实机行程配置"
+                  title="从已连接的 FluidNC / GRBL 控制器读取实机行程配置（不会覆盖手填值）"
                 >
                   <RefreshCw size={13} />
                   <span>{probingDevice ? "读取中..." : "读取实机行程"}</span>
@@ -1742,7 +1788,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.xTravelMm}
-                    onChange={(e) => updateWorkspaceLimits({ x_travel_mm: e.target.value, from_hardware: false, manual: true })}
+                    onChange={(e) => updateManualWorkspaceLimits({ x_travel_mm: e.target.value })}
                     className="text-input"
                     aria-label="X 轴可调行程 (mm)"
                   />
@@ -1755,7 +1801,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.yTravelMm}
-                    onChange={(e) => updateWorkspaceLimits({ y_travel_mm: e.target.value, from_hardware: false, manual: true })}
+                    onChange={(e) => updateManualWorkspaceLimits({ y_travel_mm: e.target.value })}
                     className="text-input"
                     aria-label="Y 轴可调行程 (mm)"
                   />
@@ -1766,17 +1812,17 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     {workspace.xTravelMm} × {workspace.yTravelMm} mm
                   </b>
                 </div>
-                <div className="twin-metric-box">
+                <div className="twin-metric-box" id="twin-limits-source">
                   <span>行程来源</span>
-                  <b>
-                    {workspace.hasHardwareLimits
-                      ? "已从实机读取"
-                      : machineLimits?.manual || workspace.xTravelMm !== 100 || workspace.yTravelMm !== 100
-                        ? "手动设置"
-                        : "默认配置（100×100）"}
-                  </b>
+                  <b>{limitsSourceLabel}</b>
                 </div>
               </div>
+              {limitsExceedWarning ? (
+                <div className="twin-bounds-alert" id="twin-limits-exceed-warning" role="alert">
+                  <AlertTriangle size={15} />
+                  <span>{limitsExceedWarning}</span>
+                </div>
+              ) : null}
               {boundsWarning ? (
                 <div className="twin-bounds-alert" role="alert">
                   <ShieldAlert size={15} />

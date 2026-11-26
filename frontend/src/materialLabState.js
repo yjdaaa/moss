@@ -408,6 +408,94 @@ export function buildMatrixPreviewPayload({
   return { payload };
 }
 
+function strokeLabelWidthMm(text, heightMm) {
+  const s = String(text || "");
+  if (!s) return 0;
+  let units = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === " ") units += 2.5;
+    else if (ch === ".") units += 1.5;
+    else if (ch === "(" || ch === ")") units += 2.0;
+    else units += 4.0;
+    if (i + 1 < s.length) units += 1.5;
+  }
+  return units * (heightMm / 6.0);
+}
+
+/**
+ * 按现有单元尺寸、间距、行列数与行列标注规则估算标定矩阵外框宽高（mm），对齐 `laser_core::material::layout_material_test`。
+ */
+export function estimateMatrixDimensionsMm({
+  testType = "matrix",
+  rows = 5,
+  cols = 5,
+  intervalCount = 9,
+  yAxis = "speed",
+  speedMax = 2500,
+  powerMax = 600,
+  intervalMax = 0.16,
+  passesMax = 3,
+  labels = true,
+  cellSizeMm = undefined,
+  gapMm = undefined,
+} = {}) {
+  const isInterval = testType === "interval";
+  const r = isInterval ? 1 : Math.max(1, Math.round(Number(rows) || 5));
+  const c = Math.max(1, Math.round(Number(isInterval ? intervalCount : cols) || (isInterval ? 9 : 5)));
+  const size = Number(cellSizeMm) > 0 ? Number(cellSizeMm) : (isInterval ? 8 : 12);
+  const gap = Number(gapMm) >= 0 ? Number(gapMm) : 4;
+  const gridWidth = c * size + Math.max(0, c - 1) * gap;
+  const gridHeight = r * size + Math.max(0, r - 1) * gap;
+  if (!labels) {
+    return {
+      widthMm: Number(gridWidth.toFixed(1)),
+      heightMm: Number(gridHeight.toFixed(1)),
+    };
+  }
+  const labelH = isInterval ? 2.5 : 3.0;
+  const labelGap = 1.5;
+  let rowSample = "2500";
+  if (yAxis === "power") {
+    const pct = Math.round(Number(powerMax) || 600) / 10;
+    rowSample = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+  } else if (yAxis === "interval") {
+    rowSample = (Number(intervalMax) || 0.16).toFixed(2);
+  } else if (yAxis === "passes") {
+    rowSample = String(Math.max(1, Math.round(Number(passesMax) || 3)));
+  } else {
+    rowSample = String(Math.max(100, Math.round(Number(speedMax) || 2500)));
+  }
+  const leftOffset = r > 1 ? labelH + labelGap + strokeLabelWidthMm(rowSample, labelH) + labelGap : 0;
+  const topOffset = c > 1 ? 2 * (labelGap + labelH) : 0;
+  return {
+    widthMm: Number((gridWidth + leftOffset).toFixed(1)),
+    heightMm: Number((gridHeight + topOffset).toFixed(1)),
+  };
+}
+
+function formatMatrixMm(v) {
+  const rounded = Number(Number(v || 0).toFixed(1));
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/** 生成矩阵前校验估算外框是否超出当前连接目标的有效行程。 */
+export function checkMatrixFitsWorkspace(dimensions, workspaceLimits) {
+  const widthMm = Number(dimensions?.widthMm) || 0;
+  const heightMm = Number(dimensions?.heightMm) || 0;
+  const maxW = Number(workspaceLimits?.x_travel_mm) > 0 ? Number(workspaceLimits.x_travel_mm) : 100;
+  const maxH = Number(workspaceLimits?.y_travel_mm) > 0 ? Number(workspaceLimits.y_travel_mm) : 100;
+  if (widthMm > maxW + 0.01 || heightMm > maxH + 0.01) {
+    return {
+      ok: false,
+      widthMm,
+      heightMm,
+      error: `矩阵约 ${formatMatrixMm(widthMm)}×${formatMatrixMm(heightMm)} mm，超出当前行程 ${formatMatrixMm(maxW)}×${formatMatrixMm(maxH)} mm，请减少行列或缩小单元`,
+    };
+  }
+  return { ok: true, widthMm, heightMm };
+}
+
 /** 标定矩阵生成输入快照签名，用于判定修改参数后矩阵预览是否已过期（仅纳入当前测试类型与选中坐标轴真正用到的字段）。 */
 export function matrixInputSignature({
   material = "",

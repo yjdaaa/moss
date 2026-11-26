@@ -197,15 +197,11 @@ pub(crate) fn generate_text_artifacts(
         weld: parse_bool(object.get("text_weld"), true),
         image,
     };
+    // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）；
+    // 2026-11-26（r65）：work_area_* 校验 (0, 2000] 有限数字，非法值直接返回 400
+    let area_w = parse_work_area_mm(object.get("work_area_width_mm"), "work_area_width_mm")?;
+    let area_h = parse_work_area_mm(object.get("work_area_height_mm"), "work_area_height_mm")?;
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
-    // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
-    let area = |key: &str| {
-        parse_float(object.get(key), key, MACHINE_WORK_AREA_MM)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(MACHINE_WORK_AREA_MM)
-    };
-    let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
     if let Ok(Some(extents)) = laser_core::gcode::motion_extents(&artifacts.gcode)
         && (extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01)
     {

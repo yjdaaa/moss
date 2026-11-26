@@ -382,6 +382,11 @@ fn connection_check_exposes_fluidnc_has_estop_or_fault_pin_and_null_features_for
     );
     assert_eq!(fluid_resp["result"]["connected"], true, "{fluid_resp}");
     assert_eq!(
+        fluid_resp["result"]["features"]["axes"],
+        serde_json::json!(["x", "y"]),
+        "{fluid_resp}"
+    );
+    assert_eq!(
         fluid_resp["result"]["features"]["has_estop_or_fault_pin"], true,
         "{fluid_resp}"
     );

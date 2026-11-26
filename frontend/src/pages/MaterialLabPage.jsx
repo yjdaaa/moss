@@ -30,6 +30,8 @@ import {
   buildMatrixSendRequest,
   buildMatrixConfirmPrompt,
   buildMatrixPreviewPayload,
+  estimateMatrixDimensionsMm,
+  checkMatrixFitsWorkspace,
   matrixPollOutcome,
   matrixSendOutcome,
   unwrapImportedMaterialLibrary,
@@ -37,6 +39,11 @@ import {
   thicknessChipLabel,
   powerScaleToPercent,
 } from "../materialLabState.js";
+import {
+  WORKSPACE_LIMITS_EVENT,
+  readWorkspaceLimitsStore,
+  resolveWorkspaceLimitsForTarget,
+} from "../deviceConnection.js";
 import { readLocalSafe, writeLocalSafe } from "../components/material-lab/labStorage.js";
 import { LabLibraryPanel } from "../components/material-lab/LabLibraryPanel.jsx";
 import { LabParamsPanel } from "../components/material-lab/LabParamsPanel.jsx";
@@ -109,6 +116,22 @@ export function MaterialLabPage({
     serialPort,
     baudrate,
   } = useDeviceConnection();
+  const labConnectionForm = {
+    connection_mode: connectionMode,
+    port: serialPort,
+    baudrate: String(baudrate),
+    network_host: matrixHost,
+    network_telnet_port: String(telnetPort),
+  };
+  const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
+  useEffect(() => {
+    const onLimits = (e) => {
+      if (e?.detail) setWorkspaceLimitsStore(e.detail);
+    };
+    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+  }, []);
+  const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimitsStore, labConnectionForm);
   const [matrixPreview, setMatrixPreview] = useState(null);
   const [matrixSignature, setMatrixSignature] = useState("");
   const [matrixId, setMatrixId] = useState("");
@@ -549,7 +572,29 @@ export function MaterialLabPage({
       setMatrixStatus(`生成失败: ${built.error}`);
       return;
     }
-    const payload = built.payload;
+    const estimatedDims = estimateMatrixDimensionsMm({
+      testType: matrixTestType,
+      rows: matrixRows,
+      cols: matrixCols,
+      intervalCount: matrixIntervalCount,
+      yAxis: matrixYAxis,
+      speedMax: matrixSpeedMax,
+      powerMax: matrixPowerMax,
+      intervalMax: matrixIntervalMax,
+      passesMax: matrixPassesMax,
+      labels: matrixLabels,
+    });
+    const fitCheck = checkMatrixFitsWorkspace(estimatedDims, effectiveWorkspaceLimits);
+    if (!fitCheck.ok) {
+      setMatrixStatus(`生成失败: ${fitCheck.error}`);
+      void showAlert(fitCheck.error, { title: "矩阵超出当前行程", tone: "warning" });
+      return;
+    }
+    const payload = {
+      ...built.payload,
+      work_area_width_mm: effectiveWorkspaceLimits.x_travel_mm,
+      work_area_height_mm: effectiveWorkspaceLimits.y_travel_mm,
+    };
     const testLabel = matrixTestType === "interval" ? "线距测试" : `「${modeInfo.label}」标定矩阵`;
     setMatrixBusy(true);
     setMatrixStatus(`正在生成${testLabel} G-code 与预览...`);
@@ -859,6 +904,7 @@ export function MaterialLabPage({
         busy={matrixBusy}
         running={isMatrixRunning}
         onSend={handleSendMatrix}
+        connectionForm={labConnectionForm}
       />
 
       {/* 三栏：材料库表格、材料参数、校准矩阵（技术书 §9.5.5 B） */}

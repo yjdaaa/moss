@@ -228,6 +228,27 @@ impl ApiService {
             )
         };
 
+        let optional_work_area = |key: &str| -> Result<Option<f64>, (u16, serde_json::Value)> {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(raw) => crate::generation::parse_work_area_mm(Some(raw), key)
+                    .map(Some)
+                    .map_err(|e| (400, failure(e, None))),
+            }
+        };
+        let work_area_w = optional_work_area("work_area_width_mm")?;
+        let work_area_h = optional_work_area("work_area_height_mm")?;
+        if work_area_w.is_some() || work_area_h.is_some() {
+            let max_w = work_area_w.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
+            let max_h = work_area_h.unwrap_or(crate::generation::MACHINE_WORK_AREA_MM);
+            if width_mm > max_w + 0.01 || height_mm > max_h + 0.01 {
+                return Err(invalid(format!(
+                    "测试图案约 {:.1}×{:.1} mm，超出当前行程 {:.0}×{:.0} mm",
+                    width_mm, height_mm, max_w, max_h
+                )));
+            }
+        }
+
         let root = self
             .generated_root
             .as_deref()

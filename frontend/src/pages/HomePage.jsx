@@ -49,7 +49,6 @@ import {
   fillSettingsPayload,
   fillSettingsSignature,
   localSettingsToStore,
-  machineMotionFromLimits,
   machineMotionPayload,
   materialLayerFromRecommendation,
   materialLayerPayload,
@@ -57,7 +56,8 @@ import {
   rasterScanPayload,
   rasterScanSignature,
   readFillSettings,
-  readMachineMotion,
+  readMachineMotionStore,
+  resolveMachineMotionForTarget,
   writeFillSettings,
   writeMachineMotion,
 } from "../fillOptions.js";
@@ -72,8 +72,12 @@ import { notifyMaterialsUpdated, pickThicknessForMaterial, subscribeMaterialsUpd
 import {
   DEVICE_LOG_EVENT,
   MACHINE_MOTION_EVENT,
+  WORKSPACE_LIMITS_EVENT,
   probeControllerConnection,
   readBufferedDeviceLogs,
+  readWorkspaceLimitsStore,
+  resolveWorkspaceLimitsForTarget,
+  syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
@@ -172,15 +176,35 @@ export function HomePage({
   const textUsesFill = resolveTextStyle(textStyleEffective).textFill !== "outline";
   // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
   const textIsCut = resolveTextStyle(textStyleEffective).laserMode === "cut";
-  // 握手读到的机器加速度 / 最大速度：工时估算与自动过扫描用（2026-11-16）
-  const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  const currentConnectionTarget = {
+    connection_mode: connectionMode,
+    port: serialPort,
+    baudrate: String(baudrate),
+    network_host: networkHost,
+    network_telnet_port: String(telnetPort),
+  };
+  // 握手读到的机器加速度 / 最大速度（按当前连接目标取值）：工时估算与自动过扫描用
+  const [machineMotionStore, setMachineMotionStore] = useState(() => readMachineMotionStore());
   useEffect(() => {
     const onMotion = (e) => {
-      if (e?.detail) setMachineMotion(e.detail);
+      if (e?.detail) setMachineMotionStore(e.detail);
     };
     window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
     return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
   }, []);
+  const machineMotion = resolveMachineMotionForTarget(machineMotionStore, currentConnectionTarget);
+  // 当前连接目标的有效雕刻行程（手填 → 固件 → 默认 100mm）
+  const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
+  useEffect(() => {
+    const onLimits = (e) => {
+      if (e?.detail) setWorkspaceLimitsStore(e.detail);
+    };
+    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+  }, []);
+  const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimitsStore, currentConnectionTarget);
+  const maxWidthMm = effectiveWorkspaceLimits.x_travel_mm;
+  const maxHeightMm = effectiveWorkspaceLimits.y_travel_mm;
   // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
@@ -264,6 +288,7 @@ export function HomePage({
     customFeed,
     customPasses,
     presetParams: hasRecommendation ? `${powerPercent}/${recommendedFeedRate}/${recommendedPasses}` : "",
+    workArea: `${maxWidthMm}x${maxHeightMm}`,
   };
   const currentSignature = workbenchInputSignature(signatureInputs);
   const previewStale = Boolean(currentWorkflow?.workflow_id) && isWorkbenchPreviewStale(previewSignature, currentSignature);
@@ -539,13 +564,8 @@ export function HomePage({
     setConnectionStatus(outcome.status);
     if (outcome.connected) {
       syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm);
-    }
-    const motion = machineMotionFromLimits(outcome.machineLimits);
-    if (motion) {
-      writeMachineMotion(motion);
-      setMachineMotion(motion);
-    }
-    if (outcome.connected) {
+      syncHardwareMachineFeatures(outcome.status?.features ?? null, connectionForm);
+      writeMachineMotion(outcome.machineLimits, connectionForm);
       addLog("DEVICE", outcome.text, "ok");
     }
     return outcome.connected;
@@ -619,6 +639,8 @@ export function HomePage({
           engraving_mode: spec.engravingMode,
           text_fill: spec.textFill,
           origin: textOrigin,
+          work_area_width_mm: maxWidthMm,
+          work_area_height_mm: maxHeightMm,
           ...fillPayload,
           ...motionPayload,
           ...manualField,
@@ -634,6 +656,8 @@ export function HomePage({
           heightMm: imageHeightMm,
           imageMode,
           extras: imageExtras,
+          maxWidthMm: Math.max(1000, maxWidthMm),
+          maxHeightMm: Math.max(1000, maxHeightMm),
         });
         if (imgExtra.error) {
           showAlert(imgExtra.error, { title: "图片参数填写有误", tone: "warning" });
@@ -654,6 +678,8 @@ export function HomePage({
           image_file: uploadedImagePath,
           laser_mode: "engrave",
           engraving_mode: "raster",
+          work_area_width_mm: maxWidthMm,
+          work_area_height_mm: maxHeightMm,
           ...imgExtra,
           ...scanPayload,
           ...motionPayload,
@@ -1301,6 +1327,8 @@ export function HomePage({
                 setImageHeightMm={setImageHeightMm}
                 fillSettings={fillSettings}
                 updateFillSettings={updateFillSettings}
+                maxWidthMm={maxWidthMm}
+                maxHeightMm={maxHeightMm}
               />
             )}
 

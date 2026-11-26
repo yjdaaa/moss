@@ -334,6 +334,170 @@ fn draw_preview_rejects_out_of_range_or_invalid_work_area_with_400() {
     assert_eq!(ok_json["success"], true);
 }
 
+#[test]
+fn text_image_and_matrix_preview_validate_work_area_bounds_and_allow_large_format() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(laser_runtime::MemoryStore::new());
+    let uploads = temp.path().join("uploads");
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&uploads).unwrap();
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let img = image::GrayImage::from_pixel(40, 40, image::Luma([0]));
+    img.save(uploads.join("dot.png")).unwrap();
+
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_store(store)
+    .with_upload_root(uploads.clone())
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![uploads, gen_dir]);
+
+    let post_status_json = |path: &str, body: &serde_json::Value| -> (u16, serde_json::Value) {
+        let payload = body.to_string();
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        let raw = service.handle_http(req.as_bytes());
+        let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let first_line = std::str::from_utf8(&raw[..sep])
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap();
+        let status: u16 = first_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&raw[sep + 4..]).unwrap();
+        (status, json)
+    };
+
+    // 1. 文字任务：越界或非有限 work_area 返回 400；大幅面合法值（400×200）放行超过 100mm 的文字
+    for bad in [
+        serde_json::json!({"work_area_width_mm": 2001}),
+        serde_json::json!({"work_area_height_mm": 0}),
+        serde_json::json!({"work_area_width_mm": "NaN"}),
+    ] {
+        let mut req = serde_json::json!({
+            "text": "MOSS",
+            "material": "椴木",
+            "thickness_mm": 3.0,
+            "font_size_mm": 12.0
+        });
+        for (k, v) in bad.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        let (st, js) = post_status_json("/api/text-task/generate", &req);
+        assert_eq!(st, 400, "文字任务非法 work_area 应返回 400: {js}");
+    }
+    let wide_text_default = serde_json::json!({
+        "text": "MOSS LASER LARGE",
+        "material": "椴木",
+        "thickness_mm": 3.0,
+        "font_size_mm": 28.0
+    });
+    assert_eq!(
+        post_status_json("/api/text-task/generate", &wide_text_default).0,
+        400,
+        "默认 100mm 幅面应拦截超宽文字"
+    );
+    let mut wide_text_400 = wide_text_default;
+    wide_text_400["work_area_width_mm"] = serde_json::json!(400.0);
+    wide_text_400["work_area_height_mm"] = serde_json::json!(200.0);
+    let (ok_text_st, ok_text_js) = post_status_json("/api/text-task/generate", &wide_text_400);
+    assert_eq!(ok_text_st, 200, "{ok_text_js}");
+    assert_eq!(ok_text_js["success"], true);
+
+    // 2. 图片任务：越界 work_area 返回 400；大幅面合法值（300×200）放行 180mm 宽图片
+    for bad in [
+        serde_json::json!({"work_area_width_mm": 2500}),
+        serde_json::json!({"work_area_height_mm": -10}),
+        serde_json::json!({"work_area_height_mm": "inf"}),
+    ] {
+        let mut req = serde_json::json!({
+            "action": "preview",
+            "source_type": "image",
+            "image_file": "dot.png",
+            "material": "椴木",
+            "thickness_mm": 3.0
+        });
+        for (k, v) in bad.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        let (st, js) = post_status_json("/api/workflow", &req);
+        assert_eq!(st, 400, "图片任务非法 work_area 应返回 400: {js}");
+    }
+    let wide_img_default = serde_json::json!({
+        "action": "preview",
+        "source_type": "image",
+        "image_file": "dot.png",
+        "material": "椴木",
+        "thickness_mm": 3.0,
+        "width_mm": 180.0
+    });
+    assert_eq!(
+        post_status_json("/api/workflow", &wide_img_default).0,
+        400,
+        "默认 100mm 幅面应拦截 180mm 图片"
+    );
+    let mut wide_img_300 = wide_img_default;
+    wide_img_300["work_area_width_mm"] = serde_json::json!(300.0);
+    wide_img_300["work_area_height_mm"] = serde_json::json!(200.0);
+    let (ok_img_st, ok_img_js) = post_status_json("/api/workflow", &wide_img_300);
+    assert_eq!(ok_img_st, 200, "{ok_img_js}");
+    assert_eq!(ok_img_js["success"], true);
+
+    // 3. 标定矩阵：提供 work_area 时越界拦截 400，合法大幅面放行
+    let (bad_mat_st, _) = post_status_json(
+        "/api/material-lab/preview",
+        &serde_json::json!({
+            "material": "椴木",
+            "thickness_mm": 3.0,
+            "rows": 5,
+            "columns": 5,
+            "work_area_width_mm": 2001.0
+        }),
+    );
+    assert_eq!(bad_mat_st, 400);
+    let (over_mat_st, over_mat_js) = post_status_json(
+        "/api/material-lab/preview",
+        &serde_json::json!({
+            "material": "椴木",
+            "thickness_mm": 3.0,
+            "rows": 8,
+            "columns": 8,
+            "work_area_width_mm": 100.0,
+            "work_area_height_mm": 100.0
+        }),
+    );
+    assert_eq!(over_mat_st, 400, "{over_mat_js}");
+    assert!(
+        over_mat_js["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("超出当前行程")
+    );
+    let (ok_mat_st, ok_mat_js) = post_status_json(
+        "/api/material-lab/preview",
+        &serde_json::json!({
+            "material": "椴木",
+            "thickness_mm": 3.0,
+            "rows": 8,
+            "columns": 8,
+            "work_area_width_mm": 220.0,
+            "work_area_height_mm": 220.0
+        }),
+    );
+    assert_eq!(ok_mat_st, 200, "{ok_mat_js}");
+    assert_eq!(ok_mat_js["success"], true);
+}
+
 /// 200×100 像素、中间一块黑色矩形的 PNG data URL。
 pub(super) fn draw_test_png() -> String {
     use base64::Engine;

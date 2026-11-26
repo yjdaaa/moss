@@ -11,14 +11,14 @@ import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
 import { DeviceConnectionModal } from "./components/DeviceConnectionModal.jsx";
 import { SettingsModal } from "./components/SettingsModal.jsx";
 import {
-  MACHINE_MOTION_EVENT,
   emitDeviceLog,
   probeControllerConnection,
   readUnifiedConnection,
+  syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
 } from "./deviceConnection.js";
 import { drawTargetReady } from "./drawConnection.js";
-import { machineMotionFromLimits, writeMachineMotion } from "./fillOptions.js";
+import { writeMachineMotion } from "./fillOptions.js";
 import { useDeviceConnection } from "./useDeviceConnection.js";
 import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
@@ -152,17 +152,8 @@ function App() {
       setConnectionStatus(outcome.status);
       if (outcome.connected) {
         syncHardwareWorkspaceLimits(outcome.machineLimits, saved);
-      }
-      const motion = machineMotionFromLimits(outcome.machineLimits);
-      if (motion) {
-        writeMachineMotion(motion);
-        try {
-          window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: motion }));
-        } catch (_error) {
-          // 非浏览器环境忽略广播
-        }
-      }
-      if (outcome.connected) {
+        syncHardwareMachineFeatures(outcome.status?.features ?? null, saved);
+        writeMachineMotion(outcome.machineLimits, saved);
         emitDeviceLog("DEVICE", outcome.text, "ok");
       }
     }, 600);

@@ -29,7 +29,11 @@ export function WorkbenchImageTool({
   setImageHeightMm,
   fillSettings,
   updateFillSettings,
+  maxWidthMm = 1000,
+  maxHeightMm = 1000,
 }) {
+  const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : 1000;
+  const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : 1000;
   return (
     <div className="tool-body wb-spacer">
       <div className="wb-spacer-2">
@@ -130,8 +134,8 @@ export function WorkbenchImageTool({
             type="number"
             inputMode="decimal"
             min={1}
-            max={1000}
-            placeholder="自动"
+            max={limitW}
+            placeholder={`自动 (≤${limitW})`}
             value={imageWidthMm}
             onChange={(e) => setImageWidthMm(e.target.value)}
             className="text-input"
@@ -144,8 +148,8 @@ export function WorkbenchImageTool({
             type="number"
             inputMode="decimal"
             min={1}
-            max={1000}
-            placeholder="自动"
+            max={limitH}
+            placeholder={`自动 (≤${limitH})`}
             value={imageHeightMm}
             onChange={(e) => setImageHeightMm(e.target.value)}
             className="text-input"

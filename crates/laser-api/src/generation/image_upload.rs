@@ -368,14 +368,16 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             }
             (None, None) => material_pixel,
         };
+        let work_area_width_mm =
+            parse_work_area_mm(object.get("work_area_width_mm"), "work_area_width_mm")?;
+        let work_area_height_mm =
+            parse_work_area_mm(object.get("work_area_height_mm"), "work_area_height_mm")?;
         let raster_options = laser_core::image_job::ImageRasterOptions {
             pixel_size_mm: base_pixel_mm,
             width_mm: optional_number("width_mm")?,
             height_mm: optional_number("height_mm")?,
-            work_area_width_mm: optional_number("work_area_width_mm")?
-                .unwrap_or(MACHINE_WORK_AREA_MM),
-            work_area_height_mm: optional_number("work_area_height_mm")?
-                .unwrap_or(MACHINE_WORK_AREA_MM),
+            work_area_width_mm,
+            work_area_height_mm,
             scan_overscan_mm: overscan_mm,
             mode: laser_core::image_job::ToneMode::parse(
                 object.get("image_mode").and_then(|v| v.as_str()),

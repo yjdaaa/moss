@@ -704,7 +704,7 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.doesNotMatch(passThroughImgHtml, /wb-image-preset|wb-image-interval-scale/, "直通模式隐藏不生效的质量预设与行间距倍数");
 
     assert.doesNotMatch(twinHtml, />Z 轴<|规划缓冲/, "2 轴机台与未上报 Bf 的固件不显示假 Z 轴与假 0/15 缓冲");
-    assert.match(twinHtml, /默认配置（100×100）/);
+    assert.match(twinHtml, /默认 100/);
 
     // 8. 2026-11-26 创作画板行程动态联动、运行态取消与断点续雕门禁、实验室脏状态提示、弹窗 Tab 焦点循环
     const { DrawMaterialCard } = await server.ssrLoadModule("/src/components/draw/DrawMaterialCard.jsx");
@@ -756,6 +756,85 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     );
     assert.match(drawMat220Html, /id="draw-width-mm"[^>]*max="220"[^>]*placeholder="自动 \(≤220\)"/);
     assert.match(drawMat220Html, /id="draw-height-mm"[^>]*max="180"[^>]*placeholder="自动 \(≤180\)"/);
+
+    const drawMatManualHtml = renderToStaticMarkup(
+      React.createElement(DrawMaterialCard, {
+        form: {
+          material: "椴木",
+          thickness_mm: "3",
+          width_mm: "",
+          height_mm: "",
+          image_strategy: "raster",
+          vector_style: "outline",
+          image_mode: "auto",
+          line_interval_scale: "",
+          halftone_cell_mm: "",
+          halftone_angle_deg: "",
+          gray_min_power_percent: "10",
+          vector_simplify_factor: "3",
+        },
+        updateForm: () => {},
+        drawMode: "vector",
+        engraveRoute: "vector",
+        setEngraveRoute: () => {},
+        applyImageQualityPreset: () => {},
+        materialLibrary: [],
+        materialMode: "custom",
+        materialSelectValue: "__custom__",
+        handleMaterialSelectChange: () => {},
+        handleThicknessSelectChange: () => {},
+        handleReturnToLibrary: () => {},
+        refreshMaterialLibrary: () => {},
+        selectedOnly: false,
+        setSelectedOnly: () => {},
+        selectionKey: "",
+        fillSettings: {},
+        updateFillSettings: () => {},
+        materialApplied: [],
+        materialLayer: null,
+        saveFillToMaterial: () => {},
+        hasRec: false,
+        customParams: false,
+        setCustomParams: () => {},
+        maxWidthMm: 400,
+        maxHeightMm: 300,
+        workspaceLimits: {
+          x_travel_mm: 400,
+          y_travel_mm: 300,
+          z_travel_mm: 20,
+          sources: { x: "manual", y: "manual", z: "default" },
+          hardware: { x: 300, y: 200, z: null },
+          has_manual: true,
+          has_hardware: true,
+        },
+        onResetManualLimits: () => {},
+      }),
+    );
+    assert.match(drawMatManualHtml, /当前机器行程：手填 400×300 mm/);
+    assert.match(drawMatManualHtml, /id="draw-restore-hardware-limits"[\s\S]*?恢复为固件值/);
+    assert.match(drawMatManualHtml, /大于固件报告的 300×200 mm，发送时仍按固件行程拦截/);
+
+    const twinPeripheralsHtml = renderToStaticMarkup(
+      React.createElement(TwinPage, {
+        onNavigate: () => {},
+        connectionStatus: {
+          connected: true,
+          checkedAt: 1,
+          isFluidnc: true,
+          features: {
+            axes: ["x", "y", "z"],
+            has_air_assist: true,
+            has_door: false,
+            has_estop_or_fault_pin: true,
+            speed_map: "0=0% 500=30% 1000=100%",
+          },
+        },
+      }),
+    );
+    assert.match(twinPeripheralsHtml, /Z 轴/, "FluidNC features.axes 含 z 时渲染 Z 轴行");
+    assert.match(twinPeripheralsHtml, /气泵：已接线/);
+    assert.match(twinPeripheralsHtml, /0=0% 500=30% 1000=100%/);
+    assert.match(twinPeripheralsHtml, /固件 speed_map 非线性，MOSS 按 \$30 线性换算的功率百分比与实际出光可能不一致/);
 
     const baseSendProps = {
       form: { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: "23" },

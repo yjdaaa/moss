@@ -13,6 +13,9 @@ import {
   resolveTwinHeadPose,
   resolveTwinHasZAxis,
   resolveTwinSafetySwitchStatus,
+  isLinearSpeedMap,
+  describeMachinePeripherals,
+  NONLINEAR_SPEED_MAP_WARNING,
   canResetTwinToDemo,
   YISU_V1_PROFILE,
   normalizeWorkspaceLimits,
@@ -431,7 +434,52 @@ test("数字孪生运行态禁止切回演示刀路，且更新行程不在 setM
   assert.match(twinSource, /if \(!canResetTwinToDemo\(\{ jobStatus, jobSendResult \}\)\) return false;/);
   assert.doesNotMatch(
     twinSource,
-    /setMachineLimits\(\s*\([^)]*\)\s*=>\s*\{[\s\S]*?writeWorkspaceLimits/,
-    "writeWorkspaceLimits 不能放在 setMachineLimits 状态回调内执行",
+    /setMachineLimits\(\s*\([^)]*\)\s*=>\s*\{[\s\S]*?write(Manual)?WorkspaceLimits/,
+    "writeManualWorkspaceLimits 不能放在 setMachineLimits 状态回调内执行",
   );
+
+  // H5: FluidNC 返回 features.axes 时优先按是否含 z 判定，无 features.axes（经典 GRBL）才回退启发式
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: true },
+      machineLimits: { z_travel_mm: 50, from_hardware: true },
+      machineFeatures: { axes: ["x", "y"] },
+      telemetry: { wpos: { x: 0, y: 0, z: 0 } },
+    }),
+    false,
+    "FluidNC 仅配置 x/y 两轴时，即使 $132 有值也不显示 Z 轴",
+  );
+  assert.equal(
+    resolveTwinHasZAxis({
+      workspace: { hasHardwareLimits: true },
+      machineLimits: { z_travel_mm: YISU_V1_PROFILE.zTravelMm, from_hardware: true },
+      machineFeatures: { axes: ["x", "y", "z"] },
+      telemetry: { wpos: { x: 0, y: 0, z: 0 } },
+    }),
+    true,
+    "FluidNC 配置含 z 轴段时，即使 z_travel_mm 等于 20 且坐标为 0 也显示 Z 轴",
+  );
+
+  // H6: speed_map 线性判定与气泵接线展示
+  assert.equal(isLinearSpeedMap("0=0% 1000=100%"), true);
+  assert.equal(isLinearSpeedMap("0=0.00% 255=100.00%"), true);
+  assert.equal(isLinearSpeedMap("0=0% 500=50% 1000=100%"), true);
+  assert.equal(isLinearSpeedMap("0=0% 500=30% 1000=100%"), false);
+  assert.equal(isLinearSpeedMap("0=10% 1000=100%"), false);
+  assert.equal(isLinearSpeedMap("100=0% 1000=100%"), false);
+
+  const linearPeriph = describeMachinePeripherals({
+    has_air_assist: true,
+    speed_map: "0=0% 1000=100%",
+  });
+  assert.equal(linearPeriph.airAssistLabel, "已接线");
+  assert.equal(linearPeriph.speedMap, "0=0% 1000=100%");
+  assert.equal(linearPeriph.speedMapWarning, "");
+
+  const nonlinearPeriph = describeMachinePeripherals({
+    has_air_assist: false,
+    speed_map: "0=0% 500=35% 1000=100%",
+  });
+  assert.equal(nonlinearPeriph.airAssistLabel, "未接线");
+  assert.equal(nonlinearPeriph.speedMapWarning, NONLINEAR_SPEED_MAP_WARNING);
 });

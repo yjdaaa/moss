@@ -109,18 +109,26 @@ test("预览结果说明：实际过扫描与去重条数", () => {
   assert.equal(fillResultNote(null, 0), "");
 });
 
-test("机器运动参数：握手读到的加速度记在本机并随预览转发，手填加速度优先", () => {
+test("机器运动参数按连接目标保存：切目标隔离、握手无运动参数清空该目标，手填加速度仍优先", () => {
   const limits = { x_travel_mm: 100, x_accel_mm_s2: 800, y_accel_mm_s2: 600, x_max_rate_mm_per_min: 6000, y_max_rate_mm_per_min: null, junction_deviation_mm: 0.01 };
   const motion = machineMotionFromLimits(limits);
   assert.deepEqual(motion, { x_accel_mm_s2: 800, y_accel_mm_s2: 600, x_max_rate_mm_per_min: 6000, junction_deviation_mm: 0.01 });
   assert.equal(machineMotionFromLimits({ x_travel_mm: 100 }), null, "只有行程时不算运动参数");
   assert.equal(machineMotionFromLimits(null), null);
 
+  const targetA = { connection_mode: "network", network_host: "192.0.2.10", network_telnet_port: "23" };
+  const targetB = { connection_mode: "serial", port: "COM5", baudrate: "115200" };
   const store = memoryStore();
-  writeMachineMotion(limits, store);
-  assert.deepEqual(readMachineMotion(store), motion);
+  writeMachineMotion(limits, targetA, store);
+  assert.deepEqual(readMachineMotion(targetA, store), motion);
+  assert.equal(readMachineMotion(targetB, store), null, "切到另一连接目标时不沿用旧机器运动参数");
+
+  // 再次握手但未报任何运动参数时，清空该目标记录
+  writeMachineMotion({ x_travel_mm: 100 }, targetA, store);
+  assert.equal(readMachineMotion(targetA, store), null, "握手没报运动参数时清空该目标记录");
+
   store.data[MACHINE_MOTION_KEY] = "{bad";
-  assert.equal(readMachineMotion(store), null);
+  assert.equal(readMachineMotion(targetA, store), null);
 
   assert.deepEqual(machineMotionPayload(DEFAULT_FILL_SETTINGS, motion), { machine_motion: motion });
   assert.deepEqual(machineMotionPayload(DEFAULT_FILL_SETTINGS, null), {}, "都没有时交给后端默认值");

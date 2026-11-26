@@ -160,26 +160,35 @@ export function materialRecommendationModes({ activeTool, textStyle }) {
  * 图片预览可选尺寸、算法与高级项（反相、直通、点宽补偿、网点网格 / 角度、灰度最小功率）
  * -> `/api/workflow` preview 字段；留空不传，填错返回 `{ error }`。
  */
-export function imageParamsPayload({ widthMm = "", heightMm = "", imageMode = "auto", extras = {} } = {}) {
+export function imageParamsPayload({
+  widthMm = "",
+  heightMm = "",
+  imageMode = "auto",
+  extras = {},
+  maxWidthMm = IMAGE_DIMENSION_LIMIT_MM,
+  maxHeightMm = IMAGE_DIMENSION_LIMIT_MM,
+} = {}) {
   const mode = normalizeImageMode(imageMode);
   const payload = { image_mode: mode };
   const extra = imageExtrasPayload(mode, extras);
   if (extra.error) return { error: extra.error };
   Object.assign(payload, extra);
-  const parseDim = (raw, label) => {
+  const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : IMAGE_DIMENSION_LIMIT_MM;
+  const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : IMAGE_DIMENSION_LIMIT_MM;
+  const parseDim = (raw, label, limit) => {
     const trimmed = String(raw ?? "").trim();
     if (!trimmed) return { empty: true };
     const val = Number(trimmed);
-    if (!Number.isFinite(val) || val <= 0 || val > IMAGE_DIMENSION_LIMIT_MM) {
-      return { error: `${label}要是大于 0、不超过 ${IMAGE_DIMENSION_LIMIT_MM} mm 的数字（留空则自动推算）` };
+    if (!Number.isFinite(val) || val <= 0 || val > limit) {
+      return { error: `${label}要是大于 0、不超过 ${limit} mm 的数字（留空则自动推算）` };
     }
     return { value: Math.round(val * 100) / 100 };
   };
-  const w = parseDim(widthMm, "成品宽度");
+  const w = parseDim(widthMm, "成品宽度", limitW);
   if (w.error) return { error: w.error };
   if (!w.empty) payload.width_mm = w.value;
 
-  const h = parseDim(heightMm, "成品高度");
+  const h = parseDim(heightMm, "成品高度", limitH);
   if (h.error) return { error: h.error };
   if (!h.empty) payload.height_mm = h.value;
 
@@ -246,7 +255,9 @@ export function workbenchInputSignature({
   customFeed = "",
   customPasses = "",
   presetParams = "",
+  workArea = "",
 } = {}) {
+  const effectiveWorkArea = workArea && workArea !== "100x100" ? { workArea } : {};
   const base = {
     tool: activeTool,
     material: String(selectedMaterial || ""),
@@ -268,6 +279,7 @@ export function workbenchInputSignature({
       fill: String(fillSignature || ""),
       // 雕刻路线是全局开关，工作台不随请求发送；切换后旧预览必须作废
       route: normalizeEngraveRoute(engraveRoute),
+      ...effectiveWorkArea,
     });
   }
   if (activeTool === "image") {
@@ -281,6 +293,7 @@ export function workbenchInputSignature({
       extras: imageExtrasSignature(normalizeImageMode(imageMode), imageExtras),
       // 过扫描、双向扫描、扫描偏移与机器加速度（随请求发 fill_options 扫描子集）
       scan: String(scanSignature || ""),
+      ...effectiveWorkArea,
     });
   }
   if (activeTool === "gcode") {

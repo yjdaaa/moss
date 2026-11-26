@@ -67,9 +67,10 @@ import { canResumeJob, getResumeStartLine, sendProgressFromResult } from "../est
 import { applyImagePreset } from "../qualityPresets.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
 import {
+  clearManualWorkspaceLimits,
   connectionSummaryView,
   MACHINE_MOTION_EVENT,
-  readWorkspaceLimits,
+  readWorkspaceLimitsStore,
   resolveWorkspaceLimitsForTarget,
   WORKSPACE_LIMITS_EVENT,
 } from "../deviceConnection.js";
@@ -95,7 +96,8 @@ import {
   rasterScanPayload,
   rasterScanSignature,
   readFillSettings,
-  readMachineMotion,
+  readMachineMotionStore,
+  resolveMachineMotionForTarget,
   timeEstimateNote,
   writeFillSettings,
 } from "../fillOptions.js";
@@ -246,27 +248,32 @@ export function DrawPage({
     setFillSettings(next);
     writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
   };
-  // 握手读到的机器加速度 / 最大速度（与工作台共用本机记录）：工时估算与自动过扫描用
-  const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  // 握手读到的机器加速度 / 最大速度（按当前连接目标取值）：工时估算与自动过扫描用
+  const [machineMotionStore, setMachineMotionStore] = useState(() => readMachineMotionStore());
   useEffect(() => {
     const onMotion = (e) => {
-      if (e?.detail) setMachineMotion(e.detail);
+      if (e?.detail) setMachineMotionStore(e.detail);
     };
     window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
     return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
   }, []);
-  // 雕刻机最大雕刻范围（仅当保存行程的 target_key 与当前连接目标一致时才采用，否则回退默认 100×100 mm）
-  const [workspaceLimits, setWorkspaceLimits] = useState(() => readWorkspaceLimits());
+  const machineMotion = resolveMachineMotionForTarget(machineMotionStore, form);
+  // 雕刻机最大雕刻范围（同一连接目标按“手填 → 固件 → 默认 100×100 mm”取值）
+  const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
   useEffect(() => {
     const onLimits = (e) => {
-      if (e?.detail) setWorkspaceLimits(e.detail);
+      if (e?.detail) setWorkspaceLimitsStore(e.detail);
     };
     window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
     return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
   }, []);
-  const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimits, form);
+  const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimitsStore, form);
   const maxWidthMm = effectiveWorkspaceLimits.x_travel_mm;
   const maxHeightMm = effectiveWorkspaceLimits.y_travel_mm;
+  const handleResetManualLimits = useCallback(() => {
+    clearManualWorkspaceLimits(form);
+    setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+  }, [form]);
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
@@ -1919,6 +1926,8 @@ export function DrawPage({
           setCustomPasses={setCustomPasses}
           maxWidthMm={maxWidthMm}
           maxHeightMm={maxHeightMm}
+          workspaceLimits={effectiveWorkspaceLimits}
+          onResetManualLimits={handleResetManualLimits}
         />
 
         <DrawDeviceCard

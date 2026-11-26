@@ -1000,10 +1000,19 @@ export function canResetTwinToDemo({ jobStatus = "", jobSendResult = null } = {}
 }
 
 /**
- * 根据后端实际返回的行程（`z_travel_mm`）与实时坐标判断机台是否具备有效 Z 轴：
- * 不读取后端不存在的 `features.axes` 字段。
+ * 判断机台是否具备有效 Z 轴（2026-11-26 r65）：
+ * - FluidNC 返回 `features.axes` 时，直接以其中是否包含 `"z"` 为准；
+ * - 未返回 `features.axes`（经典 GRBL 或未握手）时，退回原有行程与实时坐标启发式判断。
  */
-export function resolveTwinHasZAxis({ workspace = null, machineLimits = null, telemetry = null } = {}) {
+export function resolveTwinHasZAxis({
+  workspace = null,
+  machineLimits = null,
+  machineFeatures = null,
+  telemetry = null,
+} = {}) {
+  if (Array.isArray(machineFeatures?.axes)) {
+    return machineFeatures.axes.some((axis) => String(axis || "").trim().toLowerCase() === "z");
+  }
   return (
     (Boolean(workspace?.hasHardwareLimits)
       && Number(machineLimits?.z_travel_mm) > 0
@@ -1011,6 +1020,54 @@ export function resolveTwinHasZAxis({ workspace = null, machineLimits = null, te
     || Math.abs(Number(telemetry?.wpos?.z) || 0) > 1e-4
     || Math.abs(Number(telemetry?.mpos?.z) || 0) > 1e-4
   );
+}
+
+/**
+ * 判断 FluidNC `speed_map` 是否为线性的 `0=0% ... <max>=100%`：
+ * 要求至少 2 个点、首点 `0=0%`、末点 `<max>=100%`（`max > 0`）、转速严格递增，且各点百分比与线性比例误差不超过 0.05%。
+ */
+export function isLinearSpeedMap(rawSpeedMap) {
+  if (typeof rawSpeedMap !== "string") return true;
+  const cleaned = rawSpeedMap.trim().replace(/^["']|["']$/g, "").trim();
+  if (!cleaned) return true;
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return false;
+  const points = [];
+  for (const token of tokens) {
+    const match = /^([+-]?\d+(?:\.\d+)?)=([+-]?\d+(?:\.\d+)?)%$/.exec(token);
+    if (!match) return false;
+    const speed = Number(match[1]);
+    const pct = Number(match[2]);
+    if (!Number.isFinite(speed) || !Number.isFinite(pct)) return false;
+    points.push({ speed, pct });
+  }
+  if (Math.abs(points[0].speed) > 1e-6 || Math.abs(points[0].pct) > 0.05) return false;
+  const last = points[points.length - 1];
+  if (!(last.speed > 0) || Math.abs(last.pct - 100) > 0.05) return false;
+  for (let i = 1; i < points.length; i += 1) {
+    if (!(points[i].speed > points[i - 1].speed)) return false;
+    const expectedPct = (points[i].speed / last.speed) * 100;
+    if (Math.abs(points[i].pct - expectedPct) > 0.05) return false;
+  }
+  return true;
+}
+
+export const NONLINEAR_SPEED_MAP_WARNING =
+  "固件 speed_map 非线性，MOSS 按 $30 线性换算的功率百分比与实际出光可能不一致";
+
+/** 提取 FluidNC 固件上报的气泵接线状态与 `speed_map` 展示摘要（仅展示，不改功率换算）。 */
+export function describeMachinePeripherals(machineFeatures) {
+  if (!machineFeatures || typeof machineFeatures !== "object") return null;
+  const hasAirField = typeof machineFeatures.has_air_assist === "boolean";
+  const speedMap = typeof machineFeatures.speed_map === "string" && machineFeatures.speed_map.trim()
+    ? machineFeatures.speed_map.trim()
+    : "";
+  if (!hasAirField && !speedMap) return null;
+  return {
+    airAssistLabel: hasAirField ? (machineFeatures.has_air_assist ? "已接线" : "未接线") : null,
+    speedMap: speedMap || null,
+    speedMapWarning: speedMap && !isLinearSpeedMap(speedMap) ? NONLINEAR_SPEED_MAP_WARNING : "",
+  };
 }
 
 /**

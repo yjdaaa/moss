@@ -6,6 +6,12 @@
 // 创意画板只生成雕刻任务，不带切割设置。
 // 2026-11-17（技术书 r45）：位图（工作台图片、画板转图片）也用这份设置里的扫描子集（`rasterScanPayload`）。
 
+import {
+  MACHINE_MOTION_EVENT,
+  MAX_SAVED_TARGETS,
+  connectionTargetKey,
+} from "./deviceConnection.js";
+
 export const FILL_SETTINGS_KEY = "moss.fillSettings.v1";
 
 export const FILL_GROUPING_OPTIONS = [
@@ -370,23 +376,96 @@ export function machineMotionFromLimits(limits) {
   return Object.keys(motion).length ? motion : null;
 }
 
-export function readMachineMotion(storage = globalThis.localStorage) {
+function parseMotionStoreObject(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { targets: {} };
+  }
+  if (!parsed.targets || typeof parsed.targets !== "object" || Array.isArray(parsed.targets)) {
+    // 旧格式未绑定连接目标，丢弃以免切设备时沿用上一台机器的加速度
+    return { targets: {} };
+  }
+  const entries = [];
+  for (const [rawKey, entry] of Object.entries(parsed.targets)) {
+    const key = String(rawKey || "").trim();
+    const motion = machineMotionFromLimits(entry?.motion ?? entry);
+    if (key && motion) {
+      entries.push([
+        key,
+        {
+          motion,
+          updated_at: Number.isFinite(Number(entry?.updated_at)) ? Number(entry.updated_at) : 0,
+        },
+      ]);
+    }
+  }
+  if (entries.length > MAX_SAVED_TARGETS) {
+    entries.sort((a, b) => a[1].updated_at - b[1].updated_at);
+    entries.splice(0, entries.length - MAX_SAVED_TARGETS);
+  }
+  return { targets: Object.fromEntries(entries) };
+}
+
+export function readMachineMotionStore(storage = globalThis.localStorage) {
   try {
-    const raw = storage?.getItem(MACHINE_MOTION_KEY);
-    return raw ? machineMotionFromLimits(JSON.parse(raw)) : null;
+    const raw = storage?.getItem?.(MACHINE_MOTION_KEY);
+    return raw ? parseMotionStoreObject(JSON.parse(raw)) : { targets: {} };
   } catch {
-    return null;
+    return { targets: {} };
   }
 }
 
-export function writeMachineMotion(motion, storage = globalThis.localStorage) {
+export function resolveMachineMotionForTarget(storeOrMotion, target) {
+  const key = connectionTargetKey(target);
+  if (!key || !storeOrMotion || typeof storeOrMotion !== "object") return null;
+  if (storeOrMotion.targets && typeof storeOrMotion.targets === "object") {
+    return machineMotionFromLimits(storeOrMotion.targets[key]?.motion) || null;
+  }
+  return null;
+}
+
+/** 读取指定连接目标保存的机器运动参数；目标为空或未记录时返回 null。 */
+export function readMachineMotion(target, storage = globalThis.localStorage) {
+  const key = connectionTargetKey(target);
+  if (!key) return null;
+  const store = readMachineMotionStore(storage);
+  return resolveMachineMotionForTarget(store, key);
+}
+
+/**
+ * 按连接目标写入机器运动参数：
+ * - 握手未报运动参数（`motion` 为空）时清空该目标记录，不再沿用旧值；
+ * - 最多保留 16 个连接目标，超出淘汰最旧项，并广播 `MACHINE_MOTION_EVENT`。
+ */
+export function writeMachineMotion(motion, target, storage = globalThis.localStorage) {
+  const key = connectionTargetKey(target);
+  if (!key) return null;
+  const store = readMachineMotionStore(storage);
+  const nextTargets = { ...store.targets };
   const clean = machineMotionFromLimits(motion);
-  if (!clean) return;
+  if (clean) {
+    let maxTs = Date.now();
+    for (const item of Object.values(nextTargets)) {
+      const ts = Number(item?.updated_at) || 0;
+      if (ts >= maxTs) maxTs = ts + 1;
+    }
+    nextTargets[key] = { motion: clean, updated_at: maxTs };
+  } else {
+    delete nextTargets[key];
+  }
+  const saved = parseMotionStoreObject({ targets: nextTargets });
   try {
-    storage?.setItem(MACHINE_MOTION_KEY, JSON.stringify(clean));
+    storage?.setItem?.(MACHINE_MOTION_KEY, JSON.stringify(saved));
   } catch {
     // 存储被禁用时只是不记住
   }
+  try {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: saved }));
+    }
+  } catch {
+    // 非浏览器环境忽略广播
+  }
+  return clean;
 }
 
 /** 提交给后端的 `machine_motion`；没有任何值时返回空对象（后端按默认 1000 mm/s² 估算）。 */

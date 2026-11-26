@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 机器行程、运动参数与固件能力统一按连接目标分桶取值且手填优先（2026-11-26）
+
+- **现象**：切换连接目标后无法同时保留多台设备的行程与运动参数，再次握手会覆盖用户在数字孪生手填的行程，工作台文字/图片生成与材料实验室标定矩阵未按当前连接目标的有效行程校验，FluidNC 机台 Z 轴判断未读 `$CD` 的 `axes:` 段，`speed_map` 与气泵状态也未在界面展示。
+- **根因与修复**：`deviceConnection.js` 与 `fillOptions.js` 改为按 `target_key` 分桶存储（最多 16 台，兼容迁移带 `target_key` 旧行程、握手无运动参数时清空该目标），同一目标行程按“手填 → 固件 → 默认 100 mm”逐轴取值，再次握手只更新 `hardware` 不覆盖 `manual`，孪生页与画板标明来源、提供「恢复为固件值」并在手填大于固件时提示发送仍按固件行程拦截（`check_job_fits_machine` 实时复核不变）；工作台文字/图片与材料实验室矩阵接入当前目标有效行程，后端 `text.rs`、`image_upload.rs` 与 `material_lab` 统一经 `parse_work_area_mm` 校验 `(0, 2000]`；`laser-device` 解析并暴露 `features.axes` 供孪生页优先判定 Z 轴，孪生页与连接弹窗展示气泵状态、`speed_map` 原文及非线性提示（功率换算不变）。
+- **验证**：`laser-device` 扩展 `parse_fluidnc_yaml_and_grbl_limits_extract_limits_and_features`（`features.axes`），`laser-api` 新增 `text_image_and_matrix_preview_validate_work_area_bounds_and_allow_large_format`；前端 `deviceConnection`、`fillOptions`、`materialLabState`、`twinState`、`uiPolishB` 覆盖分桶、手填优先、恢复固件值、16 目标淘汰与矩阵超限拦截；在仅含本改动的隔离工作树跑 `node scripts/verify.mjs --finish --no-update` 与回环 E2E 全部通过（Rust 1572 项、前端单测 406 项、浏览器测试 19 个文件、E2E 41 项）。真实 FluidNC 行程与 `axes` 上报未实机复测（`unverified`）。
+- **关联**：`crates/laser-device/src/protocol.rs`、`crates/laser-api/src/{connection.rs,material_lab_patterns.rs}`、`crates/laser-api/src/generation/{text.rs,image_upload.rs}`、`crates/laser-api/src/material_lab/preview.rs`、`frontend/src/{deviceConnection.js,fillOptions.js,materialLabState.js,twinState.js,workbenchParams.js,main.jsx}`、`frontend/src/pages/{HomePage.jsx,DrawPage.jsx,TwinPage.jsx,MaterialLabPage.jsx}`、`frontend/src/components/{CalibrationWizard.jsx,DeviceConnectionModal.jsx,draw/DrawMaterialCard.jsx,workbench/WorkbenchImageTool.jsx}`、融合技术书 r65。
+
 ### 修复机器行程跨目标沿用、断点续雕行号偏差及画板严格模式取消门禁（2026-11-26）
 
 - **现象**：连接过大幅面机器或在孪生页手填大行程后切换到不报 `$130/$131` 的 100 mm 机器时，创作画板仍沿用旧行程并可能生成超幅面刀路，后端 `/api/draw/preview` 也未限制 `work_area_*` 上限；断点续雕按 `lines_sent + 1` 而非设备确认的 `resumable_from_line + 1` 显示起始行且对 `failed` / 无边界任务误显按钮；严格模式审批通过或发送遇到 `HTTP 0` 时画板隐藏「取消任务」，孪生页运行中切回演示刀路会清掉急停目标任务，语音套系缺模型时未隐藏「用这套」，孪生页还在 `setMachineLimits` 回调内写存储。

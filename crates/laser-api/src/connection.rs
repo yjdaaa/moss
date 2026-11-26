@@ -735,6 +735,7 @@ impl ApiService {
                 "junction_deviation_mm": lim.junction_deviation_mm,
             })),
             "features": machine_features.map(|feat| serde_json::json!({
+                "axes": feat.axes,
                 "has_air_assist": feat.has_air_assist,
                 "has_door": feat.has_door,
                 "has_estop_or_fault_pin": feat.has_estop_or_fault_pin,

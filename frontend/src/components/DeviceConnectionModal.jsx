@@ -5,14 +5,18 @@ import { DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "../api/client.js";
 import { showPrompt } from "../appDialog.js";
 import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 import {
-  MACHINE_MOTION_EVENT,
+  MACHINE_FEATURES_EVENT,
   SERIAL_BAUDRATES,
   isHostSerialAvailable,
   probeControllerConnection,
+  readMachineFeaturesStore,
+  resolveMachineFeaturesForTarget,
+  syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
-import { machineMotionFromLimits, writeMachineMotion } from "../fillOptions.js";
+import { writeMachineMotion } from "../fillOptions.js";
 import { defaultSerialPortHint } from "../platform.js";
+import { describeMachinePeripherals } from "../twinState.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
@@ -240,15 +244,8 @@ function DeviceConnectionModalBody({
       setConnectionStatus?.(outcome.status);
       if (outcome.connected) {
         syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm);
-      }
-      const motion = machineMotionFromLimits(outcome.machineLimits);
-      if (motion) {
-        writeMachineMotion(motion);
-        try {
-          window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: motion }));
-        } catch (_error) {
-          // 忽略非浏览器环境广播失败
-        }
+        syncHardwareMachineFeatures(outcome.status?.features ?? null, probeForm);
+        writeMachineMotion(outcome.machineLimits, probeForm);
       }
       setNotice({ tone: outcome.bannerTone, text: outcome.text });
       onLog?.("DEVICE", outcome.text, outcome.logLevel);
@@ -256,6 +253,27 @@ function DeviceConnectionModalBody({
       if (mountedRef.current) setProbing(false);
     }
   };
+
+  const [featuresStore, setFeaturesStore] = useState(() => readMachineFeaturesStore());
+  useEffect(() => {
+    const onFeatures = (e) => {
+      if (e?.detail) setFeaturesStore(e.detail);
+    };
+    window.addEventListener(MACHINE_FEATURES_EVENT, onFeatures);
+    return () => window.removeEventListener(MACHINE_FEATURES_EVENT, onFeatures);
+  }, []);
+  const currentModalTarget = {
+    connection_mode: effectiveMode,
+    port: serialPort,
+    baudrate,
+    network_host: networkHost,
+    network_telnet_port: Number(telnetPortText) >= 1 && Number(telnetPortText) <= 65535
+      ? Math.round(Number(telnetPortText))
+      : (Number(telnetPort) || 23),
+  };
+  const modalPeripherals = describeMachinePeripherals(
+    resolveMachineFeaturesForTarget(featuresStore, currentModalTarget),
+  );
 
   const statusBanner = notice
     ? notice
@@ -539,6 +557,25 @@ function DeviceConnectionModalBody({
                 <AlertTriangle size={15} aria-hidden="true" />
               ) : null}
               <span>{statusBanner.text}</span>
+            </div>
+          ) : null}
+
+          {modalPeripherals ? (
+            <div className="wb-params-hint" id="conn-machine-peripherals">
+              <div>
+                {modalPeripherals.airAssistLabel ? `气泵：${modalPeripherals.airAssistLabel}` : ""}
+                {modalPeripherals.airAssistLabel && modalPeripherals.speedMap ? " · " : ""}
+                {modalPeripherals.speedMap ? (
+                  <span>
+                    speed_map：<code>{modalPeripherals.speedMap}</code>
+                  </span>
+                ) : null}
+              </div>
+              {modalPeripherals.speedMapWarning ? (
+                <div id="conn-speed-map-warning" role="note" style={{ color: "var(--ob-amber, #f59e0b)", marginTop: "4px" }}>
+                  {modalPeripherals.speedMapWarning}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

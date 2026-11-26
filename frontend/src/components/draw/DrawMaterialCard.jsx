@@ -2,6 +2,10 @@ import React from "react";
 import { RefreshCw } from "lucide-react";
 import { isReadOnlyReferenceClient } from "../../authSession.js";
 import {
+  formatWorkspaceLimitsLabel,
+  workspaceLimitsExceedsHardwareWarning,
+} from "../../deviceConnection.js";
+import {
   DRAW_IMAGE_STRATEGIES,
   availableDrawVectorStyles,
   effectiveDrawVectorStyle,
@@ -68,9 +72,17 @@ export function DrawMaterialCard({
   setCustomPasses,
   maxWidthMm = 100,
   maxHeightMm = 100,
+  workspaceLimits = null,
+  onResetManualLimits = null,
 }) {
   const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : 100;
   const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : 100;
+  const limitsSourceText = workspaceLimits
+    ? formatWorkspaceLimitsLabel(workspaceLimits)
+    : (limitW === 100 && limitH === 100 ? "默认 100" : `固件 ${limitW}×${limitH}`);
+  const limitsExceedWarning = workspaceLimits
+    ? workspaceLimitsExceedsHardwareWarning(workspaceLimits)
+    : "";
   const matchedMaterial =
     materialMode === "library" ? findMaterialOption(materialLibrary, form.material) : null;
   const isSurfaceOnly = Boolean(
@@ -203,6 +215,24 @@ export function DrawMaterialCard({
           />
         </label>
       </div>
+      <div className="wb-params-hint" id="draw-workspace-limits-meta" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+        <span>当前机器行程：{limitsSourceText} mm</span>
+        {workspaceLimits?.has_manual && onResetManualLimits ? (
+          <button
+            type="button"
+            id="draw-restore-hardware-limits"
+            className="btn btn-ghost ghost-button"
+            onClick={onResetManualLimits}
+          >
+            恢复为固件值
+          </button>
+        ) : null}
+      </div>
+      {limitsExceedWarning ? (
+        <div className="wb-params-hint" id="draw-limits-exceed-warning" role="alert" style={{ color: "var(--ob-amber, #f59e0b)" }}>
+          {limitsExceedWarning}
+        </div>
+      ) : null}
 
       <EngraveRouteSwitch
         idPrefix="draw"

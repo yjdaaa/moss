@@ -421,3 +421,23 @@ test("校准矩阵列参数与行参数选重自动互换，材料参数面板�
   assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", { ...current, notes: "改一条备注" }), true);
   assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", { ...current, aliases: "walnut ,  黑胡桃 " }), false, "仅空格差异不算脏");
 });
+
+test("校准矩阵生成前按当前连接目标有效行程估算宽高并拦截超限", async () => {
+  const { checkMatrixFitsWorkspace, estimateMatrixDimensionsMm } = await import("../src/materialLabState.js");
+
+  const fiveByFive = estimateMatrixDimensionsMm({ testType: "matrix", rows: 5, cols: 5, yAxis: "speed", speedMax: 2500, labels: true });
+  assert.equal(checkMatrixFitsWorkspace(fiveByFive, { x_travel_mm: 100, y_travel_mm: 100 }).ok, true);
+
+  const eightByEight = estimateMatrixDimensionsMm({ testType: "matrix", rows: 8, cols: 8, yAxis: "speed", speedMax: 2500, labels: true });
+  const over100 = checkMatrixFitsWorkspace(eightByEight, { x_travel_mm: 100, y_travel_mm: 100 });
+  assert.equal(over100.ok, false);
+  assert.match(over100.error, /^矩阵约 [\d.]+×[\d.]+ mm，超出当前行程 100×100 mm，请减少行列或缩小单元$/);
+  assert.equal(checkMatrixFitsWorkspace(eightByEight, { x_travel_mm: 220, y_travel_mm: 220 }).ok, true);
+
+  const interval9 = estimateMatrixDimensionsMm({ testType: "interval", intervalCount: 9, labels: true });
+  assert.equal(interval9.widthMm, 104);
+  assert.equal(checkMatrixFitsWorkspace(interval9, { x_travel_mm: 100, y_travel_mm: 100 }).ok, false);
+  const interval8 = estimateMatrixDimensionsMm({ testType: "interval", intervalCount: 8, labels: true });
+  assert.equal(interval8.widthMm, 92);
+  assert.equal(checkMatrixFitsWorkspace(interval8, { x_travel_mm: 100, y_travel_mm: 100 }).ok, true);
+});

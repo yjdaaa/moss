@@ -49,6 +49,8 @@ impl MachineLimits {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MachineFeatures {
+    /// `$CD` 的 `axes:` 段下实际配置的轴名（小写，如 `["x", "y", "z"]`）
+    pub axes: Vec<String>,
     pub has_air_assist: bool,
     pub has_door: bool,
     pub speed_map: Option<String>,
@@ -351,9 +353,21 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
         }
         if current_section == "axes" && indent <= 4 && trimmed.ends_with(':') {
             // 只认轴名（x / y / z / a / b / c）；同级非轴段重置 current_axis，`homing:`/`motor0:` 子段不改当前轴
-            let name = trimmed.trim_end_matches(':').trim();
-            if matches!(name, "x" | "y" | "z" | "a" | "b" | "c") {
-                current_axis = name;
+            let raw_name = trimmed.trim_end_matches(':').trim();
+            let axis_key = match raw_name.to_ascii_lowercase().as_str() {
+                "x" => Some("x"),
+                "y" => Some("y"),
+                "z" => Some("z"),
+                "a" => Some("a"),
+                "b" => Some("b"),
+                "c" => Some("c"),
+                _ => None,
+            };
+            if let Some(axis) = axis_key {
+                if !features.axes.iter().any(|existing| existing == axis) {
+                    features.axes.push(axis.to_string());
+                }
+                current_axis = axis;
             } else if indent <= 2 {
                 current_axis = "";
             }
@@ -527,9 +541,14 @@ control:
         assert_eq!(limits.x_max_rate_mm_per_min, Some(6000.0));
         assert_eq!(limits.x_accel_mm_s2, Some(800.0));
         assert_eq!(limits.y_accel_mm_s2, Some(600.0));
+        assert_eq!(features.axes, vec!["x", "y", "z"]);
         assert_eq!(features.speed_map.as_deref(), Some("0=0% 1000=100%"));
         assert!(features.has_air_assist);
         assert!(features.has_door);
+
+        let two_axis_yaml = "axes:\n  x:\n    motor0:\n      limit_neg_pin: gpio.17\n  y:\n    homing:\n      cycle: 1\n";
+        let (_, two_axis_features) = parse_fluidnc_yaml(two_axis_yaml);
+        assert_eq!(two_axis_features.axes, vec!["x", "y"]);
 
         let grbl_settings = vec![
             "$130=280.000".to_string(),

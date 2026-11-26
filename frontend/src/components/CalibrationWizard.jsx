@@ -29,6 +29,7 @@ import {
   readMachineMotion,
   writeFillSettings,
 } from "../fillOptions.js";
+import { readUnifiedConnection } from "../deviceConnection.js";
 
 /**
  * 首次标定向导（r40，2026-11-16）：按顺序串起线距测试、功率 × 速度矩阵、双向扫描偏移、过扫描检查、
@@ -48,6 +49,7 @@ export function CalibrationWizard({
   busy = false,
   running = false,
   onSend,
+  connectionForm = null,
 }) {
   const materialKey = wizardMaterialKey(material, thickness);
   const visibleSteps = wizardStepsForThickness(thickness);
@@ -104,13 +106,14 @@ export function CalibrationWizard({
       return;
     }
     const speeds = speedsText.split(/[,，\s]+/).filter(Boolean);
+    const targetConn = connectionForm || readUnifiedConnection();
     const built = buildPatternPreviewPayload({
       testType,
       material,
       thickness,
       speeds: speeds.length ? speeds : null,
       fillOptions: fill?.fill_options || null,
-      motion: machineMotionPayload(settings, readMachineMotion()),
+      motion: machineMotionPayload(settings, readMachineMotion(targetConn)),
     });
     if (built.error) {
       setNote(built.error);

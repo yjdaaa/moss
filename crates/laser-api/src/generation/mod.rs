@@ -22,7 +22,7 @@ const DRAW_PIXEL_MM: f64 = 0.1;
 
 /// 图片任务默认机器幅面（翼宿 V1.0，`docs/laser/hardware-bom.md`）；请求可用 `work_area_width_mm` /
 /// `work_area_height_mm` 传入连接检查读到的实际行程（上限 `MAX_WORK_AREA_MM`）。发送前另按固件行程复核。
-const MACHINE_WORK_AREA_MM: f64 = 100.0;
+pub(crate) const MACHINE_WORK_AREA_MM: f64 = 100.0;
 const MAX_WORK_AREA_MM: f64 = 2000.0;
 
 /// 解析画板 `work_area_width_mm` / `work_area_height_mm`：缺省或 null 用默认 100 mm；
