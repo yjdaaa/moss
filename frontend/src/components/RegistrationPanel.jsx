@@ -43,6 +43,9 @@ export default function RegistrationPanel({
   idPrefix = "wb-reg",
   rootId = "wb-registration",
   sessionKey = REGISTRATION_SESSION_KEY,
+  // 2026-11-26 合并点动：页面已有统一移头面板（工作台「现场移头与对刀原点」）时传入说明文字，
+  // 这里不再放第二套方向键，改为提示并提供“打开移头面板”；画板页没有移头面板，仍用自带点动
+  externalJog = null,
 }) {
   const isRegistered = Boolean(workflow?.registration);
   const [saved] = useState(() => readRegistrationSession(globalThis.sessionStorage, sessionKey));
@@ -303,6 +306,16 @@ export default function RegistrationPanel({
           </label>
         ))}
 
+        {externalJog ? (
+          <div className="fill-options-wide registration-jog" id={`${idPrefix}-jog-external`}>
+            <span className="ob-sub">{externalJog.hint}</span>
+            {externalJog.onOpen ? (
+              <button type="button" id={`${idPrefix}-open-head-jog`} className="btn btn-ghost wb-sec-btn" onClick={externalJog.onOpen}>
+                {externalJog.openLabel || "打开移头面板"}
+              </button>
+            ) : null}
+          </div>
+        ) : (
         <div className="fill-options-wide registration-jog">
           <span className="ob-sub">点动（激光关闭）：</span>
           {jogArmed ? (
@@ -340,6 +353,7 @@ export default function RegistrationPanel({
             </button>
           )}
         </div>
+        )}
 
         {/* 低功率点射（对齐 LightBurn “Fire”）：没有红光点的机器用来看清激光头在哪；默认关闭 */}
         <div className="fill-options-wide registration-jog registration-pointer">

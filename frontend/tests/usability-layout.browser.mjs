@@ -37,6 +37,8 @@ try {
     confirmSend: 0,
     drawPreview: 0,
     lastDrawPreviewBody: null,
+    lastTextBody: null,
+    serveRecent: false,
   };
   const mockVoice = {
     mode: "official",
@@ -137,6 +139,11 @@ try {
       });
     }
     if (target.pathname === "/api/text-task/generate") {
+      try {
+        apiCalls.lastTextBody = JSON.parse(route.request().postData() || "null");
+      } catch {
+        apiCalls.lastTextBody = null;
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -238,6 +245,25 @@ try {
       const body = JSON.parse(route.request().postData() || "{}");
       if (body.action === "confirm_send") {
         apiCalls.confirmSend += 1;
+      }
+      if (body.action === "recent" && apiCalls.serveRecent) {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            success: true,
+            result: {
+              workflows: [{
+                workflow_id: "wf-recent-1",
+                source_type: "text",
+                status: "completed",
+                updated_at: 1764100000,
+                input: { text: "李四\n2026", font_size_mm: 9, text_fill: "hatch", origin: "center", material: "椴木", thickness_mm: 3 },
+                artifacts: { actual_params: { laser_max_power: 300, power_scale: 1000, feed_rate: 1500, passes: 1 } },
+              }],
+            },
+          }),
+        });
       }
       return route.fulfill({
         status: 200,
@@ -380,7 +406,10 @@ try {
   await page.locator(".feedback-chip", { hasText: "刻太浅" }).click();
   assert.equal(await page.getByLabel("加工效果反馈").inputValue(), "刻太浅", "点击症状快捷胶囊填入反馈输入框");
   await page.locator("#wb-registration > summary").click();
-  await page.locator("#wb-reg-arm-jog").waitFor({ timeout: 5_000 });
+  // 2026-11-26 合并点动：工作台对位不再自带方向键，引导到「现场移头」面板
+  await page.locator("#wb-reg-jog-external").waitFor({ timeout: 5_000 });
+  assert.equal(await page.locator("#wb-reg-arm-jog").count(), 0, "工作台只保留一套点动方向键");
+  assert.equal(await page.locator("#wb-head-jog").count(), 1, "移头面板在监视舱里");
   const regPreviewBtn = page.locator("#wb-reg-preview");
   await regPreviewBtn.scrollIntoViewIfNeeded();
   const regBtnBox = await regPreviewBtn.boundingBox();
@@ -396,6 +425,31 @@ try {
   assert.equal(regHit, true, "展开两点对位后生成对位预览按钮中心点必须命中自身而非被操作卡遮挡");
   await page.locator("#wb-registration > summary").click();
   await page.evaluate(() => window.scrollTo(0, 0));
+
+  // 2026-11-26 多行文字 + 外框 / 铭牌：回车分行与外框参数随生成请求发出
+  await page.locator("#wb-text-content").fill("张三\n2026.11.26");
+  assert.match(await page.locator("#wb-text-count").innerText(), /12 \/ 72 字 · 2 \/ 3 行/);
+  await page.locator("#wb-text-border").selectOption("rounded");
+  await page.locator("#wb-text-board-width").fill("80");
+  await page.locator("#wb-text-board-height").fill("40");
+  apiCalls.lastTextBody = null;
+  await page.locator("#wb-btn-generate").click();
+  for (let i = 0; i < 50 && !apiCalls.lastTextBody; i += 1) await page.waitForTimeout(100);
+  assert.equal(apiCalls.lastTextBody?.text, "张三\n2026.11.26", "多行文字原样带换行发送");
+  assert.deepEqual(apiCalls.lastTextBody?.border, { shape: "rounded", style: "single" });
+  assert.equal(apiCalls.lastTextBody?.width_mm, 80);
+  assert.equal(apiCalls.lastTextBody?.height_mm, 40);
+  await page.locator("#wb-text-border").selectOption("none");
+
+  // 最近任务：展开读取一次，回填文字、刻法与实际参数（不重发旧刀路）
+  apiCalls.serveRecent = true;
+  await page.locator("#wb-recent-tasks > summary").click();
+  await page.locator("#wb-recent-select").waitFor({ timeout: 5_000 });
+  await page.locator("#wb-recent-recall").click();
+  assert.equal(await page.locator("#wb-text-content").inputValue(), "李四\n2026", "回填历史任务文字");
+  assert.equal(await page.locator("#wb-text-style").inputValue(), "hatch", "回填历史刻法");
+  apiCalls.serveRecent = false;
+  await page.locator("#wb-recent-tasks > summary").click();
 
   // 1280 宽下对刀起点下拉「木牌中心」不截断
   const originSelect = page.locator("#wb-text-origin");
@@ -527,7 +581,7 @@ try {
 
   // 2026-11-26 导入 SVG：真实画板里清洗、测量后作为带矢量轮廓的图片元素加入场景，生成预览时随 scene_json 发给后端
   await page.locator("#draw-import-svg").waitFor();
-  await page.getByLabel("导入 SVG 文件").setInputFiles({
+  await page.getByLabel("导入 SVG / DXF 文件").setInputFiles({
     name: "ring.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(
@@ -538,6 +592,20 @@ try {
   });
   await page.getByText(/已导入 SVG：ring\.svg（原始尺寸 20\.0 × 20\.0 mm/).waitFor({ timeout: 10_000 });
   assert.equal(await page.evaluate(() => window.__svgPwned), undefined, "SVG 里的脚本不执行");
+  // DXF：CAD 零件图（外框 + 圆孔），同一个导入按钮
+  await page.getByLabel("导入 SVG / DXF 文件").setInputFiles({
+    name: "plate.dxf",
+    mimeType: "application/dxf",
+    buffer: Buffer.from(
+      ["0", "SECTION", "2", "HEADER", "9", "$INSUNITS", "70", "4", "0", "ENDSEC",
+        "0", "SECTION", "2", "ENTITIES",
+        "0", "LWPOLYLINE", "8", "0", "90", "4", "70", "1", "10", "0", "20", "0", "10", "30", "20", "0", "10", "30", "20", "15", "10", "0", "20", "15",
+        "0", "CIRCLE", "8", "0", "10", "15", "20", "7.5", "40", "4",
+        "0", "ENDSEC", "0", "EOF"].join("\n"),
+      "utf8",
+    ),
+  });
+  await page.getByText(/已导入 DXF：plate\.dxf（原始尺寸 30\.0 × 15\.0 mm/).waitFor({ timeout: 10_000 });
 
   await page.locator("#draw-dock-preview-btn").click();
   await page.locator("#draw-dock-preview-summary").waitFor({ timeout: 10_000 });
@@ -546,6 +614,9 @@ try {
   assert.ok(svgElement?.customData?.moss_vector, "导入的 SVG 以带 moss_vector 的图片元素随场景发送");
   assert.equal(svgElement.customData.moss_vector.paths[0].rings.length, 2, "外框与孔两个环");
   assert.deepEqual(svgElement.customData.moss_vector.size, [20, 20]);
+  const dxfElement = (apiCalls.lastDrawPreviewBody?.scene_json?.elements || []).find((el) => el.customData?.source_name === "plate.dxf");
+  assert.deepEqual(dxfElement?.customData?.moss_vector?.size, [30, 15], "DXF 也以矢量图片元素随场景发送");
+  assert.equal(dxfElement.customData.moss_vector.paths[0].rings.length, 2, "外框与圆孔两个环");
   assert.match(await page.locator("#draw-dock-preview-summary").innerText(), /50×35mm · 约 12s/, "首屏吸底条应展示预览尺寸与预估耗时摘要");
   assert.match(await page.locator("#draw-dock-send-btn").innerText(), /请先配置连接/, "未配连接时吸底条发送按钮应明确提示请先配置连接");
   assert.equal(await page.locator("#draw-dock-send-btn").isDisabled(), false, "未配连接时点击吸底条按钮应可唤起连接弹窗");

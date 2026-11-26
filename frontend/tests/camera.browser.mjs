@@ -270,6 +270,14 @@ try {
   await page.locator("#camera-placeholder").waitFor({ state: "visible", timeout: 5000 });
   const clearCount = await page.evaluate(() => window.__CAM_STATE__.clearCount);
   assert.equal(clearCount, 1);
+  // 6. 2026-11-26 设为画板参考底图：重拍一张后送进创作画板，锁定半透明、不参与雕刻
+  assert.equal(await page.locator("#camera-to-draw-btn").isDisabled(), true, "没有画面时不能设为底图");
+  await page.locator("#camera-capture-btn").click();
+  await page.locator("#camera-frame-img").waitFor({ state: "visible", timeout: 5000 });
+  await page.locator("#camera-to-draw-btn").click();
+  await page.waitForFunction(() => location.pathname === "/draw", null, { timeout: 5000 });
+  await page.getByText(/已放入摄像头参考底图（锁定、半透明、不参与雕刻）/).waitFor({ timeout: 20_000 });
+
   assert.deepEqual(errors, [], "摄像头页不应产生前端异常");
   console.log("CAMERA_BROWSER_TEST=PASS");
   await context.close();

@@ -29,6 +29,10 @@ import {
   workbenchCanonicalTarget,
   workbenchConnectionFields,
   workbenchResumeSendPrompt,
+  normalizeWorkbenchText,
+  recentTaskLabel,
+  textBorderPayload,
+  workbenchTextPayload,
 } from "../workbenchParams.js";
 import { framingRequest, framingShapeText, readFramingShape } from "../aiPreviewState.js";
 import { drawConnectionPayload, drawTargetLabel, drawTargetReady } from "../drawConnection.js";
@@ -64,6 +68,7 @@ import {
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { WorkbenchLinkCard } from "../components/workbench/WorkbenchLinkCard.jsx";
 import { WorkbenchTextTool } from "../components/workbench/WorkbenchTextTool.jsx";
+import { WorkbenchRecentTasks } from "../components/workbench/WorkbenchRecentTasks.jsx";
 import { WorkbenchImageTool } from "../components/workbench/WorkbenchImageTool.jsx";
 import { WorkbenchGcodeTool } from "../components/workbench/WorkbenchGcodeTool.jsx";
 import { WorkbenchMaterialCard } from "../components/workbench/WorkbenchMaterialCard.jsx";
@@ -131,8 +136,25 @@ export function HomePage({
 
   // Tool specific inputs（图片与已有 G-code 独立存放，互不串文件）
   const [textContent, setTextContent] = useState(
-    () => readLocal("laser-forge-text", "MOSS") || "MOSS"
+    () => normalizeWorkbenchText(readLocal("laser-forge-text", "MOSS")) || "MOSS"
   );
+  // 外框 / 铭牌（2026-11-26）：形状、双线与木牌尺寸，按本机记住
+  const [textBorder, setTextBorder] = useState(() => {
+    try {
+      const saved = JSON.parse(readLocal("laser-forge-text-border", "null"));
+      if (saved && typeof saved === "object") {
+        return {
+          shape: String(saved.shape || "none"),
+          double: Boolean(saved.double),
+          boardWidthMm: String(saved.boardWidthMm ?? ""),
+          boardHeightMm: String(saved.boardHeightMm ?? ""),
+        };
+      }
+    } catch {
+      // 记录损坏时回到无外框
+    }
+    return { shape: "none", double: false, boardWidthMm: "", boardHeightMm: "" };
+  });
   const [fontSizeMm, setFontSizeMm] = useState(
     () => Number(readLocal("laser-forge-font-size", "12") || 12)
   );
@@ -264,6 +286,7 @@ export function HomePage({
   const signatureInputs = {
     activeTool,
     textContent,
+    textBorder,
     fontSizeMm,
     textStyle: textStyleEffective,
     textOrigin,
@@ -355,6 +378,42 @@ export function HomePage({
   const effectiveMcpStatus = externalMcpStatus || mcpStatus;
   const lastLoggedPctRef = useRef(-1);
 
+  // 最近任务回填（2026-11-26）：只改左侧表单，不碰当前预览；签名变了旧预览自动作废，要重新计算轨迹
+  const handleRecallTask = (recall, workflow) => {
+    if (!recall) return;
+    if (recall.tool) setActiveTool(recall.tool);
+    if (recall.text != null) setTextContent(recall.text);
+    if (recall.fontSizeMm) setFontSizeMm(recall.fontSizeMm);
+    if (recall.textStyle) setTextStyle(recall.textStyle);
+    if (recall.textOrigin) setTextOrigin(recall.textOrigin);
+    if (recall.textBorder) setTextBorder(recall.textBorder);
+    const notes = [];
+    if (recall.material) {
+      const hit = materials.find((m) => m.name === recall.material);
+      if (hit) {
+        setSelectedMaterial(hit.name);
+        const thick = pickThicknessForMaterial(hit, recall.thickness || selectedThickness);
+        if (thick) setSelectedThickness(thick);
+        if (recall.thickness && thick && String(thick) !== String(recall.thickness)) {
+          notes.push(`材料库里没有 ${recall.thickness} mm，已选 ${thick} mm`);
+        }
+      } else {
+        notes.push(`材料库里已没有“${recall.material}”，材料保持不变`);
+      }
+    }
+    if (recall.custom) {
+      setCustomParams(true);
+      setCustomPower(recall.custom.power);
+      setCustomFeed(recall.custom.feed);
+      setCustomPasses(recall.custom.passes);
+    }
+    addLog(
+      "PREVIEW",
+      `已回填最近任务：${recentTaskLabel(workflow)}${notes.length ? `（${notes.join("；")}）` : ""}。请重新计算加工轨迹，开刻前仍需确认。`,
+      notes.length ? "warn" : "info",
+    );
+  };
+
   const addLog = (tag, message, level = "info") => {
     const time = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev.slice(-99), { time, tag, message, level }]);
@@ -409,6 +468,7 @@ export function HomePage({
       ["laser-forge-text", textContent],
       ["laser-forge-font-size", String(fontSizeMm)],
       ["laser-forge-text-style", textStyle],
+      ["laser-forge-text-border", JSON.stringify(textBorder)],
     ];
     for (const [key, val] of entries) {
       if (persistedRef.current[key] !== val) {
@@ -422,6 +482,7 @@ export function HomePage({
     textContent,
     fontSizeMm,
     textStyle,
+    textBorder,
   ]);
 
   const loadMaterials = async () => {
@@ -614,6 +675,12 @@ export function HomePage({
           setBusy(false);
           return;
         }
+        const borderPayload = textBorderPayload({ ...textBorder, maxWidthMm, maxHeightMm });
+        if (borderPayload.error) {
+          showAlert(borderPayload.error, { title: "外框设置不对", tone: "warning" });
+          setBusy(false);
+          return;
+        }
         // 雕刻路线不随请求发送：后端按全局开关（与语音同一条），工作台只按它显示可选刻法
         const spec = resolveTextStyle(textStyleEffective);
         const fillPayload = engraveRoute === "image"
@@ -631,7 +698,7 @@ export function HomePage({
           return;
         }
         res = await postJson("/api/text-task/generate", {
-          text: textContent.trim(),
+          text: workbenchTextPayload(textContent),
           material: selectedMaterial,
           thickness_mm: Number(selectedThickness),
           font_size_mm: Number(fontSizeMm),
@@ -641,6 +708,7 @@ export function HomePage({
           origin: textOrigin,
           work_area_width_mm: maxWidthMm,
           work_area_height_mm: maxHeightMm,
+          ...borderPayload,
           ...fillPayload,
           ...motionPayload,
           ...manualField,
@@ -1280,11 +1348,15 @@ export function HomePage({
               })}
             </div>
 
+            <WorkbenchRecentTasks onRecall={handleRecallTask} disabled={busy} />
+
             {/* Tool specific parameters */}
             {activeTool === "text" && (
               <WorkbenchTextTool
                 textContent={textContent}
                 setTextContent={setTextContent}
+                textBorder={textBorder}
+                setTextBorder={setTextBorder}
                 fontSizeMm={fontSizeMm}
                 setFontSizeMm={setFontSizeMm}
                 textStyle={textStyleEffective}

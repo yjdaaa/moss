@@ -5,6 +5,7 @@ import {
   FlipHorizontal2,
   RotateCw,
   Trash2,
+  ImagePlus,
   Radio,
   Play,
   Pause,
@@ -13,6 +14,7 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import { createPollRunner } from "../pollGuard.js";
+import { offerDrawReference } from "../drawReference.js";
 import { voiceApi } from "../voiceApi.js";
 import { formatBytes, voiceErrorText } from "../voiceState.js";
 import {
@@ -595,6 +597,28 @@ export function CameraPage({ onNavigate }) {
               >
                 <RotateCw size={15} aria-hidden="true" />
               </button>
+              {/* 2026-11-26：把当前画面送进创作画板当摆位参考底图（不参与雕刻；摄像头没有和激光平台标定） */}
+              {onNavigate && (
+                <button
+                  type="button"
+                  className="camera-icon-btn"
+                  id="camera-to-draw-btn"
+                  aria-label="设为画板参考底图"
+                  title="设为创作画板的参考底图（只作摆位参考、不参与雕刻；照片未与激光平台标定，开刻前用“走边框”核对）"
+                  disabled={!frame?.data_url}
+                  onClick={() => {
+                    offerDrawReference({
+                      dataUrl: frame.data_url,
+                      mirror: Boolean(viewPrefs.mirror),
+                      flip180: Boolean(viewPrefs.flip180),
+                      device: activeDevice?.title || "",
+                    });
+                    onNavigate("/draw");
+                  }}
+                >
+                  <ImagePlus size={15} aria-hidden="true" />
+                </button>
+              )}
               <button
                 type="button"
                 className="camera-icon-btn"

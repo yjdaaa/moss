@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 创作画板支持导入 DXF 并修正 SVG 显示框，摄像头画面可设为画板参考底图（2026-11-26）
+
+- **现象**：CAD 零件图（DXF）无法导入画板；导入的 SVG 若原画幅四周有留白，画布显示的图片与实际刀路轮廓错位、被拉伸；摄像头拍到的木牌照片只能干看，不能拿来摆位。
+- **根因与修复**：新增 `dxfImport.js` 解析直线、多段线（凸度圆弧）、圆、圆弧、椭圆、样条，按 `$INSUNITS` 换算、外框与孔按嵌套层数定方向，转成与 SVG 相同的 `moss_vector`；SVG 显示改为裁到图形外框（`cropSvgText`）；摄像头页新增“设为画板参考底图”，画板放入锁定半透明的 `moss_reference` 图片，前端导出与后端 `sketch.rs` 都跳过它，永远不雕刻。
+- **验证**：前端 `dxfImport.test.mjs` 5 项、`svgImport.test.mjs` 8 项，浏览器 `svg-import`（留白裁框）、`usability-layout`（真实画板导入 DXF 并随场景发送）、`camera`（设为底图后跳到画板并放入）；`laser-api` 新增 `camera_reference_images_are_never_carved`。未在真机出光验证，摄像头与激光平台无标定。
+- **关联**：`frontend/src/{dxfImport.js,svgImport.js,drawReference.js,drawConnection.js}`、`frontend/src/pages/{DrawPage.jsx,CameraPage.jsx}`、`crates/laser-api/src/sketch.rs`。
+
+### 工作台矢量文字支持多行与外框铭牌，新增最近任务回填并合并重复点动面板（2026-11-26）
+
+- **现象**：工作台矢量文字只有 24 字的单行输入，后端已有的外框 / 铭牌只能靠语音触发；想按昨天的参数再刻一次只能凭记忆重填；监视舱里“现场移头”和“两点对位”各有一套步长与确认方式不同的方向键。
+- **根因与修复**：文字改为多行输入（最多 3 行、72 字），新增外框 / 铭牌下拉与木牌尺寸，复用 `/api/text-task/generate` 的 `border` + `width_mm` / `height_mm`（未加外框时请求与签名不变）；新增 `WorkbenchRecentTasks` 读 `action:"recent"` 回填文字、刻法、外框、材料与实际参数，不重发旧刀路；工作台两点对位改用统一移头面板（`RegistrationPanel` 的 `externalJog`），画板页不变。
+- **验证**：`laser-api` 新增 `workbench_multiline_text_with_border_fits_the_board`（两行高度、外框内缩 3 mm、切割可生成、木牌太小报错）；前端 `workbenchTextBorder.test.mjs` 3 项；`usability-layout.browser.mjs` 覆盖多行与外框随请求发送、最近任务回填、工作台只剩一套点动。未在真机出光验证。
+- **关联**：`frontend/src/components/workbench/{WorkbenchTextTool.jsx,WorkbenchRecentTasks.jsx,WorkbenchMonitorCard.jsx}`、`frontend/src/components/RegistrationPanel.jsx`、`frontend/src/pages/HomePage.jsx`、`frontend/src/workbenchParams.js`。
+
 ### 创作画板支持导入 SVG 矢量图并按矢量路径雕刻或切割（2026-11-26）
 
 - **现象**：外部素材（下载的轮廓、Logo、Illustrator / Inkscape / CAD 导出的 SVG）只能转成 PNG 当位图逐行扫，无法用矢量路径做轮廓、填充或带切缝补偿的切割，孔洞也会被当成位图处理。

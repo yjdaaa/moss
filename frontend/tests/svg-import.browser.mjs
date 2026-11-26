@@ -99,6 +99,16 @@ try {
   assert.deepEqual(hostile.ignored, { script: 1, foreignObject: 1, image: 1, text: 1, use: 1 });
   assert.ok(hostile.paths[0].fill && hostile.paths[0].stroke, "url() 引用的渐变改成纯色，仍算填充 / 描边");
 
+  // 4b. 画幅四周有留白：显示用的 SVG 裁到图形外框，画布图片与刀路轮廓同框对齐
+  const margin = await run(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100"><rect x="20" y="30" width="20" height="10"/></svg>',
+  );
+  assert.ok(margin.ok, margin.message);
+  assert.ok(Math.abs(margin.size[0] - 20) < 0.01 && Math.abs(margin.size[1] - 10) < 0.01, `${margin.size}`);
+  assert.match(margin.svg, /viewBox="20 30 20 10"/, "裁到图形外框");
+  assert.match(margin.svg, /width="20mm"/);
+  assert.match(margin.svg, /height="10mm"/);
+
   // 5. 错误提示
   const notSvg = await run("<html><body>hi</body></html>");
   assert.equal(notSvg.ok, false);

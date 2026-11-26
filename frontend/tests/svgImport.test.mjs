@@ -93,3 +93,20 @@ test("带矢量轮廓的导入 SVG 不算位图，矢量模式照样可刻", () 
   assert.equal(hasSceneImageElements([vector, { type: "image" }]), true);
   assert.equal(hasSceneImageElements([{ type: "image", isDeleted: true }]), false);
 });
+
+test("摄像头参考底图：锁定半透明垫底、按镜像 / 旋转摆正，不算位图", async () => {
+  const { drawReferenceSkeleton, isDrawReferenceElement, offerDrawReference, takeDrawReference } = await import("../src/drawReference.js");
+  const skeleton = drawReferenceSkeleton({ fileId: "f", naturalWidth: 640, naturalHeight: 480, mirror: true, flip180: true, device: "小智" });
+  assert.equal(skeleton.width, 480);
+  assert.equal(skeleton.height, 360);
+  assert.equal(skeleton.locked, true);
+  assert.equal(skeleton.opacity, 45);
+  assert.deepEqual(skeleton.scale, [-1, 1]);
+  assert.equal(skeleton.angle, Math.PI);
+  assert.equal(isDrawReferenceElement(skeleton), true);
+  assert.equal(hasSceneImageElements([skeleton]), false, "参考底图不让矢量模式退回光栅");
+  assert.equal(isDrawReferenceElement({ type: "image" }), false);
+  offerDrawReference({ dataUrl: "data:image/jpeg;base64,AA" });
+  assert.equal(takeDrawReference()?.dataUrl, "data:image/jpeg;base64,AA");
+  assert.equal(takeDrawReference(), null, "取一次即清空");
+});

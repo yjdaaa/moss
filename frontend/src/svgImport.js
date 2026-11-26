@@ -273,6 +273,42 @@ export function buildVectorData(shapes) {
   return { version: 1, size: [round(maxX - minX), round(maxY - minY)], paths };
 }
 
+/** 导入图形在画布上的最小边长（mm）：一条横线也要有可见的高度；与元素框、显示 SVG 一致。 */
+export const MIN_VECTOR_IMAGE_MM = 0.25;
+
+/** 图形集合的外框（mm）。 */
+export function shapesBounds(shapes) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const shape of shapes) {
+    for (const line of [...shape.rings, ...shape.open]) {
+      for (const [x, y] of line) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/** 改写根元素的 viewBox / 宽高，让 SVG 正好显示给定的用户坐标框。 */
+export function cropSvgText(svgText, { x, y, w, h, widthMm, heightMm }, { DOMParserImpl = globalThis.DOMParser, XMLSerializerImpl = globalThis.XMLSerializer } = {}) {
+  const doc = new DOMParserImpl().parseFromString(svgText, "image/svg+xml");
+  const root = doc.documentElement;
+  const fmt = (n) => String(Math.round(n * 1e6) / 1e6);
+  root.setAttribute("viewBox", `${fmt(x)} ${fmt(y)} ${fmt(w)} ${fmt(h)}`);
+  root.setAttribute("width", `${fmt(widthMm)}mm`);
+  root.setAttribute("height", `${fmt(heightMm)}mm`);
+  root.setAttribute("preserveAspectRatio", "none");
+  // 描边宽的图形边缘不被裁掉一半
+  root.setAttribute("overflow", "visible");
+  return new XMLSerializerImpl().serializeToString(root);
+}
+
 export function countVectorPoints(data) {
   return (data?.paths || []).reduce(
     (sum, path) => sum + [...path.rings, ...path.open].reduce((n, line) => n + line.length, 0),
@@ -362,7 +398,19 @@ export function extractSvgVectors(svgText, { document: doc = globalThis.document
     if (countVectorPoints(data) > limits.maxPoints) {
       throw new Error(`SVG 轮廓点数超过 ${limits.maxPoints}，请先在设计软件里简化路径`);
     }
-    return { data, sizeMm: { width: data.size[0], height: data.size[1] }, ignored: dropped, svg };
+    // 显示用的 SVG 裁到图形外框：画布上的图片与刀路轮廓按同一个框对齐（原画幅四周留白不能算进去）
+    const bounds = shapesBounds(shapes);
+    const widthMm = Math.max(data.size[0], MIN_VECTOR_IMAGE_MM);
+    const heightMm = Math.max(data.size[1], MIN_VECTOR_IMAGE_MM);
+    const cropped = cropSvgText(svg, {
+      x: bounds.minX / unitMm + (box ? box.x : 0),
+      y: bounds.minY / unitMm + (box ? box.y : 0),
+      w: widthMm / unitMm,
+      h: heightMm / unitMm,
+      widthMm,
+      heightMm,
+    });
+    return { data, sizeMm: { width: data.size[0], height: data.size[1] }, ignored: dropped, svg: cropped };
   } finally {
     host.remove();
   }

@@ -58,7 +58,9 @@ import { apiFetch, getJson, postJson } from "../api/client.js";
 import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
-import { SVG_CANVAS_PX_PER_MM, SVG_IMPORT_LIMITS, extractSvgVectors, ignoredSummary, svgDataUrl } from "../svgImport.js";
+import { MIN_VECTOR_IMAGE_MM, SVG_CANVAS_PX_PER_MM, SVG_IMPORT_LIMITS, extractSvgVectors, ignoredSummary, svgDataUrl } from "../svgImport.js";
+import { extractDxfVectors, ignoredDxfSummary } from "../dxfImport.js";
+import { DRAW_REFERENCE_EVENT, drawReferenceSkeleton, isDrawReferenceElement, takeDrawReference } from "../drawReference.js";
 import { drawEstopContexts, estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
@@ -956,16 +958,60 @@ export function DrawPage({
     }
   }
 
-  // 导入 SVG（2026-11-26）：清洗后作为一个带矢量轮廓的图片元素放进画板，刀路用同一份轮廓按矢量规划
+  // 摄像头画面设为参考底图（2026-11-26）：摄像头页交过来后放到最底层、锁定半透明，不参与雕刻
+  useEffect(() => {
+    if (!excalidrawAPI) return undefined;
+    let cancelled = false;
+    const place = async () => {
+      const reference = takeDrawReference();
+      if (!reference || cancelled) return;
+      const size = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve({ w: 0, h: 0 });
+        img.src = reference.dataUrl;
+      });
+      if (cancelled) return;
+      const mimeType = /^data:([^;,]+)/.exec(reference.dataUrl)?.[1] || "image/jpeg";
+      const fileId = `moss-ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      excalidrawAPI.addFiles([{ id: fileId, dataURL: reference.dataUrl, mimeType, created: Date.now() }]);
+      const current = excalidrawAPI.getSceneElements();
+      const live = current.filter((el) => !el.isDeleted);
+      const at = live.length > 0
+        ? { x: Math.min(...live.map((el) => el.x)), y: Math.min(...live.map((el) => el.y)) }
+        : { x: 0, y: 0 };
+      const [element] = convertToExcalidrawElements([
+        drawReferenceSkeleton({ fileId, naturalWidth: size.w, naturalHeight: size.h, mirror: reference.mirror, flip180: reference.flip180, device: reference.device, at }),
+      ]);
+      const next = [element, ...current];
+      sceneDirtyRef.current = true;
+      excalidrawAPI.updateScene({ elements: next });
+      setTimeout(() => excalidrawAPI.scrollToContent?.(next.filter((el) => !el.isDeleted), { fitToContent: true }), 40);
+      setSceneRev(computeSceneRevision(next.filter((el) => !el.isDeleted)));
+      setStatus("已放入摄像头参考底图（锁定、半透明、不参与雕刻）：照片没有和激光平台标定，只能看着摆位置，开刻前请用“走边框”核对；不需要时右键解锁后删除");
+    };
+    void place();
+    const onOffer = () => void place();
+    window.addEventListener(DRAW_REFERENCE_EVENT, onOffer);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(DRAW_REFERENCE_EVENT, onOffer);
+    };
+  }, [excalidrawAPI]);
+
+  // 导入 SVG / DXF（2026-11-26）：转成一个带矢量轮廓的图片元素放进画板，刀路用同一份轮廓按矢量规划
   async function handleImportSvgFile(event) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file || !excalidrawAPI) return;
     try {
+      const isDxf = /\.dxf$/i.test(file.name);
+      const kind = isDxf ? "DXF" : "SVG";
       if (file.size > SVG_IMPORT_LIMITS.maxBytes) {
-        throw new Error(`SVG 文件太大（上限 ${Math.round(SVG_IMPORT_LIMITS.maxBytes / 1024 / 1024)} MB），请先在设计软件里简化`);
+        throw new Error(`${kind} 文件太大（上限 ${Math.round(SVG_IMPORT_LIMITS.maxBytes / 1024 / 1024)} MB），请先简化`);
       }
-      const { data, sizeMm, ignored, svg } = extractSvgVectors(await file.text());
+      const text = await file.text();
+      const { data, sizeMm, ignored, svg, units } = isDxf ? extractDxfVectors(text) : extractSvgVectors(text);
       const fileId = `moss-svg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       excalidrawAPI.addFiles([{ id: fileId, dataURL: svgDataUrl(svg), mimeType: "image/svg+xml", created: Date.now() }]);
       const current = excalidrawAPI.getSceneElements();
@@ -982,8 +1028,8 @@ export function DrawPage({
           type: "image",
           x,
           y,
-          width: Math.max(sizeMm.width, 0.25) * SVG_CANVAS_PX_PER_MM,
-          height: Math.max(sizeMm.height, 0.25) * SVG_CANVAS_PX_PER_MM,
+          width: Math.max(sizeMm.width, MIN_VECTOR_IMAGE_MM) * SVG_CANVAS_PX_PER_MM,
+          height: Math.max(sizeMm.height, MIN_VECTOR_IMAGE_MM) * SVG_CANVAS_PX_PER_MM,
           fileId,
           status: "saved",
           customData: { moss_vector: data, source_name: file.name },
@@ -997,14 +1043,15 @@ export function DrawPage({
       setHasSceneImages(hasSceneImageElements(next));
       const sizeText = `${sizeMm.width.toFixed(1)} × ${sizeMm.height.toFixed(1)} mm`;
       // 画板“宽 / 高”是整幅画板（含四周留边、填充过扫描余量）的尺寸，不等于这个图形本身，所以不自动填，只提示原始尺寸
-      const ignoredText = ignoredSummary(ignored);
+      const ignoredText = isDxf ? ignoredDxfSummary(ignored) : ignoredSummary(ignored);
+      const unitNote = isDxf && units?.assumed ? "；文件没写单位，按毫米算" : "";
       setStatus(
-        `已导入 SVG：${file.name}（原始尺寸 ${sizeText}；成品大小仍由“宽 / 高”决定，生成预览后看“轮廓尺寸”核对）${ignoredText ? `；${ignoredText}` : ""}`,
+        `已导入 ${kind}：${file.name}（原始尺寸 ${sizeText}${unitNote}；成品大小仍由“宽 / 高”决定，生成预览后看“轮廓尺寸”核对）${ignoredText ? `；${ignoredText}` : ""}`,
       );
     } catch (error) {
       const msg = error?.message || String(error);
-      setStatus(`导入 SVG 失败：${msg}`);
-      void showAlert(msg, { title: "无法导入 SVG", tone: "warning" });
+      setStatus(`导入矢量图失败：${msg}`);
+      void showAlert(msg, { title: "无法导入矢量图", tone: "warning" });
     }
   }
 
@@ -1140,8 +1187,13 @@ export function DrawPage({
     }
     const appState = excalidrawAPI.getAppState();
     const files = excalidrawAPI.getFiles();
+    // 摄像头参考底图（2026-11-26）只作摆位参考：给激光用的导出图不含它（后端矢量规划也跳过它）
+    const laserElements = forLaser ? activeElements.filter((element) => !isDrawReferenceElement(element)) : activeElements;
+    if (forLaser && laserElements.length === 0) {
+      throw new Error("画板里只有摄像头参考底图，没有要刻的图形");
+    }
     const exportElements = forLaser
-      ? prepareRasterExportElements(activeElements, drawInkExportMode(drawMode, form.image_mode))
+      ? prepareRasterExportElements(laserElements, drawInkExportMode(drawMode, form.image_mode))
       : activeElements;
     const exportAppState = {
       ...appState,
@@ -1764,18 +1816,18 @@ export function DrawPage({
                   className="btn btn-ghost"
                   onClick={() => importSvgInputRef.current?.click()}
                   disabled={busy || !excalidrawAPI}
-                  title="导入 SVG 矢量图（Logo、轮廓、CAD 导出图），按矢量路径雕刻或切割"
+                  title="导入 SVG / DXF 矢量图（Logo、轮廓、CAD 零件图），按矢量路径雕刻或切割"
                 >
                   <Upload size={14} aria-hidden="true" />
-                  SVG
+                  SVG/DXF
                 </button>
                 <input
                   ref={importSvgInputRef}
                   type="file"
-                  accept=".svg,image/svg+xml"
+                  accept=".svg,.dxf,image/svg+xml,image/vnd.dxf,application/dxf"
                   className="sr-only-file"
                   onChange={handleImportSvgFile}
-                  aria-label="导入 SVG 文件"
+                  aria-label="导入 SVG / DXF 文件"
                 />
                 <button type="button" className="btn btn-ghost" onClick={downloadScene} disabled={busy || !excalidrawAPI}>
                   <FileJson size={14} aria-hidden="true" />

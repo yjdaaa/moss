@@ -589,6 +589,13 @@ pub(crate) fn sketch_from_scene(
             }
             // 导入的 SVG（2026-11-26）：图片元素带着 `customData.moss_vector` 矢量轮廓时按矢量刻，
             // 画布上看到的是 SVG 原图（孔洞、颜色都对），刀路用的是同一份轮廓
+            // 摄像头参考底图（2026-11-26，`customData.moss_reference`）只作摆位参考，永远不雕刻
+            "image"
+                if element
+                    .get("customData")
+                    .and_then(|c| c.get("moss_reference"))
+                    .and_then(Value::as_bool)
+                    == Some(true) => {}
             "image" => {
                 let vector = push_vector_image(element, (x, y, w, h), angle, style, &mut out)?;
                 out.has_image |= !vector;
@@ -841,6 +848,30 @@ mod tests {
             sketch_from_scene(&svg_image(big), &no_font, VectorStyle::Canvas)
                 .unwrap_err()
                 .contains("点数")
+        );
+    }
+
+    #[test]
+    fn camera_reference_images_are_never_carved() {
+        let scene = json!({"elements": [
+            {"type": "image", "x": 0, "y": 0, "width": 480, "height": 360, "customData": {"moss_reference": true}},
+            {"type": "rectangle", "x": 10, "y": 10, "width": 20, "height": 10, "strokeColor": "#000", "backgroundColor": "transparent"},
+        ]});
+        let sketch = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
+        assert!(!sketch.has_image, "参考底图不算位图，矢量模式照常");
+        assert_eq!(sketch.closed.len(), 1, "只刻矩形");
+        assert_eq!(
+            sketch.bounds(),
+            Some((10.0, 10.0, 30.0, 20.0)),
+            "排版范围不含参考底图"
+        );
+        let only_reference = json!({"elements": [
+            {"type": "image", "x": 0, "y": 0, "width": 480, "height": 360, "customData": {"moss_reference": true}},
+        ]});
+        assert!(
+            sketch_from_scene(&only_reference, &no_font, VectorStyle::Canvas)
+                .unwrap()
+                .is_empty()
         );
     }
 

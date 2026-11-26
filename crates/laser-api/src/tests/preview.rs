@@ -2030,3 +2030,69 @@ fn material_preset_multipass_and_draw_framing_bounds_are_emitted() {
     assert_eq!(draw_res["result"]["artifacts"]["frame_mm"]["max_x"], 30.0);
     assert_eq!(draw_res["result"]["artifacts"]["frame_mm"]["max_y"], 20.0);
 }
+
+/// 2026-11-26 工作台多行文字 + 外框 / 铭牌：回车分行的文字与 `border` + 木牌尺寸一起生成，
+/// 外框按木牌尺寸走线（成品与木牌同大），两行文字比一行更高；切割刻法也能生成。
+#[test]
+fn workbench_multiline_text_with_border_fits_the_board() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let generate = |body: serde_json::Value| {
+        let res = post_json(&service, "/api/text-task/generate", &body);
+        assert_eq!(res["success"], true, "{res}");
+        let artifacts = res["result"]["artifacts"].clone();
+        let gcode =
+            std::fs::read_to_string(temp.path().join(artifacts["gcode_file"].as_str().unwrap()))
+                .unwrap();
+        (artifacts, gcode)
+    };
+    let one_line = serde_json::json!({
+        "text": "AB", "font_path": font, "font_size_mm": 6, "material": "椴木", "thickness_mm": 3
+    });
+    let (single, _) = generate(one_line.clone());
+    let mut two_lines = one_line.clone();
+    two_lines["text"] = serde_json::json!("AB\nBA");
+    let (double, _) = generate(two_lines.clone());
+    let height = |a: &serde_json::Value| a["height_mm"].as_f64().unwrap();
+    assert!(
+        height(&double) > height(&single) * 1.5,
+        "两行文字应约为一行的两倍高：{} vs {}",
+        height(&double),
+        height(&single)
+    );
+
+    let mut bordered = two_lines.clone();
+    bordered["border"] = serde_json::json!({"shape": "rounded", "style": "single"});
+    bordered["width_mm"] = serde_json::json!(60);
+    bordered["height_mm"] = serde_json::json!(30);
+    let (artifacts, gcode) = generate(bordered.clone());
+    assert_eq!(artifacts["border"]["shape"], "rounded", "{artifacts}");
+    // 外框比木牌四周各内缩 DEFAULT_BORDER_INSET_MM，以激光头对准的木牌中心为原点
+    let inset = laser_core::shapes::DEFAULT_BORDER_INSET_MM;
+    let extents = laser_core::gcode::motion_extents(&gcode).unwrap().unwrap();
+    assert!(
+        (extents.width() - (60.0 - 2.0 * inset)).abs() < 0.5
+            && (extents.height() - (30.0 - 2.0 * inset)).abs() < 0.5,
+        "外框按木牌 60 × 30 mm 内缩 {inset} mm 走线：{extents:?}"
+    );
+    let mut cut = bordered.clone();
+    cut["laser_mode"] = serde_json::json!("cut");
+    cut["engraving_mode"] = serde_json::json!("cut");
+    let res = post_json(&service, "/api/text-task/generate", &cut);
+    assert_eq!(res["success"], true, "外框切割刻法也能生成：{res}");
+
+    // 木牌放不下文字时如实报错
+    let mut tiny = bordered.clone();
+    tiny["width_mm"] = serde_json::json!(12);
+    tiny["height_mm"] = serde_json::json!(8);
+    let res = post_json(&service, "/api/text-task/generate", &tiny);
+    assert_eq!(res["success"], false, "{res}");
+}

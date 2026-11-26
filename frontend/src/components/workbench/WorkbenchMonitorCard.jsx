@@ -12,6 +12,19 @@ import { WbCard } from "../WorkbenchCanvas.jsx";
 import { WorkbenchHeadJogPanel } from "./WorkbenchHeadJogPanel.jsx";
 
 /** 雕刻工作台 ④ 加工监视舱：现场移头与对刀原点、刀路预览、刀路摘要、生成与下发、走边框 / 导出 / 取消、两点对位、急停与下发进度。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
+// 2026-11-26 合并点动：工作台只保留「现场移头与对刀原点」一套方向键（r60），两点对位改为引导到那里点动
+function openHeadJogPanel() {
+  const panel = document.getElementById("wb-head-jog");
+  if (!panel) return;
+  if (!panel.open) panel.querySelector("summary")?.click();
+  panel.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+}
+const WORKBENCH_REGISTRATION_JOG = {
+  hint: "点动：用上方「现场移头与对刀原点」把激光头（激光关闭）对准标记，再点“记录”",
+  openLabel: "打开移头面板",
+  onOpen: openHeadJogPanel,
+};
+
 export function WorkbenchMonitorCard({
   onNavigate,
   previewUrl,
@@ -116,6 +129,7 @@ export function WorkbenchMonitorCard({
             }
             onLog={addLog}
             onRegistered={(workflow) => adoptDerivedWorkflow(workflow, "对位预览")}
+            externalJog={WORKBENCH_REGISTRATION_JOG}
           />
         )}
 

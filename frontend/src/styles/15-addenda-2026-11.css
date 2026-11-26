@@ -1736,3 +1736,14 @@ button.conn-pill:hover {
 
 
 
+
+/* 2026-11-26 工作台矢量文字：多行输入（最多 3 行）与外框 / 铭牌行 */
+.wb-text-area.wb-text-area { display: block; resize: vertical; min-height: 42px; max-height: 120px; line-height: 1.45; white-space: pre-wrap; }
+#wb-text-border-row .wb-check-inline { display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; }
+#wb-text-border-row .wb-check-inline input { width: 18px; height: 18px; margin: 0 0 9px; accent-color: var(--gold); }
+
+/* 2026-11-26 工作台「最近任务」：折叠行，展开后一行下拉 + 回填按钮 */
+.wb-recent-tasks > summary { display: flex; align-items: center; gap: 6px; }
+.wb-recent-tasks > summary small { margin-left: auto; color: var(--ink-dim); font-size: 11px; font-weight: 400; }
+.wb-recent-row { display: flex; gap: 8px; align-items: center; }
+.wb-recent-row .select-input { flex: 1 1 auto; min-width: 0; }

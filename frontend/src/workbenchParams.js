@@ -256,6 +256,7 @@ export function workbenchInputSignature({
   customPasses = "",
   presetParams = "",
   workArea = "",
+  textBorder = null,
 } = {}) {
   const effectiveWorkArea = workArea && workArea !== "100x100" ? { workArea } : {};
   const base = {
@@ -274,6 +275,14 @@ export function workbenchInputSignature({
       ...base,
       text: String(textContent || "").trim(),
       fontSizeMm: Number(fontSizeMm) || 0,
+      // 外框 / 铭牌（2026-11-26）：没加外框时不写入，旧签名不变
+      ...(textBorder?.shape && textBorder.shape !== "none"
+        ? {
+            border: `${textBorder.shape}/${textBorder.double ? "double" : "single"}/${String(textBorder.boardWidthMm ?? "").trim()}/${
+              textBorder.shape === "circle" ? "" : String(textBorder.boardHeightMm ?? "").trim()
+            }`,
+          }
+        : {}),
       textStyle: resolveTextStyle(textStyle).style,
       textOrigin: textOrigin === "lower_left" ? "lower_left" : "center",
       fill: String(fillSignature || ""),
@@ -484,4 +493,146 @@ export function workbenchResumeSendPrompt({
     confirmText: `确认从第 ${safeStart} 行续雕`,
     danger: false,
   };
+}
+
+// 2026-11-26 工作台矢量文字：多行文本与外框 / 铭牌（复用后端 `/api/text-task/generate` 已有的 `border` 与木牌尺寸）
+export const WORKBENCH_TEXT_MAX_LINES = 3;
+export const WORKBENCH_TEXT_MAX_CHARS = 72;
+
+/** 规范化工作台文字：统一换行符、最多 3 行、总长不超过 72 个字符（多余的行并到最后一行之后截掉）。 */
+export function normalizeWorkbenchText(raw) {
+  const lines = String(raw ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const kept = lines.slice(0, WORKBENCH_TEXT_MAX_LINES).join("\n");
+  return Array.from(kept).slice(0, WORKBENCH_TEXT_MAX_CHARS).join("");
+}
+
+/** 文字计数：字符数（按码点，不含换行）与行数。 */
+export function workbenchTextStats(text) {
+  const value = String(text ?? "");
+  return {
+    chars: Array.from(value.replace(/\n/g, "")).length,
+    lines: value === "" ? 0 : value.split("\n").length,
+  };
+}
+
+/** 发给后端的文字：去掉每行行尾空白与首尾空行（行内空格保留）。 */
+export function workbenchTextPayload(text) {
+  return String(text ?? "")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/u, ""))
+    .join("\n")
+    .replace(/^\n+|\n+$/g, "");
+}
+
+export const TEXT_BORDER_OPTIONS = [
+  { value: "none", label: "无外框" },
+  { value: "rect", label: "矩形框" },
+  { value: "rounded", label: "圆角矩形框" },
+  { value: "circle", label: "圆牌" },
+  { value: "ellipse", label: "椭圆牌" },
+];
+
+/**
+ * 外框 / 铭牌请求字段：无外框返回 `{}`；有外框时要木牌尺寸（圆牌只要直径），
+ * 返回 `{ border: { shape, style }, width_mm, height_mm }` 或 `{ error }`。
+ */
+export function textBorderPayload({ shape, double = false, boardWidthMm, boardHeightMm, maxWidthMm = 2000, maxHeightMm = 2000 }) {
+  if (!shape || shape === "none") return {};
+  if (!TEXT_BORDER_OPTIONS.some((opt) => opt.value === shape)) return { error: `不认识的外框样式：${shape}` };
+  const num = (value) => {
+    const text = String(value ?? "").trim();
+    if (text === "") return null;
+    const n = Number(text);
+    return Number.isFinite(n) && n > 0 ? n : NaN;
+  };
+  const w = num(boardWidthMm);
+  const h = shape === "circle" ? w : num(boardHeightMm);
+  if (w === null || h === null) {
+    return { error: shape === "circle" ? "加圆牌要填木牌直径" : "加外框要填木牌宽和高" };
+  }
+  if (Number.isNaN(w) || Number.isNaN(h)) return { error: "木牌尺寸要填大于 0 的数字（mm）" };
+  if (w > maxWidthMm || h > maxHeightMm) {
+    return { error: `木牌 ${w} × ${h} mm 超出机器行程 ${maxWidthMm} × ${maxHeightMm} mm` };
+  }
+  return { border: { shape, style: double ? "double" : "single" }, width_mm: w, height_mm: h };
+}
+
+// 2026-11-26 工作台「最近任务」：把历史任务的参数回填到左侧表单（不重发旧刀路，回填后要重新计算轨迹，开刻门禁照常）
+const RECENT_SOURCE_LABEL = { text: "文字", image: "图片", draw: "画板", gcode: "G-code" };
+
+/** 历史任务的文字刻法（与 `resolveTextStyle` 的取值对应）。 */
+export function recentTextStyle(input = {}) {
+  const laserMode = String(input.laser_mode || "").toLowerCase();
+  const engraving = String(input.engraving_mode || "").toLowerCase();
+  if (laserMode === "cut" || engraving === "cut") return "cut";
+  const fill = String(input.text_fill || "").toLowerCase();
+  if (fill === "fill" || fill === "hatch") return fill;
+  return "outline";
+}
+
+/** 下拉里一行的说明：时间 · 来源 · 内容 · 材料。 */
+export function recentTaskLabel(workflow, now = Date.now()) {
+  const input = workflow?.input || {};
+  const source = RECENT_SOURCE_LABEL[workflow?.source_type] || "任务";
+  const seconds = Number(workflow?.updated_at ?? workflow?.created_at);
+  let when = "";
+  if (Number.isFinite(seconds) && seconds > 0) {
+    const date = new Date(seconds * 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    const sameDay = new Date(now).toDateString() === date.toDateString();
+    when = sameDay
+      ? `${pad(date.getHours())}:${pad(date.getMinutes())}`
+      : `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+  const text = typeof input.text === "string" ? input.text.replace(/\s*\n\s*/g, " / ").trim() : "";
+  const content = text ? `“${Array.from(text).slice(0, 16).join("")}${Array.from(text).length > 16 ? "…" : ""}”` : "";
+  const material = input.material || workflow?.material || workflow?.confirmation_snapshot?.material || "";
+  const thickness = Number(input.thickness_mm ?? workflow?.thickness_mm);
+  const materialText = material ? `${material}${Number.isFinite(thickness) && thickness > 0 ? ` ${thickness}mm` : ""}` : "";
+  return [when, source, content, materialText].filter(Boolean).join(" · ");
+}
+
+/**
+ * 历史任务可回填的字段；拿不出任何可用参数时返回 null。
+ * 文字任务回填文字、字高、刻法、对刀起点与外框；所有任务回填材料、厚度，
+ * 记录里有实际功率 / 速度 / 遍数时改成“自定义参数”并填上（这次实际用的值）。
+ */
+export function recentTaskRecall(workflow) {
+  if (!workflow || typeof workflow !== "object") return null;
+  const input = workflow.input || {};
+  const out = {};
+  const material = input.material || workflow.material || workflow.confirmation_snapshot?.material;
+  if (material) out.material = String(material);
+  const thickness = Number(input.thickness_mm ?? workflow.thickness_mm ?? workflow.confirmation_snapshot?.thickness_mm);
+  if (Number.isFinite(thickness) && thickness > 0) out.thickness = String(thickness);
+  if (workflow.source_type === "text" && typeof input.text === "string" && input.text.trim()) {
+    out.tool = "text";
+    out.text = normalizeWorkbenchText(input.text);
+    const size = Number(input.font_size_mm);
+    if (Number.isFinite(size) && size > 0) out.fontSizeMm = size;
+    out.textStyle = recentTextStyle(input);
+    out.textOrigin = input.origin === "lower_left" ? "lower_left" : "center";
+    const shape = input.border && typeof input.border === "object" ? String(input.border.shape || "rect") : "none";
+    out.textBorder = TEXT_BORDER_OPTIONS.some((opt) => opt.value === shape)
+      ? {
+          shape,
+          double: input.border?.style === "double",
+          boardWidthMm: input.border && Number(input.width_mm) > 0 ? String(input.width_mm) : "",
+          boardHeightMm: input.border && Number(input.height_mm) > 0 ? String(input.height_mm) : "",
+        }
+      : { shape: "none", double: false, boardWidthMm: "", boardHeightMm: "" };
+  }
+  const actual = workflow.artifacts?.actual_params;
+  const scale = Number(actual?.power_scale) > 0 ? Number(actual.power_scale) : 1000;
+  const power = (Number(actual?.laser_max_power) * 100) / scale;
+  const feed = Number(actual?.feed_rate);
+  const passes = Number(actual?.passes ?? 1);
+  if ([power, feed, passes].every(Number.isFinite) && power > 0 && feed > 0 && passes > 0) {
+    out.custom = {
+      power: String(Math.round(power * 10) / 10),
+      feed: String(Math.round(feed)),
+      passes: String(Math.round(passes)),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
