@@ -388,7 +388,8 @@ function VoiceDeviceAllowModalDialog({
   const copyTimerRef = useRef(null);
 
   const busy = Boolean(busyAction);
-  const activeDevice = allowFeedback?.device || queue.current;
+  const currentDevice = queue.current;
+  const activeDevice = allowFeedback?.device || currentDevice;
   const activeDraft = readDeviceAllowDraft(draftsByDevice, activeDevice);
   const alreadyAutoAllow = builtinStatus?.local?.settings?.auto_allow_devices === true;
 
@@ -430,13 +431,13 @@ function VoiceDeviceAllowModalDialog({
       }
       return;
     }
-    if (!queue.current) return;
-    const targetId = queue.current.device_id;
+    if (!currentDevice) return;
+    const targetId = currentDevice.device_id;
     const nextId = nextPendingDeviceIdAfterAction(pendingList, targetId);
-    dismissedRef.current.set(targetId, Number(queue.current.last_seen) || 0);
+    dismissedRef.current.set(targetId, Number(currentDevice.last_seen) || 0);
     setSelectedDeviceId(nextId);
     bumpDismissVersion();
-  }, [busy, allowFeedback, finishAllowFeedback, queue.current, pendingList, dismissedRef, setSelectedDeviceId, bumpDismissVersion]);
+  }, [busy, allowFeedback, finishAllowFeedback, currentDevice, pendingList, dismissedRef, setSelectedDeviceId, bumpDismissVersion]);
 
   useEffect(() => {
     const onKey = (e) => {
