@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 
-export default function VoiceHomeApprovalCard() {
+export default function VoiceHomeApprovalCard({ active = true }) {
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -32,17 +32,24 @@ export default function VoiceHomeApprovalCard() {
   }, []);
   useEffect(() => {
     mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!active) return undefined;
     void refresh(false);
     const timer = setInterval(() => {
       if (!document.hidden) void refresh(true);
     }, 5000);
     return () => {
-      mountedRef.current = false;
       pollSeqRef.current += 1;
       inFlightRef.current = false;
       clearInterval(timer);
     };
-  }, [refresh]);
+  }, [active, refresh]);
   const cancel = async (item) => {
     setBusy(item.approval_id);
     setError("");

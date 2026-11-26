@@ -73,6 +73,7 @@ import {
   MACHINE_MOTION_EVENT,
   probeControllerConnection,
   readBufferedDeviceLogs,
+  syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
@@ -535,6 +536,7 @@ export function HomePage({
     const outcome = await probeControllerConnection(postJson, connectionForm);
     if (probeEpochRef.current !== epoch) return false;
     setConnectionStatus(outcome.status);
+    syncHardwareWorkspaceLimits(outcome.machineLimits);
     const motion = machineMotionFromLimits(outcome.machineLimits);
     if (motion) {
       writeMachineMotion(motion);
@@ -1340,6 +1342,7 @@ export function HomePage({
           fillNote={fillNote}
           busy={busy}
           framingBusy={framingBusy}
+          canGenerate={activeTool !== "text" || Boolean(textContent.trim())}
           overlayStatus={overlayStatus}
           framingShape={framingShape}
           setFramingShape={setFramingShape}
@@ -1376,6 +1379,7 @@ export function HomePage({
             )}
               {/* 数控中控台与实时调参反馈卡片 */}
               <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
+                showHeading={false}
                 disabled={busy || framingBusy || previewStale || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
                 onAdopt={(workflow) => adoptDerivedWorkflow(workflow, "调参预览")} />
           </WbCard>

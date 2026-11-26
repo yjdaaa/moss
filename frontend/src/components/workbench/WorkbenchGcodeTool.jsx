@@ -1,4 +1,5 @@
 import React from "react";
+import { Upload, X } from "lucide-react";
 import { postJson } from "../../api/client.js";
 import { showAlert } from "../../appDialog.js";
 
@@ -16,49 +17,72 @@ export function WorkbenchGcodeTool({
         <label className="wb-label-2">
           导入现有 G-code / NC 刀路文件 (.gcode / .nc)
         </label>
-        <input
-          type="file"
-          accept=".gcode,.nc"
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            e.target.value = "";
-            if (!file) return;
-            if (file.size > 14 * 1024 * 1024) {
-              showAlert("G-code 刀路文件过大（在线上传上限 14 MB，请求体限 20 MB）。", {
-                title: "刀路超出大小限制",
-                tone: "warning",
-              });
-              return;
-            }
-            addLog("FILE", `正在读取刀路文件: ${file.name}...`, "info");
-            const reader = new FileReader();
-            reader.onload = async () => {
-              try {
-                const res = await postJson("/api/upload", {
-                  filename: file.name,
-                  content_base64: reader.result,
-                });
-                if (res.ok && res.data?.success) {
-                  setUploadedGcodePath(res.data.result?.file_path || file.name);
-                  setUploadedGcodeName(file.name);
-                  addLog("FILE", `已载入 G-code 刀路: ${file.name}`, "ok");
-                } else {
-                  const err = res.data?.result || "载入失败";
-                  addLog("FILE", `G-code 载入失败: ${err}`, "error");
-                  showAlert(err, { title: "G-code 载入失败", tone: "error" });
+        <div className="wb-file-picker-row">
+          <label className="btn btn-ghost wb-file-picker-btn" id="wb-gcode-picker-btn">
+            <Upload size={14} aria-hidden="true" />
+            <span>{uploadedGcodePath ? "更换 G-code 文件…" : "选择 G-code / NC 文件…"}</span>
+            <input
+              id="wb-gcode-file-input"
+              type="file"
+              accept=".gcode,.nc"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                if (file.size > 14 * 1024 * 1024) {
+                  showAlert("G-code 刀路文件过大（在线上传上限 14 MB，请求体限 20 MB）。", {
+                    title: "刀路超出大小限制",
+                    tone: "warning",
+                  });
+                  return;
                 }
-              } catch (err) {
-                addLog("FILE", `网络或系统异常: ${err.message}`, "error");
-                showAlert(err.message, { title: "载入异常", tone: "error" });
-              }
-            };
-            reader.onerror = () => {
-              addLog("FILE", "本地刀路读取失败", "error");
-            };
-            reader.readAsDataURL(file);
-          }}
-          className="file-input wb-field-6"
-        />
+                addLog("FILE", `正在读取刀路文件: ${file.name}...`, "info");
+                const reader = new FileReader();
+                reader.onload = async () => {
+                  try {
+                    const res = await postJson("/api/upload", {
+                      filename: file.name,
+                      content_base64: reader.result,
+                    });
+                    if (res.ok && res.data?.success) {
+                      setUploadedGcodePath(res.data.result?.file_path || file.name);
+                      setUploadedGcodeName(file.name);
+                      addLog("FILE", `已载入 G-code 刀路: ${file.name}`, "ok");
+                    } else {
+                      const err = res.data?.result || "载入失败";
+                      addLog("FILE", `G-code 载入失败: ${err}`, "error");
+                      showAlert(err, { title: "G-code 载入失败", tone: "error" });
+                    }
+                  } catch (err) {
+                    addLog("FILE", `网络或系统异常: ${err.message}`, "error");
+                    showAlert(err.message, { title: "载入异常", tone: "error" });
+                  }
+                };
+                reader.onerror = () => {
+                  addLog("FILE", "本地刀路读取失败", "error");
+                };
+                reader.readAsDataURL(file);
+              }}
+              className="sr-only-file file-input wb-field-6"
+            />
+          </label>
+          {uploadedGcodePath && (
+            <button
+              type="button"
+              id="wb-gcode-clear-btn"
+              className="btn btn-ghost wb-file-clear-btn"
+              onClick={() => {
+                setUploadedGcodePath("");
+                setUploadedGcodeName("");
+              }}
+              title="移除已载入的刀路文件"
+              aria-label="移除已载入的刀路文件"
+            >
+              <X size={13} aria-hidden="true" />
+              <span>移除</span>
+            </button>
+          )}
+        </div>
         {uploadedGcodePath && (
           <div className="wb-box-2" id="wb-gcode-selected">
             ✓ 载入刀路: {uploadedGcodeName || uploadedGcodePath}

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Send, Wifi, X } from "lucide-react";
 import { isTopmostModalBackdrop } from "../AppDialog.jsx";
 import { OriginBadge, inferOriginKind } from "../OriginBadge.jsx";
+import { useModalFocusTrap } from "../useModalFocusTrap.js";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
 
 // 创意画板发送确认框。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分）
@@ -23,10 +24,14 @@ export function SendConfirmDialog({
   // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开脱机文件支持时默认脱机直接报错失败
   const [offlineSdChoice, setOfflineSd] = React.useState(false);
   const backdropRef = useRef(null);
+  const dialogRef = useRef(null);
+  const cancelBtnRef = useRef(null);
   const backdropPressRef = useRef(false);
   // SD 脱机只能经网口上传；串口只能逐行发送
   const offlineSd = sdAvailable && offlineSdChoice;
   const canConfirm = !requireMovedAck || movedAcknowledged;
+
+  useModalFocusTrap({ backdropRef, dialogRef, initialFocusRef: cancelBtnRef });
 
   useEffect(() => {
     const onKey = (e) => {
@@ -60,7 +65,7 @@ export function SendConfirmDialog({
         backdropPressRef.current = false;
       }}
     >
-      <section className="send-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
+      <section ref={dialogRef} className="send-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
         <div className="confirm-heading">
           <div>
             <Send size={18} />
@@ -100,7 +105,7 @@ export function SendConfirmDialog({
           </label>
         ) : null}
         <div className="confirm-actions">
-          <button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
+          <button ref={cancelBtnRef} type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
             取消
           </button>
           <button

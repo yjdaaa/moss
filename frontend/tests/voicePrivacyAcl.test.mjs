@@ -94,7 +94,7 @@ test("n67 / n69：唤醒词卡与固件卡都挂在主窗口语音中心“设�
   const page = frontend("src/pages/VoicePage.jsx");
   const devices = page.split('<VoiceTabPanel tab="devices"')[1].split("</VoiceTabPanel>")[0];
   assert.match(devices, /<VoiceWakeWordSection mode=\{mode\} active=\{activeTab === "devices"\} \/>/, "唤醒词只在设备标签打开时挂载");
-  assert.match(devices, /<VoiceFirmwareCard \/>/);
+  assert.match(devices, /<VoiceFirmwareCard active=\{activeTab === "devices"\} \/>/);
   assert.match(devices, /lazy>/, "固件卡收起时不挂载");
   assert.doesNotMatch(page, /<VoiceTabPanel tab="wake"/, "“唤醒词与音量”标签已并入设备标签");
   // n69 音量去重：扬声器音量只在“已连接设备”的快捷控制里调，仍走主窗口设备即时请求 set_volume

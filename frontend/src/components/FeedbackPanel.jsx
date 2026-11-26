@@ -27,7 +27,7 @@ function paramsText(params) {
   return `S${params.laser_max_power} / ${params.power_scale} · F${params.feed_rate} mm/min · ${params.passes} 次`;
 }
 
-export function FeedbackPanel({ workflowId, origin = null, disabled = false, onAdopt }) {
+export function FeedbackPanel({ workflowId, origin = null, disabled = false, showHeading = true, onAdopt }) {
   const [text, setText] = useState("");
   const [history, setHistory] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -99,7 +99,7 @@ export function FeedbackPanel({ workflowId, origin = null, disabled = false, onA
   if (!workflowId) return null;
   return (
     <section className="feedback-panel" aria-label="加工反馈">
-      <h3><MessageSquare size={16} />加工反馈</h3>
+      {showHeading ? <h3><MessageSquare size={16} />加工反馈</h3> : null}
       <form onSubmit={submit}>
         <div className="feedback-chips" role="group" aria-label="常见症状快捷选择">
           {FEEDBACK_SYMPTOM_CHIPS.map((chip) => {

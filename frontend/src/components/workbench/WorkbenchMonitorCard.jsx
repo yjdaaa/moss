@@ -26,6 +26,7 @@ export function WorkbenchMonitorCard({
   fillNote,
   busy,
   framingBusy,
+  canGenerate = true,
   overlayStatus,
   framingShape,
   setFramingShape,
@@ -160,7 +161,14 @@ export function WorkbenchMonitorCard({
 
           {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行 */}
           <div className="wb-dispatch-actions" id="wb-dispatch-actions" role="toolbar" aria-label="生成与下发">
-            <button type="button" className="btn btn-hud-primary" onClick={handleGeneratePreview} disabled={busy || framingBusy}>
+            <button
+              type="button"
+              id="wb-btn-generate"
+              className="btn btn-hud-primary"
+              onClick={handleGeneratePreview}
+              disabled={busy || framingBusy || !canGenerate}
+              title={!canGenerate ? "请先在左侧输入要雕刻的文字" : undefined}
+            >
               <Cpu size={15} aria-hidden="true" />
               <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
             </button>

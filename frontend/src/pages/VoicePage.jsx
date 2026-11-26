@@ -726,7 +726,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
               {mode === "builtin" && <BuiltinScreenPreview builtin={builtin} />}
               {/* n67（2026-11-07）：独立安全窗口取消，固件升级直接在这里；每台推送前仍逐台确认 */}
               <VoiceGroup id="device-firmware" title="固件升级" summary="导入自己编译的固件，逐台确认推送" lazy>
-                <VoiceFirmwareCard />
+                <VoiceFirmwareCard active={activeTab === "devices"} />
               </VoiceGroup>
               {mode === "builtin" && (
                 <VoiceGroup
@@ -773,7 +773,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="privacy" active={activeTab === "privacy"}>
-            {mode === "builtin" && <PrivateSettingsEntry status={builtinStatus} />}
+            {mode === "builtin" && <PrivateSettingsEntry status={builtinStatus} active={activeTab === "privacy"} />}
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="records" active={activeTab === "records"}>

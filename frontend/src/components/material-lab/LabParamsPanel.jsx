@@ -1,5 +1,5 @@
 import React from "react";
-import { Save, Settings2, Trash2 } from "lucide-react";
+import { RotateCcw, Save, Settings2, Trash2 } from "lucide-react";
 import { formatPowerScaleHint, isSurfaceKey, modeOptionsForThickness, thicknessChipLabel } from "../../materialLabState.js";
 import { FoldHeader } from "../FoldHeader.jsx";
 import { PowerPercentInput } from "./PowerPercentInput.jsx";
@@ -12,6 +12,8 @@ export function LabParamsPanel({
   selectedThickness,
   currentMatThicknesses,
   hasSavedCell,
+  isDirty = false,
+  handleResetParams = null,
   editorStatus,
   activeMode,
   handleModeChange,
@@ -41,8 +43,8 @@ export function LabParamsPanel({
       <div className="lab-row-5">
         <h3 className="lab-heading">
           <span>{selectedMaterial ? `${selectedMaterial} · ${thicknessChipLabel(selectedThickness)}` : "未选择材料"}</span>
-          <small className="lab-heading-tag">
-            {readOnly ? "只读参数" : hasSavedCell ? "已存参数" : "该模式未存（初始值）"}
+          <small className={`lab-heading-tag${!readOnly && isDirty ? " is-dirty" : ""}`} id="lab-params-state-tag">
+            {readOnly ? "只读参数" : isDirty ? "● 未保存修改" : hasSavedCell ? "已存参数" : "该模式未存（初始值）"}
           </small>
         </h3>
         <div className="lab-row-6">
@@ -239,6 +241,18 @@ export function LabParamsPanel({
               title="存为不分厚度的表面雕刻条目：任何厚度在没有同厚度参数时都用它（切割仍按真实厚度）"
             >
               存为表面通用
+            </button>
+          )}
+          {isDirty && handleResetParams && (
+            <button
+              type="button"
+              id="lab-reset-params"
+              className="btn btn-ghost lab-btn-3"
+              onClick={handleResetParams}
+              title="放弃当前未保存的修改，还原为库内参数"
+            >
+              <RotateCcw size={13} className="lab-icon" />
+              还原修改
             </button>
           )}
         </div>

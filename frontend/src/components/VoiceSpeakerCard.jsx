@@ -3,16 +3,17 @@ import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 import { speakerCalibrationView } from "../voiceState.js";
 
-export default function VoiceSpeakerCard() {
+export default function VoiceSpeakerCard({ active = true }) {
   const [data,setData]=useState(null),[error,setError]=useState(""),[pollError,setPollError]=useState(""),[busy,setBusy]=useState(false);
   const [name,setName]=useState(""),[session,setSession]=useState("");
   const [drafts,setDrafts]=useState({});
   const epoch=useRef(0),mutating=useRef(false);
   useEffect(()=>{
+    if(!active)return undefined;
     let live=true,pending=false;
-    const poll=async()=>{if(pending||mutating.current)return;pending=true;const started=epoch.current;try{const next=await voiceApi.speakerManage({action:"status"});if(live&&started===epoch.current){setData(next);setPollError("");}}catch(e){if(live&&started===epoch.current)setPollError(e.message);}finally{pending=false;}};
+    const poll=async()=>{if(pending||mutating.current||document.hidden)return;pending=true;const started=epoch.current;try{const next=await voiceApi.speakerManage({action:"status"});if(live&&started===epoch.current){setData(next);setPollError("");}}catch(e){if(live&&started===epoch.current)setPollError(e.message);}finally{pending=false;}};
     void poll();const timer=setInterval(poll,2000);return()=>{live=false;clearInterval(timer);};
-  },[]);
+  },[active]);
   const act=async(input)=>{if(mutating.current)return false;mutating.current=true;epoch.current++;setBusy(true);try{setData(await voiceApi.speakerManage(input));setError("");return true;}catch(e){setError(e.message);return false;}finally{epoch.current++;mutating.current=false;setBusy(false);}};
   useEffect(() => {
     if (!session || !Array.isArray(data?.sessions)) return;
@@ -57,7 +58,7 @@ export default function VoiceSpeakerCard() {
     {pollError&&<p role="alert">状态刷新失败：{pollError}</p>}
     <div className="voice-form-grid">
     <label>姓名 <input className="text-input" value={name} maxLength={64} onChange={e=>setName(e.target.value)} disabled={busy||data?.enrollment?.active}/></label>
-    <label>采集设备 <select className="text-input" value={session} onChange={e=>setSession(e.target.value)} disabled={busy||data?.enrollment?.active}>
+    <label>采集设备 <select className="select-input text-input" value={session} onChange={e=>setSession(e.target.value)} disabled={busy||data?.enrollment?.active}>
       <option value="">选择当前会话</option>{data?.sessions?.map(row=><option key={JSON.stringify([row.device_id,row.session_id])} value={JSON.stringify([row.device_id,row.session_id])}>{row.device_id}</option>)}
     </select></label>
     </div>

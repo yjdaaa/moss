@@ -9,6 +9,7 @@ import {
   SERIAL_BAUDRATES,
   isHostSerialAvailable,
   probeControllerConnection,
+  syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
 import { machineMotionFromLimits, writeMachineMotion } from "../fillOptions.js";
 import { defaultSerialPortHint } from "../platform.js";
@@ -236,6 +237,7 @@ function DeviceConnectionModalBody({
       });
       if (!mountedRef.current || probeEpochRef.current !== epoch) return;
       setConnectionStatus?.(outcome.status);
+      syncHardwareWorkspaceLimits(outcome.machineLimits);
       const motion = machineMotionFromLimits(outcome.machineLimits);
       if (motion) {
         writeMachineMotion(motion);

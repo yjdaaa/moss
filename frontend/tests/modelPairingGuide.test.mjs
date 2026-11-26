@@ -47,5 +47,6 @@ test("按场景选一套模型：选着但没下载完的组合写明缺什么�
     const readyHtml = render(ready);
     assert.match(readyHtml, /✓ 正在用/);
     assert.doesNotMatch(readyHtml, /voice-combo-missing-/);
+    assert.match(readyHtml, new RegExp(`id="voice-combo-need-${MODEL_COMBOS[1].id}"`), "未激活套系缺模型时直接列出缺失项并提供下载，不误显示用这套");
   });
 });

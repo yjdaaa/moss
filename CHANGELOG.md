@@ -4,12 +4,26 @@
 
 ## [Unreleased]
 
+### 统一雕刻工作台及全站各页面选择框高度、网格列数与边缘对齐（2026-11-26）
+
+- **现象**：雕刻工作台「矢量文字」三列参数因“对刀起点”带 20px 图标导致下拉框下沉错位，「图片处理」套用 3 列网格导致右侧留出 1/3 空洞，「填充与走刀设置」长标签折行把同行输入框顶成一高一低，「材质与参数」内嵌额外描边套框使左边缘缩进 16px 且隐藏厚度时只占半宽，「加工反馈」卡内重复出现两次标题；此外创作画板光栅转换方式与行间距未并排且材料库下方存在双倍间距，材料实验室非光栅模式与双轴矩阵存在列尾空洞，语音中心与连接弹窗并排下拉框和输入框/按钮存在 2px 高度差。
+- **根因与修复**：在 `15-addenda-2026-11.css` 统一工作台、画板、实验室、语音中心、数字孪生与连接/材料弹窗中并排 `<input>`、`<select>` 与同行图标按钮的盒高、标签行 20px 最小高度与底边对齐；`WorkbenchImageTool` 与 `DrawMaterialCard` 光栅参数改用 2 列对称网格（奇数尾项自动跨满整行），`.tool-body` 改为 `12px` 纵向 flex 间距并消除画板 `.material-library-label` 双倍下边距；去掉 `WorkbenchMaterialCard` 内层 `.wb-box-6` 的嵌套边框与内边距，`.wb-grid-2`、`.lab-grid` 与 `.lab-grid-2` 在少一项时自动铺满整行；`WorkbenchHeadJogPanel` 补齐 `select-input` 并右对齐原点动作；`FeedbackPanel` 新增 `showHeading`（`HomePage` 传 `false` 去重标题）并统一曜石输入框样式。
+- **验证**：`uiPolishB.test.mjs` 新增工作台与画板 2 列参数网格、点动步长 `select-input` 类名与反馈面板去重标题断言；`node scripts/verify.mjs --finish` 通过并快更本机桌面包。纯前端排版与样式收口，不涉及硬件实机协议变更。
+- **关联**：`frontend/src/pages/HomePage.jsx`、`frontend/src/components/FeedbackPanel.jsx`、`frontend/src/components/draw/DrawMaterialCard.jsx`、`frontend/src/components/workbench/{WorkbenchImageTool,WorkbenchHeadJogPanel,WorkbenchMaterialCard,WorkbenchTextTool}.jsx`、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/uiPolishB.test.mjs`。
+
 ### 已连接小智设备支持移除并将已撤销设备折叠收起（2026-11-26）
 
 - **现象**：语音中心「已连接设备」中，不再使用的已允许或误触发的待允许小智设备只能撤销而无法从列表移除，已撤销记录混排在主表中也影响日常查看。
 - **根因与修复**：`RuntimeDb::delete_voice_device`、`BuiltinVoice::remove_device` 与桌面主窗口命令 `voice_device_remove` 支持移除 `allowed` / `pending` 设备——立即断开在线会话，同事务作废未消费语音审批、删除仅针对该设备的待推送固件与内存资源包、删除 `voice_devices` 行（含四类快照）及 `builtin_device_prefs` 快捷偏好，保留对话记录、长期记忆与声纹资料；移除后旧 token 因连接校验 `allowed` 记录而自然失效，设备再次连入按新设备进入 `pending`（开启自动允许时直接放行）。`revoked` 设备在后端事务内拒绝移除（409 `voice_device_revoked`）以防绕过撤销；前端仅在 `allowed` / `pending` 行显示需确认的「移除」按钮，并将 `revoked` 设备统一收入底部默认折叠的「已撤销（N 台）」分组（保留「重新允许」）。
 - **验证**：新增 `remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_reenters_pending`（moss-voice-host）与 `removed_device_old_valid_hmac_token_cannot_open_ws_session_and_staged_assets_clear`（moss-voice-server），前端补 `voiceState`、`uiModalAndScrollFixes` 与 `voice-center.browser.mjs` 断言；`node scripts/verify.mjs --finish --no-update` 通过（Rust 1570 项、前端单测 404 项、浏览器测试 19 个文件、回环 E2E 全部通过；因工作区含其他会话未提交改动未快更）。真实小智移除后重连未实机复测（`unverified`）。
 - **关联**：`crates/laser-runtime/src/db/voice.rs`、`crates/moss-voice-server/src/{lib.rs,wake_assets.rs}`、`crates/moss-voice-host/src/builtin/devices.rs`、`apps/desktop/src-tauri/src/{voice_builtin.rs,lib.rs}`、`frontend/src/{voiceApi.js,voiceState/devices.js}`、`frontend/src/components/voice-builtin/{BuiltinDevicesPanel.jsx,useBuiltinStatus.js}`、内置语音技术书 n134。
+
+### 画板尺寸跟随雕刻机最大行程联动及全站操作门禁、后台轮询与弹窗焦点收口（2026-11-26）
+
+- **现象**：创作画板尺寸上限写死 100 mm、取消按钮未按运行态门禁且中断后缺断点续雕；材料实验室 X/Y 轴选重不自动互换、改参数缺未保存与还原提示；数字孪生工作流下拉框切不回内置演示刀路；语音中心未激活场景套系缺模型时仍显示“用这套”、3 处折叠/隐藏面板切走后持续轮询、隐私与家居子卡缺脏状态提示；工作台文件上传后仍显示“未选择任何文件”、文字与画板空文本可点生成、5 个弹窗未锁 Tab 焦点循环。
+- **根因与修复**：`deviceConnection.js` 新增全局工作区行程同步（握手探测到 `$130/$131` 或 `max_travel_mm` 时自动广播更新），画板宽高上限、占位符与 `validateDrawDimensions` 动态跟随雕刻机最大行程并在非默认幅面下透传 `work_area_width_mm` / `work_area_height_mm`；`DrawSendCard` 仅在 `jobActive` 显示取消任务并在有断点时提供 `action: "resume"` 续雕；`LabMatrixSettings` 选重轴自动互换，`LabParamsPanel` 新增 `isCellEditorDirty` 未保存标记与还原按钮；`TwinPage` 下拉首项支持切回 `DEMO_GCODE`；`ModelPairingGuide` 为未激活套系展示缺模型一键下载，`VoiceSpeakerCard` / `VoiceHomeApprovalCard` / `VoiceFirmwareCard` 增加 `active` 与 `!document.hidden` 门禁，隐私子卡接入 `useVoiceDirty`；工作台与画板补齐空文本生成门禁、自定义文件选择按钮及共享 `useModalFocusTrap` 焦点锁定。
+- **验证**：`deviceConnection`、`drawConnection`、`materialLabState`、`modelPairingGuide` 与 `uiPolishB` 新增行程同步、画板尺寸校验、断点续雕、轴自动互换、参数脏状态、套系缺模型提示、折叠轮询门禁及弹窗 Tab 焦点循环单测；`node scripts/verify.mjs --finish` 通过。真实大幅面控制器行程上报与断点续雕未实机出光复测（`unverified`）。
+- **关联**：`frontend/src/{deviceConnection,drawConnection,materialLabState}.js`、`frontend/src/components/useModalFocusTrap.js`、`frontend/src/pages/{HomePage,DrawPage,MaterialLabPage,TwinPage,VoicePage}.jsx`、`frontend/src/components/draw/{DrawMaterialCard,DrawSendCard,SendConfirmDialog}.jsx`、`frontend/src/components/material-lab/{LabMatrixSettings,LabParamsPanel}.jsx`、`frontend/src/components/voice-builtin/ModelPairingGuide.jsx`。
 
 ### 修复数字孪生开关状态误报、Colab 旧模型残留、画板覆盖切割选择、手机网页隐藏串口及画板光栅参数丢失（2026-11-26）
 

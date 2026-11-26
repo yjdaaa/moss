@@ -41,6 +41,12 @@ export const SERIAL_BAUDRATES = Object.freeze([
 ]);
 export const DEVICE_CONNECTION_EVENT = "moss:device-connection";
 export const MACHINE_MOTION_EVENT = "moss:machine-motion";
+export const WORKSPACE_LIMITS_KEY = "moss_yisu_workspace_limits_v1";
+export const WORKSPACE_LIMITS_EVENT = "moss:workspace-limits";
+export const DEFAULT_XY_TRAVEL_MM = 100;
+export const DEFAULT_Z_TRAVEL_MM = 20;
+export const MAX_XY_TRAVEL_MM = 2000;
+export const MAX_Z_TRAVEL_MM = 500;
 export const DEVICE_LOG_EVENT = "moss:device-log";
 
 const USE_DEFAULT_STORAGE = Symbol("defaultStorage");
@@ -75,6 +81,85 @@ export function readBufferedDeviceLogs() {
 
 export function clearBufferedDeviceLogs() {
   recentDeviceLogs.length = 0;
+}
+
+function clampTravel(val, min, max, fallback) {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+/** 读取本机保存的雕刻机有效行程（默认对齐翼宿 V1.0 100×100×20mm）。 */
+export function readWorkspaceLimits(storage = defaultStorage()) {
+  try {
+    const raw = storage?.getItem?.(WORKSPACE_LIMITS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const x = Number(parsed?.x_travel_mm);
+      const y = Number(parsed?.y_travel_mm);
+      const z = Number(parsed?.z_travel_mm);
+      if (x >= 20 && x <= MAX_XY_TRAVEL_MM && y >= 20 && y <= MAX_XY_TRAVEL_MM) {
+        return {
+          x_travel_mm: x,
+          y_travel_mm: y,
+          z_travel_mm: z >= 5 && z <= MAX_Z_TRAVEL_MM ? z : DEFAULT_Z_TRAVEL_MM,
+          from_hardware: Boolean(parsed?.from_hardware),
+          manual: Boolean(parsed?.manual),
+        };
+      }
+    }
+  } catch (_error) {
+    // 存储不可用时回退默认行程
+  }
+  return {
+    x_travel_mm: DEFAULT_XY_TRAVEL_MM,
+    y_travel_mm: DEFAULT_XY_TRAVEL_MM,
+    z_travel_mm: DEFAULT_Z_TRAVEL_MM,
+    from_hardware: false,
+  };
+}
+
+/** 写入雕刻机有效行程并广播事件，使创作画板与数字孪生实时同步最大雕刻范围。 */
+export function writeWorkspaceLimits(patch = {}, storage = defaultStorage()) {
+  const base = readWorkspaceLimits(storage);
+  const next = {
+    ...base,
+    ...patch,
+    x_travel_mm: clampTravel(patch?.x_travel_mm ?? base.x_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
+    y_travel_mm: clampTravel(patch?.y_travel_mm ?? base.y_travel_mm, 20, MAX_XY_TRAVEL_MM, DEFAULT_XY_TRAVEL_MM),
+    z_travel_mm: clampTravel(patch?.z_travel_mm ?? base.z_travel_mm, 5, MAX_Z_TRAVEL_MM, DEFAULT_Z_TRAVEL_MM),
+  };
+  try {
+    storage?.setItem?.(WORKSPACE_LIMITS_KEY, JSON.stringify(next));
+  } catch (_error) {
+    // 存储受限时仅在当前会话广播
+  }
+  try {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      window.dispatchEvent(new CustomEvent(WORKSPACE_LIMITS_EVENT, { detail: next }));
+    }
+  } catch (_error) {
+    // 非浏览器环境忽略事件广播
+  }
+  return next;
+}
+
+/** 当硬件握手返回实机行程（`$130/$131` 或 FluidNC `max_travel_mm`）时，自动同步到全局行程配置。 */
+export function syncHardwareWorkspaceLimits(machineLimits, storage = defaultStorage()) {
+  if (!machineLimits || typeof machineLimits !== "object") return null;
+  const x = Number(machineLimits.x_travel_mm);
+  const y = Number(machineLimits.y_travel_mm);
+  if (!(x > 0) && !(y > 0)) return null;
+  return writeWorkspaceLimits(
+    {
+      ...(x > 0 ? { x_travel_mm: x } : {}),
+      ...(y > 0 ? { y_travel_mm: y } : {}),
+      ...(Number(machineLimits.z_travel_mm) > 0 ? { z_travel_mm: Number(machineLimits.z_travel_mm) } : {}),
+      from_hardware: true,
+      manual: false,
+    },
+    storage,
+  );
 }
 
 function defaultStorage() {

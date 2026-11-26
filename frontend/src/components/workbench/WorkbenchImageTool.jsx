@@ -1,4 +1,5 @@
 import React from "react";
+import { Upload, X } from "lucide-react";
 import { postJson } from "../../api/client.js";
 import { showAlert } from "../../appDialog.js";
 import { IMAGE_PRESET_HINTS, detectImagePreset } from "../../qualityPresets.js";
@@ -35,51 +36,75 @@ export function WorkbenchImageTool({
         <label className="wb-label-2">
           上传图像文件 (PNG / JPG / BMP / GIF / WebP)
         </label>
-        <input
-          type="file"
-          accept=".png,.jpg,.jpeg,.bmp,.gif,.webp"
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            e.target.value = "";
-            if (!file) return;
-            if (file.size > 14 * 1024 * 1024) {
-              showAlert("图片文件过大（上限 14 MB，Base64 传输请求体限 20 MB），请先压缩分辨率后再上传。", {
-                title: "图片超出大小限制",
-                tone: "warning",
-              });
-              return;
-            }
-            addLog("FILE", `正在读取素材: ${file.name}...`, "info");
-            const reader = new FileReader();
-            reader.onload = async () => {
-              const dataUrl = typeof reader.result === "string" ? reader.result : "";
-              try {
-                const res = await postJson("/api/upload", {
-                  filename: file.name,
-                  content_base64: dataUrl,
-                });
-                if (res.ok && res.data?.success) {
-                  setUploadedImagePath(res.data.result?.file_path || file.name);
-                  setUploadedImageName(file.name);
-                  setUploadedImageThumb(dataUrl);
-                  addLog("FILE", `已保存至工作区: ${file.name}`, "ok");
-                } else {
-                  const err = res.data?.result || "上传失败";
-                  addLog("FILE", `图片上传失败: ${err}`, "error");
-                  showAlert(err, { title: "图片上传失败", tone: "error" });
+        <div className="wb-file-picker-row">
+          <label className="btn btn-ghost wb-file-picker-btn" id="wb-image-picker-btn">
+            <Upload size={14} aria-hidden="true" />
+            <span>{uploadedImagePath ? "更换图像文件…" : "选择图像文件…"}</span>
+            <input
+              id="wb-image-file-input"
+              type="file"
+              accept=".png,.jpg,.jpeg,.bmp,.gif,.webp"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                if (file.size > 14 * 1024 * 1024) {
+                  showAlert("图片文件过大（上限 14 MB，Base64 传输请求体限 20 MB），请先压缩分辨率后再上传。", {
+                    title: "图片超出大小限制",
+                    tone: "warning",
+                  });
+                  return;
                 }
-              } catch (err) {
-                addLog("FILE", `网络或系统异常: ${err.message}`, "error");
-                showAlert(err.message, { title: "上传异常", tone: "error" });
-              }
-            };
-            reader.onerror = () => {
-              addLog("FILE", "本地文件读取失败", "error");
-            };
-            reader.readAsDataURL(file);
-          }}
-          className="file-input wb-field-6"
-        />
+                addLog("FILE", `正在读取素材: ${file.name}...`, "info");
+                const reader = new FileReader();
+                reader.onload = async () => {
+                  const dataUrl = typeof reader.result === "string" ? reader.result : "";
+                  try {
+                    const res = await postJson("/api/upload", {
+                      filename: file.name,
+                      content_base64: dataUrl,
+                    });
+                    if (res.ok && res.data?.success) {
+                      setUploadedImagePath(res.data.result?.file_path || file.name);
+                      setUploadedImageName(file.name);
+                      setUploadedImageThumb(dataUrl);
+                      addLog("FILE", `已保存至工作区: ${file.name}`, "ok");
+                    } else {
+                      const err = res.data?.result || "上传失败";
+                      addLog("FILE", `图片上传失败: ${err}`, "error");
+                      showAlert(err, { title: "图片上传失败", tone: "error" });
+                    }
+                  } catch (err) {
+                    addLog("FILE", `网络或系统异常: ${err.message}`, "error");
+                    showAlert(err.message, { title: "上传异常", tone: "error" });
+                  }
+                };
+                reader.onerror = () => {
+                  addLog("FILE", "本地文件读取失败", "error");
+                };
+                reader.readAsDataURL(file);
+              }}
+              className="sr-only-file file-input wb-field-6"
+            />
+          </label>
+          {uploadedImagePath && (
+            <button
+              type="button"
+              id="wb-image-clear-btn"
+              className="btn btn-ghost wb-file-clear-btn"
+              onClick={() => {
+                setUploadedImagePath("");
+                setUploadedImageName("");
+                setUploadedImageThumb("");
+              }}
+              title="移除已选择的图像文件"
+              aria-label="移除已选择的图像文件"
+            >
+              <X size={13} aria-hidden="true" />
+              <span>移除</span>
+            </button>
+          )}
+        </div>
         {uploadedImagePath && (
           <div className="wb-box-2 wb-image-thumb-row" id="wb-image-selected">
             {uploadedImageThumb && (
@@ -97,7 +122,7 @@ export function WorkbenchImageTool({
           onSelect={applyImageQualityPreset}
         />
       )}
-      <div className="wb-params-grid">
+      <div className="wb-params-grid wb-params-grid--2">
         <label>
           <span>成品宽 mm</span>
           <input
@@ -136,7 +161,7 @@ export function WorkbenchImageTool({
           <span className="fill-options-title">高级设置</span>
           <span className="fill-options-summary">{imageAdvancedSummary(imageMode, imageExtras)}</span>
         </summary>
-        <div className="wb-params-grid">
+        <div className="wb-params-grid wb-params-grid--2">
           <label>
             <span>转换方式</span>
             <select

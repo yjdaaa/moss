@@ -4,6 +4,7 @@ import { KeyRound, X } from "lucide-react";
 import { storeAuthToken, clearAuthToken, readAuthToken, isRemoteMode } from "../authSession.js";
 import { postJson } from "../api/client.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
+import { useModalFocusTrap } from "./useModalFocusTrap.js";
 
 // 关闭时整个对话框卸载，下次打开输入框与报错从空白开始；Hooks 放在内层组件，保证每次渲染调用顺序一致
 export function AuthModal({ visible, ...props }) {
@@ -15,8 +16,12 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const backdropRef = useRef(null);
+  const dialogRef = useRef(null);
+  const codeInputRef = useRef(null);
   const backdropPressRef = useRef(false);
   const currentToken = readAuthToken();
+
+  useModalFocusTrap({ backdropRef, dialogRef, initialFocusRef: codeInputRef });
 
   useEffect(() => {
     const onKey = (e) => {
@@ -90,7 +95,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
         backdropPressRef.current = false;
       }}
     >
-      <div className="mat-modal auth-box-2" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+      <div ref={dialogRef} className="mat-modal auth-box-2" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
         <div className="mat-modal-head">
           <h3 id="auth-modal-title" className="auth-heading">
             <KeyRound size={18} />
@@ -109,6 +114,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
           <div className="mat-field">
             <label htmlFor="auth-code-input">6 位配对码</label>
             <input
+              ref={codeInputRef}
               id="auth-code-input"
               type="text"
               maxLength={6}
@@ -122,7 +128,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
                   void handlePair();
                 }
               }}
-              className="auth-field"
+              className="text-input auth-field"
               autoComplete="off"
             />
           </div>

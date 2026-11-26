@@ -1,7 +1,8 @@
 import React from "react";
-import { Eye, Save, Send, Square, UploadCloud } from "lucide-react";
+import { Eye, Flame, Save, Send, Square, UploadCloud } from "lucide-react";
 import { writeFramingShape } from "../../aiPreviewState.js";
 import { drawTargetMissingText } from "../../drawConnection.js";
+import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
 import { REGISTRATION_DRAW_SESSION_KEY, drawOriginNote } from "../../registrationState.js";
 import { FeedbackPanel } from "../FeedbackPanel.jsx";
 import { FoldHeader } from "../FoldHeader.jsx";
@@ -60,6 +61,7 @@ export function DrawSendCard({
   setStatus,
   generatePreview,
   openSendConfirmation,
+  resumeWorkflow,
   runFraming,
   cancelWorkflow,
   adoptRegistered,
@@ -68,6 +70,13 @@ export function DrawSendCard({
 }) {
   const status = result?.result?.status;
   const jobActive = ACTIVE_STATUSES.includes(status);
+  const sendResult = result?.result?.send_result;
+  const sendProgress = sendResult
+    ? { sent: Number(sendResult.lines_sent) || 0, total: Number(sendResult.total_lines) || 0 }
+    : null;
+  const canResume = Boolean(
+    canActOnWorkflow && !previewStale && hostReady && canResumeJob(sendProgress, status),
+  );
   const notice = drawSendNotice({ canActOnWorkflow, previewStale, hostReady, summaryAllowsSend, form });
   const pathUrl = web.gcode_preview_url || web.image_preview_url;
   return (
@@ -151,16 +160,32 @@ export function DrawSendCard({
               <span>下载 G-code</span>
             </button>
           ) : null}
-          <button
-            type="button"
-            className="btn btn-ghost wb-sec-btn is-warn"
-            onClick={cancelWorkflow}
-            disabled={busy}
-            title="停止后续发送并请求安全停机；紧急情况请按顶栏急停"
-          >
-            <Square size={14} aria-hidden="true" />
-            <span>取消任务</span>
-          </button>
+          {canResume && resumeWorkflow ? (
+            <button
+              type="button"
+              id="draw-resume-send-btn"
+              className="btn btn-hud-fire btn-resume wb-sec-btn"
+              onClick={resumeWorkflow}
+              disabled={busy}
+              title="从上次安全停机记录的断点行继续流式下发剩余 G-code"
+            >
+              <Flame size={14} aria-hidden="true" />
+              <span>{formatResumeActionLabel(sendProgress)}</span>
+            </button>
+          ) : null}
+          {jobActive ? (
+            <button
+              type="button"
+              id="draw-cancel-job-btn"
+              className="btn btn-ghost wb-sec-btn is-warn"
+              onClick={cancelWorkflow}
+              disabled={busy}
+              title="停止后续发送并请求安全停机；紧急情况请按顶栏急停"
+            >
+              <Square size={14} aria-hidden="true" />
+              <span>取消任务</span>
+            </button>
+          ) : null}
         </div>
       ) : null}
 

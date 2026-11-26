@@ -15,6 +15,7 @@ import {
   emitDeviceLog,
   probeControllerConnection,
   readUnifiedConnection,
+  syncHardwareWorkspaceLimits,
 } from "./deviceConnection.js";
 import { drawTargetReady } from "./drawConnection.js";
 import { machineMotionFromLimits, writeMachineMotion } from "./fillOptions.js";
@@ -149,6 +150,7 @@ function App() {
             && String(saved.network_telnet_port) === String(current.network_telnet_port));
       if (!sameTarget) return;
       setConnectionStatus(outcome.status);
+      syncHardwareWorkspaceLimits(outcome.machineLimits);
       const motion = machineMotionFromLimits(outcome.machineLimits);
       if (motion) {
         writeMachineMotion(motion);

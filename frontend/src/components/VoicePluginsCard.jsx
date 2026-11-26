@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { useVoiceDirty } from "./VoiceLayout.jsx";
 
 const INITIAL = {
   weather_enabled: false, weather_host: "", weather_latitude: null, weather_longitude: null, weather_auth: "api_key",
@@ -30,6 +31,7 @@ const parseOptionalNumber = (raw, label) => {
 
 export default function VoicePluginsCard() {
   const [config, setConfig] = useState(INITIAL);
+  const [baselineSnap, setBaselineSnap] = useState("");
   const [selectedService, setSelectedService] = useState("lunar");
   const [keyStatus, setKeyStatus] = useState({});
   const [keyChanges, setKeyChanges] = useState(emptyKeys);
@@ -39,24 +41,34 @@ export default function VoicePluginsCard() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const buildSnap = (cfg, src, ds) => JSON.stringify({ cfg, src: String(src || "").trim(), ds: String(ds || "").trim() });
+  const hasKeyEdit = Object.values(keyChanges).some((k) => k.action !== "keep" && (k.action === "clear" || Boolean(k.value)));
+  const isDirty = !loading && Boolean(baselineSnap) && (buildSnap(config, sources, datasets) !== baselineSnap || hasKeyEdit);
+  useVoiceDirty(isDirty);
   const load = async () => {
     const data = await voiceApi.pluginsStatus();
     const next = { ...INITIAL, ...(data.settings || {}) };
+    const nextSources = (next.news_sources || []).map((s) => s.kind === "newsnow" ? [s.id, "newsnow", s.url, s.source_id].join("|") : [s.id, s.url].join("|")).join("\n");
+    const nextDatasets = (next.rag_dataset_ids || []).join("\n");
     setConfig(next);
     setKeyStatus(data.keys || {});
-    setSources((next.news_sources || []).map((s) => s.kind === "newsnow" ? [s.id, "newsnow", s.url, s.source_id].join("|") : [s.id, s.url].join("|")).join("\n"));
-    setDatasets((next.rag_dataset_ids || []).join("\n"));
+    setSources(nextSources);
+    setDatasets(nextDatasets);
     setKeyChanges(emptyKeys());
+    setBaselineSnap(buildSnap(next, nextSources, nextDatasets));
   };
   useEffect(() => {
     let active = true;
     voiceApi.pluginsStatus().then((data) => {
       if (!active) return;
       const next = { ...INITIAL, ...(data.settings || {}) };
+      const nextSources = (next.news_sources || []).map((s) => s.kind === "newsnow" ? [s.id, "newsnow", s.url, s.source_id].join("|") : [s.id, s.url].join("|")).join("\n");
+      const nextDatasets = (next.rag_dataset_ids || []).join("\n");
       setConfig(next);
       setKeyStatus(data.keys || {});
-      setSources((next.news_sources || []).map((s) => s.kind === "newsnow" ? [s.id, "newsnow", s.url, s.source_id].join("|") : [s.id, s.url].join("|")).join("\n"));
-      setDatasets((next.rag_dataset_ids || []).join("\n"));
+      setSources(nextSources);
+      setDatasets(nextDatasets);
+      setBaselineSnap(buildSnap(next, nextSources, nextDatasets));
     }).catch((e) => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
@@ -89,6 +101,7 @@ export default function VoicePluginsCard() {
     <label className="voice-form-group" key={name}>
       <span>{label}</span>
       <input
+        className="text-input"
         type={type === "number" ? "text" : type}
         inputMode={type === "number" ? "decimal" : undefined}
         placeholder={placeholder}
@@ -99,20 +112,20 @@ export default function VoicePluginsCard() {
     </label>
   );
   const toggle = (name, label) => (
-    <label className="voice-form-group">
-      <input type="checkbox" disabled={saving} checked={!!config[name]} onChange={(e) => set(name, e.target.checked)} /> {label}
+    <label className="voice-form-group voice-check">
+      <input type="checkbox" disabled={saving} checked={!!config[name]} onChange={(e) => set(name, e.target.checked)} /> <span>{label}</span>
     </label>
   );
   const keyField = (kind, label) => (
     <div className="voice-form-group">
       <label>{label}：{keyStatus[kind] ? "已保存密钥" : "未设置密钥"}</label>
-      <select aria-label={label + " 密钥操作"} value={keyChanges[kind].action} disabled={saving}
+      <select className="select-input" aria-label={label + " 密钥操作"} value={keyChanges[kind].action} disabled={saving}
         onChange={(e) => keyUpdate(kind, { action: e.target.value, value: "" })}>
         <option value="keep">保留原密钥</option>
         <option value="set">设置新密钥</option>
         <option value="clear">清除密钥</option>
       </select>
-      {keyChanges[kind].action === "set" && <input aria-label={label + " 新密钥"} type="password" autoComplete="new-password" value={keyChanges[kind].value} disabled={saving}
+      {keyChanges[kind].action === "set" && <input className="text-input" aria-label={label + " 新密钥"} type="password" autoComplete="new-password" value={keyChanges[kind].value} disabled={saving}
         onChange={(e) => keyUpdate(kind, { value: e.target.value })} />}
     </div>
   );
@@ -121,7 +134,7 @@ export default function VoicePluginsCard() {
     <p>只选择需要的服务。联网服务可能把查询内容发给服务商，并产生 API 费用；所有服务默认关闭。</p>
     {loading ? <p>正在读取服务设置…</p> : <>
       <label className="voice-form-group">要设置的服务
-        <select aria-label="要设置的服务" value={selectedService} onChange={(event) => setSelectedService(event.target.value)}>
+        <select className="select-input" aria-label="要设置的服务" value={selectedService} onChange={(event) => setSelectedService(event.target.value)}>
           <option value="lunar">农历（本机）</option>
           <option value="weather">天气</option>
           <option value="news">新闻</option>
@@ -143,7 +156,7 @@ export default function VoicePluginsCard() {
           {field("weather_longitude", "默认经度", "116.4", "number")}
         </div>
         <label className="voice-form-group">鉴权方式
-          <select value={config.weather_auth} disabled={saving} onChange={(e) => set("weather_auth", e.target.value)}>
+          <select className="select-input" value={config.weather_auth} disabled={saving} onChange={(e) => set("weather_auth", e.target.value)}>
             <option value="api_key">X-QW-Api-Key</option><option value="bearer">Bearer JWT</option>
           </select>
         </label>
@@ -152,13 +165,13 @@ export default function VoicePluginsCard() {
       {selectedService === "news" && <div className="voice-private-service">
         {toggle("news_enabled", "启用新闻 RSS")}
         <label className="voice-form-group">新闻来源，每行一个：RSS「编号|HTTPS地址」或 NewsNow「编号|newsnow|服务地址|来源ID」
-          <textarea rows={3} disabled={saving} value={sources} onChange={(e) => setSources(e.target.value)} placeholder="tech|https://example.com/feed.xml" />
+          <textarea className="text-input" rows={3} disabled={saving} value={sources} onChange={(e) => setSources(e.target.value)} placeholder="tech|https://example.com/feed.xml" />
         </label>
       </div>}
       {selectedService === "search" && <div className="voice-private-service">
         {toggle("search_enabled", "启用联网搜索")}
         <label className="voice-form-group">搜索服务
-          <select aria-label="搜索服务" value={config.search_provider} disabled={saving} onChange={(e) => set("search_provider", e.target.value)}>
+          <select className="select-input" aria-label="搜索服务" value={config.search_provider} disabled={saving} onChange={(e) => set("search_provider", e.target.value)}>
             <option value="tavily">Tavily</option><option value="metaso">秘塔 Metaso</option>
           </select>
         </label>
@@ -175,7 +188,7 @@ export default function VoicePluginsCard() {
         {toggle("rag_enabled", "启用外部 RAGFlow 知识库检索")}
         {field("rag_host", "RAGFlow 服务地址", "https://rag.example.com")}
         <label className="voice-form-group">数据集白名单，每行一个 Dataset ID
-          <textarea rows={3} disabled={saving} value={datasets} onChange={(e) => setDatasets(e.target.value)} />
+          <textarea className="text-input" rows={3} disabled={saving} value={datasets} onChange={(e) => setDatasets(e.target.value)} />
         </label>
         {keyField("rag", "RAGFlow API 密钥")}
       </div>}

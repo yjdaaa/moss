@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
 import { SOURCE_LABEL, scopeLabel, scopeOptions } from "../voiceContextState.js";
+import { useVoiceDirty } from "./VoiceLayout.jsx";
 
 // 无感合一版语音记忆面板（技术书 n50）：
 // 唯一总开关「让小智记住我的习惯」+ 随手补充输入框 + 单列可改可删列表。
@@ -34,6 +35,7 @@ function MemoryItemRow({ row, multiScope, busy, onEdit, onDelete }) {
         <p className="voice-context-content">{row.content}</p>
       ) : (
         <textarea
+          className="text-input"
           rows={2}
           maxLength={1000}
           value={draft}
@@ -86,6 +88,7 @@ export default function VoiceContextCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  useVoiceDirty(Boolean(newContent.trim()));
 
   const loadAll = useCallback(async (searchText = "") => {
     const [nextStatus, listed] = await Promise.all([
@@ -181,7 +184,7 @@ export default function VoiceContextCard() {
       {error && <p role="alert">{error}</p>}
       {status && (
         <>
-          <label>
+          <label className="voice-check">
             <input
               type="checkbox"
               id="context-memory-switch"
@@ -189,15 +192,16 @@ export default function VoiceContextCard() {
               disabled={busy}
               onChange={(e) => toggleMaster(e.target.checked)}
             />
-            让小智记住我的习惯（默认关闭）
+            <span>让小智记住我的习惯（默认关闭）</span>
           </label>
 
           {writableOptions.length === 0 ? (
             <p>暂无已允许的小智设备；在“设备”标签允许设备接入后，对话习惯会自动按设备记录，也可在此手动补充。</p>
           ) : (
-            <span>
+            <span className="voice-form-actions">
               {multiScope && (
                 <select
+                  className="select-input"
                   value={key(selectedScope)}
                   onChange={(e) => setScopeKey(e.target.value)}
                   disabled={busy}
@@ -211,6 +215,7 @@ export default function VoiceContextCard() {
                 </select>
               )}
               <input
+                className="text-input"
                 value={newContent}
                 maxLength={1000}
                 disabled={busy}
@@ -246,8 +251,9 @@ export default function VoiceContextCard() {
             <div className="voice-memory-list-head">
               <h4>已记住的内容（{rows.length}）</h4>
               {(rows.length > 3 || Boolean(appliedQuery)) && (
-                <span>
+                <span className="voice-form-actions">
                   <input
+                    className="text-input"
                     value={query}
                     placeholder="按词筛选"
                     disabled={busy}

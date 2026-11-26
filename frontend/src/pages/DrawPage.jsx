@@ -62,10 +62,16 @@ import { drawEstopContexts, estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
-import { manualParamsPayload } from "../workbenchParams.js";
+import { manualParamsPayload, workbenchResumeSendPrompt } from "../workbenchParams.js";
+import { canResumeJob } from "../estopResumeState.js";
 import { applyImagePreset } from "../qualityPresets.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
-import { connectionSummaryView, MACHINE_MOTION_EVENT } from "../deviceConnection.js";
+import {
+  connectionSummaryView,
+  MACHINE_MOTION_EVENT,
+  readWorkspaceLimits,
+  WORKSPACE_LIMITS_EVENT,
+} from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { OriginBadge } from "../components/OriginBadge.jsx";
@@ -124,6 +130,7 @@ import {
   parseImportedSceneJson,
   readDrawDefaultForm,
   safeBrowserStorage,
+  validateDrawDimensions,
 } from "../drawConnection.js";
 
 const BACKEND_CONFIG_KEYS = [
@@ -245,6 +252,17 @@ export function DrawPage({
     window.addEventListener(MACHINE_MOTION_EVENT, onMotion);
     return () => window.removeEventListener(MACHINE_MOTION_EVENT, onMotion);
   }, []);
+  // 雕刻机最大雕刻范围（与数字孪生、硬件握手共用本机行程记录，默认 100×100 mm）
+  const [workspaceLimits, setWorkspaceLimits] = useState(() => readWorkspaceLimits());
+  useEffect(() => {
+    const onLimits = (e) => {
+      if (e?.detail) setWorkspaceLimits(e.detail);
+    };
+    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+  }, []);
+  const maxWidthMm = Number(workspaceLimits?.x_travel_mm) > 0 ? Number(workspaceLimits.x_travel_mm) : 100;
+  const maxHeightMm = Number(workspaceLimits?.y_travel_mm) > 0 ? Number(workspaceLimits.y_travel_mm) : 100;
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
@@ -714,6 +732,7 @@ export function DrawPage({
     passes: customPasses,
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
     vectorRasterFallback,
+    workArea: `${maxWidthMm}x${maxHeightMm}`,
     // 矢量看填充设置与选区，光栅扫描（含插入图片触发光栅回退）看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
     fill: drawMode === "vector" && !vectorRasterFallback
       ? fillSettingsSignature(fillSettings, drawVectorLayerFlags(effectiveVectorStyle)) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
@@ -1029,6 +1048,12 @@ export function DrawPage({
       });
       if (!ok) return;
     }
+    const dimCheck = validateDrawDimensions(form, { maxWidthMm, maxHeightMm });
+    if (dimCheck.error) {
+      setStatus(`成品尺寸有误：${dimCheck.error}`);
+      void showAlert(dimCheck.error, { title: "成品尺寸超出雕刻范围", tone: "warning" });
+      return;
+    }
     const manual = manualParamsPayload({
       enabled: customParams,
       powerPercent: customPower,
@@ -1086,6 +1111,8 @@ export function DrawPage({
         thickness_mm: Number(form.thickness_mm) || 3.0,
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
+        ...(maxWidthMm !== 100 ? { work_area_width_mm: maxWidthMm } : {}),
+        ...(maxHeightMm !== 100 ? { work_area_height_mm: maxHeightMm } : {}),
         mode: modeSnapshot,
         ...(modeSnapshot === "vector" ? { vector_style: effectiveVectorStyle } : {}),
         ...(drawIsCut(modeSnapshot, effectiveVectorStyle) ? { laser_mode: "cut" } : {}),
@@ -1218,6 +1245,82 @@ export function DrawPage({
         startDrawJobPolling(workflowId, inFlight);
       } else {
         setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
+      }
+    } catch (error) {
+      setStatus(`请求失败：${error.message || error}`);
+    } finally {
+      if (!inFlight.stop) inFlightJobsRef.current.delete(workflowId);
+      setBusy(false);
+    }
+  }
+
+  async function resumeWorkflow() {
+    if (!workflowId || !hostReady) {
+      setStatus(workflowId ? drawTargetMissingText(form) : "请先生成预览");
+      return;
+    }
+    if (previewStale) {
+      setStatus("画布或参数已改动，当前中断任务已过期，请先重新生成预览");
+      void showAlert("画布或左侧参数已修改，禁止在旧刀路上直接断点续雕！请先点击「重新生成预览」。", {
+        title: "预览已过期 · 拦截续雕",
+        tone: "warning",
+      });
+      return;
+    }
+    const sr = result?.result?.send_result || {};
+    const sendProgress = { sent: Number(sr.lines_sent) || 0, total: Number(sr.total_lines) || 0 };
+    if (!canResumeJob(sendProgress, result?.result?.status)) return;
+    if (inFlightJobsRef.current.has(workflowId)) return;
+
+    const startLine = sendProgress.sent + 1;
+    const resumePrompt = workbenchResumeSendPrompt({
+      workflow: result?.result,
+      material: form.material,
+      thickness: form.thickness_mm,
+      targetLabel: drawTargetLabel(form),
+      startLine,
+      totalLines: sendProgress.total,
+    });
+    const confirmed = await showConfirm(resumePrompt.message, {
+      title: resumePrompt.title,
+      tone: "warning",
+      danger: resumePrompt.danger,
+      confirmText: resumePrompt.confirmText,
+      cancelText: "取消",
+    });
+    if (!confirmed) {
+      setStatus("已取消断点续雕确认，机器未启动");
+      return;
+    }
+
+    setBusy(true);
+    setStatus(`正在从第 ${startLine} 行发起断点续雕...`);
+    const inFlight = { jobId: workflowId, target: estopTargetArgs(form) };
+    inFlightJobsRef.current.set(workflowId, inFlight);
+    try {
+      const res = await postJson("/api/workflow", {
+        action: "resume",
+        workflow_id: workflowId,
+        confirmed: true,
+        ...drawConnectionPayload(form),
+        run_in_background: true,
+        wait_for_response: true,
+      });
+      const data = res.data || { success: false, result: `HTTP ${res.status}` };
+      if (isApprovalRequiredResponse(res)) {
+        setResult(data);
+        setStatus(approvalPendingMessage(res, "断点续雕"));
+        return;
+      }
+      setResult(data);
+      if (res.ok && data.success) {
+        setStatus(data.result?.speech || `断点续雕已启动：正在从第 ${startLine} 行继续执行...`);
+        startDrawJobPolling(workflowId, inFlight);
+      } else if (res.status === 0) {
+        setStatus("断点续雕请求结果未知，正在查询原任务状态，请勿重复续雕；必要时请按顶栏急停。");
+        startDrawJobPolling(workflowId, inFlight);
+      } else {
+        setStatus((typeof data.result === "string" && data.result) || "断点恢复失败");
       }
     } catch (error) {
       setStatus(`请求失败：${error.message || error}`);
@@ -1714,6 +1817,8 @@ export function DrawPage({
           setCustomFeed={setCustomFeed}
           customPasses={customPasses}
           setCustomPasses={setCustomPasses}
+          maxWidthMm={maxWidthMm}
+          maxHeightMm={maxHeightMm}
         />
 
         <DrawDeviceCard
@@ -1742,6 +1847,7 @@ export function DrawPage({
           setStatus={setStatus}
           generatePreview={generatePreview}
           openSendConfirmation={openSendConfirmation}
+          resumeWorkflow={resumeWorkflow}
           runFraming={runFraming}
           cancelWorkflow={cancelWorkflow}
           adoptRegistered={adoptRegistered}

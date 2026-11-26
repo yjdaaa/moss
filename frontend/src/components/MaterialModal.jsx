@@ -5,6 +5,7 @@ import { getJson, postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
 import { notifyMaterialsUpdated, thicknessesEqual } from "../materialSelectState.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
+import { useModalFocusTrap } from "./useModalFocusTrap.js";
 
 export function parseThicknessList(str) {
   return String(str || "")
@@ -189,7 +190,16 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const backdropRef = useRef(null);
+  const dialogRef = useRef(null);
+  const nameInputRef = useRef(null);
+  const thickInputRef = useRef(null);
   const backdropPressRef = useRef(false);
+
+  useModalFocusTrap({
+    backdropRef,
+    dialogRef,
+    initialFocusRef: isEditing ? thickInputRef : nameInputRef,
+  });
 
   useEffect(() => {
     const onKey = (e) => {
@@ -349,7 +359,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
         backdropPressRef.current = false;
       }}
     >
-      <div className="mat-modal" role="dialog" aria-modal="true" aria-labelledby="mat-modal-title">
+      <div ref={dialogRef} className="mat-modal" role="dialog" aria-modal="true" aria-labelledby="mat-modal-title">
         <div className="mat-modal-head">
           <h3 id="mat-modal-title">
             <Layers size={18} className="mat-form-icon" />
@@ -364,6 +374,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
           <div className="mat-field">
             <label htmlFor="mat-f-name">材料名称</label>
             <input
+              ref={nameInputRef}
               id="mat-f-name"
               className="text-input"
               type="text"
@@ -378,6 +389,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
           <div className="mat-field">
             <label htmlFor="mat-f-thick">厚度规格（mm，多个厚度用逗号分隔）</label>
             <input
+              ref={thickInputRef}
               id="mat-f-thick"
               className="text-input"
               type="text"

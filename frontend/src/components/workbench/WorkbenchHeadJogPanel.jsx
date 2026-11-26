@@ -81,7 +81,7 @@ export function WorkbenchHeadJogPanel({
             <span>步长</span>
             <select
               id="wb-jog-step"
-              className="wb-compact-select"
+              className="select-input wb-compact-select"
               value={step}
               disabled={guard.disabled}
               onChange={(e) => {

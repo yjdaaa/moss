@@ -110,6 +110,34 @@ export function drawSizeValue(value) {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
+/**
+ * 按当前雕刻机最大雕刻范围校验画板输入的宽 / 高（留空表示自动缩放到幅面内）：
+ * 填了非正数或超过机器行程时给出明确原因拦截。
+ */
+export function validateDrawDimensions(form, { maxWidthMm = 100, maxHeightMm = 100 } = {}) {
+  const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : 100;
+  const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : 100;
+  const check = (raw, label, maxMm) => {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed) return { value: null };
+    const num = Number(trimmed);
+    if (!Number.isFinite(num) || num <= 0) {
+      return { error: `${label}须为大于 0 的数字（留空为自动）` };
+    }
+    if (num > maxMm) {
+      return {
+        error: `${label} ${num} mm 超出当前雕刻机最大行程 ${maxMm} mm（若已更换大幅面机器，请先握手探测或在数字孪生页同步行程）`,
+      };
+    }
+    return { value: num };
+  };
+  const w = check(form?.width_mm, "成品宽度", limitW);
+  if (w.error) return { error: w.error };
+  const h = check(form?.height_mm, "成品高度", limitH);
+  if (h.error) return { error: h.error };
+  return { widthMm: w.value, heightMm: h.value };
+}
+
 export function isSerial(form) {
   return form?.connection_mode === "serial";
 }
@@ -287,6 +315,7 @@ export function drawGenerationSignature(form, custom = {}, route = "vector") {
       : custom?.presetParams
         ? `preset:${custom.presetParams}`
         : "preset",
+    ...(custom?.workArea && custom.workArea !== "100x100" ? { work_area: String(custom.workArea) } : {}),
   });
 }
 

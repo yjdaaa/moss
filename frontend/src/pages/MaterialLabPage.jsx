@@ -23,6 +23,7 @@ import { notifyMaterialsUpdated, subscribeMaterialsUpdated } from "../materialSe
 import {
   resolveMaterialLabSelection,
   resolveCellEditorValues,
+  isCellEditorDirty,
   resolveMatrixModeParams,
   matrixInputSignature,
   isMatrixStale,
@@ -230,6 +231,19 @@ export function MaterialLabPage({
 
   // 手机连接电脑或局域网浏览器访问时材料与校准结果只读（后端同样拒绝）：修改类按钮不显示，参数只能查看
   const readOnly = isReadOnlyReferenceClient();
+
+  const isParamsDirty = isCellEditorDirty(materials, selectedMaterial, selectedThickness, activeMode, {
+    maxPower,
+    feedRate,
+    passes,
+    pixelSize,
+    aliases,
+    entryTitle,
+    notes,
+  });
+  const handleResetParams = useCallback(() => {
+    applyEditorState(materials, selectedMaterial, selectedThickness, activeMode);
+  }, [applyEditorState, materials, selectedMaterial, selectedThickness, activeMode]);
 
   const handleSelectMaterialAndThick = (matName, thickKey) => {
     const nextMode = isSurfaceKey(thickKey) && activeMode === "cut" ? "raster" : activeMode;
@@ -871,6 +885,8 @@ export function MaterialLabPage({
           selectedThickness={selectedThickness}
           currentMatThicknesses={currentMatThicknesses}
           hasSavedCell={hasSavedCell}
+          isDirty={isParamsDirty}
+          handleResetParams={handleResetParams}
           editorStatus={editorStatus}
           activeMode={activeMode}
           handleModeChange={handleModeChange}

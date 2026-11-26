@@ -31,11 +31,22 @@ const PRIVATE_TASKS = [
   { key: "home", title: "家居", description: "连接设备；每次控制仍需批准" },
 ];
 
-export function PrivateSettingsEntry({ status }) {
+export function PrivateSettingsEntry({ status, active = true }) {
   const [opened, setOpened] = useState(() => new Set());
+  const [openKeys, setOpenKeys] = useState(() => new Set());
   const [advanced, setAdvanced] = useState(() => new Set());
+  const [homeApprovalsOpen, setHomeApprovalsOpen] = useState(false);
   const expand = (key) => setOpened((old) => (old.has(key) ? old : new Set([...old, key])));
   const expandAdvanced = (key) => setAdvanced((old) => (old.has(key) ? old : new Set([...old, key])));
+  const setOpenState = (key, isOpen) => {
+    setOpenKeys((old) => {
+      if (old.has(key) === isOpen) return old;
+      const next = new Set(old);
+      if (isOpen) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
   const homeRef = useRef(null);
   const homeApprovalsRef = useRef(null);
   const [focusApprovals, setFocusApprovals] = useState(false);
@@ -43,7 +54,9 @@ export function PrivateSettingsEntry({ status }) {
   useEffect(() => {
     const focusHomeApprovals = () => {
       expand("home");
+      setOpenState("home", true);
       expandAdvanced("home");
+      setHomeApprovalsOpen(true);
       if (homeRef.current) homeRef.current.open = true;
       setFocusApprovals(true);
       clearVoiceFocus(HOME_APPROVALS);
@@ -72,7 +85,11 @@ export function PrivateSettingsEntry({ status }) {
         {PRIVATE_TASKS.map(({ key, title, description }) => (
           <details key={key} className="voice-private-item" id={`voice-private-${key}-item`}
             ref={key === "home" ? homeRef : undefined}
-            onToggle={(event) => { if (event.currentTarget.open) expand(key); }}>
+            onToggle={(event) => {
+              const isOpen = Boolean(event.currentTarget.open);
+              if (isOpen) expand(key);
+              setOpenState(key, isOpen);
+            }}>
             <summary>
               <ChevronDown className="voice-private-item-arrow" size={15} aria-hidden="true" />
               <strong>{title}</strong>
@@ -81,15 +98,21 @@ export function PrivateSettingsEntry({ status }) {
             <div className="voice-private-item-body">
               {key === "memory" && opened.has("memory") && <VoiceContextCard status={status} />}
               {key === "plugins" && opened.has("plugins") && <VoicePluginsCard />}
-              {key === "speaker" && opened.has("speaker") && <VoiceSpeakerCard />}
+              {key === "speaker" && opened.has("speaker") && <VoiceSpeakerCard active={active && openKeys.has("speaker")} />}
               {key === "home" && opened.has("home") && (
                 <>
-                  <VoiceHomeCard />
+                  <VoiceHomeCard active={active && openKeys.has("home")} />
                   <details className="voice-private-more" id="voice-private-home-approvals"
                     ref={homeApprovalsRef}
-                    onToggle={(event) => { if (event.currentTarget.open) expandAdvanced("home"); }}>
+                    onToggle={(event) => {
+                      const isOpen = Boolean(event.currentTarget.open);
+                      if (isOpen) expandAdvanced("home");
+                      setHomeApprovalsOpen(isOpen);
+                    }}>
                     <summary>家居审批</summary>
-                    {advanced.has("home") && <VoiceHomeApprovalCard />}
+                    {advanced.has("home") && (
+                      <VoiceHomeApprovalCard active={active && openKeys.has("home") && homeApprovalsOpen} />
+                    )}
                   </details>
                 </>
               )}

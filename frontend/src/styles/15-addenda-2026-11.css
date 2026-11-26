@@ -1481,3 +1481,258 @@ button.conn-pill:hover {
   margin-top: 8px;
 }
 
+.lab-heading-tag.is-dirty {
+  color: var(--ob-amber);
+  font-weight: 600;
+}
+.wb-file-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.wb-file-picker-btn {
+  cursor: pointer;
+}
+
+/* ============================================================
+   2026-11-26 雕刻工作台各卡片选择框排列、等高对齐与嵌套框收整
+   ============================================================ */
+.ob-card .tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ob-card .tool-body > .wb-spacer-2 {
+  margin-bottom: 0;
+}
+.ob-card .tool-body > .quality-presets,
+.ob-card .tool-body > .engrave-route .quality-presets,
+.ob-card .tool-body > .fill-options {
+  margin-top: 0;
+}
+.wb-params-grid {
+  align-items: stretch;
+}
+.wb-params-grid.wb-params-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.wb-params-grid.wb-params-grid--2 > label:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+.wb-params-grid label {
+  justify-content: space-between;
+  gap: 5px;
+  font-size: 11.5px;
+}
+.wb-params-grid label > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  line-height: 1.3;
+}
+.wb-params-grid input,
+.wb-params-grid select,
+.wb-params-grid .wb-compact-select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 6px 10px !important;
+  font-size: 12.5px;
+  line-height: 1.35;
+  border-radius: 9px;
+}
+.wb-params-grid select,
+.wb-params-grid .wb-compact-select {
+  padding-right: 26px !important;
+}
+.wb-params-grid.wb-text-params-grid .wb-compact-select {
+  padding: 6px 22px 6px 8px !important;
+}
+.fill-options-body {
+  align-items: stretch;
+}
+.fill-options:not(.registration-panel) .fill-options-body > label:not(.checkbox-row) {
+  justify-content: space-between;
+  gap: 5px;
+  font-size: 11.5px;
+  white-space: normal;
+}
+.fill-options-body input[type="number"],
+.fill-options-body select {
+  height: 34px;
+  box-sizing: border-box;
+  padding: 6px 10px !important;
+  font-size: 12.5px;
+  line-height: 1.35;
+  border-radius: 9px;
+}
+.fill-options-body select {
+  padding-right: 28px !important;
+}
+.fill-options-material > .btn,
+.fill-offset-table > .btn,
+.fill-offset-row > .btn {
+  height: 32px;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.registration-panel .registration-custom {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 2px;
+}
+.registration-panel .registration-custom > input {
+  width: 100%;
+  min-width: 0;
+}
+.wb-box-6 {
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wb-box-6 > .wb-row-5 {
+  margin-bottom: 0;
+}
+.wb-box-6 > .wb-params {
+  margin-top: 0;
+}
+.wb-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.wb-grid-2 > :only-child {
+  grid-column: 1 / -1;
+}
+.wb-grid-2 > div {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 0;
+}
+.wb-grid-2 .wb-label-3.wb-label-3.wb-label-3 {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-bottom: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ob-ink-2);
+}
+.wb-grid-2 select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 6px 28px 6px 10px !important;
+  font-size: 12.5px;
+  line-height: 1.35;
+  border-radius: 9px;
+}
+.wb-jog-step-label select,
+.wb-jog-btn {
+  height: 30px;
+  box-sizing: border-box;
+}
+.wb-jog-origin-actions {
+  margin-left: auto;
+}
+[data-wb-card="feedback"] .feedback-panel {
+  padding: 0;
+  border-top: 0;
+}
+.feedback-panel textarea {
+  border-radius: 10px;
+  border: 1px solid var(--ob-line-2) !important;
+  background: var(--ob-well) !important;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+/* ---- 跨页选择框与并排表单网格统一对齐（创作画板 / 材料实验室 / 语音中心 / 数字孪生 / 连接与材料弹窗） ---- */
+.ob-draw-page .control-panel .material-library-label {
+  margin-bottom: 0;
+}
+.ob-draw-page .control-panel .material-library-row > select,
+.ob-draw-page .control-panel .material-library-row > .icon-button,
+.ob-draw-page .control-panel > .wb-card-body select.select-input,
+.ob-draw-page .control-panel > .wb-card-body input.text-input {
+  height: 36px;
+  box-sizing: border-box;
+}
+.ob-draw-page .control-panel .dimension-grid {
+  align-items: stretch;
+}
+.ob-draw-page .control-panel .dimension-grid > label {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.lab-grid.lab-grid.lab-grid > div:not(.lab-box-3) {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.lab-grid.lab-grid.lab-grid > div:nth-child(3):has(+ .lab-box-3) {
+  grid-column: 1 / -1;
+}
+.lab-grid .lab-label-2.lab-label-2.lab-label-2 {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+}
+.lab-grid .lab-field-3.lab-field-3 {
+  height: 36px;
+  box-sizing: border-box;
+}
+.lab-grid-2:not(:has(> :nth-child(3))) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.lab-field-4.lab-field-4,
+.lab-axis-select.lab-axis-select {
+  height: 32px;
+  box-sizing: border-box;
+}
+.voice-form-grid > label:not(.voice-check):not(.voice-wide) > span:first-child,
+.voice-form-grid > .voice-field:not(.voice-wide) > .voice-field-head {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+}
+.voice-form-grid input.text-input,
+.voice-form-grid select.text-input,
+.voice-form-grid select.select-input {
+  height: 38px;
+  box-sizing: border-box;
+}
+.device-conn-inline > select,
+.device-conn-inline > .btn,
+.mat-field > input,
+.mat-field > select {
+  height: 38px;
+  box-sizing: border-box;
+}
+.twin-row-actions > .twin-select,
+.twin-row-actions > .twin-select + .btn {
+  height: 36px;
+  box-sizing: border-box;
+}
+
+
+
+

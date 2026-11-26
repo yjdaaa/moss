@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
+import { useVoiceDirty } from "./VoiceLayout.jsx";
 
 // NV15 stores inert settings and a separate local token, never connecting to
 // HA or issuing control requests before the dedicated production gate.
@@ -30,8 +31,9 @@ const asForm = (settings) => ({
   }) : [],
 });
 
-export default function VoiceHomeCard() {
+export default function VoiceHomeCard({ active = true }) {
   const [form, setForm] = useState(EMPTY);
+  const [baselineSnap, setBaselineSnap] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [revision, setRevision] = useState(null);
   const [credentialRevision, setCredentialRevision] = useState(null);
@@ -48,6 +50,17 @@ export default function VoiceHomeCard() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const snapForm = (f) => JSON.stringify({
+    base_url: String(f?.base_url || "").trim(),
+    entities: (f?.entities || []).map((e) => ({
+      entity_id: String(e.entity_id || "").trim(),
+      alias: String(e.alias || "").trim(),
+      enabled: Boolean(e.enabled),
+      media: e.media || [],
+    })),
+  });
+  const isDirty = loaded && ((Boolean(baselineSnap) && snapForm(form) !== baselineSnap) || Boolean(token.trim()));
+  useVoiceDirty(isDirty);
 
   useEffect(() => {
     let alive = true;
@@ -57,7 +70,9 @@ export default function VoiceHomeCard() {
         setError(data.reason || "Home Assistant 配置无法安全读取");
         return;
       }
-      setForm(asForm(data.settings));
+      const initial = asForm(data.settings);
+      setForm(initial);
+      setBaselineSnap(snapForm(initial));
       setRevision(data.revision);
       setCredentialRevision(data.credential_revision);
       setCredentialConfigured(!!data.key_configured);
@@ -79,7 +94,9 @@ export default function VoiceHomeCard() {
     try {
       const data = await voiceApi.homeStatus();
       if (!Number.isSafeInteger(data.revision) || !data.settings) throw new Error(data.reason || "配置不可读取");
-      setForm(asForm(data.settings));
+      const next = asForm(data.settings);
+      setForm(next);
+      setBaselineSnap(snapForm(next));
       setRevision(data.revision);
       setCredentialRevision(data.credential_revision);
       setCredentialConfigured(!!data.key_configured);
@@ -138,7 +155,9 @@ export default function VoiceHomeCard() {
       setVoiceReadEnabled(false);
       setVoiceControlEnabled(false);
       setToken("");
-      setForm(asForm(status.settings));
+      const restored = asForm(status.settings);
+      setForm(restored);
+      setBaselineSnap(snapForm(restored));
       setMessage("白名单配置已恢复为全部停用；旧令牌和全部家居授权已撤销。请重新输入令牌并逐项核对设备。");
     } catch (e) {
       setCredentialConfigured(false);
@@ -222,15 +241,15 @@ export default function VoiceHomeCard() {
 
   // Opt-in, bounded read-only polling. No home control or auto-authorization.
   useEffect(() => {
-    if (!syncEnabled || !loaded || !credentialConfigured) return;
-    let active = true;
+    if (!active || !syncEnabled || !loaded || !credentialConfigured) return;
+    let live = true;
     let inFlight = false;
     const refresh = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
         const result = await voiceApi.homeDiscover();
-        if (!active) return;
+        if (!live) return;
         if (!Array.isArray(result.entities) || result.policy_revision !== revision
           || result.credential_revision !== credentialRevision) {
           setSyncEnabled(false);
@@ -242,7 +261,7 @@ export default function VoiceHomeCard() {
         setSyncedAt(new Date().toLocaleTimeString("zh-CN"));
         setError("");
       } catch (e) {
-        if (!active) return;
+        if (!live) return;
         setDiscovery((old) => old?.map((entry) => ({
           ...entry, state: "unavailable", actions_available: [], attributes: {}, last_updated: "",
         })) ?? null);
@@ -256,8 +275,8 @@ export default function VoiceHomeCard() {
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
     }, 15_000);
-    return () => { active = false; clearInterval(timer); };
-  }, [syncEnabled, loaded, credentialConfigured, revision, credentialRevision]);
+    return () => { live = false; clearInterval(timer); };
+  }, [active, syncEnabled, loaded, credentialConfigured, revision, credentialRevision]);
 
   const update = (index, patch) => setForm((current) => ({
     ...current,
@@ -297,7 +316,9 @@ export default function VoiceHomeCard() {
       const result = await voiceApi.homeSave({ settings, expected_revision: revision });
       if (!Number.isSafeInteger(result.revision)) throw new Error("保存回执缺少有效版本");
       setRevision(result.revision);
-      setForm(asForm(result.settings));
+      const savedForm = asForm(result.settings);
+      setForm(savedForm);
+      setBaselineSnap(snapForm(savedForm));
       setDiscovery(null);
       setSyncEnabled(false);
       setMessage("白名单已保存。白名单或令牌变化会撤销旧授权；继续使用前请重新确认。");
@@ -317,7 +338,7 @@ export default function VoiceHomeCard() {
         <summary>访问令牌：{credentialConfigured ? "已设置（更换或撤销）" : "未设置（需要填写）"}</summary>
         <p>令牌只保存在本机，不会回显。更改令牌会撤销现有授权。</p>
         <label><span>长期访问令牌（不会自动连接家居）</span>
-          <input type="password" value={token} disabled={!loaded || busy} autoComplete="new-password"
+          <input className="text-input" type="password" value={token} disabled={!loaded || busy} autoComplete="new-password"
             onChange={(event) => setToken(event.target.value)} placeholder="输入新令牌以替换" />
         </label>
         <div className="voice-form-actions">
@@ -328,7 +349,7 @@ export default function VoiceHomeCard() {
 
       <label className="voice-form-group">
         <span>Home Assistant HTTPS 地址（保存后可手动只读同步）</span>
-        <input value={form.base_url} disabled={!loaded || busy} autoComplete="off"
+        <input className="text-input" value={form.base_url} disabled={!loaded || busy} autoComplete="off"
           placeholder="https://ha.example.test:8123/"
           onChange={(event) => setForm((current) => ({
             ...current, base_url: event.target.value,
@@ -345,24 +366,25 @@ export default function VoiceHomeCard() {
         <div className="voice-form-group" key={index}>
           <label>
             <span>实体 ID</span>
-            <input value={entity.entity_id} disabled={!loaded || busy}
+            <input className="text-input" value={entity.entity_id} disabled={!loaded || busy}
               placeholder="例如 light.desk"
               onChange={(event) => update(index, { entity_id: event.target.value })} />
           </label>
           <label>
             <span>语音别名</span>
-            <input value={entity.alias} disabled={!loaded || busy}
+            <input className="text-input" value={entity.alias} disabled={!loaded || busy}
               placeholder="例如 书桌灯"
               onChange={(event) => update(index, { alias: event.target.value })} />
           </label>
-          <label>
+          <label className="voice-check">
             <input type="checkbox" checked={entity.enabled} disabled={!loaded || busy}
               onChange={(event) => update(index, { enabled: event.target.checked })} />
-            加入语音实体白名单（动作仍需逐次审批）
+            <span>加入语音实体白名单（动作仍需逐次审批）</span>
           </label>
           {entity.entity_id.startsWith("media_player.") && <label>
             <span>本地音乐白名单，每行 library_ID|music 或 library_ID|playlist</span>
             <textarea
+              className="text-input"
               value={entity.media_text ?? (entity.media || []).map((m) => `${m.id}|${m.media_type}`).join("\n")}
               disabled={!loaded || busy}
               onChange={(event) => {
@@ -398,7 +420,7 @@ export default function VoiceHomeCard() {
         </div>
         {backupAudit && <p role="status">历史文件只读审计：{backupAudit.risk === "suspected_legacy_credential" ? "疑似包含旧访问令牌" : backupAudit.risk === "encrypted_credential_material" ? "包含凭据加密材料标记" : "无法确认安全，按敏感文件处理"}；读取 {backupAudit.inspected_bytes} 字节。请勿公开分享；若疑似泄漏应在 HA 服务端撤销并更换令牌。未读取或显示令牌内容。</p>}
         <label><span>配置备份 JSON（手动复制或粘贴，最多 64 KiB）</span>
-          <textarea value={portableBackup} disabled={busy} rows={5} spellCheck={false}
+          <textarea className="text-input" value={portableBackup} disabled={busy} rows={5} spellCheck={false}
             onChange={(event) => setPortableBackup(event.target.value)} />
         </label>
         <p>恢复后所有实体处于未选中状态，控制权限不自动启用，必须重新输入令牌并重新审批。</p>

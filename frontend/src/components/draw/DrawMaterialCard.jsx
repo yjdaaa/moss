@@ -66,7 +66,11 @@ export function DrawMaterialCard({
   setCustomFeed,
   customPasses,
   setCustomPasses,
+  maxWidthMm = 100,
+  maxHeightMm = 100,
 }) {
+  const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : 100;
+  const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : 100;
   const matchedMaterial =
     materialMode === "library" ? findMaterialOption(materialLibrary, form.material) : null;
   const isSurfaceOnly = Boolean(
@@ -86,6 +90,7 @@ export function DrawMaterialCard({
         <span>材料库</span>
         <div className="material-library-row">
           <select
+            className="select-input"
             value={materialSelectValue}
             onChange={(event) => handleMaterialSelectChange(event.target.value)}
           >
@@ -98,7 +103,7 @@ export function DrawMaterialCard({
           </select>
           <button
             type="button"
-            className="ghost-button icon-button"
+            className="btn btn-ghost ghost-button icon-button"
             title="刷新材料库"
             aria-label="刷新材料库"
             disabled={materialRefreshBusy}
@@ -113,6 +118,7 @@ export function DrawMaterialCard({
         <label>
           材料名称
           <input
+            className="text-input"
             value={form.material}
             onChange={(event) => updateForm("material", event.target.value)}
           />
@@ -125,6 +131,7 @@ export function DrawMaterialCard({
             <label>
               厚度 mm
               <input
+                className="text-input"
                 type="number"
                 min="0"
                 step="0.1"
@@ -140,6 +147,7 @@ export function DrawMaterialCard({
           <label>
             厚度 mm
             <select
+              className="select-input"
               value={form.thickness_mm}
               onChange={(event) => handleThicknessSelectChange(event.target.value)}
             >
@@ -160,7 +168,7 @@ export function DrawMaterialCard({
       })()}
 
       {materialMode === "custom" && materialLibrary.length > 0 ? (
-        <button type="button" className="ghost-button" onClick={handleReturnToLibrary}>
+        <button type="button" className="btn btn-ghost ghost-button" onClick={handleReturnToLibrary}>
           返回材料库
         </button>
       ) : null}
@@ -169,25 +177,29 @@ export function DrawMaterialCard({
         <label>
           宽 mm
           <input
+            className="text-input"
+            id="draw-width-mm"
             type="number"
             min="0"
-            max="100"
+            max={limitW}
             step="0.1"
             value={form.width_mm}
             onChange={(event) => updateForm("width_mm", event.target.value)}
-            placeholder="自动 (≤100)"
+            placeholder={`自动 (≤${limitW})`}
           />
         </label>
         <label>
           高 mm
           <input
+            className="text-input"
+            id="draw-height-mm"
             type="number"
             min="0"
-            max="100"
+            max={limitH}
             step="0.1"
             value={form.height_mm}
             onChange={(event) => updateForm("height_mm", event.target.value)}
-            placeholder="自动 (≤100)"
+            placeholder={`自动 (≤${limitH})`}
           />
         </label>
       </div>
@@ -214,6 +226,7 @@ export function DrawMaterialCard({
             <label title="只影响闭合图形（矩形、菱形、椭圆、首尾相接的线）与文字；手绘、直线和箭头始终刻一笔">
               刻法
               <select
+                className="select-input"
                 id="draw-vector-style"
                 value={effectiveVectorStyle}
                 onChange={(event) => updateForm("vector_style", event.target.value)}
@@ -260,6 +273,7 @@ export function DrawMaterialCard({
         <label>
           刻法
           <select
+            className="select-input"
             id="draw-image-strategy"
             value={normalizeDrawImageStrategy(form.image_strategy)}
             onChange={(event) => updateForm("image_strategy", event.target.value)}
@@ -279,35 +293,40 @@ export function DrawMaterialCard({
             hints={IMAGE_PRESET_HINTS}
             onSelect={applyImageQualityPreset}
           />
-          <label>
-            转换方式
-            <select
-              id="draw-image-mode"
-              value={rasterImageMode}
-              onChange={(event) => updateForm("image_mode", event.target.value)}
-            >
-              {IMAGE_MODE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            行间距倍数
-            <input
-              id="draw-image-interval-scale"
-              type="number"
-              min={IMAGE_INTERVAL_SCALE_LIMITS.min}
-              max={IMAGE_INTERVAL_SCALE_LIMITS.max}
-              step="0.1"
-              value={form.line_interval_scale}
-              onChange={(event) => updateForm("line_interval_scale", event.target.value)}
-            />
-          </label>
+          <div className="dimension-grid">
+            <label>
+              转换方式
+              <select
+                className="select-input"
+                id="draw-image-mode"
+                value={rasterImageMode}
+                onChange={(event) => updateForm("image_mode", event.target.value)}
+              >
+                {IMAGE_MODE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              行间距倍数
+              <input
+                className="text-input"
+                id="draw-image-interval-scale"
+                type="number"
+                min={IMAGE_INTERVAL_SCALE_LIMITS.min}
+                max={IMAGE_INTERVAL_SCALE_LIMITS.max}
+                step="0.1"
+                value={form.line_interval_scale}
+                onChange={(event) => updateForm("line_interval_scale", event.target.value)}
+              />
+            </label>
+          </div>
           {rasterModeFields.halftone ? (
             <div className="dimension-grid">
               <label>
                 网点网格 mm
                 <input
+                  className="text-input"
                   id="draw-image-halftone-cell"
                   type="number"
                   min="0.2"
@@ -320,6 +339,7 @@ export function DrawMaterialCard({
               <label>
                 网点角度 °
                 <input
+                  className="text-input"
                   id="draw-image-halftone-angle"
                   type="number"
                   min="0"
@@ -335,6 +355,7 @@ export function DrawMaterialCard({
             <label>
               灰度最小功率 %
               <input
+                className="text-input"
                 id="draw-image-gray-min"
                 type="number"
                 min="0"
@@ -353,6 +374,7 @@ export function DrawMaterialCard({
         <label>
           轮廓平滑度（0.25 精细 ～ 8 简化）
           <input
+            className="text-input"
             type="number"
             min="0.25"
             max="8"

@@ -5,7 +5,7 @@ import { firmwareDeliveryView } from "../voiceState.js";
 
 // NV17 固件 OTA（2026-10-15 用户决定：逐台确认推送）。导入自己编译的 ESP32 应用固件，
 // 选一台已允许的设备确认推送；设备下次检查更新时自动下载刷写，上报新版本后才算升级完成。
-export default function VoiceFirmwareCard() {
+export default function VoiceFirmwareCard({ active = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -31,17 +31,24 @@ export default function VoiceFirmwareCard() {
   }, []);
   useEffect(() => {
     mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pollSeqRef.current += 1;
+      inFlightRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!active) return undefined;
     void refresh(false);
     const timer = setInterval(() => {
       if (!document.hidden) void refresh(true);
     }, 5000);
     return () => {
-      mountedRef.current = false;
       pollSeqRef.current += 1;
       inFlightRef.current = false;
       clearInterval(timer);
     };
-  }, [refresh]);
+  }, [active, refresh]);
   const run = async (work, done) => {
     setBusy(true); setError(""); setMessage("");
     try {
@@ -114,7 +121,7 @@ export default function VoiceFirmwareCard() {
           {devices.map((device) => (
             <li key={device.device_id}>
               {device.name || device.device_id} · 型号 {device.model || "未知"} · 当前 {device.firmware_version || "未知"}
-              <select className="text-input" aria-label={`${device.device_id} 要推送的固件`} disabled={busy || artifacts.length === 0}
+              <select className="select-input text-input" aria-label={`${device.device_id} 要推送的固件`} disabled={busy || artifacts.length === 0}
                 value={choice[device.device_id] || artifacts[0]?.sha256 || ""}
                 onChange={(event) => setChoice((old) => ({ ...old, [device.device_id]: event.target.value }))}>
                 {artifacts.map((item) => <option key={item.sha256} value={item.sha256}>{item.version}{item.project ? ` · ${item.project}` : ""}</option>)}

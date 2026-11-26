@@ -4,6 +4,7 @@ import { Settings, X, ShieldAlert, Monitor, Network, Link2, CheckCircle2, AlertC
 import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
+import { useModalFocusTrap } from "./useModalFocusTrap.js";
 
 import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
@@ -171,7 +172,10 @@ function SettingsModalBody({
     checkingUpdate ||
     appUpdateBusy(activeUpdateProgress);
   const backdropRef = useRef(null);
+  const dialogRef = useRef(null);
   const backdropPressRef = useRef(false);
+
+  useModalFocusTrap({ backdropRef, dialogRef });
 
   useEffect(() => {
     const onKey = (e) => {
@@ -470,6 +474,7 @@ function SettingsModalBody({
       }}
     >
       <div
+        ref={dialogRef}
         className="mat-modal settings-modal settings-box-2"
         role="dialog"
         aria-modal="true"

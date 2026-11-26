@@ -330,3 +330,35 @@ test("画板矢量刻法不覆盖已保存切割选择：含位图或表面通�
   );
   assert.match(drawPageSrc, /const effectiveVectorStyle = effectiveDrawVectorStyle\(form\.vector_style/);
 });
+
+test("画板尺寸按雕刻机最大行程校验，且行程变化使旧预览签名过期", async () => {
+  const { drawGenerationSignature, validateDrawDimensions } = await import("../src/drawConnection.js");
+  assert.deepEqual(validateDrawDimensions({ width_mm: "", height_mm: "" }, { maxWidthMm: 100, maxHeightMm: 100 }), {
+    widthMm: null,
+    heightMm: null,
+  });
+  assert.deepEqual(validateDrawDimensions({ width_mm: "80", height_mm: "60" }, { maxWidthMm: 100, maxHeightMm: 100 }), {
+    widthMm: 80,
+    heightMm: 60,
+  });
+  assert.match(
+    validateDrawDimensions({ width_mm: "120", height_mm: "60" }, { maxWidthMm: 100, maxHeightMm: 100 }).error,
+    /成品宽度 120 mm 超出当前雕刻机最大行程 100 mm/,
+  );
+  assert.deepEqual(
+    validateDrawDimensions({ width_mm: "200", height_mm: "150" }, { maxWidthMm: 220, maxHeightMm: 180 }),
+    { widthMm: 200, heightMm: 150 },
+    "大幅面雕刻机同步 220×180mm 行程后允许输入 200×150mm",
+  );
+  assert.match(
+    validateDrawDimensions({ width_mm: "200", height_mm: "190" }, { maxWidthMm: 220, maxHeightMm: 180 }).error,
+    /成品高度 190 mm 超出当前雕刻机最大行程 180 mm/,
+  );
+
+  const form = { material: "椴木", thickness_mm: "3", vector_style: "outline" };
+  const sig100 = drawGenerationSignature(form, { workArea: "100x100" }, "vector");
+  const sigDefault = drawGenerationSignature(form, {}, "vector");
+  assert.equal(sig100, sigDefault, "默认 100×100 幅面保持既有签名格式");
+  const sig220 = drawGenerationSignature(form, { workArea: "220x180" }, "vector");
+  assert.notEqual(sig220, sig100, "雕刻机最大行程改变后旧预览签名应变化");
+});

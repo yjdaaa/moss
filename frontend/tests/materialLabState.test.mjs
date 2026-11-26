@@ -399,3 +399,25 @@ test("B2 实验室功率 0–100% 与后端 S 值 (0–1000) 换算、S 值提�
     "线距测试改功率或矩阵行数不应令预览过期",
   );
 });
+
+test("校准矩阵列参数与行参数选重自动互换，材料参数面板未保存修改脏状态精准检测", async () => {
+  const { isCellEditorDirty, swapMatrixAxis } = await import("../src/materialLabState.js");
+  assert.deepEqual(swapMatrixAxis("power", "speed", "x", "speed"), { xAxis: "speed", yAxis: "power" });
+  assert.deepEqual(swapMatrixAxis("power", "speed", "y", "power"), { xAxis: "speed", yAxis: "power" });
+  assert.deepEqual(swapMatrixAxis("power", "speed", "x", "passes"), { xAxis: "passes", yAxis: "speed" });
+
+  const baseline = resolveCellEditorValues(SAMPLE_MATERIALS, "胡桃木", "5", "cut");
+  const current = {
+    maxPower: baseline.maxPower,
+    feedRate: baseline.feedRate,
+    passes: baseline.passes,
+    pixelSize: baseline.pixelSize,
+    aliases: baseline.aliases,
+    entryTitle: baseline.title,
+    notes: baseline.notes,
+  };
+  assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", current), false);
+  assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", { ...current, maxPower: 800 }), true);
+  assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", { ...current, notes: "改一条备注" }), true);
+  assert.equal(isCellEditorDirty(SAMPLE_MATERIALS, "胡桃木", "5", "cut", { ...current, aliases: "walnut ,  黑胡桃 " }), false, "仅空格差异不算脏");
+});

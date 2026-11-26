@@ -173,6 +173,48 @@ export function resolveCellEditorValues(materialsMap, materialName, thicknessKey
   };
 }
 
+/**
+ * 判断材料参数面板当前编辑值是否相对于材料库已存值（或未存模式的初始默认值）有未保存修改。
+ */
+export function isCellEditorDirty(materialsMap, materialName, thicknessKey, mode = "raster", current = {}) {
+  if (!materialName) return false;
+  const baseline = resolveCellEditorValues(materialsMap, materialName, thicknessKey, mode);
+  const normAliases = (raw) =>
+    String(raw ?? "")
+      .split(/[,，\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(", ");
+  if (Math.round(Number(current.maxPower) || 0) !== Math.round(Number(baseline.maxPower) || 0)) return true;
+  if (Math.round(Number(current.feedRate) || 0) !== Math.round(Number(baseline.feedRate) || 0)) return true;
+  if (Math.round(Number(current.passes) || 1) !== Math.round(Number(baseline.passes) || 1)) return true;
+  if (mode === "raster") {
+    const curPix = Number(current.pixelSize);
+    const basePix = Number(baseline.pixelSize);
+    if (Number.isFinite(curPix) && Number.isFinite(basePix) && Math.abs(curPix - basePix) > 1e-6) return true;
+  }
+  if (normAliases(current.aliases) !== normAliases(baseline.aliases)) return true;
+  if (String(current.entryTitle ?? "").trim() !== String(baseline.title ?? "").trim()) return true;
+  if (String(current.notes ?? "").trim() !== String(baseline.notes ?? "").trim()) return true;
+  return false;
+}
+
+/**
+ * 切换校准矩阵列参数（x）或行参数（y）：若新选的轴与另一轴相同，自动把另一轴互换为原轴参数。
+ */
+export function swapMatrixAxis(xAxis, yAxis, which, nextAxis) {
+  if (which === "x") {
+    return {
+      xAxis: nextAxis,
+      yAxis: nextAxis === yAxis ? (xAxis !== nextAxis ? xAxis : (nextAxis === "power" ? "speed" : "power")) : yAxis,
+    };
+  }
+  return {
+    xAxis: nextAxis === xAxis ? (yAxis !== nextAxis ? yAxis : (nextAxis === "speed" ? "power" : "speed")) : xAxis,
+    yAxis: nextAxis,
+  };
+}
+
 /** 将界面激活模式（raster / outline / cut）映射为标定矩阵接口字段。 */
 export function resolveMatrixModeParams(mode = "raster") {
   if (mode === "cut") {

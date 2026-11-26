@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { AlertCircle, X } from "lucide-react";
 import { trayActionCopy } from "../platform.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
+import { useModalFocusTrap } from "./useModalFocusTrap.js";
 
 export function CloseConfirmModal({ visible, onClose, onConfirm }) {
   // 关闭即卸载内层状态，防止取消后残留“完全退出+记住选择”在下次打开时误杀进程
@@ -14,8 +15,11 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
   const backdropRef = useRef(null);
+  const dialogRef = useRef(null);
   const backdropPressRef = useRef(false);
   const trayCopy = trayActionCopy();
+
+  useModalFocusTrap({ backdropRef, dialogRef });
 
   useEffect(() => {
     const onKey = (e) => {
@@ -51,7 +55,7 @@ function CloseConfirmModalBody({ onClose, onConfirm }) {
         backdropPressRef.current = false;
       }}
     >
-      <div className="mat-modal close-confirm-box-2" role="dialog" aria-modal="true" aria-labelledby="close-confirm-title">
+      <div ref={dialogRef} className="mat-modal close-confirm-box-2" role="dialog" aria-modal="true" aria-labelledby="close-confirm-title">
         <div className="mat-modal-head">
           <h3 id="close-confirm-title" className="close-confirm-heading">
             <AlertCircle size={18} className="close-confirm-icon" />

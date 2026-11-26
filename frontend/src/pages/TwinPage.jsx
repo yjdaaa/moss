@@ -32,9 +32,7 @@ import {
   resolveTwinHeadPose,
   resolveTwinHasZAxis,
   resolveTwinSafetySwitchStatus,
-  YISU_V1_PROFILE,
   MAX_XY_TRAVEL_MM,
-  MAX_Z_TRAVEL_MM,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
   twinEstopContext,
@@ -43,7 +41,13 @@ import { TERMINAL_STATUSES, normalizeWorkflowStatus } from "../state/statusNorma
 import { workflowDetails } from "../approvalState.js";
 import { showAlert } from "../appDialog.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
-import { connectionSummaryView, readUnifiedConnection } from "../deviceConnection.js";
+import {
+  WORKSPACE_LIMITS_EVENT,
+  connectionSummaryView,
+  readUnifiedConnection,
+  readWorkspaceLimits,
+  writeWorkspaceLimits,
+} from "../deviceConnection.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
 const TWIN_STATUS_LABELS = {
@@ -106,37 +110,11 @@ const DEMO_GCODE = [
   "G0 X0 Y0",
 ].join("\n");
 
-const WORKSPACE_STORAGE_KEY = "moss_yisu_workspace_limits_v1";
 const SIM_FRAME_MS = 1000 / 30;
 const MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
 
 function loadSavedWorkspaceLimits() {
-  try {
-    const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      const x = Number(parsed?.x_travel_mm);
-      const y = Number(parsed?.y_travel_mm);
-      const z = Number(parsed?.z_travel_mm);
-      if (x >= 20 && x <= MAX_XY_TRAVEL_MM && y >= 20 && y <= MAX_XY_TRAVEL_MM) {
-        return {
-          x_travel_mm: x,
-          y_travel_mm: y,
-          z_travel_mm: z >= 5 && z <= MAX_Z_TRAVEL_MM ? z : YISU_V1_PROFILE.zTravelMm,
-          from_hardware: Boolean(parsed?.from_hardware),
-          manual: Boolean(parsed?.manual),
-        };
-      }
-    }
-  } catch (_e) {
-    // ignore
-  }
-  return {
-    x_travel_mm: YISU_V1_PROFILE.xTravelMm,
-    y_travel_mm: YISU_V1_PROFILE.yTravelMm,
-    z_travel_mm: YISU_V1_PROFILE.zTravelMm,
-    from_hardware: false,
-  };
+  return readWorkspaceLimits();
 }
 
 function loadSavedMaterialConfig() {
@@ -258,14 +236,30 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   const updateWorkspaceLimits = useCallback((patch) => {
     setMachineLimits((prev) => {
       const base = prev || loadSavedWorkspaceLimits();
-      const next = normalizeWorkspaceLimits(patch, base);
-      try {
-        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(next));
-      } catch (_e) {
-        // ignore
-      }
-      return next;
+      const normalized = normalizeWorkspaceLimits(patch, base);
+      return writeWorkspaceLimits(normalized);
     });
+  }, []);
+  useEffect(() => {
+    const onLimits = (e) => {
+      if (e?.detail) {
+        setMachineLimits((prev) => {
+          if (
+            prev
+            && prev.x_travel_mm === e.detail.x_travel_mm
+            && prev.y_travel_mm === e.detail.y_travel_mm
+            && prev.z_travel_mm === e.detail.z_travel_mm
+            && Boolean(prev.from_hardware) === Boolean(e.detail.from_hardware)
+            && Boolean(prev.manual) === Boolean(e.detail.manual)
+          ) {
+            return prev;
+          }
+          return e.detail;
+        });
+      }
+    };
+    window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
   }, []);
   const [telemetry, setTelemetry] = useState(() => parseGrblStatusReport(""));
   const [pollingTelemetry, setPollingTelemetry] = useState(false);
@@ -351,6 +345,20 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     }
     return "";
   }, [toolpath, workspace]);
+
+  const resetToDemoToolpath = useCallback(() => {
+    workflowLoadSeqRef.current += 1;
+    setLoadingWorkflow(false);
+    setActiveWorkflow(null);
+    setSelectedWorkflowId("");
+    setJobStatus("preview_ready");
+    setJobSendResult(null);
+    setGcodeText(DEMO_GCODE);
+    setGcodeSourceLabel("内置演示刀路 (60×60mm)");
+    setSimProgress(0);
+    setSimPlaying(true);
+    setDriveMode("sim");
+  }, []);
 
   // 加载指定 workflow 的 G-code 刀路文件。请求序号守卫（2026-11-05）：快速切换任务时，
   // 旧任务较慢返回的刀路不得覆盖新选中的任务。
@@ -1110,6 +1118,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 <select
                   value={selectedWorkflowId}
                   onChange={(e) => {
+                    if (!e.target.value) {
+                      resetToDemoToolpath();
+                      return;
+                    }
                     const wf = recentWorkflows.find((w) => w.workflow_id === e.target.value);
                     if (wf) void loadWorkflowToolpath(wf);
                   }}
@@ -1117,7 +1129,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   aria-label="选择历史或当前工作流任务"
                 >
                   <option value="">
-                    {recentWorkflows.length > 0 ? "切换工作流任务..." : "暂无工作流记录 (使用演示刀路)"}
+                    {recentWorkflows.length > 0 ? "内置演示刀路 (60×60mm)" : "暂无工作流记录 (使用演示刀路)"}
                   </option>
                   {recentWorkflows.map((wf) => (
                     <option key={wf.workflow_id} value={wf.workflow_id}>

@@ -20,7 +20,8 @@ export function ModelPairingGuide({ settings, models, busy, onApply, onDownload 
       <ul className="voice-preset-list">
         {MODEL_COMBOS.map((combo) => {
           const active = comboActive(combo, settings);
-          const missing = active ? comboMissingModels(combo, models) : [];
+          const catalogReady = Array.isArray(models) && models.length > 0;
+          const missing = active || catalogReady ? comboMissingModels(combo, models) : [];
           const toDownload = missing.filter((model) => !model.downloading);
           return (
             <li key={combo.id} id={`voice-combo-${combo.id}`} className="voice-combo-row">
@@ -51,6 +52,32 @@ export function ModelPairingGuide({ settings, models, busy, onApply, onDownload 
                 </span>
               ) : active ? (
                 <span className="voice-muted voice-combo-active">✓ 正在用</span>
+              ) : missing.length > 0 ? (
+                <span className="voice-combo-missing" id={`voice-combo-need-${combo.id}`}>
+                  <span className="voice-muted">
+                    需先下载：{missing.map((model) => `${model.label}${model.downloading ? "（下载中）" : ""}`).join("、")}
+                  </span>
+                  {toDownload.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      id={`voice-combo-download-${combo.id}`}
+                      disabled={Boolean(busy)}
+                      onClick={() => onDownload?.(toDownload.map((model) => model.id))}
+                    >
+                      下载缺的模型
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    id={`voice-combo-apply-${combo.id}`}
+                    disabled={Boolean(busy)}
+                    onClick={() => apply(combo)}
+                  >
+                    用这套
+                  </button>
+                </span>
               ) : (
                 <button
                   type="button"

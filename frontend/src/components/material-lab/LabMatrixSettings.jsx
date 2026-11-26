@@ -1,5 +1,11 @@
 import React from "react";
-import { TEST_TYPE_OPTIONS, axisOptionsForMode, modeOptionsForThickness, thicknessChipLabel } from "../../materialLabState.js";
+import {
+  TEST_TYPE_OPTIONS,
+  axisOptionsForMode,
+  modeOptionsForThickness,
+  swapMatrixAxis,
+  thicknessChipLabel,
+} from "../../materialLabState.js";
 import { PowerPercentInput } from "./PowerPercentInput.jsx";
 
 /** 材料实验室 ③ 校准矩阵 · 标定条件：标题与模式、状态行、功率 / 速度区间、行列、测试类型与轴参数。原样搬自 pages/MaterialLabPage.jsx（2026-11-16 按职责拆分） */
@@ -198,7 +204,11 @@ export function LabMatrixSettings({
               <select
                 id="lab-x-axis"
                 value={matrixXAxis}
-                onChange={(e) => setMatrixXAxis(e.target.value)}
+                onChange={(e) => {
+                  const next = swapMatrixAxis(matrixXAxis, matrixYAxis, "x", e.target.value);
+                  setMatrixXAxis(next.xAxis);
+                  if (next.yAxis !== matrixYAxis) setMatrixYAxis(next.yAxis);
+                }}
                 className="select-input lab-axis-select"
                 aria-label="网格列参数"
               >
@@ -212,7 +222,11 @@ export function LabMatrixSettings({
               <select
                 id="lab-y-axis"
                 value={matrixYAxis}
-                onChange={(e) => setMatrixYAxis(e.target.value)}
+                onChange={(e) => {
+                  const next = swapMatrixAxis(matrixXAxis, matrixYAxis, "y", e.target.value);
+                  setMatrixYAxis(next.yAxis);
+                  if (next.xAxis !== matrixXAxis) setMatrixXAxis(next.xAxis);
+                }}
                 className="select-input lab-axis-select"
                 aria-label="网格行参数"
               >

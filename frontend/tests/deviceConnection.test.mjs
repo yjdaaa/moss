@@ -247,3 +247,37 @@ test("串口可用性按后端宿主判定：仅 Tauri 安卓本地宿主隐藏�
   assert.equal(isTauriHost(tauriDesktopWin), true);
   assert.equal(isHostSerialAvailable({ win: tauriDesktopWin, nav: macNav, remote: false }), true);
 });
+
+test("雕刻机有效行程全局读写与硬件握手自动同步", async () => {
+  const {
+    readWorkspaceLimits,
+    syncHardwareWorkspaceLimits,
+    writeWorkspaceLimits,
+  } = await import("../src/deviceConnection.js");
+  const store = memoryStorage();
+  assert.deepEqual(readWorkspaceLimits(store), {
+    x_travel_mm: 100,
+    y_travel_mm: 100,
+    z_travel_mm: 20,
+    from_hardware: false,
+  });
+
+  const manual = writeWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90, manual: true }, store);
+  assert.equal(manual.x_travel_mm, 90);
+  assert.equal(manual.y_travel_mm, 90);
+  assert.equal(manual.manual, true);
+  assert.equal(readWorkspaceLimits(store).x_travel_mm, 90);
+
+  // 硬件握手未返回行程时不覆盖已保存设置
+  assert.equal(syncHardwareWorkspaceLimits({ x_accel_mm_s2: 1200 }, store), null);
+  assert.equal(readWorkspaceLimits(store).x_travel_mm, 90);
+
+  // 硬件握手返回实机行程（如 220×180mm）时自动同步更新
+  const synced = syncHardwareWorkspaceLimits({ x_travel_mm: 220, y_travel_mm: 180 }, store);
+  assert.equal(synced.x_travel_mm, 220);
+  assert.equal(synced.y_travel_mm, 180);
+  assert.equal(synced.from_hardware, true);
+  assert.equal(synced.manual, false);
+  assert.equal(readWorkspaceLimits(store).x_travel_mm, 220);
+  assert.equal(readWorkspaceLimits(store).y_travel_mm, 180);
+});

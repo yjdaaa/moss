@@ -705,5 +705,207 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
 
     assert.doesNotMatch(twinHtml, />Z 轴<|规划缓冲/, "2 轴机台与未上报 Bf 的固件不显示假 Z 轴与假 0/15 缓冲");
     assert.match(twinHtml, /默认配置（100×100）/);
+
+    // 8. 2026-11-26 创作画板行程动态联动、运行态取消与断点续雕门禁、实验室脏状态提示、弹窗 Tab 焦点循环
+    const { DrawMaterialCard } = await server.ssrLoadModule("/src/components/draw/DrawMaterialCard.jsx");
+    const { DrawSendCard } = await server.ssrLoadModule("/src/components/draw/DrawSendCard.jsx");
+    const { resolveModalTabWrap } = await server.ssrLoadModule("/src/components/useModalFocusTrap.js");
+
+    const drawMat220Html = renderToStaticMarkup(
+      React.createElement(DrawMaterialCard, {
+        form: {
+          material: "椴木",
+          thickness_mm: "3",
+          width_mm: "",
+          height_mm: "",
+          image_strategy: "raster",
+          vector_style: "outline",
+          image_mode: "auto",
+          line_interval_scale: "",
+          halftone_cell_mm: "",
+          halftone_angle_deg: "",
+          gray_min_power_percent: "10",
+          vector_simplify_factor: "3",
+        },
+        updateForm: () => {},
+        drawMode: "vector",
+        engraveRoute: "vector",
+        setEngraveRoute: () => {},
+        applyImageQualityPreset: () => {},
+        materialLibrary: [],
+        materialMode: "custom",
+        materialSelectValue: "__custom__",
+        handleMaterialSelectChange: () => {},
+        handleThicknessSelectChange: () => {},
+        handleReturnToLibrary: () => {},
+        refreshMaterialLibrary: () => {},
+        selectedOnly: false,
+        setSelectedOnly: () => {},
+        selectionKey: "",
+        fillSettings: {},
+        updateFillSettings: () => {},
+        materialApplied: [],
+        materialLayer: null,
+        saveFillToMaterial: () => {},
+        hasRec: false,
+        customParams: false,
+        setCustomParams: () => {},
+        maxWidthMm: 220,
+        maxHeightMm: 180,
+      }),
+    );
+    assert.match(drawMat220Html, /id="draw-width-mm"[^>]*max="220"[^>]*placeholder="自动 \(≤220\)"/);
+    assert.match(drawMat220Html, /id="draw-height-mm"[^>]*max="180"[^>]*placeholder="自动 \(≤180\)"/);
+
+    const baseSendProps = {
+      form: { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: "23" },
+      busy: false,
+      excalidrawAPI: {},
+      workflowId: "draw-1",
+      web: { gcode_download_url: "/preview?path=draw-1.gcode" },
+      jobSummary: { actual_width_mm: 40, actual_height_mm: 20, can_send: true },
+      previewStale: false,
+      hostReady: true,
+      canActOnWorkflow: true,
+      canConfirmSend: true,
+      summaryAllowsSend: true,
+      framingShape: "box",
+      setFramingShape: () => {},
+      motionPayload: {},
+      setStatus: () => {},
+      generatePreview: () => {},
+      openSendConfirmation: () => {},
+      resumeWorkflow: () => {},
+      runFraming: () => {},
+      cancelWorkflow: () => {},
+      adoptRegistered: () => {},
+      adoptFeedbackWorkflow: () => {},
+      downloadFromUrl: () => {},
+    };
+    const previewReadySendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: { result: { status: "preview_ready" } },
+      }),
+    );
+    assert.doesNotMatch(previewReadySendHtml, /id="draw-cancel-job-btn"|取消任务/, "仅生成预览尚未发送时不显示取消任务按钮");
+    assert.doesNotMatch(previewReadySendHtml, /id="draw-resume-send-btn"/);
+
+    const runningSendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: { result: { status: "running", send_result: { lines_sent: 12, total_lines: 100 } } },
+      }),
+    );
+    assert.match(runningSendHtml, /id="draw-cancel-job-btn"[\s\S]*?取消任务/, "运行态显示取消任务按钮");
+    assert.doesNotMatch(runningSendHtml, /id="draw-resume-send-btn"/);
+
+    const cancelledSendHtml = renderToStaticMarkup(
+      React.createElement(DrawSendCard, {
+        ...baseSendProps,
+        result: { result: { status: "cancelled", send_result: { lines_sent: 25, total_lines: 100 } } },
+      }),
+    );
+    assert.doesNotMatch(cancelledSendHtml, /id="draw-cancel-job-btn"/, "已取消终态隐藏取消任务按钮");
+    assert.match(cancelledSendHtml, /id="draw-resume-send-btn"[\s\S]*?从第 26 行继续加工 \(断点续雕\)/, "中断有断点时显示断点续雕按钮");
+
+    const dirtyParamsHtml = renderToStaticMarkup(
+      React.createElement(LabParamsPanel, {
+        materials: { 椴木: { thicknesses: { "3": {} } } },
+        readOnly: false,
+        selectedMaterial: "椴木",
+        selectedThickness: "3",
+        currentMatThicknesses: ["3"],
+        hasSavedCell: true,
+        isDirty: true,
+        handleResetParams: () => {},
+        editorStatus: "",
+        activeMode: "raster",
+        handleModeChange: () => {},
+        handleDeleteCurrentThickness: () => {},
+        handleSaveParams: () => {},
+        setMaterialModalData: () => {},
+        setShowMaterialModal: () => {},
+        maxPower: 500,
+        setMaxPower: () => {},
+        feedRate: 1800,
+        setFeedRate: () => {},
+        passes: 1,
+        setPasses: () => {},
+        pixelSize: 0.1,
+        setPixelSize: () => {},
+        aliases: "",
+        setAliases: () => {},
+        entryTitle: "",
+        setEntryTitle: () => {},
+        notes: "",
+        setNotes: () => {},
+      }),
+    );
+    assert.match(dirtyParamsHtml, /id="lab-params-state-tag"[^>]*>● 未保存修改</);
+    assert.match(dirtyParamsHtml, /id="lab-reset-params"[\s\S]*?还原修改/);
+
+    const btnA = { id: "a" };
+    const btnB = { id: "b" };
+    const fakeDialog = {
+      querySelectorAll: () => [btnA, btnB],
+      contains: (el) => el === btnA || el === btnB,
+    };
+    assert.equal(resolveModalTabWrap({ dialogEl: fakeDialog, activeElement: btnB, shiftKey: false }), btnA);
+    assert.equal(resolveModalTabWrap({ dialogEl: fakeDialog, activeElement: btnA, shiftKey: true }), btnB);
+    assert.equal(resolveModalTabWrap({ dialogEl: fakeDialog, activeElement: btnA, shiftKey: false }), null);
+    assert.equal(resolveModalTabWrap({ dialogEl: fakeDialog, activeElement: {}, shiftKey: false }), btnA);
+
+    // 9. 2026-11-26 雕刻工作台与跨页各卡片选择框排列、两列网格、点动步长 select-input 类名与反馈卡去重标题契约
+    assert.match(imgToolHtml, /wb-params-grid wb-params-grid--2[\s\S]*?id="wb-image-width"/, "图片成品尺寸与高级设置使用 2 列网格消除右侧 1/3 空洞");
+    assert.match(readyJogHtml, /id="wb-jog-step"[^>]*class="select-input wb-compact-select"/, "点动步长下拉框挂齐 select-input 与 wb-compact-select");
+    const panelNoHeadHtml = renderToStaticMarkup(
+      React.createElement(FeedbackPanel, { workflowId: "wf-1", showHeading: false, disabled: false, onAdopt: () => {} }),
+    );
+    assert.doesNotMatch(panelNoHeadHtml, /<h3>/, "工作台反馈卡内嵌 FeedbackPanel 时隐藏重复的二级加工反馈标题");
+    const drawRasterHtml = renderToStaticMarkup(
+      React.createElement(DrawMaterialCard, {
+        form: {
+          material: "椴木",
+          thickness_mm: "3",
+          width_mm: "",
+          height_mm: "",
+          image_strategy: "raster",
+          vector_style: "outline",
+          image_mode: "auto",
+          line_interval_scale: "1",
+          halftone_cell_mm: "",
+          halftone_angle_deg: "",
+          gray_min_power_percent: "10",
+          vector_simplify_factor: "3",
+        },
+        updateForm: () => {},
+        drawMode: "raster",
+        engraveRoute: "image",
+        setEngraveRoute: () => {},
+        applyImageQualityPreset: () => {},
+        materialLibrary: [],
+        materialMode: "custom",
+        materialSelectValue: "__custom__",
+        handleMaterialSelectChange: () => {},
+        handleThicknessSelectChange: () => {},
+        handleReturnToLibrary: () => {},
+        refreshMaterialLibrary: () => {},
+        selectedOnly: false,
+        setSelectedOnly: () => {},
+        selectionKey: "",
+        fillSettings: {},
+        updateFillSettings: () => {},
+        materialApplied: [],
+        materialLayer: null,
+        saveFillToMaterial: () => {},
+        hasRec: false,
+        customParams: false,
+        setCustomParams: () => {},
+        maxWidthMm: 100,
+        maxHeightMm: 100,
+      }),
+    );
+    assert.match(drawRasterHtml, /class="dimension-grid"[\s\S]*?id="draw-image-mode"[\s\S]*?id="draw-image-interval-scale"/, "画板光栅模式转换方式与行间距倍数并排 2 列对齐");
   });
 });
