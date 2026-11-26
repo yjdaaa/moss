@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Excalidraw, exportToBlob, newElementWith } from "@excalidraw/excalidraw";
+import { Excalidraw, convertToExcalidrawElements, exportToBlob, newElementWith } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Download,
@@ -58,6 +58,7 @@ import { apiFetch, getJson, postJson } from "../api/client.js";
 import { approvalPendingMessage, isApprovalRequiredResponse } from "../approvalState.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
+import { SVG_CANVAS_PX_PER_MM, SVG_IMPORT_LIMITS, extractSvgVectors, ignoredSummary, svgDataUrl } from "../svgImport.js";
 import { drawEstopContexts, estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
@@ -293,6 +294,7 @@ export function DrawPage({
   const workflowIdRef = useRef(workflowId);
   workflowIdRef.current = workflowId;
   const importInputRef = useRef(null);
+  const importSvgInputRef = useRef(null);
   const materialLoadedOnceRef = useRef(false);
   const materialRefreshGenerationRef = useRef(0);
   const boardStageRef = useRef(null);
@@ -951,6 +953,58 @@ export function DrawPage({
       const msg = error?.message || String(error);
       setStatus(`导入场景失败：${msg}`);
       void showAlert(msg, { title: "导入失败", tone: "error" });
+    }
+  }
+
+  // 导入 SVG（2026-11-26）：清洗后作为一个带矢量轮廓的图片元素放进画板，刀路用同一份轮廓按矢量规划
+  async function handleImportSvgFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !excalidrawAPI) return;
+    try {
+      if (file.size > SVG_IMPORT_LIMITS.maxBytes) {
+        throw new Error(`SVG 文件太大（上限 ${Math.round(SVG_IMPORT_LIMITS.maxBytes / 1024 / 1024)} MB），请先在设计软件里简化`);
+      }
+      const { data, sizeMm, ignored, svg } = extractSvgVectors(await file.text());
+      const fileId = `moss-svg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      excalidrawAPI.addFiles([{ id: fileId, dataURL: svgDataUrl(svg), mimeType: "image/svg+xml", created: Date.now() }]);
+      const current = excalidrawAPI.getSceneElements();
+      const live = current.filter((el) => !el.isDeleted);
+      // 已有图形时放在现有内容右侧，避免压住
+      let x = 0;
+      let y = 0;
+      if (live.length > 0) {
+        x = Math.max(...live.map((el) => el.x + Math.abs(el.width || 0))) + 40;
+        y = Math.min(...live.map((el) => el.y));
+      }
+      const [element] = convertToExcalidrawElements([
+        {
+          type: "image",
+          x,
+          y,
+          width: Math.max(sizeMm.width, 0.25) * SVG_CANVAS_PX_PER_MM,
+          height: Math.max(sizeMm.height, 0.25) * SVG_CANVAS_PX_PER_MM,
+          fileId,
+          status: "saved",
+          customData: { moss_vector: data, source_name: file.name },
+        },
+      ]);
+      const next = [...current, element];
+      sceneDirtyRef.current = true;
+      excalidrawAPI.updateScene({ elements: next });
+      setTimeout(() => excalidrawAPI.scrollToContent?.([element], { fitToContent: true }), 40);
+      setSceneRev(computeSceneRevision(next.filter((el) => !el.isDeleted)));
+      setHasSceneImages(hasSceneImageElements(next));
+      const sizeText = `${sizeMm.width.toFixed(1)} × ${sizeMm.height.toFixed(1)} mm`;
+      // 画板“宽 / 高”是整幅画板（含四周留边、填充过扫描余量）的尺寸，不等于这个图形本身，所以不自动填，只提示原始尺寸
+      const ignoredText = ignoredSummary(ignored);
+      setStatus(
+        `已导入 SVG：${file.name}（原始尺寸 ${sizeText}；成品大小仍由“宽 / 高”决定，生成预览后看“轮廓尺寸”核对）${ignoredText ? `；${ignoredText}` : ""}`,
+      );
+    } catch (error) {
+      const msg = error?.message || String(error);
+      setStatus(`导入 SVG 失败：${msg}`);
+      void showAlert(msg, { title: "无法导入 SVG", tone: "warning" });
     }
   }
 
@@ -1703,6 +1757,25 @@ export function DrawPage({
                   accept=".json,.excalidraw,application/json"
                   className="sr-only-file"
                   onChange={handleImportSceneFile}
+                />
+                <button
+                  type="button"
+                  id="draw-import-svg"
+                  className="btn btn-ghost"
+                  onClick={() => importSvgInputRef.current?.click()}
+                  disabled={busy || !excalidrawAPI}
+                  title="导入 SVG 矢量图（Logo、轮廓、CAD 导出图），按矢量路径雕刻或切割"
+                >
+                  <Upload size={14} aria-hidden="true" />
+                  SVG
+                </button>
+                <input
+                  ref={importSvgInputRef}
+                  type="file"
+                  accept=".svg,image/svg+xml"
+                  className="sr-only-file"
+                  onChange={handleImportSvgFile}
+                  aria-label="导入 SVG 文件"
                 />
                 <button type="button" className="btn btn-ghost" onClick={downloadScene} disabled={busy || !excalidrawAPI}>
                   <FileJson size={14} aria-hidden="true" />

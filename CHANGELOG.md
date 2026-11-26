@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 创作画板支持导入 SVG 矢量图并按矢量路径雕刻或切割（2026-11-26）
+
+- **现象**：外部素材（下载的轮廓、Logo、Illustrator / Inkscape / CAD 导出的 SVG）只能转成 PNG 当位图逐行扫，无法用矢量路径做轮廓、填充或带切缝补偿的切割，孔洞也会被当成位图处理。
+- **根因与修复**：画板工具栏新增“SVG”：前端 `svgImport.js` 白名单清洗（去脚本、事件属性、外链、`<use>`/`<image>`/`<foreignObject>`/`<text>`）后在 Shadow DOM 里由浏览器 SVG 引擎测量路径、变换、单位与样式，生成带 `customData.moss_vector` 的图片元素；后端 `sketch.rs::push_vector_image` 按元素框、翻转与旋转换算后按画板刻法规划，切割时外轮廓与孔整组切。新契约字段见 api-contracts §3.2；成品尺寸仍按“宽 / 高”，不自动 1:1，DXF 未做。
+- **验证**：`laser-api` 新增 `imported_svg_*` 3 项与 `draw_vector_mode_carves_imported_svg_images_with_holes`（孔里不出光、切割走矢量）；前端 `svgImport.test.mjs` 7 项、`svg-import.browser.mjs`（单位与 viewBox、组变换与 CSS 类、奇偶孔洞、开放线、恶意 SVG 不执行脚本、错误提示）、`usability-layout.browser.mjs` 在真实画板导入并随 `scene_json` 发送；`verify.mjs --finish` 全部通过。未在真机出光验证。
+- **关联**：`frontend/src/svgImport.js`、`frontend/src/pages/DrawPage.jsx`（`handleImportSvgFile`）、`frontend/src/drawConnection.js`（`hasSceneImageElements`）、`crates/laser-api/src/sketch.rs`。
+
+### 删除比赛遗留的 open_jsjds_website_tool 与重复的 ai_laser_gcode_tool 工具（2026-11-26）
+
+- **现象**：激光 MCP 工具目录里留着只用于早期参赛演示、打开大赛官网的 `open_jsjds_website_tool`，以及与 `generate_text_laser_task_tool` 同一分支的旧别名 `ai_laser_gcode_tool`，在语音中心工具开关里各占一行。
+- **根因与修复**：从 `ToolCatalog`、分发、`tool_risk`、严格模式隐藏表、黄金清单 `mcp_tools.json`、Jev 粗筛归组、慢工具垫音判断和前端工具标签中删除这两个工具，`open_app_tool` 说明与别名去掉大赛官网；工具目录由 20 个减为 18 个（默认 17 个）。**破坏性变更**：调用这两个工具名会按未知工具拒绝，文字刻字改用 `generate_text_laser_task_tool`。
+- **验证**：`laser-mcp` 29 项、`laser-contracts`、`laser-tools` 单测通过，工具数量与严格模式审计断言同步更新；`verify.mjs --finish` 全部通过（含回环 E2E）。
+- **关联**：`crates/laser-tools/src/lib.rs`、`crates/laser-mcp/src/{schema.rs,dispatch.rs,tests.rs}`、`crates/laser-contracts/src/risk.rs`、`tests/golden/mcp_tools.json`、`frontend/src/voiceState/settings.js`。
+
+### Jev 配置收口到语音中心，摄像头导航只在内置链路显示，隐私与家居减负（2026-11-26）
+
+- **现象**：官方小智链路下 Jev 加工反馈判断只能在右上角偏好设置里配，与语音中心两处入口打架；“摄像头”在官方链路下整页只有警告却常驻主导航，易被误认为激光对位相机；隐私与家居里联网插件、声纹标定排在常用项之间。
+- **根因与修复**：Jev 一节抽成 `JevSettingsSection`，官方链路放到语音中心“服务”标签，桌面端偏好设置不再显示，仅网页 / 手机等无语音中心环境保留（取代 r32）；`visibleNavItems` 只在 `voice.mode=builtin` 时显示摄像头；隐私与家居顺序改为记忆 → 家居 → 联网查询插件（可选）→ 声纹识别（实验），RAGFlow 标明需自建服务器。功能与默认值不变。
+- **验证**：`voiceState.test.mjs`、`uiPolishB.test.mjs`、新增 `sideNavItems.test.mjs`；浏览器 `camera` / `voice-center` / `voice-plugins` 通过，`verify.mjs --finish` 全部通过。未用真实小智设备验证。
+- **关联**：`frontend/src/components/{JevSettingsSection.jsx,SettingsModal.jsx,SideNav.jsx,VoiceBuiltinCard.jsx,VoicePluginsCard.jsx}`、`frontend/src/pages/VoicePage.jsx`、`frontend/src/voiceState/settings.js`。
+
 ### 机器行程、运动参数与固件能力统一按连接目标分桶取值且手填优先（2026-11-26）
 
 - **现象**：切换连接目标后无法同时保留多台设备的行程与运动参数，再次握手会覆盖用户在数字孪生手填的行程，工作台文字/图片生成与材料实验室标定矩阵未按当前连接目标的有效行程校验，FluidNC 机台 Z 轴判断未读 `$CD` 的 `axes:` 段，`speed_map` 与气泵状态也未在界面展示。

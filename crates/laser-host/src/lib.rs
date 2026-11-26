@@ -1242,7 +1242,6 @@ mod tests {
             "command_execution_tool",
             "open_app_tool",
             "shortcut_key_execution_tool",
-            "open_jsjds_website_tool",
         ] {
             assert!(
                 !names.iter().any(|name| name == hidden),

@@ -17,12 +17,12 @@ fn safe_tools_list_hides_developer_command() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 19);
+    assert_eq!(names.len(), 17);
     assert!(!names.contains(&"command_execution_tool"));
 }
 
 #[test]
-fn developer_tools_list_has_twenty_tools_matching_catalog() {
+fn developer_tools_list_has_eighteen_tools_matching_catalog() {
     let listed = tools_list_json(true)["tools"]
         .as_array()
         .unwrap()
@@ -34,7 +34,7 @@ fn developer_tools_list_has_twenty_tools_matching_catalog() {
         .into_iter()
         .map(str::to_owned)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed.len(), 20);
+    assert_eq!(listed.len(), 18);
     assert_eq!(listed, catalog, "tools/list 与 ToolCatalog 必须一致");
 }
 
@@ -186,7 +186,7 @@ fn every_listed_tool_has_a_risk_level() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 18);
     for name in &names {
         assert!(
             laser_contracts::tool_risk(name, &serde_json::json!({})).is_some(),
@@ -216,7 +216,6 @@ fn strict_bridge_refuses_r4_tools() {
             "command_execution_tool",
             serde_json::json!({"command": "dir"}),
         ),
-        ("open_jsjds_website_tool", serde_json::json!({})),
         (
             "material_params_tool",
             serde_json::json!({"action": "delete", "material": "椴木"}),
@@ -257,17 +256,17 @@ fn strict_bridge_refuses_r4_tools() {
             .contains("strict_mode_blocked")
     );
     assert!(backend.0.calls().is_empty(), "被拒绝的调用不得触达后端");
-    // P1-08：每次拒绝都记审计（8 次 R4 + 1 次采用反馈）
+    // P1-08：每次拒绝都记审计（7 次 R4 + 1 次采用反馈）
     let audits = backend.1.lock().unwrap().clone();
-    assert_eq!(audits.len(), 9);
-    assert!(audits[..8].iter().all(
+    assert_eq!(audits.len(), 8);
+    assert!(audits[..7].iter().all(
         |entry| entry.action == laser_contracts::AuditAction::R4Denied
             && entry.client == "mcp"
             && entry.result == laser_contracts::AuditResult::Denied
     ));
     assert_eq!(audits[0].detail.tool.as_deref(), Some("open_app_tool"));
     assert_eq!(
-        audits[8].action,
+        audits[7].action,
         laser_contracts::AuditAction::StrictModeBlocked
     );
 
@@ -283,7 +282,7 @@ fn strict_bridge_refuses_r4_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 16, "{names:?}");
+    assert_eq!(names.len(), 15, "{names:?}");
     assert!(!names.contains(&"open_app_tool") && !names.contains(&"command_execution_tool"));
     assert!(names.contains(&"laser_grbl_tool") && names.contains(&"material_params_tool"));
 }
@@ -356,7 +355,7 @@ fn non_strict_bridge_behavior_is_unchanged() {
         Some(&backend),
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
 }
 
 #[test]
@@ -378,7 +377,7 @@ fn json_rpc_handles_initialize_tools_list_notifications_and_errors() {
         false,
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
     assert!(
         handle_json_rpc(
             &serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -463,7 +462,6 @@ fn compact_tool_list_is_small_described_and_consistent() {
         "start_tuned_job_tool",
         "generate_text_laser_task_tool",
         "generate_text_image_gcode_tool",
-        "ai_laser_gcode_tool",
         "recommend_laser_params_tool",
         "generate_text_image_tool",
         "command_execution_tool",
@@ -1176,7 +1174,7 @@ fn disabled_tools_are_neither_listed_nor_callable() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 17, "{names:?}");
+    assert_eq!(names.len(), 15, "{names:?}");
     assert!(!names.contains(&"material_params_tool") && !names.contains(&"laser_safe_action_tool"));
 
     let call = handle_json_rpc_with(
@@ -1521,9 +1519,8 @@ fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
         200,
         serde_json::json!({"success": true, "result": {"workflow_id": "wf-ai", "status": "preview_ready"}}),
     );
-    let backend = FakeBackend::new(vec![ok.clone(), ok.clone(), ok.clone(), ok]);
+    let backend = FakeBackend::new(vec![ok.clone(), ok.clone(), ok]);
     for name in [
-        "ai_laser_gcode_tool",
         "generate_text_laser_task_tool",
         "generate_text_image_gcode_tool",
     ] {
@@ -1548,7 +1545,7 @@ fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
     );
     assert!(preview.result.contains("同意开刻"), "{}", preview.result);
     let calls = backend.calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 3);
     assert!(
         calls.iter().all(|call| call.1 == "/api/text-task/generate"),
         "{calls:?}"

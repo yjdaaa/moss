@@ -34,7 +34,7 @@ try {
     }}};
   });
   await page.goto(server.resolvedUrls.local[0]+'__nv11_fixture.html');
-  await page.getByRole('heading',{name:'信息服务'}).waitFor();
+  await page.getByRole('heading',{name:'联网查询插件'}).waitFor();
   assert.equal(await page.getByLabel('搜索服务').count(),0,'未选择时不显示搜索表单');
   await page.getByLabel('要设置的服务').selectOption('search');
   await page.getByLabel('搜索服务').waitFor();
@@ -48,7 +48,7 @@ try {
   const draft=page.getByLabel('秘塔 API 密钥 新密钥');
   await draft.fill('NV11_FAKE_METASO_ONLY');assert.equal(await draft.getAttribute('type'),'password');
   await page.getByLabel('启用联网搜索',{exact:true}).check();
-  const save=page.getByRole('button',{name:'保存信息服务',exact:true});await save.click();
+  const save=page.getByRole('button',{name:'保存联网查询插件',exact:true});await save.click();
   await page.getByRole('alert').filter({hasText:'合成保存失败'}).waitFor();
   assert.equal(await page.getByLabel('搜索服务').inputValue(),'metaso');assert.equal(await draft.inputValue(),'NV11_FAKE_METASO_ONLY');
   let payload=await page.evaluate(()=>window.__calls.at(-1));

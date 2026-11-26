@@ -295,7 +295,7 @@
 | R1 生成，不触设备 | `laser_workflow_tool preview`；文字生成三件套；`run_calibration_grid_tool`（无 `calibration_id`）；`select_calibration_cell_tool`；`refine_laser_params_from_feedback_tool`；`regenerate_text_laser_task_tool`（不含采用） | 直接转发 |
 | R2 降低风险 | `laser_workflow_tool cancel`；`laser_grbl_tool cancel`；`laser_safe_action_tool emergency_stop / soft_reset / laser_off`；进给/功率倍率中的 `*_minus_10`、`*_reset` | 直接转发并在网关侧补 `confirmed=true`（这是唯一允许网关补确认的类别，因为拒绝停机比误停更危险）。注意：加工中只有实时字节类（`emergency_stop`、`soft_reset`、倍率）会生效，`laser_off` 会被拒绝；提示词中“停”只映射 `cancel` / `emergency_stop` |
 | R3 运动或出光 | `laser_workflow_tool confirm_send/send/resume`；`start_tuned_job_tool`；`run_calibration_grid_tool` 带 `calibration_id`；`laser_safe_action_tool unlock/home/set_origin/absolute_move/relative_move`；`*_plus_10` 倍率；`regenerate_text_laser_task_tool` 采用反馈 | 创建审批请求，不转发 |
-| R4 永不开放 | `command_execution_tool`、`open_app_tool`、`shortcut_key_execution_tool`、`open_jsjds_website_tool`；材料库删除/覆盖 | `tool_not_allowed` |
+| R4 永不开放 | `command_execution_tool`、`open_app_tool`、`shortcut_key_execution_tool`；材料库删除/覆盖 | `tool_not_allowed` |
 
 说明：`*_plus_10` 倍率现有语义“不需确认”，但会提高功率或速度，融合模式下归入 R3。此为对语音入口的收紧，网页/桌面行为不变。
 

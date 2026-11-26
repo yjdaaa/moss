@@ -604,9 +604,11 @@ try {
   await tab("服务").click();
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
   assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
-  // 官方链路没有“模型”标签：加工反馈判断（Jev）只能在右上角偏好设置里配（2026-11-15）
+  // 官方链路没有“模型”标签：加工反馈判断（Jev）在“服务”标签配（2026-11-26 入口收口到语音中心，偏好设置不再重复）
+  assert.ok(await page.locator("#voice-group-official-jev").isVisible(), "官方链路在服务标签显示 Jev 判断服务");
   await page.getByTitle("系统偏好设置").click();
-  await page.locator(".settings-modal #settings-jev").waitFor();
+  await page.locator(".settings-modal").waitFor();
+  assert.equal(await page.locator(".settings-modal #settings-jev").count(), 0, "桌面端偏好设置不再显示 Jev");
   await page.locator(".settings-modal .mat-modal-close").click();
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "语音状态条默认跟随官方链路");
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-expanded"), "false", "非对话时默认收成单行状态条");

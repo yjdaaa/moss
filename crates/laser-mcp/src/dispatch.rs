@@ -568,7 +568,6 @@ fn dispatch_allowed(
             Ok(args) => laser_tools::execute_open_app(&args),
             Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
         },
-        "open_jsjds_website_tool" => laser_tools::execute_open_jsjds_website(),
         "shortcut_key_execution_tool" => match serde_json::from_value(arguments.clone()) {
             Ok(args) => laser_tools::execute_shortcut_key(&args),
             Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
@@ -751,9 +750,7 @@ fn dispatch_allowed(
                 other => ToolCallResult::err(format!("material_params 不支持的 action: {other}")),
             }
         }
-        "generate_text_laser_task_tool"
-        | "generate_text_image_gcode_tool"
-        | "ai_laser_gcode_tool" => {
+        "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" => {
             if arg_str(arguments, "text").is_none() {
                 return ToolCallResult::err(format!(
                     "{name} 当前仅支持 text 素材；图片素材请通过网页/桌面端上传后使用 laser_workflow_tool"

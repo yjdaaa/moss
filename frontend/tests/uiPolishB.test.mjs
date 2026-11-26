@@ -294,11 +294,14 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.match(secHtml, /<span class="ob-fold-summary">端口 9666<\/span>/);
 
     const settingsSrc = readFileSync(path.join(srcRoot, "components/SettingsModal.jsx"), "utf8");
-    for (const id of ["settings-port", "settings-mcp", "settings-jev", "settings-update", "settings-close", "settings-top-pills"]) {
+    for (const id of ["settings-port", "settings-mcp", "settings-update", "settings-close", "settings-top-pills"]) {
       assert.match(settingsSrc, new RegExp(`id="${id}"[^>]*summary=`), `${id} 必须向 FoldHeader 传入当前值摘要`);
     }
-    assert.match(settingsSrc, /id="settings-jev-test"/);
-    assert.match(settingsSrc, /保存并测试/);
+    // Jev 一节抽成独立组件（2026-11-26），偏好设置与语音中心官方链路共用
+    const jevSrc = readFileSync(path.join(srcRoot, "components/JevSettingsSection.jsx"), "utf8");
+    assert.match(jevSrc, /id="settings-jev"[^>]*summary=/, "settings-jev 必须向 FoldHeader 传入当前值摘要");
+    assert.match(jevSrc, /id=\{`\$\{prefix\}-test`\}/);
+    assert.match(jevSrc, /保存并测试/);
 
     for (const rel of ["components/PhoneLinkSection.jsx", "components/ExportSettingsSection.jsx", "components/ProcessTraceSection.jsx"]) {
       const src = readFileSync(path.join(srcRoot, rel), "utf8");

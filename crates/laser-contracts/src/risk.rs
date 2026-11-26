@@ -61,10 +61,7 @@ fn flag(arguments: &serde_json::Value, key: &str) -> bool {
 pub fn tool_never_exposed(name: &str) -> bool {
     matches!(
         name,
-        "command_execution_tool"
-            | "open_app_tool"
-            | "shortcut_key_execution_tool"
-            | "open_jsjds_website_tool"
+        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool"
     )
 }
 
@@ -116,9 +113,7 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
         "generate_text_image_tool"
         | "select_calibration_cell_tool"
         | "refine_laser_params_from_feedback_tool" => R1,
-        "generate_text_laser_task_tool"
-        | "generate_text_image_gcode_tool"
-        | "ai_laser_gcode_tool" => {
+        "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" => {
             if flag(arguments, "confirmed") && flag(arguments, "send_after_generate") {
                 R3
             } else {
@@ -147,10 +142,7 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
                 R1
             }
         }
-        "command_execution_tool"
-        | "open_app_tool"
-        | "shortcut_key_execution_tool"
-        | "open_jsjds_website_tool" => R4,
+        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool" => R4,
         _ => return None,
     };
     Some(level)
@@ -233,7 +225,7 @@ mod tests {
                 R3,
             ),
             (
-                "ai_laser_gcode_tool",
+                "generate_text_image_gcode_tool",
                 json!({"confirmed": "true", "send_after_generate": "true"}),
                 R3,
             ),
@@ -272,7 +264,6 @@ mod tests {
             ("command_execution_tool", json!({}), R4),
             ("open_app_tool", json!({}), R4),
             ("shortcut_key_execution_tool", json!({}), R4),
-            ("open_jsjds_website_tool", json!({}), R4),
         ];
         for (name, arguments, expected) in cases {
             assert_eq!(
@@ -288,7 +279,6 @@ mod tests {
             "command_execution_tool",
             "open_app_tool",
             "shortcut_key_execution_tool",
-            "open_jsjds_website_tool",
         ] {
             assert!(tool_never_exposed(name));
         }

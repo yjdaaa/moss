@@ -164,7 +164,6 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
             }
             "generate_text_laser_task_tool"
             | "generate_text_image_gcode_tool"
-            | "ai_laser_gcode_tool"
             | "laser_workflow_tool" => {
                 // 2026-11-06 文字刻法、排版与起点（用户决定：默认描边、激光头对准木牌中心）
                 let props = &mut tool["inputSchema"]["properties"];
@@ -282,10 +281,7 @@ pub const COMPACT_LASER_TOOLS: [&str; 8] = [
 fn is_desktop_control_tool(name: &str) -> bool {
     matches!(
         name,
-        "command_execution_tool"
-            | "open_app_tool"
-            | "shortcut_key_execution_tool"
-            | "open_jsjds_website_tool"
+        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool"
     )
 }
 

@@ -36,6 +36,7 @@ try {
     discover: 0,
     confirmSend: 0,
     drawPreview: 0,
+    lastDrawPreviewBody: null,
   };
   const mockVoice = {
     mode: "official",
@@ -191,6 +192,11 @@ try {
     }
     if (target.pathname === "/api/draw/preview") {
       apiCalls.drawPreview += 1;
+      try {
+        apiCalls.lastDrawPreviewBody = JSON.parse(route.request().postData() || "null");
+      } catch {
+        apiCalls.lastDrawPreviewBody = null;
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -512,16 +518,34 @@ try {
     ],
     appState: { viewBackgroundColor: "#ffffff" },
   });
-  await page.locator(".topbar-actions input[type='file']").setInputFiles({
+  await page.locator(".topbar-actions input[accept*='.excalidraw']").setInputFiles({
     name: "dock-test.excalidraw.json",
     mimeType: "application/json",
     buffer: Buffer.from(scenePayload, "utf8"),
   });
   await page.getByText(/已导入场景：dock-test\.excalidraw\.json/).waitFor({ timeout: 10_000 });
 
+  // 2026-11-26 导入 SVG：真实画板里清洗、测量后作为带矢量轮廓的图片元素加入场景，生成预览时随 scene_json 发给后端
+  await page.locator("#draw-import-svg").waitFor();
+  await page.getByLabel("导入 SVG 文件").setInputFiles({
+    name: "ring.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="20mm" viewBox="0 0 20 20"><script>window.__svgPwned=1</script>' +
+        '<path fill-rule="evenodd" d="M0 0H20V20H0Z M6 6H14V14H6Z"/></svg>',
+      "utf8",
+    ),
+  });
+  await page.getByText(/已导入 SVG：ring\.svg（原始尺寸 20\.0 × 20\.0 mm/).waitFor({ timeout: 10_000 });
+  assert.equal(await page.evaluate(() => window.__svgPwned), undefined, "SVG 里的脚本不执行");
+
   await page.locator("#draw-dock-preview-btn").click();
   await page.locator("#draw-dock-preview-summary").waitFor({ timeout: 10_000 });
   assert.equal(apiCalls.drawPreview, 1, "吸底条生成预览应复用同一预览流程");
+  const svgElement = (apiCalls.lastDrawPreviewBody?.scene_json?.elements || []).find((el) => el.type === "image");
+  assert.ok(svgElement?.customData?.moss_vector, "导入的 SVG 以带 moss_vector 的图片元素随场景发送");
+  assert.equal(svgElement.customData.moss_vector.paths[0].rings.length, 2, "外框与孔两个环");
+  assert.deepEqual(svgElement.customData.moss_vector.size, [20, 20]);
   assert.match(await page.locator("#draw-dock-preview-summary").innerText(), /50×35mm · 约 12s/, "首屏吸底条应展示预览尺寸与预估耗时摘要");
   assert.match(await page.locator("#draw-dock-send-btn").innerText(), /请先配置连接/, "未配连接时吸底条发送按钮应明确提示请先配置连接");
   assert.equal(await page.locator("#draw-dock-send-btn").isDisabled(), false, "未配连接时点击吸底条按钮应可唤起连接弹窗");

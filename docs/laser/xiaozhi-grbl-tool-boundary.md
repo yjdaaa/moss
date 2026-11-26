@@ -13,7 +13,7 @@
 - `laser_safe_action_tool` 把自然动作映射到受控命令：`status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset` 必须 `confirmed=true`。移动动作固定先 `M5` 关光。
 - `check_laser_connection_tool` 只做连接检查：打开串口或 Telnet，发 `$$` 读到终止 `ok` 并要求 `$32=1`；`include_detail=true` 时附带固件设置行。没有 HTTP `[ESP800]` 路径。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_file` 与 `send_command` 已被拒绝，只保留 `status` / `check` / `probe` 与按 `job_id` 的 `cancel`。
-- 文字工具（`generate_text_laser_task_tool`、`generate_text_image_gcode_tool`、`ai_laser_gcode_tool`）只接受 `text`，都生成 workflow 预览；图片素材只能从网页或桌面端上传。
+- 文字工具（`generate_text_laser_task_tool`、`generate_text_image_gcode_tool`）只接受 `text`，都生成 workflow 预览；图片素材只能从网页或桌面端上传。
 
 ## 路由建议
 

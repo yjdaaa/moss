@@ -10,13 +10,17 @@ export const NAV_ITEMS = [
   { path: "/draw", label: "创作画板", icon: PenTool },
   { path: "/material-lab", label: "材料实验室", icon: Layers },
   { path: "/twin", label: "数字孪生", icon: Box },
-  { path: "/camera", label: "摄像头", icon: Camera, desktopOnly: true },
+  // 摄像头画面来自连到 MOSS 内置语音服务的小智（ESP32 摄像头），官方链路下用不了：
+  // 只在当前是内置链路时显示（2026-11-26 导航减负，避免误以为是激光机对位相机）
+  { path: "/camera", label: "摄像头", icon: Camera, desktopOnly: true, builtinVoiceOnly: true },
   { path: "/voice", label: "语音中心", icon: AudioLines, desktopOnly: true },
 ];
 
-/** 当前环境可见的导航项。 */
-export function visibleNavItems(showVoice) {
-  return NAV_ITEMS.filter((item) => !item.desktopOnly || showVoice);
+/** 当前环境可见的导航项；`voiceMode` 未读到（null）时先不显示摄像头，避免闪一下。 */
+export function visibleNavItems(showVoice, voiceMode = null) {
+  return NAV_ITEMS.filter(
+    (item) => (!item.desktopOnly || showVoice) && (!item.builtinVoiceOnly || voiceMode === "builtin"),
+  );
 }
 
 export function SideNav({
@@ -140,7 +144,7 @@ export function SideNav({
       </button>
       <div className="ob-nav-label">工作区</div>
       <nav className="ob-nav">
-        {visibleNavItems(showVoice).map((item) => {
+        {visibleNavItems(showVoice, voiceStatus?.mode ?? null).map((item) => {
           const Icon = item.icon;
           const active = currentPath === item.path;
           const voiceApprovals = item.path === "/voice" && approvalCount > 0 ? approvalCount : 0;

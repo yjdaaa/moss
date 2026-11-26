@@ -16,7 +16,6 @@ pub fn laser_mcp_compact_tool(name: &str) -> bool {
             | "command_execution_tool"
             | "open_app_tool"
             | "shortcut_key_execution_tool"
-            | "open_jsjds_website_tool"
     )
 }
 

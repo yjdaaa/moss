@@ -65,7 +65,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 
 - 先读运行目录 `settings.json` 的 `mcp_endpoint`，未配置时才回退 `MCP_ENDPOINT` 环境变量；有效地址须为 `ws://` 或 `wss://` 且不含 `<` 占位符，否则静默跳过。
 - 桥在独立线程中运行 `laser_mcp::run_bridge`，断线按 1 秒起、60 秒封顶指数退避重连，日志中的 token 脱敏。
-- 协议版本 `2024-11-05`，服务名 `YOKO_MCP_SERVER`。`tools/list` 使用编译期嵌入的黄金清单，并与 `ToolCatalog` 校验一致；清单共 20 个工具，未设置 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时不含 `command_execution_tool`，共 19 个。
+- 协议版本 `2024-11-05`，服务名 `YOKO_MCP_SERVER`。`tools/list` 使用编译期嵌入的黄金清单，并与 `ToolCatalog` 校验一致；清单共 18 个工具，未设置 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时不含 `command_execution_tool`，共 17 个。
 - 需要持久化或真实作业的工具（workflow、材料库、标定矩阵、文字任务、正式发送）通过 `HostBackend` 直接调用进程内 `ApiService::dispatch_json` / `dispatch_json_with_watch`（跳过原始 HTTP/1.1 文本报文拼装与头解析，走同一鉴权后门禁与状态机，按预览走边框通过显式 `ShortJobWatch` 条件变量同步开始回执），与网页共用同一套门禁、SQLite 与 `JobWorker`。`laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_file`、`send_command` 直接拒绝并引导走 workflow 或安全动作。
 - 桥的连接状态、客户端身份与最近请求写入注入的 `McpTelemetry` 实例（`ApiService::with_mcp_telemetry` / `HostBackend::mcp_telemetry`，默认共享 `laser_contracts::global_mcp_telemetry` 单例），由 `/api/system/info` 暴露给前端。
 

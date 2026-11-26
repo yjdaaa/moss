@@ -25,6 +25,7 @@ import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard, VoiceToolsCard } from "../components/VoiceEndpointsCard.jsx";
+import { JevSettingsSection } from "../components/JevSettingsSection.jsx";
 import VoiceWakeWordSection from "../components/VoiceWakeWordSection.jsx";
 import { SaveBar, VOICE_GOTO_EVENT, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel, focusVoiceGroup, gotoVoiceGroup } from "../components/VoiceLayout.jsx";
 import { HOME_APPROVALS, VOICE_FOCUS_EVENT, peekVoiceFocus } from "../voiceFocus.js";
@@ -664,6 +665,8 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                     <div className="voice-stack">
                       {officialBlock}
                       <SettingsGroup group="official" {...groupProps} />
+                      {/* 官方链路没有“模型”标签，加工反馈判断（Jev）在这里配（2026-11-26，取代 r32 的偏好设置入口） */}
+                      <JevSettingsSection frame="voice" />
                     </div>
                   ),
                 },

@@ -547,8 +547,7 @@ pub fn groups_of_builtin_tool(spec: &ToolSpec) -> &'static [ToolGroup] {
         "laser_grbl_tool" | "laser_network_grbl_tool" => {
             &[ToolGroup::LaserQuery, ToolGroup::LaserControl]
         }
-        "ai_laser_gcode_tool"
-        | "generate_text_image_gcode_tool"
+        "generate_text_image_gcode_tool"
         | "generate_text_image_tool"
         | "generate_text_laser_task_tool"
         | "regenerate_text_laser_task_tool"

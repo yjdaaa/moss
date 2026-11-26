@@ -17,8 +17,7 @@ const PRIORITY_TOOLS: [&str; 8] = [
     "start_tuned_job_tool",
 ];
 
-const SECONDARY_TOOLS: [&str; 12] = [
-    "ai_laser_gcode_tool",
+const SECONDARY_TOOLS: [&str; 10] = [
     "command_execution_tool",
     "generate_text_image_gcode_tool",
     "generate_text_image_tool",
@@ -26,13 +25,10 @@ const SECONDARY_TOOLS: [&str; 12] = [
     "laser_grbl_tool",
     "laser_network_grbl_tool",
     "open_app_tool",
-    "open_jsjds_website_tool",
     "refine_laser_params_from_feedback_tool",
     "regenerate_text_laser_task_tool",
     "shortcut_key_execution_tool",
 ];
-
-pub const JSJDS_OFFICIAL_WEBSITE_URL: &str = "https://jsjds.blcu.edu.cn/index.htm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSpec {
@@ -1121,13 +1117,6 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
     if app.is_empty() {
         return ToolCallResult::err("argument 不能为空");
     }
-    let normalized = app.replace(' ', "");
-    if normalized.contains("计算机设计大赛")
-        || normalized.eq_ignore_ascii_case("4c")
-        || normalized == "打开4c"
-    {
-        return execute_open_jsjds_website();
-    }
     let target = resolve_app_alias(app);
     let payload = args
         .payload
@@ -1176,17 +1165,6 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
     match result {
         Ok(()) => ToolCallResult::ok(format!("已启动应用: {app}")),
         Err(error) => ToolCallResult::err(format!("启动应用 {app} 失败: {error}")),
-    }
-}
-
-pub fn execute_open_jsjds_website() -> ToolCallResult {
-    match open_with_system(JSJDS_OFFICIAL_WEBSITE_URL) {
-        Ok(()) => ToolCallResult::with_detail(
-            true,
-            "已打开中国大学生计算机设计大赛官网",
-            JSJDS_OFFICIAL_WEBSITE_URL,
-        ),
-        Err(error) => ToolCallResult::err(format!("打开官网失败: {error}")),
     }
 }
 
@@ -1441,14 +1419,14 @@ mod tests {
         let catalog = ToolCatalog::safe_default();
         assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
         assert!(!catalog.names().contains(&"command_execution_tool"));
-        assert_eq!(catalog.specs().len(), 19);
+        assert_eq!(catalog.specs().len(), 17);
     }
 
     #[test]
     fn developer_mode_adds_command_only_after_priority_tools() {
         let catalog = ToolCatalog::developer_mode();
         assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
-        assert_eq!(catalog.specs().len(), 20);
+        assert_eq!(catalog.specs().len(), 18);
         assert!(
             catalog
                 .specs()

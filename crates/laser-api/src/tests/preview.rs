@@ -727,6 +727,92 @@ fn draw_vector_mode_plans_scene_shapes_and_falls_back_for_images() {
     );
 }
 
+/// 2026-11-26 导入 SVG：带 `customData.moss_vector` 的图片元素按矢量规划（不退回光栅），
+/// 外框与孔同组非零填充——孔里不出光；切割刻法整组切。
+#[test]
+fn draw_vector_mode_carves_imported_svg_images_with_holes() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let png = draw_test_png();
+    let vector = serde_json::json!({
+        "version": 1,
+        "size": [20, 20],
+        "paths": [{
+            "rings": [
+                [[0, 0], [20, 0], [20, 20], [0, 20], [0, 0]],
+                [[6, 6], [6, 14], [14, 14], [14, 6], [6, 6]]
+            ],
+            "open": [],
+            "fill": true,
+            "stroke": false
+        }]
+    });
+    let scene = serde_json::json!({"elements": [
+        {"type": "image", "x": 0, "y": 0, "width": 80, "height": 80, "fileId": "f1", "customData": {"moss_vector": vector}},
+    ]});
+    let body = serde_json::json!({"image_data_url": png, "material": "椴木", "thickness_mm": 3.0, "mode": "vector", "width_mm": 20, "height_mm": 20, "scene_json": scene});
+    let res = post_json(&service, "/api/draw/preview", &body);
+    assert_eq!(res["success"], true, "{res}");
+    let artifacts = &res["result"]["artifacts"];
+    assert_eq!(
+        artifacts["mode"], "vector",
+        "导入 SVG 不算位图：{artifacts}"
+    );
+    assert!(artifacts.get("vector_note").is_none(), "{artifacts}");
+    let gcode =
+        std::fs::read_to_string(temp.path().join(artifacts["gcode_file"].as_str().unwrap()))
+            .unwrap();
+    // 出光段（带正功率的 G1）按实际出光范围换算孔的位置（轮廓 20 mm 中 6~14 是孔），孔里不能出光
+    let mut last = (0.0_f64, 0.0_f64);
+    let mut segments = Vec::new();
+    for line in gcode.lines() {
+        let coord = |axis: char| {
+            line.split_whitespace()
+                .find_map(|t| t.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
+        };
+        let next = (coord('X').unwrap_or(last.0), coord('Y').unwrap_or(last.1));
+        if line.starts_with("G1") && coord('S').unwrap_or(0.0) > 0.0 {
+            segments.push((last, next));
+        }
+        if line.starts_with("G0") || line.starts_with("G1") {
+            last = next;
+        }
+    }
+    let burns = segments.len();
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (a, b) in &segments {
+        for p in [a, b] {
+            (x0, y0, x1, y1) = (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1));
+        }
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    assert!((w - h).abs() < 0.5, "外框是正方形：{w} × {h}");
+    let hole_x = (x0 + w * 0.35)..(x0 + w * 0.65);
+    let hole_y = (y0 + h * 0.35)..(y0 + h * 0.65);
+    for (a, b) in &segments {
+        let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        assert!(
+            !(hole_x.contains(&mid.0) && hole_y.contains(&mid.1)),
+            "孔里出光：{a:?} → {b:?}"
+        );
+    }
+    assert!(burns > 20, "外框与孔之间应有大量排线：{burns}");
+
+    let mut cut = body.clone();
+    cut["vector_style"] = serde_json::json!("cut");
+    cut["laser_mode"] = serde_json::json!("cut");
+    let cut_res = post_json(&service, "/api/draw/preview", &cut);
+    assert_eq!(cut_res["success"], true, "{cut_res}");
+    assert_eq!(
+        cut_res["result"]["artifacts"]["mode"], "vector",
+        "导入 SVG 可以矢量切割"
+    );
+}
+
 /// 2026-11-16 只刻选中的图形（对齐 LightBurn“只加工选中图形”，不用选区原点）：
 /// 选中的部分刻在它在整幅画里的位置；只刻矢量；选中图片或空选区报错。
 #[test]

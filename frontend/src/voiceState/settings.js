@@ -90,13 +90,11 @@ export const TOOL_META = {
   start_tuned_job_tool: { label: "按调参结果开刻（旧入口）", group: "advanced", risk: "confirm", summary: "和“刻字”的确认发送重复。" },
   generate_text_laser_task_tool: { label: "生成刻字任务（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
   generate_text_image_gcode_tool: { label: "文字转刀路文件", group: "advanced", risk: "file", summary: "只生成图片和刀路文件。" },
-  ai_laser_gcode_tool: { label: "素材转刀路（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
   generate_text_image_tool: { label: "生成文字图片", group: "advanced", risk: "file", summary: "只生成白底黑字图片。" },
   laser_grbl_tool: { label: "串口底层收发", group: "advanced", risk: "confirm", summary: "直接对串口查状态、取消；发任意 G-code 已禁用。" },
   laser_network_grbl_tool: { label: "网络底层收发", group: "advanced", risk: "confirm", summary: "直接对网络雕刻机查状态、取消；发任意 G-code 已禁用。" },
   open_app_tool: { label: "打开电脑应用", group: "desktop", risk: "desktop", summary: "打开浏览器、微信等应用或网址。" },
   shortcut_key_execution_tool: { label: "电脑快捷键", group: "desktop", risk: "desktop", summary: "播放、暂停音乐，调电脑音量。" },
-  open_jsjds_website_tool: { label: "打开计算机设计大赛官网", group: "desktop", risk: "desktop", summary: "打开大赛官网。" },
   command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
 };
 
@@ -231,13 +229,17 @@ export function voiceTabsFor(mode) {
 
 /**
  * 右上角偏好设置是否显示“OpenRouter · Jev 判断服务”（加工反馈判断，`/api/jev`）。
- * 桌面端只有内置链路的“模型 → Jev”卡片能配这项；官方链路没有“模型”标签，
- * 所以除内置链路外都在偏好设置里保留入口（2026-11-15 用户决定）。没有语音中心的网页环境一直显示；
- * 链路还没读到（null）时先不显示，避免内置链路下闪一下。
+ * 2026-11-26 用户决定（取代 2026-11-15 的 r32）：桌面端的语音与 AI 配置只留「语音中心」一个入口——
+ * 内置链路在“模型 → Jev”，官方链路在“服务”标签的 Jev 卡片；偏好设置只在没有语音中心的网页 / 手机环境显示。
  */
-export function preferencesShowJev({ hasVoiceCenter, voiceMode }) {
-  if (!hasVoiceCenter) return true;
-  return voiceMode != null && voiceMode !== "builtin";
+export function preferencesShowJev({ hasVoiceCenter }) {
+  return !hasVoiceCenter;
+}
+
+/** Jev 判断服务折叠标题上的当前值摘要。 */
+export function jevSettingsSummary({ enabled, maskedKey }) {
+  if (!enabled) return maskedKey ? "未启用（已存密钥）" : "未启用";
+  return maskedKey ? `已启用 · ${maskedKey}` : "已启用 · 未配密钥";
 }
 
 /** 语音链路名称（2026-11-17 删除自建服务端链路，只剩这两条）。 */

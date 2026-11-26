@@ -361,7 +361,8 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   const approval = readFileSync(path.join(srcRoot, "components/ApprovalCenter.jsx"), "utf8");
   assert.match(approval, /if \(!shown \|\| failure \|\| busy \|\| remaining > 0\) return;\s*removeShown\(shown\.approval_id\)/, "倒计时过期移除须经 removeShown 同步顶栏待审批计数");
 
-  const settings = readFileSync(path.join(srcRoot, "components/SettingsModal.jsx"), "utf8");
+  // 2026-11-26 Jev 一节抽成 JevSettingsSection（偏好设置与语音中心官方链路共用）
+  const settings = readFileSync(path.join(srcRoot, "components/JevSettingsSection.jsx"), "utf8");
   assert.match(
     settings,
     /const savedOk = await saveJevSettings\(\{ silentSuccess: true \}\);\s*if \(!savedOk\) return;/,

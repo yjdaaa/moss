@@ -8,6 +8,7 @@ import { readUnifiedConnection } from "./deviceConnection.js";
 import { normalizeEngraveRoute } from "./engraveRoute.js";
 import { intervalScaleValue } from "./qualityPresets.js";
 import { imageParamsPayload, normalizeImageMode } from "./workbenchParams.js";
+import { isVectorImageElement } from "./svgImport.js";
 
 /** 转图片方式（雕刻路线为“转图片”时）。 */
 export const DRAW_IMAGE_STRATEGIES = Object.freeze([
@@ -89,9 +90,12 @@ export function drawRasterImagePayload(form) {
   });
 }
 
-/** 画布有效元素里是否包含插入的位图图片。 */
+/** 画布有效元素里是否包含插入的位图图片（带矢量轮廓的导入 SVG 不算，矢量模式照样能刻，2026-11-26）。 */
 export function hasSceneImageElements(elements) {
-  return Array.isArray(elements) && elements.some((el) => el && !el.isDeleted && el.type === "image");
+  return (
+    Array.isArray(elements) &&
+    elements.some((el) => el && !el.isDeleted && el.type === "image" && !isVectorImageElement(el))
+  );
 }
 
 /**

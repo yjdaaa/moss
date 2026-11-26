@@ -24,11 +24,12 @@ export { ExperienceGroup } from "./voice-builtin/ExperienceGroup.jsx";
 export { LiveDebugTraces } from "./voice-builtin/LiveDebugTraces.jsx";
 export { BuiltinEvents } from "./voice-builtin/BuiltinEvents.jsx";
 
+// 2026-11-26 语音中心瘦身：常用的记忆、家居在前；联网查询插件与声纹（实验）收在后面，仍默认全关、按需点开
 const PRIVATE_TASKS = [
   { key: "memory", title: "记忆", description: "查看和管理小智记住的内容" },
-  { key: "plugins", title: "信息服务", description: "选择天气、新闻和搜索等服务" },
-  { key: "speaker", title: "声纹", description: "登记家人，完成标定后再启用" },
   { key: "home", title: "家居", description: "连接设备；每次控制仍需批准" },
+  { key: "plugins", title: "联网查询插件（可选）", description: "天气、新闻、搜索、外部知识库，默认全关" },
+  { key: "speaker", title: "声纹识别（实验）", description: "只提示可能是谁在说话，不授权任何动作" },
 ];
 
 export function PrivateSettingsEntry({ status, active = true }) {

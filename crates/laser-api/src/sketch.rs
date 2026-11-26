@@ -199,6 +199,167 @@ fn arrow_head(from: Point, tip: Point, length: f64) -> [Vec<Point>; 2] {
     [wing(0.45), wing(-0.45)]
 }
 
+/// 导入 SVG 的矢量数据上限：防止异常文件让规划卡死（与前端 `svgImport.js` 的采样上限一致）。
+const MAX_VECTOR_IMAGE_POINTS: usize = 400_000;
+const MAX_VECTOR_IMAGE_PATHS: usize = 20_000;
+
+/// 解析 `[[x, y], ...]`；坐标须是有限数字。
+fn vector_points(value: &Value) -> Result<Vec<Point>, String> {
+    let bad = || "导入的 SVG 矢量数据损坏（坐标不是数字），请重新导入".to_owned();
+    value
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|p| {
+            let p = p.as_array().ok_or_else(bad)?;
+            let x = p.first().and_then(Value::as_f64).filter(|v| v.is_finite());
+            let y = p.get(1).and_then(Value::as_f64).filter(|v| v.is_finite());
+            match (x, y) {
+                (Some(x), Some(y)) => Ok((x, y)),
+                _ => Err(bad()),
+            }
+        })
+        .collect()
+}
+
+/// 图片元素上的导入 SVG 矢量（`customData.moss_vector`，版本 1）放进元素框，返回是否处理了。
+///
+/// 数据格式（前端 `svgImport.js::buildVectorData` 生成）：`size` 为轮廓原始尺寸（mm），
+/// `paths[]` 每项 `rings`（闭合环，同一项内按非零规则一起填，孔已按方向区分）、`open`（开放线）、
+/// `fill` / `stroke`（SVG 原样式是否可见）。坐标为相对轮廓左上角的 mm，按元素框等比拉伸；
+/// 元素的翻转（`scale` 为负）与旋转角一并换算。
+fn push_vector_image(
+    element: &Value,
+    (x, y, w, h): (f64, f64, f64, f64),
+    angle: f64,
+    style: VectorStyle,
+    out: &mut SketchGeometry,
+) -> Result<bool, String> {
+    let Some(data) = element.get("customData").and_then(|c| c.get("moss_vector")) else {
+        return Ok(false);
+    };
+    if data.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err("导入的 SVG 矢量数据版本不认识，请重新导入".into());
+    }
+    let (src_w, src_h) = match data.get("size").and_then(Value::as_array) {
+        Some(pair) if pair.len() == 2 => (
+            pair[0].as_f64().filter(|v| v.is_finite() && *v >= 0.0),
+            pair[1].as_f64().filter(|v| v.is_finite() && *v >= 0.0),
+        ),
+        _ => (None, None),
+    };
+    let (Some(src_w), Some(src_h)) = (src_w, src_h) else {
+        return Err("导入的 SVG 矢量数据缺少尺寸，请重新导入".into());
+    };
+    let paths = data
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or("导入的 SVG 矢量数据缺少轮廓，请重新导入")?;
+    if paths.len() > MAX_VECTOR_IMAGE_PATHS {
+        return Err(format!(
+            "导入的 SVG 图形太多（{} 个，上限 {MAX_VECTOR_IMAGE_PATHS}），请先在设计软件里合并或简化",
+            paths.len()
+        ));
+    }
+    // 等比拉伸到元素框；某一边为 0（一条横线）时用另一边的比例
+    let (w, h) = (w.abs(), h.abs());
+    let sx = if src_w > 1e-9 {
+        w / src_w
+    } else {
+        h / src_h.max(1e-9)
+    };
+    let sy = if src_h > 1e-9 { h / src_h } else { sx };
+    let flip = |i: usize| {
+        element
+            .get("scale")
+            .and_then(Value::as_array)
+            .and_then(|s| s.get(i))
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v < 0.0)
+    };
+    let (flip_x, flip_y) = (flip(0), flip(1));
+    let center = (x + w / 2.0, y + h / 2.0);
+    let place = |points: Vec<Point>| -> Vec<Point> {
+        let placed = points
+            .into_iter()
+            .map(|(px, py)| {
+                let u = if flip_x { src_w - px } else { px };
+                let v = if flip_y { src_h - py } else { py };
+                (x + u * sx, y + v * sy)
+            })
+            .collect();
+        rotate(placed, center, angle)
+    };
+    let mut total = 0usize;
+    let mut count = |points: &[Point]| -> Result<(), String> {
+        total += points.len();
+        if total > MAX_VECTOR_IMAGE_POINTS {
+            return Err(format!(
+                "导入的 SVG 轮廓点数超过 {MAX_VECTOR_IMAGE_POINTS}，请先在设计软件里简化路径"
+            ));
+        }
+        Ok(())
+    };
+    for path in paths {
+        let flag = |key: &str| path.get(key).and_then(Value::as_bool).unwrap_or(false);
+        let (fill, stroke) = (flag("fill"), flag("stroke"));
+        let mut rings = Vec::new();
+        for ring in path
+            .get("rings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut ring = vector_points(ring)?;
+            count(&ring)?;
+            if ring.len() < 3 {
+                continue;
+            }
+            if !closed_polyline(&ring) {
+                ring.push(ring[0]);
+            }
+            rings.push(place(ring));
+        }
+        let mut open = Vec::new();
+        for line in path
+            .get("open")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let line = vector_points(line)?;
+            count(&line)?;
+            if line.len() >= 2 {
+                open.push(place(line));
+            }
+        }
+        if !rings.is_empty() {
+            let (fill_it, stroke_it) = style.closed_shape(stroke, fill);
+            match style {
+                // 切割：同一图形的外轮廓与孔整组切（切缝补偿按组做，孔反向补偿），与文字相同
+                VectorStyle::Cut => {
+                    if stroke_it {
+                        out.cut_text.push(rings);
+                    }
+                }
+                _ => {
+                    if fill_it {
+                        out.filled_text.push(rings.clone());
+                    }
+                    if stroke_it {
+                        out.closed.extend(rings);
+                    }
+                }
+            }
+        }
+        // 开放线只看线条是否可见（与画板直线一致；填充图形的子路径前端已按闭合处理）
+        if stroke {
+            out.open.extend(open);
+        }
+    }
+    Ok(true)
+}
+
 /// 场景（`{"elements": [...]}` 或直接是元素数组）转成矢量几何。`font_for` 为文字找可用字体。
 /// 只留选中的元素（2026-11-16，对齐 LightBurn“只加工选中图形”）：`id` 在选中集合里，
 /// 或绑在选中容器上的文字（`containerId`）。其余字段原样保留。
@@ -426,7 +587,12 @@ pub(crate) fn sketch_from_scene(
                     }
                 }
             }
-            "image" => out.has_image = true,
+            // 导入的 SVG（2026-11-26）：图片元素带着 `customData.moss_vector` 矢量轮廓时按矢量刻，
+            // 画布上看到的是 SVG 原图（孔洞、颜色都对），刀路用的是同一份轮廓
+            "image" => {
+                let vector = push_vector_image(element, (x, y, w, h), angle, style, &mut out)?;
+                out.has_image |= !vector;
+            }
             // 框架、嵌入网页等不是要刻的图形
             _ => {}
         }
@@ -560,6 +726,122 @@ mod tests {
         assert!(!cut_text.has_fills());
         assert!(VectorStyle::parse(Some("hatch")).is_err());
         assert_eq!(VectorStyle::parse(None).unwrap(), VectorStyle::Canvas);
+    }
+
+    fn svg_image(custom: serde_json::Value) -> serde_json::Value {
+        json!({"elements": [
+            {"type": "image", "x": 5, "y": 0, "width": 20, "height": 20, "customData": {"moss_vector": custom}},
+        ]})
+    }
+
+    fn square_with_hole() -> serde_json::Value {
+        json!({
+            "version": 1,
+            "size": [10, 10],
+            "paths": [{
+                "rings": [
+                    [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]],
+                    [[3, 3], [3, 7], [7, 7], [7, 3], [3, 3]]
+                ],
+                "open": [],
+                "fill": true,
+                "stroke": false
+            }, {
+                "rings": [],
+                "open": [[[0, 12], [10, 12]]],
+                "fill": false,
+                "stroke": true
+            }]
+        })
+    }
+
+    #[test]
+    fn imported_svg_images_carve_as_vectors_with_holes_grouped() {
+        let sketch = sketch_from_scene(
+            &svg_image(square_with_hole()),
+            &no_font,
+            VectorStyle::Canvas,
+        )
+        .unwrap();
+        assert!(!sketch.has_image, "带矢量数据的导入 SVG 不算位图");
+        assert_eq!(sketch.filled_text.len(), 1, "外轮廓与孔是同一组非零填充");
+        assert_eq!(sketch.filled_text[0].len(), 2);
+        assert!(sketch.closed.is_empty(), "原样式只填不描");
+        // 10 mm 的轮廓拉伸到 20 的元素框、左移 5
+        assert_eq!(sketch.filled_text[0][0][1], (25.0, 0.0));
+        assert_eq!(sketch.filled_text[0][1][2], (19.0, 14.0));
+        assert_eq!(
+            sketch.open,
+            vec![vec![(5.0, 24.0), (25.0, 24.0)]],
+            "描边的开放线照刻一笔"
+        );
+
+        let outline = sketch_from_scene(
+            &svg_image(square_with_hole()),
+            &no_font,
+            VectorStyle::Outline,
+        )
+        .unwrap();
+        assert!(outline.filled_text.is_empty());
+        assert_eq!(outline.closed.len(), 2, "轮廓刻法：外轮廓与孔都描边");
+
+        let cut =
+            sketch_from_scene(&svg_image(square_with_hole()), &no_font, VectorStyle::Cut).unwrap();
+        assert_eq!(cut.cut_text.len(), 1, "切割：外轮廓与孔整组切，孔反向补偿");
+        assert_eq!(cut.cut_text[0].len(), 2);
+        assert!(!cut.has_fills());
+    }
+
+    #[test]
+    fn imported_svg_follows_element_flip_and_rotation() {
+        let mut scene = svg_image(square_with_hole());
+        scene["elements"][0]["scale"] = json!([-1, 1]);
+        let flipped = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
+        // 水平翻转：原 (10, 0) 落到框左边
+        assert_eq!(flipped.filled_text[0][0][1], (5.0, 0.0));
+        scene["elements"][0]["scale"] = json!([1, 1]);
+        scene["elements"][0]["angle"] = json!(std::f64::consts::PI);
+        let turned = sketch_from_scene(&scene, &no_font, VectorStyle::Canvas).unwrap();
+        let (px, py) = turned.filled_text[0][0][0];
+        assert!(
+            (px - 25.0).abs() < 1e-9 && (py - 20.0).abs() < 1e-9,
+            "转 180° 后左上角到右下角：{px},{py}"
+        );
+    }
+
+    #[test]
+    fn imported_svg_rejects_broken_or_oversized_data() {
+        let mut bad = square_with_hole();
+        bad["version"] = json!(2);
+        assert!(
+            sketch_from_scene(&svg_image(bad), &no_font, VectorStyle::Canvas)
+                .unwrap_err()
+                .contains("版本")
+        );
+        let mut bad = square_with_hole();
+        bad["paths"][0]["rings"][0][1] = json!(["a", 0]);
+        assert!(
+            sketch_from_scene(&svg_image(bad), &no_font, VectorStyle::Canvas)
+                .unwrap_err()
+                .contains("损坏")
+        );
+        let mut bad = square_with_hole();
+        bad.as_object_mut().unwrap().remove("size");
+        assert!(
+            sketch_from_scene(&svg_image(bad), &no_font, VectorStyle::Canvas)
+                .unwrap_err()
+                .contains("尺寸")
+        );
+        let huge: Vec<_> = (0..=MAX_VECTOR_IMAGE_POINTS)
+            .map(|i| json!([i % 10, i % 7]))
+            .collect();
+        let big =
+            json!({"version": 1, "size": [10, 10], "paths": [{"rings": [huge], "fill": true}]});
+        assert!(
+            sketch_from_scene(&svg_image(big), &no_font, VectorStyle::Canvas)
+                .unwrap_err()
+                .contains("点数")
+        );
     }
 
     #[test]

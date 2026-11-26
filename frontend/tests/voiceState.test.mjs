@@ -116,6 +116,7 @@ import {
   builtinJevForm,
   builtinJevSavePayload,
   preferencesShowJev,
+  jevSettingsSummary,
   restartEffect,
 } from "../src/voiceState.js";
 
@@ -2045,11 +2046,13 @@ test("按场景推荐的整套模型：一次保存、缺什么提示什么、�
   assert.ok(["vad", "denoise", "turn", "asr", "tts"].every((kind) => kinds.has(kind)));
 });
 
-test("偏好设置里的 Jev 加工反馈判断：除内置链路外都显示，链路未读到前不显示", () => {
-  assert.equal(preferencesShowJev({ hasVoiceCenter: false, voiceMode: null }), true, "网页环境没有语音中心，始终显示");
-  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "official" }), true, "官方链路没有“模型”标签，只能在这里配");
-  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "builtin" }), false, "内置链路由“模型 → Jev”统一管理，不重复");
-  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: null }), false, "链路未读到时先不显示，避免闪烁");
+test("偏好设置里的 Jev 加工反馈判断：只在没有语音中心的环境显示（2026-11-26 入口收口到语音中心）", () => {
+  assert.equal(preferencesShowJev({ hasVoiceCenter: false }), true, "网页 / 手机环境没有语音中心，只能在偏好设置里配");
+  assert.equal(preferencesShowJev({ hasVoiceCenter: true }), false, "桌面端统一在语音中心配置，偏好设置不重复");
+  assert.equal(jevSettingsSummary({ enabled: false, maskedKey: "" }), "未启用");
+  assert.equal(jevSettingsSummary({ enabled: false, maskedKey: "sk-…1234" }), "未启用（已存密钥）");
+  assert.equal(jevSettingsSummary({ enabled: true, maskedKey: "sk-…1234" }), "已启用 · sk-…1234");
+  assert.equal(jevSettingsSummary({ enabled: true, maskedKey: "" }), "已启用 · 未配密钥");
 });
 
 test("voice_local_save 生效提示以后端 hot_applied 与 restarted 为准，不再靠前端猜测清单", () => {

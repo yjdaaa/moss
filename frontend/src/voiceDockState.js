@@ -31,7 +31,6 @@ const LASER_TOOL_LABELS = {
   generate_text_image_gcode_tool: "生成刀路",
   generate_text_laser_task_tool: "生成雕刻预览",
   regenerate_text_laser_task_tool: "重新生成预览",
-  ai_laser_gcode_tool: "生成刀路",
   run_calibration_grid_tool: "测试矩阵",
   select_calibration_cell_tool: "选定测试格参数",
   start_tuned_job_tool: "按调好的参数开刻",

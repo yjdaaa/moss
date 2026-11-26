@@ -477,9 +477,7 @@ fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|id| !id.trim().is_empty()))
         }
-        "ai_laser_gcode_tool"
-        | "generate_text_image_gcode_tool"
-        | "generate_text_laser_task_tool" => {
+        "generate_text_image_gcode_tool" | "generate_text_laser_task_tool" => {
             let parsed: Value =
                 serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             !(arg_flag_true(&parsed, "confirmed") && arg_flag_true(&parsed, "send_after_generate"))

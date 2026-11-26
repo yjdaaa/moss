@@ -163,7 +163,8 @@ try {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ success: true, result: { mcp: {}, approvals: [], items: [] } }),
+        // voice.mode=builtin：摄像头导航只在内置语音链路显示（2026-11-26）
+        body: JSON.stringify({ success: true, result: { mcp: {}, voice: { mode: "builtin" }, approvals: [], items: [] } }),
       });
     }
     if (url.origin === new URL(local).origin) {

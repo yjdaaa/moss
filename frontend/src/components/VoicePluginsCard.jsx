@@ -130,7 +130,7 @@ export default function VoicePluginsCard() {
     </div>
   );
   return <section className="voice-card" aria-label="语音信息插件">
-    <h3>信息服务</h3>
+    <h3>联网查询插件</h3>
     <p>只选择需要的服务。联网服务可能把查询内容发给服务商，并产生 API 费用；所有服务默认关闭。</p>
     {loading ? <p>正在读取服务设置…</p> : <>
       <label className="voice-form-group">要设置的服务
@@ -139,7 +139,7 @@ export default function VoicePluginsCard() {
           <option value="weather">天气</option>
           <option value="news">新闻</option>
           <option value="search">联网搜索</option>
-          <option value="rag">外部 RAGFlow 知识库（远程服务）</option>
+          <option value="rag">外部 RAGFlow 知识库（高级 · 需自建服务器）</option>
         </select>
       </label>
       {selectedService === "lunar" && <div className="voice-private-service">
@@ -194,7 +194,7 @@ export default function VoicePluginsCard() {
       </div>}
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
-      <button type="button" className="btn btn-primary" disabled={saving} onClick={save}>{saving ? "正在保存…" : "保存信息服务"}</button>
+      <button type="button" className="btn btn-primary" disabled={saving} onClick={save}>{saving ? "正在保存…" : "保存联网查询插件"}</button>
     </>}
   </section>;
 }
