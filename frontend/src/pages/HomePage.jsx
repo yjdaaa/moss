@@ -147,15 +147,26 @@ export function HomePage({
     setFillSettings(next);
     writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
   };
+  const [materials, setMaterials] = useState([]);
+  const [selectedMaterial, setSelectedMaterial] = useState(
+    () => readLocal("laser-forge-mat", "椴木") || "椴木"
+  );
+  const [selectedThickness, setSelectedThickness] = useState(
+    () => readLocal("laser-forge-thick", "3") || "3"
+  );
+  const currentMaterialObj = materials.find((m) => m.name === selectedMaterial);
+  const availableThicknesses = currentMaterialObj?.thicknesses || [1, 2, 3, 5];
+  const surfaceOnlyMaterial = Boolean(currentMaterialObj && availableThicknesses.length === 0 && currentMaterialObj.surface);
+
   // 雕刻路线全局开关（2026-11-17 技术书 r45，与创作画板、语音同一个值）：转图片时描边 / 排线按实心，
-  // 用户原来选的刻法照样记着，切回矢量即恢复；外框切割始终走矢量
+  // 仅表面通用材料时外框切割回落为轮廓描边；用户原来选的刻法照样记着，切回即恢复
   const {
     route: engraveRoute,
     setRoute: setEngraveRoute,
     saving: engraveRouteSaving,
     readOnly: engraveRouteReadOnly,
   } = useEngraveRoute();
-  const textStyleEffective = effectiveTextStyle(textStyle, engraveRoute);
+  const textStyleEffective = effectiveTextStyle(textStyle, engraveRoute, { surfaceOnly: surfaceOnlyMaterial });
   const textUsesFill = resolveTextStyle(textStyleEffective).textFill !== "outline";
   // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
   const textIsCut = resolveTextStyle(textStyleEffective).laserMode === "cut";
@@ -194,13 +205,6 @@ export function HomePage({
   const [uploadedGcodeName, setUploadedGcodeName] = useState("");
 
   // Material and Parameter state
-  const [materials, setMaterials] = useState([]);
-  const [selectedMaterial, setSelectedMaterial] = useState(
-    () => readLocal("laser-forge-mat", "椴木") || "椴木"
-  );
-  const [selectedThickness, setSelectedThickness] = useState(
-    () => readLocal("laser-forge-thick", "3") || "3"
-  );
   const [powerPercent, setPowerPercent] = useState(50);
   const [recommendedFeedRate, setRecommendedFeedRate] = useState(1800);
   const [recommendedPasses, setRecommendedPasses] = useState(1);
@@ -238,8 +242,10 @@ export function HomePage({
     textStyle: textStyleEffective,
     textOrigin,
     engraveRoute,
-    // 自动过扫描随机器加速度变，读到新的加速度后填充文字的旧预览也算过期
-    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill, withCut: textIsCut })
+    // 自动过扫描随机器加速度变，读到新的加速度后填充文字的旧预览也算过期；转图片路线只看扫描子集
+    fillSignature: (engraveRoute === "image"
+      ? rasterScanSignature(fillSettings)
+      : fillSettingsSignature(fillSettings, { withFill: textUsesFill, withCut: textIsCut }))
       + (textUsesFill ? JSON.stringify(motionPayload) : ""),
     uploadedImagePath,
     imageWidthMm,
@@ -515,10 +521,6 @@ export function HomePage({
     }
   };
 
-  // Switch material -> update thickness list
-  const currentMaterialObj = materials.find((m) => m.name === selectedMaterial);
-  const availableThicknesses = currentMaterialObj?.thicknesses || [1, 2, 3, 5];
-
   const connectionForm = {
     connection_mode: connectionMode,
     port: serialPort,
@@ -589,12 +591,17 @@ export function HomePage({
         }
         // 雕刻路线不随请求发送：后端按全局开关（与语音同一条），工作台只按它显示可选刻法
         const spec = resolveTextStyle(textStyleEffective);
-        const fillPayload = fillSettingsPayload(fillSettings, {
-          withFill: spec.textFill !== "outline",
-          withCut: spec.laserMode === "cut",
-        });
+        const fillPayload = engraveRoute === "image"
+          ? rasterScanPayload(fillSettings)
+          : fillSettingsPayload(fillSettings, {
+              withFill: spec.textFill !== "outline",
+              withCut: spec.laserMode === "cut",
+            });
         if (fillPayload.error) {
-          showAlert(fillPayload.error, { title: spec.laserMode === "cut" ? "切割或走刀设置不对" : "填充设置不对", tone: "warning" });
+          showAlert(fillPayload.error, {
+            title: engraveRoute === "image" ? "扫描设置不对" : (spec.laserMode === "cut" ? "切割或走刀设置不对" : "填充设置不对"),
+            tone: "warning",
+          });
           setBusy(false);
           return;
         }
@@ -1252,6 +1259,7 @@ export function HomePage({
                 updateFillSettings={updateFillSettings}
                 textUsesFill={textUsesFill}
                 textIsCut={textIsCut}
+                surfaceOnly={surfaceOnlyMaterial}
                 materialApplied={materialApplied}
                 materialLayer={materialLayer}
                 saveFillToMaterial={saveFillToMaterial}
@@ -1350,26 +1358,28 @@ export function HomePage({
           handleEStop={handleEStop}
         />
 
-        <WbCard id="feedback" className="hud-card ob-card" label="加工反馈">
-          <FoldHeader
-            id="wb-feedback"
-            title="加工反馈"
-            defaultOpen={Boolean(currentWorkflow?.workflow_id || currentWorkflow?.feedback_origin)}
-            persist={false}
-            autoExpandKey={
-              currentWorkflow?.workflow_id
-                ? `${currentWorkflow.workflow_id}:${overlayStatus === "completed" ? "completed" : "ready"}`
-                : ""
-            }
-          />
-          {!currentWorkflow?.workflow_id && (
-            <p className="ob-sub wb-note">生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
-          )}
-            {/* 数控中控台与实时调参反馈卡片 */}
-            <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
-              disabled={busy || framingBusy || previewStale || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
-              onAdopt={(workflow) => adoptDerivedWorkflow(workflow, "调参预览")} />
-        </WbCard>
+        {activeTool !== "gcode" && (
+          <WbCard id="feedback" className="hud-card ob-card" label="加工反馈">
+            <FoldHeader
+              id="wb-feedback"
+              title="加工反馈"
+              defaultOpen={Boolean(currentWorkflow?.workflow_id || currentWorkflow?.feedback_origin)}
+              persist={false}
+              autoExpandKey={
+                currentWorkflow?.workflow_id
+                  ? `${currentWorkflow.workflow_id}:${overlayStatus === "completed" ? "completed" : "ready"}`
+                  : ""
+              }
+            />
+            {!currentWorkflow?.workflow_id && (
+              <p className="ob-sub wb-note">生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
+            )}
+              {/* 数控中控台与实时调参反馈卡片 */}
+              <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
+                disabled={busy || framingBusy || previewStale || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
+                onAdopt={(workflow) => adoptDerivedWorkflow(workflow, "调参预览")} />
+          </WbCard>
+        )}
 
       </WorkbenchCanvas>
 

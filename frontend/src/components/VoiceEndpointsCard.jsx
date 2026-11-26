@@ -118,11 +118,14 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
   );
 }
 
-export function VoiceToolsCard({ overview, busy, run }) {
+export function VoiceToolsCard({ overview, mode = "official", strictEnabled = false, busy, run }) {
   const [copiedPrompt, setCopiedPrompt] = useState("");
   if (!overview) return null;
   const tools = Array.isArray(overview.tools) ? overview.tools : [];
   const fullList = overview.full_tool_list === true;
+  const hideDesktop = mode === "builtin" || Boolean(strictEnabled);
+  const groups = groupedTools(tools, { hideDesktop });
+  const visibleTools = groups.flatMap((g) => g.tools);
 
   const switchTool = (tool, enabled) =>
     run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
@@ -139,8 +142,8 @@ export function VoiceToolsCard({ overview, busy, run }) {
     }
   };
 
-  const disabled = tools.filter((tool) => tool.enabled === false).length;
-  const offered = tools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
+  const disabled = visibleTools.filter((tool) => tool.enabled === false).length;
+  const offered = visibleTools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
   return (
     <VoiceGroup id="tools" title="MOSS 内置工具（所有链路共用）" summary={`${fullList ? "完整清单" : "精简清单"} · AI 可用 ${offered} 个${disabled ? ` · ${disabled} 个已关闭` : ""}`}>
       <p className="voice-muted">这些是 MOSS 自带的工具，官方小智和内置语音都用这一套。勾选立即生效；“停止与机器控制”不能关闭。</p>
@@ -153,7 +156,7 @@ export function VoiceToolsCard({ overview, busy, run }) {
           </small>
         </span>
       </label>
-      {groupedTools(tools).map((group) => (
+      {groups.map((group) => (
         <section className="voice-tools-group" key={group.id} id={`voice-tools-group-${group.id}`}>
           <h4>{group.title}</h4>
           <ul className="voice-tools-list">

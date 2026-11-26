@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Square, Upload, Trash2, Check } from "lucide-react";
 import { voiceApi } from "../../voiceApi.js";
 import {
+  QWEN3_TTS_1_7B_SPEED_OPTIONS,
   isAudioCppTtsModel,
   localModelSettingsError,
   localTtsSpeedFixed,
   localTtsSpeakerGroups,
+  normalizeQwen3Tts17bSpeed,
   voiceErrorText,
 } from "../../voiceState.js";
 
@@ -181,7 +183,9 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
       text: isCloneModel ? "正在按参考录音合成试听（首次加载模型约需数秒）…" : speedFixed ? "正在按当前音色合成…" : "正在按当前音色和语速合成…",
     });
     try {
-      const speed = speedFixed ? 1 : Number(form.tts_speed);
+      const speed = speedFixed
+        ? 1
+        : Number(form.tts_model === "qwen3_tts_1_7b" ? normalizeQwen3Tts17bSpeed(form.tts_speed) : form.tts_speed);
       const res = await voiceApi.localTtsPreview(
         form.tts_model,
         voices ? Number(form.tts_speaker) : 0,
@@ -345,8 +349,23 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
       )}
       {!speedFixed && (
         <label>
-          <span>本地合成语速（0.5 ~ 2.0）</span>
-          <input className="text-input" inputMode="decimal" value={form.tts_speed} onChange={(e) => update("tts_speed", e.target.value)} id="voice-local-speed" />
+          <span>{form.tts_model === "qwen3_tts_1_7b" ? "本地合成语速（说话指令档位）" : "本地合成语速（0.5 ~ 2.0）"}</span>
+          {form.tts_model === "qwen3_tts_1_7b" ? (
+            <select
+              className="text-input"
+              value={normalizeQwen3Tts17bSpeed(form.tts_speed)}
+              onChange={(e) => update("tts_speed", e.target.value)}
+              id="voice-local-speed"
+            >
+              {QWEN3_TTS_1_7B_SPEED_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input className="text-input" inputMode="decimal" value={form.tts_speed} onChange={(e) => update("tts_speed", e.target.value)} id="voice-local-speed" />
+          )}
         </label>
       )}
       <div className="voice-wide voice-local-tts-trial">

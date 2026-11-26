@@ -86,12 +86,12 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
         setNotes: () => {},
       }),
     );
-    assert.match(paramsHtml, /最小激光功率 \(0–100%\)/);
+    assert.doesNotMatch(paramsHtml, /最小激光功率|空移速度|二值阈值/);
     assert.match(paramsHtml, /最大激光功率 \(0–100%\)/);
     assert.doesNotMatch(paramsHtml, /0-1000/);
     assert.match(paramsHtml, /id="lab-max-power"[^>]*value="42\.5"/);
-    assert.match(paramsHtml, /对应 S0 \/ 1000/);
     assert.match(paramsHtml, /对应 S425 \/ 1000/);
+    assert.match(paramsHtml, /线距 \/ 点距 \(mm\)/, "光栅模式显示线距 / 点距");
     assert.match(paramsHtml, /<div class="lab-box-3"><label class="lab-label-2">材料别名 \(逗号分隔\)<\/label>/);
     assert.doesNotMatch(paramsHtml, /class="ob-k"/);
 
@@ -571,5 +571,139 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.match(voicePageSrc, /<VoiceAgentCard active=\{activeTab === "features"\} \/>/);
     const agentSrc = readFileSync(path.join(srcRoot, "components/VoiceAgentCard.jsx"), "utf8");
     assert.match(agentSrc, /if \(loadedRef\.current && !document\.hidden\) void refreshRef\.current\(true\);/, "切回扩展标签时立即刷新一次 Agent 状态");
+
+    // 7. 2026-11-26 全站能力门禁：没有的功能不显示，有的才显示
+    const { WorkbenchMaterialCard } = await server.ssrLoadModule("/src/components/workbench/WorkbenchMaterialCard.jsx");
+    const cutParamsHtml = renderToStaticMarkup(
+      React.createElement(LabParamsPanel, {
+        materials: { 椴木: { thicknesses: { surface: {} } } },
+        readOnly: false,
+        selectedMaterial: "椴木",
+        selectedThickness: "surface",
+        currentMatThicknesses: ["surface"],
+        hasSavedCell: false,
+        editorStatus: "",
+        activeMode: "outline",
+        handleModeChange: () => {},
+        handleDeleteCurrentThickness: () => {},
+        handleSaveParams: () => {},
+        setMaterialModalData: () => {},
+        setShowMaterialModal: () => {},
+        maxPower: 300,
+        setMaxPower: () => {},
+        feedRate: 1200,
+        setFeedRate: () => {},
+        passes: 1,
+        setPasses: () => {},
+        pixelSize: 0.1,
+        setPixelSize: () => {},
+        aliases: "",
+        setAliases: () => {},
+        entryTitle: "",
+        setEntryTitle: () => {},
+        notes: "",
+        setNotes: () => {},
+      }),
+    );
+    assert.doesNotMatch(cutParamsHtml, /线距 \/ 点距/, "非光栅模式隐藏线距 / 点距");
+    assert.doesNotMatch(cutParamsHtml, /边缘切割/, "表面通用条目隐藏边缘切割页签");
+
+    const intervalMatrixHtml = renderToStaticMarkup(
+      React.createElement(LabMatrixSettings, {
+        selectedMaterial: "椴木",
+        selectedThickness: "3",
+        matrixMode: "raster",
+        matrixModeInfo: resolveMatrixModeParams("raster"),
+        changeMatrixMode: () => {},
+        matrixStatus: "",
+        matrixPowerMin: 100,
+        setMatrixPowerMin: () => {},
+        matrixPowerMax: 600,
+        setMatrixPowerMax: () => {},
+        matrixSpeedMin: 500,
+        setMatrixSpeedMin: () => {},
+        matrixSpeedMax: 2500,
+        setMatrixSpeedMax: () => {},
+        matrixRows: 5,
+        setMatrixRows: () => {},
+        matrixCols: 5,
+        setMatrixCols: () => {},
+        matrixTestType: "interval",
+        setMatrixTestType: () => {},
+        matrixIntervalMin: 0.08,
+        setMatrixIntervalMin: () => {},
+        matrixIntervalMax: 0.16,
+        setMatrixIntervalMax: () => {},
+        matrixIntervalCount: 9,
+        setMatrixIntervalCount: () => {},
+        matrixXAxis: "power",
+        setMatrixXAxis: () => {},
+        matrixYAxis: "speed",
+        setMatrixYAxis: () => {},
+        matrixPassesMin: 1,
+        setMatrixPassesMin: () => {},
+        matrixPassesMax: 3,
+        setMatrixPassesMax: () => {},
+        matrixLabels: true,
+        setMatrixLabels: () => {},
+      }),
+    );
+    assert.doesNotMatch(intervalMatrixHtml, /功率区间|速度区间|矩阵行数|矩阵列数/, "线距测试隐藏功率/速度区间与矩阵行列数");
+
+    const wbGcodeMatHtml = renderToStaticMarkup(
+      React.createElement(WorkbenchMaterialCard, {
+        activeTool: "gcode",
+        textStyle: "outline",
+        materials: [{ name: "椴木", thicknesses: [3], surface: false }],
+        selectedMaterial: "椴木",
+        setSelectedMaterial: () => {},
+        selectedThickness: "3",
+        setSelectedThickness: () => {},
+        availableThicknesses: [3],
+        powerPercent: 40,
+        recommendedFeedRate: 1500,
+        recommendedPasses: 1,
+        hasRecommendation: true,
+        setMaterialModalData: () => {},
+        setShowMaterialModal: () => {},
+        customParams: false,
+        setCustomParams: () => {},
+        customPower: "40",
+        setCustomPower: () => {},
+        customFeed: "1500",
+        setCustomFeed: () => {},
+        customPasses: "1",
+        setCustomPasses: () => {},
+      }),
+    );
+    assert.doesNotMatch(wbGcodeMatHtml, /厚度规格|调整库内参数|wb-params/, "已有 G 码模式隐藏不参与生成的厚度、调参与功率速度面板");
+
+    const passThroughImgHtml = renderToStaticMarkup(
+      React.createElement(WorkbenchImageTool, {
+        addLog: () => {},
+        uploadedImagePath: "demo.png",
+        setUploadedImagePath: () => {},
+        uploadedImageName: "demo.png",
+        setUploadedImageName: () => {},
+        uploadedImageThumb: "",
+        setUploadedImageThumb: () => {},
+        imageMode: "dither",
+        setImageMode: () => {},
+        imageExtras: { ...DEFAULT_IMAGE_EXTRAS, passThrough: true },
+        setImageExtra: () => {},
+        imageFields: { halftone: false, grayscale: false },
+        applyImageQualityPreset: () => {},
+        imageWidthMm: "40",
+        setImageWidthMm: () => {},
+        imageHeightMm: "",
+        setImageHeightMm: () => {},
+        fillSettings: null,
+        updateFillSettings: null,
+      }),
+    );
+    assert.doesNotMatch(passThroughImgHtml, /wb-image-preset|wb-image-interval-scale/, "直通模式隐藏不生效的质量预设与行间距倍数");
+
+    assert.doesNotMatch(twinHtml, />Z 轴<|规划缓冲/, "2 轴机台与未上报 Bf 的固件不显示假 Z 轴与假 0/15 缓冲");
+    assert.match(twinHtml, /默认配置（100×100）/);
   });
 });

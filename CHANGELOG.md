@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 清理全站无效参数框并按模型、设备与访问身份精确门禁控件（2026-11-26）
+
+- **现象**：材料实验室与 Colab 联动保留了后端未消费的参数框，且工作台、创作画板、数字孪生、偏好设置与语音中心在当前模式、硬件固件、模型能力或局域网只读身份不支持时仍渲染无效选项或置灰死按钮。
+- **根因与修复**：删除材料实验室未参与刀路生成的最小功率/空移速度/二值阈值与 Colab 固定模型覆盖框，补齐画板光栅模式行间距/网点/灰度参数并在画布含插入图片时拦截矢量切割、引导光栅回退；`GET /api/system/info` 与 `GET /api/jobs/stop-targets` 新增 `can_edit_operator_settings`、`can_write_reference_data`、`can_acknowledge_stop` 权限字段，前端按表面通用条目、单向扫描、直通模式、凸包轮廓、FluidNC 能力、2 轴/GRBL 遥测、Android 宿主、内置语音/严格模式工具暴露范围、千问克隆/系统音色、热词/快速回答/Jev 半截话支持范围、在线小智屏幕能力与离线 `mcp=false` 宣告及本地 `qwen3_tts_1_7b` 五档指令语速动态显隐控件，不改既有存储与安全门禁。
+- **验证**：`laser-api` 新增权限字段与含图画板拒切单测，`uiPolishB`、`fillOptionsPanel`、`materialLabState`、`engraveRoute`、`voiceState` 与 `voice-center.browser.mjs` 同步新增全站门禁断言；`node scripts/verify.mjs --finish` 通过。真实激光机与小智多固件设备现场表现未实测（`unverified`）。
+- **关联**：`crates/laser-api/src/routes/system.rs`、`crates/laser-api/src/generation/draw.rs`、`frontend/src/{authSession,fillOptions,drawConnection,materialLabState,calibrationWizard,workbenchParams,deviceConnection,jobProgressState}.js`、`frontend/src/voiceState/{sections,localModels,devices,settings,modelSources}.js`、融合技术书 r63、内置语音技术书 n132。
+
 ### 修复自定义下拉框 `<optgroup>` 分组丢失、校准矩阵网格键盘可访问性及语音中心隐藏标签后台轮询（2026-11-26）
 
 - **现象**：本地合成音色下拉框（`#voice-local-speaker`）按语种和方言拆分的 `<optgroup>` 标题在 `ObsidianSelectHost` 自定义浮层中被丢弃，所有音色混为扁平长列表；材料实验室 `LabMatrixGrid` 使用内联固定宽度 `<div>` 单元格，多列时撑破卡片且无法用键盘聚焦选格；`FillOptionsPanel`、`VoiceHomeCard`、`VoiceHomeApprovalCard`、`VoiceContextCard`、`VoiceAgentCard` 存在漏挂 `.btn` 基类的裸按钮，`LocalTtsSettings` 存在 1 条 `react-hooks/exhaustive-deps` ESLint 警告，且 `VoiceMcpCard` / `VoiceAgentCard` 在未激活的“扩展”标签页下仍持续后台轮询。

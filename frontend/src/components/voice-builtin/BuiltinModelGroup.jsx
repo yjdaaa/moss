@@ -14,6 +14,7 @@ import {
   builtinModelSummary,
   builtinSectionSourceView,
   canAutoFetchModels,
+  canCloneDashscopeModel,
   canSaveSection,
   chatOnlyAudioGatewayError,
   dashscopeClonedVoicesKey,
@@ -68,6 +69,7 @@ function BuiltinModelGroup({ section, builtin }) {
   const audioRef = useRef(null);
   const fetchSeq = useRef(0);
   const voicesSeq = useRef(0);
+  const autoVoicesKeyRef = useRef("");
   const dirty = formDirty(baseline, form);
   const saveEnabled = canSaveSection(section, form, test);
   const doubao = isDoubao(form);
@@ -113,8 +115,9 @@ function BuiltinModelGroup({ section, builtin }) {
   const scopedOptions = onlyMatched ? matchedOptions : allOptions;
   const filteredOptions = filterModelOptions(rawOptions, form.model, filtering, { section, onlyMatched, modelSections });
   const baseVoiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
+  const canCloneVoice = section === "tts" && canCloneDashscopeModel(form);
   const clonedVoiceOptions =
-    dashscope && clonedVoices.key === currentVoicesKey
+    dashscope && canCloneVoice && clonedVoices.key === currentVoicesKey
       ? clonedVoices.items.map((item) => {
           const statusText = String(item.status || "OK").trim();
           const ready = !statusText || /^(?:ok|published|success|succeeded)$/i.test(statusText);
@@ -129,6 +132,12 @@ function BuiltinModelGroup({ section, builtin }) {
         })
       : [];
   const voiceOptions = [...clonedVoiceOptions, ...baseVoiceOptions.filter((opt) => !clonedVoiceOptions.some((c) => c.id === opt.id))];
+  const hasDashscopeKey = Boolean(String(form.api_key || "").trim() || ownKeySet || peerKeySet);
+  const dashscopeCloneOnly = dashscope && canCloneVoice && baseVoiceOptions.length === 0;
+  const hideEmptyVoiceToggle =
+    dashscopeCloneOnly &&
+    voiceOptions.length === 0 &&
+    (!hasDashscopeKey || (clonedVoices.key === currentVoicesKey && !clonedVoices.loading && !clonedVoices.error));
   const gatewayAudioErr = !presetKind ? chatOnlyAudioGatewayError(section, form.url) : "";
   const alibabaTtsHint = section === "tts" ? alibabaOpenaiTtsMismatch(section, form) : null;
   const endpointMismatch = !presetKind && section === "llm" ? tokenPlanEndpointMismatch(form.url, form.api_key) : null;
@@ -350,6 +359,20 @@ function BuiltinModelGroup({ section, builtin }) {
       setClonedVoices({ key: "", items: [], error: voiceErrorText(error), loading: false });
     }
   };
+
+  useEffect(() => {
+    if (section !== "tts" || !dashscopeCloneOnly || !hasDashscopeKey || sectionBusy) return undefined;
+    if (clonedVoices.key === currentVoicesKey || clonedVoices.loading || autoVoicesKeyRef.current === currentVoicesKey) {
+      return undefined;
+    }
+    const delay = String(form.api_key || "").trim() ? MODELS_AUTO_FETCH_DEBOUNCE_MS : 0;
+    const timer = setTimeout(() => {
+      autoVoicesKeyRef.current = currentVoicesKey;
+      void loadClonedVoices(form);
+    }, delay);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, dashscopeCloneOnly, hasDashscopeKey, sectionBusy, currentVoicesKey, clonedVoices.key, clonedVoices.loading]);
 
   const handleCloneFilePick = (event) => {
     const file = event.target.files?.[0];
@@ -875,9 +898,17 @@ function BuiltinModelGroup({ section, builtin }) {
             >
               <div className="voice-field-head">
                 <label htmlFor={n("model-voice")}>
-                  {doubao ? "音色 ID（可下拉选常用或手填）" : dashscope ? "音色 ID（系统音色或克隆音色）" : "音色（可下拉选常用或手填）"}
+                  {doubao
+                    ? "音色 ID（可下拉选常用或手填）"
+                    : dashscope
+                      ? dashscopeCloneOnly
+                        ? "克隆音色 ID"
+                        : canCloneVoice
+                          ? "音色 ID（系统音色或克隆音色）"
+                          : "系统音色"
+                      : "音色（可下拉选常用或手填）"}
                 </label>
-                {dashscope && (
+                {canCloneVoice && (
                   <>
                     <input
                       ref={cloneFileRef}
@@ -908,14 +939,16 @@ function BuiltinModelGroup({ section, builtin }) {
                   value={form.voice}
                   placeholder={
                     dashscope && voiceOptions.length === 0
-                      ? "点右上角“上传录音克隆音色”生成专属音色 ID"
+                      ? canCloneVoice
+                        ? "点右上角“上传录音克隆音色”生成专属音色 ID"
+                        : "填写系统音色名称"
                       : voiceOptions[0]
                         ? `如 ${voiceOptions[0].id}`
                         : "填写或下拉选择音色"
                   }
                   onFocus={() => {
-                    setVoiceMenuOpen(true);
-                    if (dashscope && clonedVoices.key !== currentVoicesKey) {
+                    if (!hideEmptyVoiceToggle) setVoiceMenuOpen(true);
+                    if (canCloneVoice && clonedVoices.key !== currentVoicesKey) {
                       loadClonedVoices(form);
                     }
                   }}
@@ -924,23 +957,25 @@ function BuiltinModelGroup({ section, builtin }) {
                   autoComplete="off"
                   id={n("model-voice")}
                 />
-                <button
-                  type="button"
-                  className="voice-combo-toggle"
-                  disabled={cloning}
-                  aria-label="展开常用音色列表"
-                  aria-expanded={voiceMenuOpen}
-                  onClick={() => {
-                    const nextOpen = !voiceMenuOpen;
-                    setVoiceMenuOpen(nextOpen);
-                    if (nextOpen && dashscope) {
-                      loadClonedVoices(form);
-                    }
-                  }}
-                  id={n("voice-toggle")}
-                >
-                  <ChevronDown size={14} />
-                </button>
+                {!hideEmptyVoiceToggle && (
+                  <button
+                    type="button"
+                    className="voice-combo-toggle"
+                    disabled={cloning}
+                    aria-label="展开常用音色列表"
+                    aria-expanded={voiceMenuOpen}
+                    onClick={() => {
+                      const nextOpen = !voiceMenuOpen;
+                      setVoiceMenuOpen(nextOpen);
+                      if (nextOpen && canCloneVoice) {
+                        loadClonedVoices(form);
+                      }
+                    }}
+                    id={n("voice-toggle")}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                )}
               </div>
               {voiceMenuOpen && (voiceOptions.length > 0 || (dashscope && (clonedVoices.loading || Boolean(clonedVoices.error)))) && (
                 <div className="voice-combo-menu" role="listbox" aria-label="语音合成常用音色" id={n("voice-options")}>

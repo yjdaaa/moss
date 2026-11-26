@@ -55,15 +55,18 @@ export function engraveRouteSaveOutcome(res, previous) {
   return { route: fallback, error: `雕刻路线没有保存：${reason}` };
 }
 
-/** 文字刻法在当前路线下能不能用：转图片时只有实心（扫描），其余不列出。 */
-export function textStyleAvailable(style, route) {
-  if (normalizeEngraveRoute(route) !== "image") return true;
-  return style === "fill";
+/** 文字刻法在当前路线与材料下能不能用：转图片时只有实心（扫描）；仅表面通用条目的材料无切割参数，不列出外框切割。 */
+export function textStyleAvailable(style, route, { surfaceOnly = false } = {}) {
+  if (normalizeEngraveRoute(route) === "image") return style === "fill";
+  if (surfaceOnly && style === "cut") return false;
+  return true;
 }
 
 /**
- * 实际生效的文字刻法：转图片时一律实心（用户原来的选择照样记着，切回矢量即恢复）。
+ * 实际生效的文字刻法：转图片时一律实心；仅表面通用条目时外框切割回落为轮廓描边（用户原选择照样记着，切回普通材料即恢复）。
  */
-export function effectiveTextStyle(style, route) {
-  return textStyleAvailable(style, route) ? style : "fill";
+export function effectiveTextStyle(style, route, { surfaceOnly = false } = {}) {
+  if (normalizeEngraveRoute(route) === "image") return "fill";
+  if (surfaceOnly && style === "cut") return "outline";
+  return style;
 }

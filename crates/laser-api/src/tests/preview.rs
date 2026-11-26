@@ -467,6 +467,20 @@ fn draw_vector_mode_plans_scene_shapes_and_falls_back_for_images() {
             .unwrap()
             .contains("图片")
     );
+
+    // 场景里有图片且请求矢量切割：显式拒绝，不得静默退化为带切割高功率慢速参数的整幅位图扫描
+    let mut cut_with_image = with_image.clone();
+    cut_with_image["vector_style"] = serde_json::json!("cut");
+    cut_with_image["laser_mode"] = serde_json::json!("cut");
+    let rejected = post_json(&service, "/api/draw/preview", &cut_with_image);
+    assert_eq!(rejected["success"], false, "{rejected}");
+    assert!(
+        rejected["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("矢量切割无法处理位图"),
+        "{rejected}"
+    );
 }
 
 /// 2026-11-16 只刻选中的图形（对齐 LightBurn“只加工选中图形”，不用选区原点）：

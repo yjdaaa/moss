@@ -3,6 +3,8 @@ import { showAlert, showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { VoiceGroup } from "../VoiceLayout.jsx";
 import {
+  isAsrHotwordsSupported,
+  localSettingsForm,
   voiceOutcomeLabel,
   voiceErrorText,
   VOICE_TIMING_STAGES,
@@ -18,6 +20,7 @@ export function LiveDebugTraces({ builtin }) {
   const enabled = pendingEnabled ?? Boolean(status?.debug_enabled ?? status?.local?.settings?.chat_log_enabled ?? true);
   const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
   const devices = Array.isArray(status?.devices) ? status.devices : [];
+  const hotwordsSupported = isAsrHotwordsSupported(localSettingsForm(status?.local?.settings), status);
   const timingItems = voiceTimingReport(status?.timings);
   const [query, setQuery] = useState("");
   const [selectedWord, setSelectedWord] = useState("");
@@ -240,19 +243,23 @@ export function LiveDebugTraces({ builtin }) {
             >
               加入同音纠偏
             </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={saving}
-              onClick={() => addHotword(selectedWord)}
-              id="voice-debug-add-hotword"
-            >
-              直接加为热词
-            </button>
+            {hotwordsSupported && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={saving}
+                onClick={() => addHotword(selectedWord)}
+                id="voice-debug-add-hotword"
+              >
+                直接加为热词
+              </button>
+            )}
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedWord("")}>
               取消
             </button>
-            <span className="voice-muted voice-debug-note">这里只是顺手加一条；纠偏表和热词的完整列表在“模型 › 对话体验”里查看、修改和删除。</span>
+            <span className="voice-muted voice-debug-note">
+              这里只是顺手加一条；{hotwordsSupported ? "纠偏表和热词的完整列表" : "同音纠偏表"}在“模型 › 对话体验”里查看、修改和删除。
+            </span>
           </div>
         )}
         {traces.length === 0 ? (

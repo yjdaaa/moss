@@ -41,7 +41,13 @@ function FillOptionsDetails({
   const scanSummary = [
     s.bidirectional ? "双向" : "单向",
     s.overscanAuto ? "过扫描自动" : `过扫描 ${s.overscanMm || 0} mm`,
-    ...(offsetTablePayload(s.scanOffsetTable).value ? ["偏移按速度表"] : Number(s.scanOffsetMm) ? [`偏移 ${s.scanOffsetMm} mm`] : []),
+    ...(s.bidirectional
+      ? offsetTablePayload(s.scanOffsetTable).value
+        ? ["偏移按速度表"]
+        : Number(s.scanOffsetMm)
+          ? [`偏移 ${s.scanOffsetMm} mm`]
+          : []
+      : []),
   ].join(" · ");
   const setRow = (index, key, value) =>
     set("scanOffsetTable", s.scanOffsetTable.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
@@ -145,10 +151,12 @@ function FillOptionsDetails({
               <span>引出线（mm，0 关闭）</span>
               {numberInput("leadOutMm", "cut-lead-out", { min: 0, max: 10, step: 0.1 })}
             </label>
-            <label>
-              <span>引线角度（°，90 垂直）</span>
-              {numberInput("leadAngleDeg", "cut-lead-angle", { min: 1, max: 90, step: 1 })}
-            </label>
+            {(Number(s.leadInMm) || 0) > 0 || (Number(s.leadOutMm) || 0) > 0 ? (
+              <label>
+                <span>引线角度（°，90 垂直）</span>
+                {numberInput("leadAngleDeg", "cut-lead-angle", { min: 1, max: 90, step: 1 })}
+              </label>
+            ) : null}
             <label>
               <span>过切（mm，回到起点后多切）</span>
               {numberInput("overcutMm", "cut-overcut", {
@@ -186,62 +194,6 @@ function FillOptionsDetails({
               />
             </label>
             )}
-            <label>
-              <span>双向扫描偏移（mm）</span>
-              <input
-                id={id("fill-offset")}
-                type="number"
-                min={-2}
-                max={2}
-                step={0.01}
-                value={s.scanOffsetMm}
-                onChange={(e) => set("scanOffsetMm", e.target.value)}
-                title="来回两行出光对不齐时，填量出的错位距离（只在双向扫描时生效）；下面填了按速度的偏移表时以表为准"
-              />
-            </label>
-            <div className="fill-options-wide fill-offset-table" id={id("fill-offset-table")}>
-              <span>按速度的扫描偏移表（可选，按加工速度插值，填了就覆盖上面的固定偏移）</span>
-              {s.scanOffsetTable.map((row, index) => (
-                <div className="fill-offset-row" key={index}>
-                  <input
-                    type="number"
-                    min={1}
-                    step={100}
-                    placeholder="速度 mm/min"
-                    aria-label={`第 ${index + 1} 行速度`}
-                    value={row.speed}
-                    onChange={(e) => setRow(index, "speed", e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={-2}
-                    max={2}
-                    step={0.01}
-                    placeholder="偏移 mm"
-                    aria-label={`第 ${index + 1} 行偏移`}
-                    value={row.offset}
-                    onChange={(e) => setRow(index, "offset", e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => set("scanOffsetTable", s.scanOffsetTable.filter((_, i) => i !== index))}
-                  >
-                    删除
-                  </button>
-                </div>
-              ))}
-              {s.scanOffsetTable.length < MAX_SCAN_OFFSET_ROWS ? (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  id={id("fill-offset-add")}
-                  onClick={() => set("scanOffsetTable", [...s.scanOffsetTable, { speed: "", offset: "" }])}
-                >
-                  添加一行
-                </button>
-              ) : null}
-            </div>
             <label className="checkbox-row">
               <input
                 id={id("fill-bidirectional")}
@@ -251,6 +203,66 @@ function FillOptionsDetails({
               />
               <span>双向扫描（关掉后只单向出光，更齐但更慢）</span>
             </label>
+            {s.bidirectional ? (
+              <>
+                <label>
+                  <span>双向扫描偏移（mm）</span>
+                  <input
+                    id={id("fill-offset")}
+                    type="number"
+                    min={-2}
+                    max={2}
+                    step={0.01}
+                    value={s.scanOffsetMm}
+                    onChange={(e) => set("scanOffsetMm", e.target.value)}
+                    title="来回两行出光对不齐时，填量出的错位距离；下面填了按速度的偏移表时以表为准"
+                  />
+                </label>
+                <div className="fill-options-wide fill-offset-table" id={id("fill-offset-table")}>
+                  <span>按速度的扫描偏移表（可选，按加工速度插值，填了就覆盖上面的固定偏移）</span>
+                  {s.scanOffsetTable.map((row, index) => (
+                    <div className="fill-offset-row" key={index}>
+                      <input
+                        type="number"
+                        min={1}
+                        step={100}
+                        placeholder="速度 mm/min"
+                        aria-label={`第 ${index + 1} 行速度`}
+                        value={row.speed}
+                        onChange={(e) => setRow(index, "speed", e.target.value)}
+                      />
+                      <input
+                        type="number"
+                        min={-2}
+                        max={2}
+                        step={0.01}
+                        placeholder="偏移 mm"
+                        aria-label={`第 ${index + 1} 行偏移`}
+                        value={row.offset}
+                        onChange={(e) => setRow(index, "offset", e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => set("scanOffsetTable", s.scanOffsetTable.filter((_, i) => i !== index))}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                  {s.scanOffsetTable.length < MAX_SCAN_OFFSET_ROWS ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      id={id("fill-offset-add")}
+                      onClick={() => set("scanOffsetTable", [...s.scanOffsetTable, { speed: "", offset: "" }])}
+                    >
+                      添加一行
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
             {scanOnly ? null : (
             <label className="checkbox-row">
               <input

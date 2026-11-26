@@ -3,22 +3,23 @@ import { FolderOpen, FolderSearch, History, RotateCcw, Trash2 } from "lucide-rea
 import { FoldHeader } from "./FoldHeader.jsx";
 import { postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
-import { isRemoteMode } from "../authSession.js";
+import { isReadOnlyReferenceClient } from "../authSession.js";
 import { shouldShowExportSettings } from "../exportSettings.js";
 import { tauriInvoke } from "../saveFile.js";
 import { PROCESS_TRACE_CONFIRM, processTraceSummary } from "../processTrace.js";
 
 /**
  * 偏好设置 → “完整过程记录”（2026-11-22 用户决定，技术书 n105 / 融合技术书 r55）。默认关闭；关着时 MOSS
- * 行为与从前一致。只在电脑本机显示（手机连电脑时不显示，后端也拒绝局域网调用）。
+ * 行为与从前一致。只在具备操作者设置权限的本机环境显示（手机连电脑、局域网只读或未带桌面会话的旁路浏览器不显示）。
  */
-export function ProcessTraceSection() {
-  if (isRemoteMode()) return null;
-  return <ProcessTracePanel />;
+export function ProcessTraceSection({ canEdit = true, hasVoice = true } = {}) {
+  if (isReadOnlyReferenceClient() || canEdit === false) return null;
+  return <ProcessTracePanel hasVoice={hasVoice} />;
 }
 
-function ProcessTracePanel() {
+function ProcessTracePanel({ hasVoice = true }) {
   const [status, setStatus] = useState(null);
+  const [forbidden, setForbidden] = useState(false);
   const [busy, setBusy] = useState(false);
   const requestSeq = useRef(0);
   const canChooseDirectory = shouldShowExportSettings();
@@ -26,8 +27,15 @@ function ProcessTracePanel() {
   const call = useCallback(async (body) => {
     const seq = ++requestSeq.current;
     const res = await postJson("/api/process-trace", { action: "status", ...body });
+    if (res.status === 403) {
+      if (seq === requestSeq.current) setForbidden(true);
+      return null;
+    }
     if (res.ok && res.data?.success) {
-      if (seq === requestSeq.current) setStatus(res.data.result);
+      if (seq === requestSeq.current) {
+        setForbidden(false);
+        setStatus(res.data.result);
+      }
       return res.data.result;
     }
     throw new Error(res.data?.result || res.error || "读取失败");
@@ -101,6 +109,8 @@ function ProcessTracePanel() {
     }
   };
 
+  if (forbidden) return null;
+
   const traceSummary = !status ? "读取中…" : status.enabled
     ? status.available === false ? "记录已暂停 · 保存位置不可用" : `已开启 · 保留 ${status.retention_days} 天`
     : "已关闭";
@@ -109,7 +119,9 @@ function ProcessTracePanel() {
     <div className="ob-fold settings-spacer" id="settings-process-trace-section">
       <FoldHeader variant="section" id="settings-process-trace" icon={History} title="完整过程记录" summary={traceSummary} defaultOpen={false} />
       <div className="settings-box-4">
-        按先后记录语音对话、模型调用与激光操作，方便事后排障；默认关闭，不保存密钥，明细见开启前确认提示。
+        {hasVoice
+          ? "按先后记录语音对话、模型调用与激光操作，方便事后排障；默认关闭，不保存密钥，明细见开启前确认提示。"
+          : "按先后记录激光生成、连接与加工操作，方便事后排障；默认关闭，不保存密钥，明细见开启前确认提示。"}
       </div>
       <label className="settings-label">
         <input

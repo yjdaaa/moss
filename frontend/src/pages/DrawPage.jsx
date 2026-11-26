@@ -36,6 +36,7 @@ import {
   CUSTOM_OPTION_VALUE,
   applyMaterialLibraryRefresh,
   applyMaterialSelectChange,
+  findMaterialOption,
   loadUiMaterialOptions,
   notifyMaterialsUpdated,
   restoreMaterialSelectState,
@@ -117,6 +118,7 @@ import {
   drawTargetReady,
   formatFramingStatus,
   framingConfirmText,
+  hasSceneImageElements,
   isDrawPreviewStale,
   isSerial,
   parseImportedSceneJson,
@@ -133,6 +135,9 @@ const BACKEND_CONFIG_KEYS = [
   "vector_style",
   "image_mode",
   "line_interval_scale",
+  "halftone_cell_mm",
+  "halftone_angle_deg",
+  "gray_min_power_percent",
   "vector_simplify_factor",
 ];
 const CONFIG_KEYS = BACKEND_CONFIG_KEYS;
@@ -250,6 +255,7 @@ export function DrawPage({
   // 只刻选中的图形（矢量模式）：选区变化计入预览签名
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [selectionKey, setSelectionKey] = useState("");
+  const [hasSceneImages, setHasSceneImages] = useState(() => hasSceneImageElements(initialScene?.elements));
   const materialLibraryRef = useRef(materialLibrary);
   const materialModeRef = useRef(materialMode);
   const formRef = useRef(form);
@@ -338,6 +344,7 @@ export function DrawPage({
       applyingRemoteSceneRef.current = false;
     }
     setSceneRev(appliedSceneRef.current.sceneRev);
+    setHasSceneImages(hasSceneImageElements(parsed.elements));
     setStatus(
       parsed.filesDropped
         ? "已恢复上次的画布；插入的图片太大没有存进本机，需要重新插入"
@@ -612,6 +619,8 @@ export function DrawPage({
     }
   }, [form]);
 
+  const vectorRasterFallback = drawMode === "vector" && hasSceneImages;
+
   // 联动查询当前材质、厚度与生成策略对应的材料库推荐功率、速度与遍数
   useEffect(() => {
     let cancelled = false;
@@ -621,8 +630,8 @@ export function DrawPage({
       setHasRec(false);
       return undefined;
     }
-    // 切割查该厚度的切割参数（不带雕刻模式），其余按刻法查雕刻档
-    const recMode = drawRecommendEngravingMode(drawMode, form.vector_style);
+    // 插入图片触发光栅回退时按光栅（填充）档查推荐；切割查该厚度的切割参数，其余按刻法查雕刻档
+    const recMode = vectorRasterFallback ? "raster" : drawRecommendEngravingMode(drawMode, form.vector_style);
     const query = new URLSearchParams(
       recMode === "cut"
         ? { material: mat, thickness_mm: thick, laser_mode: "cut" }
@@ -657,27 +666,44 @@ export function DrawPage({
     return () => {
       cancelled = true;
     };
-  }, [form.material, form.thickness_mm, drawMode, form.vector_style, recRefreshTick]);
+  }, [form.material, form.thickness_mm, drawMode, form.vector_style, vectorRasterFallback, recRefreshTick]);
 
-  // r40：把当前填充设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
+  const matchedLibraryMaterial = materialMode === "library"
+    ? findMaterialOption(materialLibrary, form.material)
+    : null;
+  const isSurfaceOnlyLibMat = Boolean(
+    matchedLibraryMaterial && (matchedLibraryMaterial.thicknesses || []).length === 0 && matchedLibraryMaterial.surface,
+  );
+  useEffect(() => {
+    if ((hasSceneImages || isSurfaceOnlyLibMat) && normalizeDrawVectorStyle(form.vector_style) === "cut") {
+      setForm((current) => ({ ...current, vector_style: "outline" }));
+    }
+    if (hasSceneImages && selectedOnly) {
+      setSelectedOnly(false);
+    }
+  }, [hasSceneImages, isSurfaceOnlyLibMat, form.vector_style, selectedOnly]);
+
+  // r40：把当前填充或切割设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
   const saveFillToMaterial = async () => {
     if (!materialLayer) return;
+    const isCutStyle = drawIsCut(drawMode, form.vector_style);
+    const kindLabel = isCutStyle ? "切割" : "填充";
     const payload = materialLayerPayload(
       fillSettings,
-      drawIsCut(drawMode, form.vector_style) ? { withFill: false, withCut: true } : { withFill: true },
+      isCutStyle ? { withFill: false, withCut: true } : { withFill: true },
     );
     if (payload.error) {
-      showAlert(payload.error, { title: "填充设置不对", tone: "warning" });
+      showAlert(payload.error, { title: `${kindLabel}设置不对`, tone: "warning" });
       return;
     }
     const ok = await showConfirm(
-      `把当前填充设置存进材料库「${materialLayer.label}」？\n以后选这个材料会自动带出；双向扫描偏移与机器加速度跟机器走，不随材料保存。`,
+      `把当前${kindLabel}设置存进材料库「${materialLayer.label}」？\n以后选这个材料会自动带出；双向扫描偏移与机器加速度跟机器走，不随材料保存。`,
       { title: "保存到材料库", confirmText: "保存", cancelText: "取消" },
     );
     if (!ok) return;
     const res = await postJson("/api/material-lab/manage", materialLayerSaveRequest(materialLayer, payload));
     if (res.ok && res.data?.success) {
-      setStatus(`已把填充设置存进材料库「${materialLayer.label}」`);
+      setStatus(`已把${kindLabel}设置存进材料库「${materialLayer.label}」`);
       notifyMaterialsUpdated();
       materialLayerKeyRef.current = "";
       setRecRefreshTick((tick) => tick + 1);
@@ -692,10 +718,11 @@ export function DrawPage({
     feed: customFeed,
     passes: customPasses,
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
-    // 矢量看填充设置与选区，光栅扫描看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
-    fill: drawMode === "vector"
+    vectorRasterFallback,
+    // 矢量看填充设置与选区，光栅扫描（含插入图片触发光栅回退）看过扫描 / 双向 / 扫描偏移（自动过扫描随机器加速度变）
+    fill: drawMode === "vector" && !vectorRasterFallback
       ? fillSettingsSignature(fillSettings, drawVectorLayerFlags(form.vector_style)) + JSON.stringify(motionPayload) + (selectedOnly ? `|sel:${selectionKey}` : "")
-      : drawMode === "raster"
+      : drawMode === "raster" || vectorRasterFallback
         ? rasterScanSignature(fillSettings) + JSON.stringify(motionPayload)
         : "",
   }, engraveRoute);
@@ -893,6 +920,7 @@ export function DrawPage({
       });
       setTimeout(() => excalidrawAPI.scrollToContent?.(parsed.elements, { fitToContent: true }), 40);
       setSceneRev(computeSceneRevision(parsed.elements));
+      setHasSceneImages(hasSceneImageElements(parsed.elements));
       setStatus(`已导入场景：${file.name}`);
     } catch (error) {
       const msg = error?.message || String(error);
@@ -1021,13 +1049,13 @@ export function DrawPage({
     const formSigSnapshot = currentFormSig;
     const modeSnapshot = drawMode;
     // 矢量带整套填充设置；光栅扫描带扫描子集（过扫描、双向、扫描偏移表）与转换方式；只刻选中的图形只在矢量下可用
-    const fillPayload = modeSnapshot === "vector"
+    const fillPayload = modeSnapshot === "vector" && !vectorRasterFallback
       ? fillSettingsPayload(fillSettings, drawVectorLayerFlags(form.vector_style))
-      : modeSnapshot === "raster"
+      : modeSnapshot === "raster" || vectorRasterFallback
         ? rasterScanPayload(fillSettings)
         : {};
     const imagePayload = modeSnapshot === "raster" ? drawRasterImagePayload(form) : {};
-    const selection = selectedOnly && modeSnapshot === "vector"
+    const selection = selectedOnly && modeSnapshot === "vector" && !vectorRasterFallback
       ? selectedElementIds(excalidrawAPI?.getAppState?.())
       : [];
     if (imagePayload.error) {
@@ -1097,7 +1125,7 @@ export function DrawPage({
           artifacts.vector_note,
           artifacts.route_note,
           artifacts.selection_note,
-          fillResultNote(artifacts.fill_options, artifacts.removed_duplicates),
+          fillResultNote(artifacts.fill_options, artifacts.removed_duplicates, artifacts.cut_options),
           timeEstimateNote(artifacts.time_estimate),
         ].filter(Boolean).join("；"));
       } else {
@@ -1353,6 +1381,7 @@ export function DrawPage({
     clearedSceneRef.current = live;
     sceneDirtyRef.current = true;
     excalidrawAPI.updateScene({ elements: live.map((el) => newElementWith(el, { isDeleted: true })) });
+    setHasSceneImages(false);
     setCanUndoClear(true);
     setStatus("画布已清空，点工具栏「撤销清空」可找回");
   }
@@ -1363,7 +1392,9 @@ export function DrawPage({
     clearedSceneRef.current = null;
     sceneDirtyRef.current = true;
     setCanUndoClear(false);
-    excalidrawAPI.updateScene({ elements: cleared.map((el) => newElementWith(el, { isDeleted: false })) });
+    const restored = cleared.map((el) => newElementWith(el, { isDeleted: false }));
+    excalidrawAPI.updateScene({ elements: restored });
+    setHasSceneImages(hasSceneImageElements(restored));
     setStatus(`已恢复清空前的 ${cleared.length} 个图形`);
   }
 
@@ -1549,6 +1580,8 @@ export function DrawPage({
                   setCanUndoClear(false);
                 }
                 setSceneRev((prev) => (prev === nextRev ? prev : nextRev));
+                const nextHasImages = hasSceneImageElements(elements);
+                setHasSceneImages((prev) => (prev === nextHasImages ? prev : nextHasImages));
                 const nextSelection = selectedElementIds(appState).join(",");
                 setSelectionKey((prev) => (prev === nextSelection ? prev : nextSelection));
               }}
@@ -1668,6 +1701,7 @@ export function DrawPage({
           selectedOnly={selectedOnly}
           setSelectedOnly={setSelectedOnly}
           selectionKey={selectionKey}
+          hasSceneImages={hasSceneImages}
           fillSettings={fillSettings}
           updateFillSettings={updateFillSettings}
           materialApplied={materialApplied}
@@ -1727,7 +1761,7 @@ export function DrawPage({
           summary={jobSummary}
           originNote={result?.result?.registration ? drawOriginNote(result.result) : ""}
           target={hostReady ? drawTargetLabel(form) : ""}
-          sdAvailable={!isSerial(form)}
+          sdAvailable={!isSerial(form) && Boolean(connectionStatus?.isFluidnc)}
           busy={busy}
           sendAllowed={summaryAllowsSend}
           onCancel={() => setConfirmOpen(false)}

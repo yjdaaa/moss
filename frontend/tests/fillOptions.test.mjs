@@ -44,13 +44,16 @@ test("填充设置默认对齐 LightBurn：一次填完、横扫、双向、过�
 });
 
 test("填充设置：手动过扫描、加速度、偏移与校验", () => {
-  const manual = fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "3.5", grouping: "individual", angleDeg: "90", crossHatch: true, bidirectional: false, scanOffsetMm: "0.12" });
+  const manual = fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "3.5", grouping: "individual", angleDeg: "90", crossHatch: true, bidirectional: true, scanOffsetMm: "0.12" });
   assert.equal(manual.fill_options.overscan_mm, 3.5);
   assert.equal(manual.fill_options.grouping, "individual");
   assert.equal(manual.fill_options.angle_deg, 90);
   assert.equal(manual.fill_options.cross_hatch, true);
-  assert.equal(manual.fill_options.bidirectional, false);
+  assert.equal(manual.fill_options.bidirectional, true);
   assert.equal(manual.fill_options.scan_offset_mm, 0.12);
+  const unidir = fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, bidirectional: false, scanOffsetMm: "0.12" });
+  assert.equal(unidir.fill_options.bidirectional, false);
+  assert.equal(unidir.fill_options.scan_offset_mm, 0, "单向扫描不套用双向偏移");
   assert.equal(fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, accelerationMmS2: "2500" }).fill_options.acceleration_mm_s2, 2500);
 
   assert.match(fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "30" }).error, /过扫描/);
@@ -189,7 +192,8 @@ test("切割设置：默认全关，外框切割才提交 cut_options，桥位�
   assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, kerfMm: "3" }).error, /切缝/);
   assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, tabMode: "count", tabCount: "2.5" }).error, /整数/);
   assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, tabMode: "spacing", tabSpacingMm: "0.5" }).error, /间距/);
-  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, leadAngleDeg: "0" }).error, /角度/);
+  assert.match(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, leadInMm: "1", leadAngleDeg: "0" }).error, /角度/);
+  assert.equal(cutOptionsPayload({ ...DEFAULT_FILL_SETTINGS, leadAngleDeg: "0" }).error, undefined, "未设引入/引出线时不校验已隐藏的引线角度");
   assert.match(fillSettingsPayload({ ...DEFAULT_FILL_SETTINGS, overcutMm: "20" }, { withFill: false, withCut: true }).error, /过切/);
   assert.equal(normalizeFillSettings({ tabMode: "zigzag" }).tabMode, "off");
 
@@ -237,20 +241,37 @@ test("位图扫描子集：只带过扫描 / 双向 / 扫描偏移（含速度�
     grouping: "individual",
     angleDeg: "45",
     crossHatch: true,
-    bidirectional: false,
+    bidirectional: true,
     scanOffsetMm: "0.08",
     scanOffsetTable: [{ speed: "3000", offset: "0.3" }, { speed: "1000", offset: "0.1" }],
     accelerationMmS2: "2500",
   });
   assert.deepEqual(tuned, {
     fill_options: {
-      bidirectional: false,
+      bidirectional: true,
       scan_offset_mm: 0.08,
       scan_offset_table: [[1000, 0.1], [3000, 0.3]],
       overscan_mm: "auto",
       acceleration_mm_s2: 2500,
     },
   });
+  assert.deepEqual(
+    rasterScanPayload({
+      ...DEFAULT_FILL_SETTINGS,
+      bidirectional: false,
+      scanOffsetMm: "0.08",
+      scanOffsetTable: [{ speed: "1000", offset: "0.1" }],
+      accelerationMmS2: "2500",
+    }),
+    {
+      fill_options: {
+        bidirectional: false,
+        scan_offset_mm: 0,
+        overscan_mm: "auto",
+        acceleration_mm_s2: 2500,
+      },
+    },
+  );
   assert.equal(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "1.5" }).fill_options.overscan_mm, 1.5);
   assert.match(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, scanOffsetMm: "3" }).error, /偏移/);
   assert.match(rasterScanPayload({ ...DEFAULT_FILL_SETTINGS, overscanAuto: false, overscanMm: "30" }).error, /过扫描/);

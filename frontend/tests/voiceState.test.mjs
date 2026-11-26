@@ -2327,3 +2327,135 @@ test("本地离线声音克隆模型（qwen3_tts_1_7b_clone）：运行时区分
   assert.equal(okStep.ok, true);
   assert.match(okStep.detail, /moss550w\.wav/);
 });
+
+test("n132 全站语音能力门禁：千问克隆/系统音色、快速回答、热词、Jev 半截话、小智屏幕与 1.7B 指令语速档位", async () => {
+  const {
+    canCloneDashscopeModel,
+    ttsVoiceOptionsFor,
+    isLlmFastReplySupported,
+    isAsrHotwordsSupported,
+    isJevUnfinishedHoldSupported,
+    normalizeQwen3Tts17bSpeed,
+    QWEN3_TTS_1_7B_SPEED_OPTIONS,
+    builtinDeviceControlsView,
+    hasColorScreenPreviewTarget,
+    groupedTools,
+  } = await import("../src/voiceState.js");
+
+  // 1. 千问 / 百炼：qwen3-tts* 无克隆、给系统音色；qwen-audio-3.0 / cosyvoice 支持克隆、无 _v3.1 系统音色
+  assert.equal(canCloneDashscopeModel({ kind: "dashscope", model: "qwen-audio-3.1-tts-flash" }), true);
+  assert.equal(canCloneDashscopeModel({ kind: "dashscope", model: "cosyvoice-v3.5-plus" }), true);
+  assert.equal(canCloneDashscopeModel({ kind: "dashscope", model: "qwen3-tts-flash" }), false);
+  assert.equal(canCloneDashscopeModel({ kind: "openai", model: "gpt-4o-mini-tts" }), false);
+  assert.deepEqual(
+    ttsVoiceOptionsFor({ kind: "dashscope", model: "qwen3-tts-flash" }).map((v) => v.id),
+    ["Cherry", "Serena", "Ethan", "Chelsie"],
+  );
+  assert.deepEqual(ttsVoiceOptionsFor({ kind: "dashscope", model: "cosyvoice-v3.5-flash" }), []);
+
+  // 2. 快速回答门禁对齐 openai.rs::thinking_off_params
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: false } } }), true, "未配置时保留供预填");
+  assert.equal(isLlmFastReplySupported({ local: { colab: { active: true } }, models: { llm: { configured: true, url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-32b" } } }), false, "Colab 接管时不显示");
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: true, url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-32b" } } }), true);
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: true, url: "https://api.openai.com/v1", model: "gpt-5-mini" } } }), true);
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: true, url: "https://api.openai.com/v1", model: "gpt-4o" } } }), false);
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: true, url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-R1" } } }), false, "纯推理模型不支持关闭思考");
+  assert.equal(isLlmFastReplySupported({ models: { llm: { configured: true, url: "http://127.0.0.1:11434/v1", model: "qwen3" } } }), false);
+
+  // 3. 热词门禁覆盖本地 X-ASR 束搜索关闭与云端 SenseVoice / TeleSpeech
+  assert.equal(isAsrHotwordsSupported({ asr: true, asr_model: "x_asr_int8", asr_beam_search: true }, null), true);
+  assert.equal(isAsrHotwordsSupported({ asr: true, asr_model: "x_asr_int8", asr_beam_search: false }, null), false);
+  assert.equal(isAsrHotwordsSupported({ asr: true, asr_model: "sense_voice" }, null), false);
+  assert.equal(
+    isAsrHotwordsSupported({ asr: false }, { models: { asr: { configured: true, kind: "openai", model: "FunAudioLLM/SenseVoiceSmall" } } }),
+    false,
+  );
+  assert.equal(
+    isAsrHotwordsSupported({ asr: false }, { models: { asr: { configured: true, kind: "doubao", model: "volc.bigasr.sauc.duration" } } }),
+    true,
+  );
+
+  // 4. Jev 半截话不抢话门禁：9B 与 CPU 下的 4B 隐藏
+  assert.equal(isJevUnfinishedHoldSupported({ jev_model: "typesafe/jev-1.14" }, {}), true);
+  assert.equal(isJevUnfinishedHoldSupported({ jev_model: "onejev_1_6_9b" }, {}), false);
+  assert.equal(isJevUnfinishedHoldSupported({ jev_model: "onejev_1_6_4b" }, { local: { onejev_env: { accelerator: "cpu" } } }), false);
+  assert.equal(isJevUnfinishedHoldSupported({ jev_model: "onejev_1_6_4b" }, { local: { onejev_env: { accelerator: "metal" } } }), true);
+
+  // 5. 本地 qwen3_tts_1_7b 5 档说话指令语速归一化
+  assert.equal(QWEN3_TTS_1_7B_SPEED_OPTIONS.length, 5);
+  assert.equal(normalizeQwen3Tts17bSpeed("0.55"), "0.6");
+  assert.equal(normalizeQwen3Tts17bSpeed("0.85"), "0.8");
+  assert.equal(normalizeQwen3Tts17bSpeed("1"), "1");
+  assert.equal(normalizeQwen3Tts17bSpeed("1.25"), "1.2");
+  assert.equal(normalizeQwen3Tts17bSpeed("1.8"), "1.4");
+  const qwen17bLegacySpeed = { ...localSettingsForm({}), tts_model: "qwen3_tts_1_7b", tts_speed: "2.5" };
+  assert.equal(localModelSettingsError(qwen17bLegacySpeed), "");
+  assert.equal(localSettingsPayload(qwen17bLegacySpeed).tts_speed, 1.4);
+
+  // 6. 无屏/单色屏小智控制项与副屏画风分组门禁，以及内置链路/严格模式隐藏电脑控制工具组
+  const screenlessOnline = builtinDeviceControlsView(
+    { device_id: "d-headless", status: "allowed" },
+    { session_id: "s1", device_id: "d-headless", device_tools: ["self.get_device_status", "self.audio_speaker.set_volume"] },
+    {},
+  );
+  assert.equal(screenlessOnline.showPreview, false, "无屏幕固件不显示投送雕刻预览按钮");
+  const oledOffline = builtinDeviceControlsView(
+    {
+      device_id: "d-oled",
+      status: "allowed",
+      hello_json: JSON.stringify({ mcp: true }),
+      status_json: JSON.stringify({ audio_speaker: { volume: 70 } }),
+    },
+    null,
+    {},
+  );
+  assert.equal(oledOffline.showTheme, true, "离线且支持 MCP 时保留置灰控制项，避免误判省略 screen 字段的 OLED/AMOLED");
+  assert.equal(oledOffline.showPreview, true);
+  const noMcpOffline = builtinDeviceControlsView(
+    {
+      device_id: "d-nomcp",
+      status: "allowed",
+      hello_json: JSON.stringify({ mcp: false }),
+    },
+    null,
+    {},
+  );
+  assert.equal(noMcpOffline.showVolume, false);
+  assert.equal(noMcpOffline.showTheme, false);
+  assert.equal(noMcpOffline.showPreview, false, "离线且 hello 明确 mcp=false 时隐藏全部快捷控制");
+  assert.equal(
+    hasColorScreenPreviewTarget({
+      devices: [
+        { device_id: "d-oled", status: "allowed", hello_json: JSON.stringify({ mcp: true }) },
+        { device_id: "d-nomcp", status: "allowed", hello_json: JSON.stringify({ mcp: false }) },
+      ],
+      sessions: [
+        {
+          session_id: "s-oled",
+          device_id: "d-oled",
+          device_tools: ["self.get_device_status", "self.screen.get_info"],
+          screen_info: { width: 128, height: 64, monochrome: true },
+        },
+      ],
+    }),
+    false,
+    "全部已允许设备确认为在线单色/无屏或离线 mcp=false 时隐藏彩屏画风预览分组",
+  );
+  assert.equal(
+    hasColorScreenPreviewTarget({
+      devices: [{ device_id: "d-offline-mcp", status: "allowed", hello_json: JSON.stringify({ mcp: true }) }],
+      sessions: [],
+    }),
+    true,
+    "离线但支持 MCP 的设备未确认屏幕类型时保留彩屏预览分组",
+  );
+  assert.equal(hasColorScreenPreviewTarget({ devices: [], sessions: [] }), true, "尚未绑定设备时保留预览分组");
+
+  const tools = [
+    { name: "laser_safe_action_tool", enabled: true, can_disable: false },
+    { name: "open_app_tool", enabled: true, can_disable: true },
+  ];
+  assert.equal(groupedTools(tools).some((g) => g.id === "desktop"), true);
+  assert.equal(groupedTools(tools, { hideDesktop: true }).some((g) => g.id === "desktop"), false);
+});
+

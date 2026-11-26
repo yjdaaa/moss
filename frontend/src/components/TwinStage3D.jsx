@@ -34,6 +34,7 @@ export function TwinStage3D({
   workspace,
   toolpath,
   pose,
+  showZAxis = false,
   showRapid = true,
   followHead = false,
   onToggleRapid,
@@ -812,6 +813,17 @@ export function TwinStage3D({
     orbitRef.current.dragging = false;
   };
 
+  const isDirectHardwareCoord = Boolean(
+    pose?.isLiveHardware && String(pose?.sourceLabel || "").includes("坐标"),
+  );
+  const readoutX = isDirectHardwareCoord
+    ? Number(pose?.x ?? 0)
+    : Number(pose?.x ?? 0) * toolpathScaleX + toolpathOffsetX;
+  const readoutY = isDirectHardwareCoord
+    ? Number(pose?.y ?? 0)
+    : Number(pose?.y ?? 0) * toolpathScaleY + toolpathOffsetY;
+  const showReadoutZ = showZAxis || Math.abs(Number(pose?.z) || 0) > 1e-4;
+
   return (
     <div
       ref={stageWrapRef}
@@ -833,7 +845,7 @@ export function TwinStage3D({
             <span className={`twin-laser-dot ${pose?.laserOn ? "is-firing" : ""}`} />
           </button>
         ) : (
-          <div className="twin-readout" aria-label="激光头实时坐标">
+          <div className="twin-readout" aria-label={isDirectHardwareCoord ? "激光头实时坐标" : "刀路推演坐标"}>
             <div className={`twin-laser-badge ${pose?.laserOn ? "is-firing" : ""}`}>
               <span className="twin-laser-dot" />
               <span>{pose?.laserOn ? `出光 S${Math.round(pose?.power || 0)}` : "未出光 M5"}</span>
@@ -841,16 +853,18 @@ export function TwinStage3D({
             <div className="twin-readout-coords">
               <span className="twin-coord-chip">
                 <span className="twin-coord-axis">X</span>
-                <b>{((pose?.x ?? 0) * toolpathScaleX + toolpathOffsetX).toFixed(2)}</b>
+                <b>{readoutX.toFixed(2)}</b>
               </span>
               <span className="twin-coord-chip">
                 <span className="twin-coord-axis">Y</span>
-                <b>{((pose?.y ?? 0) * toolpathScaleY + toolpathOffsetY).toFixed(2)}</b>
+                <b>{readoutY.toFixed(2)}</b>
               </span>
-              <span className="twin-coord-chip">
-                <span className="twin-coord-axis">Z</span>
-                <b>{(pose?.z ?? 0).toFixed(2)}</b>
-              </span>
+              {showReadoutZ && (
+                <span className="twin-coord-chip">
+                  <span className="twin-coord-axis">Z</span>
+                  <b>{(pose?.z ?? 0).toFixed(2)}</b>
+                </span>
+              )}
               <span className="twin-coord-chip twin-feed-chip">
                 <span className="twin-coord-axis">F</span>
                 <b>{Math.round(pose?.feedRate || 0)}</b>

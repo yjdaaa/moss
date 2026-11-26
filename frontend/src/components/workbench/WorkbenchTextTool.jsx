@@ -1,5 +1,5 @@
 import React from "react";
-import { isRemoteMode } from "../../authSession.js";
+import { isReadOnlyReferenceClient } from "../../authSession.js";
 import { IMAGE_ROUTE_FILL_LABEL, IMAGE_ROUTE_TEXT_NOTE, textStyleAvailable } from "../../engraveRoute.js";
 import { materialLayerHint } from "../../fillOptions.js";
 import { TEXT_ORIGIN_OPTIONS, TEXT_STYLE_OPTIONS } from "../../workbenchParams.js";
@@ -30,6 +30,7 @@ export function WorkbenchTextTool({
   updateFillSettings,
   textUsesFill,
   textIsCut,
+  surfaceOnly = false,
   materialApplied,
   materialLayer,
   saveFillToMaterial,
@@ -81,8 +82,8 @@ export function WorkbenchTextTool({
             onChange={(e) => setTextStyle(e.target.value)}
             className="select-input wb-compact-select"
           >
-            {/* 只列当前路线能用的刻法（r46）：转图片时只有实心扫描 */}
-            {TEXT_STYLE_OPTIONS.filter((opt) => textStyleAvailable(opt.value, engraveRoute)).map((opt) => (
+            {/* 只列当前路线与材料能用的刻法（r46 / r63）：转图片时只有实心扫描，仅表面通用材料隐藏外框切割 */}
+            {TEXT_STYLE_OPTIONS.filter((opt) => textStyleAvailable(opt.value, engraveRoute, { surfaceOnly })).map((opt) => (
               <option key={opt.value} value={opt.value}>
                 {engraveRoute === "image" && opt.value === "fill" ? IMAGE_ROUTE_FILL_LABEL : opt.label}
               </option>
@@ -119,7 +120,7 @@ export function WorkbenchTextTool({
         materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
         materialEntryLabel={materialLayer?.label || ""}
         onSaveToMaterial={
-          !isRemoteMode() && materialLayer && engraveRoute !== "image" && (textUsesFill || textIsCut) ? saveFillToMaterial : null
+          !isReadOnlyReferenceClient() && materialLayer && engraveRoute !== "image" && (textUsesFill || textIsCut) ? saveFillToMaterial : null
         }
       />
     </div>

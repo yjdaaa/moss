@@ -59,12 +59,22 @@ export function drawRequestMode(route, imageStrategy) {
   return normalizeEngraveRoute(route) === "image" ? normalizeDrawImageStrategy(imageStrategy) : "vector";
 }
 
-/** 光栅扫描的转换方式与行间距倍数 → 请求字段（`image_mode`、`line_interval_scale`）；填错返回 `{ error }`。 */
+/** 光栅扫描的转换方式、行间距倍数与网点/灰度专属参数 → 请求字段；填错返回 `{ error }`。 */
 export function drawRasterImagePayload(form) {
   return imageParamsPayload({
     imageMode: form?.image_mode,
-    extras: { intervalScale: form?.line_interval_scale ?? "" },
+    extras: {
+      intervalScale: form?.line_interval_scale ?? "",
+      halftoneCellMm: form?.halftone_cell_mm ?? "",
+      halftoneAngleDeg: form?.halftone_angle_deg ?? "",
+      grayMinPowerPercent: form?.gray_min_power_percent ?? "",
+    },
   });
+}
+
+/** 画布有效元素里是否包含插入的位图图片。 */
+export function hasSceneImageElements(elements) {
+  return Array.isArray(elements) && elements.some((el) => el && !el.isDeleted && el.type === "image");
 }
 
 /**
@@ -183,6 +193,9 @@ export function readDrawDefaultForm(...args) {
     image_mode: normalizeImageMode(read("laserLab.image_mode")),
     // 行间距倍数（质量预设用）；留空 = 1
     line_interval_scale: read("laserLab.line_interval_scale") || "",
+    halftone_cell_mm: read("laserLab.halftone_cell_mm") || "",
+    halftone_angle_deg: read("laserLab.halftone_angle_deg") || "",
+    gray_min_power_percent: read("laserLab.gray_min_power_percent") || "",
     connection_mode: conn.connection_mode,
     network_host: conn.network_host,
     network_telnet_port: conn.network_telnet_port,
@@ -229,6 +242,7 @@ export function computeSceneRevision(elements) {
  */
 export function drawGenerationSignature(form, custom = {}, route = "vector") {
   const mode = drawRequestMode(route, form?.image_strategy);
+  const effectiveMode = mode === "vector" && custom?.vectorRasterFallback ? "raster" : mode;
   return JSON.stringify({
     material: String(form?.material ?? "").trim(),
     thickness_mm: String(form?.thickness_mm ?? "").trim(),
@@ -236,12 +250,21 @@ export function drawGenerationSignature(form, custom = {}, route = "vector") {
     height_mm: String(form?.height_mm ?? "").trim(),
     route: normalizeEngraveRoute(route),
     mode,
-    vector_style: mode === "vector" ? normalizeDrawVectorStyle(form?.vector_style) : "",
-    simplify: mode === "outline" ? String(form?.vector_simplify_factor ?? "3").trim() : "",
+    vector_style: effectiveMode === "vector" ? normalizeDrawVectorStyle(form?.vector_style) : "",
+    simplify: effectiveMode === "outline" ? String(form?.vector_simplify_factor ?? "3").trim() : "",
     image: mode === "raster"
-      ? `${normalizeImageMode(form?.image_mode)}x${intervalScaleValue(form?.line_interval_scale)}`
+      ? (() => {
+          const imgMode = normalizeImageMode(form?.image_mode);
+          const extra =
+            imgMode === "halftone"
+              ? `:${String(form?.halftone_cell_mm ?? "").trim()}@${String(form?.halftone_angle_deg ?? "").trim()}`
+              : imgMode === "grayscale"
+                ? `:${String(form?.gray_min_power_percent ?? "").trim()}`
+                : "";
+          return `${imgMode}x${intervalScaleValue(form?.line_interval_scale)}${extra}`;
+        })()
       : "",
-    fill: mode === "outline" ? "" : String(custom?.fill ?? ""),
+    fill: effectiveMode === "outline" ? "" : String(custom?.fill ?? ""),
     manual: custom?.enabled
       ? `${String(custom.power ?? "").trim()}/${String(custom.feed ?? "").trim()}/${String(custom.passes ?? "").trim()}`
       : custom?.presetParams

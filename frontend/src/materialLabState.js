@@ -209,6 +209,11 @@ export function isSurfaceKey(key) {
   return String(key ?? "").trim() === SURFACE_THICKNESS_KEY;
 }
 
+/** 表面通用条目只存雕刻参数，不显示“边缘切割”模式。 */
+export function modeOptionsForThickness(thickness) {
+  return isSurfaceKey(thickness) ? MATRIX_MODE_OPTIONS.filter((m) => m.id !== "cut") : MATRIX_MODE_OPTIONS;
+}
+
 /** 厚度标签：表面通用条目显示“表面通用”，其余显示“N mm”。 */
 export function thicknessChipLabel(key) {
   return isSurfaceKey(key) ? "表面通用" : `${key} mm`;
@@ -329,22 +334,27 @@ export function buildMatrixPreviewPayload({
   }
   const axes = validateMatrixAxes({ xAxis, yAxis, mode: modeInfo.mode });
   if (axes.error) return axes;
-  const pMin = Number(powerMin);
-  const pMax = Number(powerMax);
-  if (!Number.isFinite(pMin) || !Number.isFinite(pMax) || pMin < 0 || pMax > 1000 || pMin > pMax) {
+  const uses = (axis) => axes.xAxis === axis || axes.yAxis === axis;
+  const pMin = uses("power") ? Number(powerMin) : 100;
+  const pMax = uses("power") ? Number(powerMax) : 600;
+  if (uses("power") && (!Number.isFinite(pMin) || !Number.isFinite(pMax) || pMin < 0 || pMax > 1000 || pMin > pMax)) {
     return { error: "功率区间须在 0 ~ 100% 之间，且下限不大于上限" };
+  }
+  const sMin = uses("speed") ? Number(speedMin) : 500;
+  const sMax = uses("speed") ? Number(speedMax) : 2500;
+  if (uses("speed") && (!Number.isFinite(sMin) || !Number.isFinite(sMax) || sMin <= 0 || sMin > sMax)) {
+    return { error: "速度区间无效：下限必须大于 0 且不大于上限" };
   }
   Object.assign(payload, {
     rows: Number(rows),
     columns: Number(cols),
     power_min: Math.round(pMin),
     power_max: Math.round(pMax),
-    speed_min: Number(speedMin),
-    speed_max: Number(speedMax),
+    speed_min: sMin,
+    speed_max: sMax,
     x_axis: axes.xAxis,
     y_axis: axes.yAxis,
   });
-  const uses = (axis) => axes.xAxis === axis || axes.yAxis === axis;
   if (uses("interval")) {
     payload.interval_min_mm = Number(intervalMin);
     payload.interval_max_mm = Number(intervalMax);
@@ -356,7 +366,7 @@ export function buildMatrixPreviewPayload({
   return { payload };
 }
 
-/** 标定矩阵生成输入快照签名，用于判定修改参数后矩阵预览是否已过期。 */
+/** 标定矩阵生成输入快照签名，用于判定修改参数后矩阵预览是否已过期（仅纳入当前测试类型与选中坐标轴真正用到的字段）。 */
 export function matrixInputSignature({
   material = "",
   thickness = "",
@@ -377,24 +387,37 @@ export function matrixInputSignature({
   passesMax = 3,
   labels = true,
 } = {}) {
+  const normMode = mode === "cut" ? "cut" : mode === "outline" ? "outline" : "raster";
+  if (testType === "interval") {
+    return JSON.stringify([
+      String(material).trim(),
+      String(thickness).trim(),
+      normMode,
+      "interval",
+      Number(intervalMin),
+      Number(intervalMax),
+      Number(intervalCount),
+      Boolean(labels),
+    ]);
+  }
+  const uses = (axis) => xAxis === axis || yAxis === axis;
   return JSON.stringify([
     String(material).trim(),
     String(thickness).trim(),
-    mode === "cut" ? "cut" : mode === "outline" ? "outline" : "raster",
+    normMode,
     Number(rows),
     Number(cols),
-    Number(powerMin),
-    Number(powerMax),
-    Number(speedMin),
-    Number(speedMax),
-    testType === "interval" ? "interval" : "matrix",
+    uses("power") ? Number(powerMin) : null,
+    uses("power") ? Number(powerMax) : null,
+    uses("speed") ? Number(speedMin) : null,
+    uses("speed") ? Number(speedMax) : null,
+    "matrix",
     String(xAxis),
     String(yAxis),
-    Number(intervalMin),
-    Number(intervalMax),
-    Number(intervalCount),
-    Number(passesMin),
-    Number(passesMax),
+    uses("interval") ? Number(intervalMin) : null,
+    uses("interval") ? Number(intervalMax) : null,
+    uses("passes") ? Number(passesMin) : null,
+    uses("passes") ? Number(passesMax) : null,
     Boolean(labels),
   ]);
 }

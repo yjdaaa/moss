@@ -14,7 +14,7 @@ impl ApiService {
             ("POST", "/api/system/check-update") => {
                 Some(self.handle_system_check_update(body, ctx))
             }
-            ("GET", "/api/jobs/stop-targets") => Some(self.handle_jobs_stop_targets()),
+            ("GET", "/api/jobs/stop-targets") => Some(self.handle_jobs_stop_targets(ctx)),
             ("POST", "/api/jobs/acknowledge-stop") => {
                 Some(self.handle_jobs_acknowledge_stop(body, ctx))
             }
@@ -163,7 +163,21 @@ impl ApiService {
         }
     }
 
-    fn handle_jobs_stop_targets(&self) -> Vec<u8> {
+    fn can_acknowledge_stop(&self, ctx: &laser_contracts::CallerContext) -> bool {
+        !matches!(
+            ctx,
+            laser_contracts::CallerContext::Voice { .. }
+                | laser_contracts::CallerContext::McpBridge
+                | laser_contracts::CallerContext::Approval { .. }
+                | laser_contracts::CallerContext::Gateway { .. }
+        ) && !matches!(
+            ctx,
+            laser_contracts::CallerContext::Lan { pairing_id } if pairing_id.is_empty()
+        ) && !(self.desktop_session.get().is_some()
+            && matches!(ctx, laser_contracts::CallerContext::Loopback))
+    }
+
+    fn handle_jobs_stop_targets(&self, ctx: &laser_contracts::CallerContext) -> Vec<u8> {
         // 顶栏急停不依赖 React 页面的生命周期，从后端读取精确任务和原连接目标。
         let Ok(running) = self.active_jobs.lock() else {
             return http_json(500, failure("设备任务表不可用", None));
@@ -192,7 +206,10 @@ impl ApiService {
         }
         http_json(
             200,
-            success(serde_json::json!({"jobs": targets.into_values().collect::<Vec<_>>() })),
+            success(serde_json::json!({
+                "jobs": targets.into_values().collect::<Vec<_>>(),
+                "can_acknowledge_stop": self.can_acknowledge_stop(ctx),
+            })),
         )
     }
 
@@ -201,15 +218,7 @@ impl ApiService {
         body: &[u8],
         ctx: &laser_contracts::CallerContext,
     ) -> Vec<u8> {
-        if matches!(
-            ctx,
-            laser_contracts::CallerContext::Voice { .. }
-                | laser_contracts::CallerContext::McpBridge
-                | laser_contracts::CallerContext::Approval { .. }
-                | laser_contracts::CallerContext::Gateway { .. }
-        ) || (self.desktop_session.get().is_some()
-            && matches!(ctx, laser_contracts::CallerContext::Loopback))
-        {
+        if !self.can_acknowledge_stop(ctx) {
             return http_json(
                 403,
                 failure(
@@ -299,6 +308,9 @@ impl ApiService {
                 "preferred_port": preferred,
                 "is_fallback": actual != preferred,
                 "web_host": self.settings.web_host,
+                "can_edit_operator_settings": self.require_operator_settings_access(ctx).is_none(),
+                "can_write_reference_data": !matches!(ctx, laser_contracts::CallerContext::Lan { .. }),
+                "can_acknowledge_stop": self.can_acknowledge_stop(ctx),
                 "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count, include_mcp_details),
                 // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端内置语音服务
                 // 上报，官方链路或未知时为 null（技术书 §9.4.5）

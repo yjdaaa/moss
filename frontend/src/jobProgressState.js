@@ -56,7 +56,7 @@ export function isFramingJob(job) {
 }
 
 /** 单条任务的展示视图。停不掉的字段一律为 null，界面据此隐藏按钮。 */
-export function jobView(job) {
+export function jobView(job, { canAcknowledgeStop = true } = {}) {
   const jobId = typeof job?.job_id === "string" && job.job_id.trim() ? job.job_id.trim() : "";
   const workflowId = typeof job?.workflow_id === "string" && job.workflow_id.trim() ? job.workflow_id.trim() : "";
   const percent = jobPercent(job);
@@ -82,7 +82,7 @@ export function jobView(job) {
     mode: job?.mode === "serial" ? "串口" : job?.mode === "network" ? "网络" : "",
     canCancel: !framing && Boolean(workflowId) && job?.state !== "unknown",
     canEstop: Boolean(jobId),
-    canAcknowledgeStop: Boolean(jobId) && job?.state === "unknown",
+    canAcknowledgeStop: Boolean(jobId) && job?.state === "unknown" && canAcknowledgeStop !== false,
     // 「取消」只在知道 workflow_id 且非未知态时可用；未知态保留软急停重试入口，但须在机器旁确认。
     cancelHint: framing
       ? ""
@@ -97,9 +97,13 @@ export function jobView(job) {
 /** 接口载荷 → 视图数组；非法输入按空列表处理，避免一个坏字段整块消失。 */
 export function jobsView(payload) {
   const jobs = Array.isArray(payload?.jobs) ? payload.jobs : Array.isArray(payload) ? payload : [];
+  const canAck =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload.can_acknowledge_stop !== false
+      : true;
   return jobs
     .filter((job) => job && (job.job_id || job.workflow_id))
-    .map(jobView)
+    .map((job) => jobView(job, { canAcknowledgeStop: canAck }))
     .sort((a, b) => (a.jobId || a.workflowId).localeCompare(b.jobId || b.workflowId));
 }
 

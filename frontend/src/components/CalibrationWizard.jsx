@@ -4,7 +4,6 @@ import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { notifyMaterialsUpdated } from "../materialSelectState.js";
 import {
-  WIZARD_STEPS,
   buildPatternPreviewPayload,
   currentWizardStep,
   kerfFromMeasurement,
@@ -15,6 +14,7 @@ import {
   stepRecord,
   timeCalibrationSummary,
   wizardMaterialKey,
+  wizardStepsForThickness,
   patternSaveTarget,
   resolveOpenWizardStep,
   resolveWizardExpanded,
@@ -50,6 +50,7 @@ export function CalibrationWizard({
   onSend,
 }) {
   const materialKey = wizardMaterialKey(material, thickness);
+  const visibleSteps = wizardStepsForThickness(thickness);
   const progress = wizardProgress(wizard, materialKey);
   const allDone = progress.done + progress.skipped >= progress.total;
   const current = currentWizardStep(wizard, materialKey);
@@ -64,7 +65,8 @@ export function CalibrationWizard({
     setPrevSyncKey(syncKey);
     setExpanded(resolveWizardExpanded(wizard, materialKey));
   }
-  const active = resolveOpenWizardStep(openStep, current);
+  const rawActive = resolveOpenWizardStep(openStep, current);
+  const active = rawActive && !visibleSteps.some((s) => s.id === rawActive) ? (current || "time") : rawActive;
   const [speedsText, setSpeedsText] = useState("");
   const [measured, setMeasured] = useState({});
   const [overscanAnswer, setOverscanAnswer] = useState("");
@@ -430,7 +432,7 @@ export function CalibrationWizard({
       {expanded ? (
         <>
           <ol className="lab-wizard-steps" id="lab-wizard-steps">
-            {WIZARD_STEPS.map((step, index) => {
+            {visibleSteps.map((step, index) => {
               const record = stepRecord(wizard, step.id, materialKey);
               const isActive = step.id === active;
               const trailingAction = !readOnly ? (

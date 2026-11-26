@@ -228,7 +228,13 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
         : summary;
       return {
         connected,
-        status: { connected, summary: result.summary, checkedAt: now },
+        status: {
+          connected,
+          summary: result.summary,
+          checkedAt: now,
+          isFluidnc: Boolean(result.features),
+          features: result.features || null,
+        },
         bannerTone: connected ? "ok" : "bad",
         logLevel: connected ? "ok" : "warn",
         text,
@@ -238,7 +244,7 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
     const errMsg = res?.data?.result || "探测失败：未检测到控制器连接";
     return {
       connected: false,
-      status: { connected: false, summary: errMsg, checkedAt: now },
+      status: { connected: false, summary: errMsg, checkedAt: now, isFluidnc: false, features: null },
       bannerTone: "bad",
       logLevel: "error",
       text: errMsg,
@@ -248,7 +254,7 @@ export async function probeControllerConnection(postJsonFn, form, now = Date.now
     const message = error instanceof Error ? error.message : String(error);
     return {
       connected: false,
-      status: { connected: false, summary: "连接探测网络异常", checkedAt: now },
+      status: { connected: false, summary: "连接探测网络异常", checkedAt: now, isFluidnc: false, features: null },
       bannerTone: "bad",
       logLevel: "error",
       text: `连接探测网络异常：${message}`,

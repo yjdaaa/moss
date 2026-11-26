@@ -48,8 +48,6 @@ export const DEFAULT_FILL_SETTINGS = Object.freeze({
   overcutMm: "0",
 });
 
-const CUT_KEYS = ["kerfMm", "tabMode", "tabCount", "tabSpacingMm", "tabWidthMm", "tabsSkipInner", "leadInMm", "leadOutMm", "leadAngleDeg", "overcutMm"];
-
 function normalizeOffsetTable(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -145,7 +143,8 @@ export function cutOptionsPayload(settings) {
   if (leadIn.error) return { error: leadIn.error };
   const leadOut = numberField(s.leadOutMm, "引出线长度", { min: 0, max: 10, allowEmpty: true });
   if (leadOut.error) return { error: leadOut.error };
-  const angle = numberField(s.leadAngleDeg, "引线角度", { min: 1, max: 90, allowEmpty: true });
+  const hasLead = (leadIn.value ?? 0) > 0 || (leadOut.value ?? 0) > 0;
+  const angle = hasLead ? numberField(s.leadAngleDeg, "引线角度", { min: 1, max: 90, allowEmpty: true }) : { value: 90 };
   if (angle.error) return { error: angle.error };
   const overcut = numberField(s.overcutMm, "过切", { min: 0, max: 10, allowEmpty: true });
   if (overcut.error) return { error: overcut.error };
@@ -201,12 +200,15 @@ export function fillSettingsPayload(settings, { withFill = true, withCut = false
 
 /** 逐行扫描共用的部分：双向、扫描偏移（含速度表）、过扫描（自动时带机器加速度）。 */
 function scanOptionsPart(s) {
-  const offset = numberField(s.scanOffsetMm, "双向扫描偏移", { min: -2, max: 2, allowEmpty: true });
-  if (offset.error) return { error: offset.error };
-  const scan = { bidirectional: s.bidirectional, scan_offset_mm: offset.value ?? 0 };
-  const table = offsetTablePayload(s.scanOffsetTable);
-  if (table.error) return { error: table.error };
-  if (table.value) scan.scan_offset_table = table.value;
+  const scan = { bidirectional: s.bidirectional, scan_offset_mm: 0 };
+  if (s.bidirectional) {
+    const offset = numberField(s.scanOffsetMm, "双向扫描偏移", { min: -2, max: 2, allowEmpty: true });
+    if (offset.error) return { error: offset.error };
+    scan.scan_offset_mm = offset.value ?? 0;
+    const table = offsetTablePayload(s.scanOffsetTable);
+    if (table.error) return { error: table.error };
+    if (table.value) scan.scan_offset_table = table.value;
+  }
   if (s.overscanAuto) {
     scan.overscan_mm = "auto";
     const accel = numberField(s.accelerationMmS2, "机器加速度", { min: 10, max: 100000, allowEmpty: true });
@@ -220,9 +222,6 @@ function scanOptionsPart(s) {
   return { value: scan };
 }
 
-/** 位图逐行扫描影响刀路的设置键（工作台图片、画板转图片用）。 */
-const RASTER_SCAN_KEYS = ["bidirectional", "scanOffsetMm", "scanOffsetTable", "overscanAuto", "overscanMm", "accelerationMmS2"];
-
 /**
  * 位图（工作台图片、创作画板转图片）提交的 `fill_options` 扫描子集（2026-11-17 技术书 r45）：
  * 过扫描（自动按速度）、双向扫描、扫描偏移与速度表、机器加速度；不带填充分组 / 角度 / 交叉这些矢量项。
@@ -233,18 +232,52 @@ export function rasterScanPayload(settings) {
   return scan.error ? { error: scan.error } : { fill_options: scan.value };
 }
 
-/** 位图扫描设置的签名：只看 {@link rasterScanPayload} 用到的键。 */
-export function rasterScanSignature(settings) {
-  const s = normalizeFillSettings(settings);
-  return `scan:${JSON.stringify(RASTER_SCAN_KEYS.map((key) => s[key]))}`;
+function activeScanSignatureValues(s) {
+  return [
+    s.bidirectional,
+    s.bidirectional ? s.scanOffsetMm : "0",
+    s.bidirectional ? s.scanOffsetTable : [],
+    s.overscanAuto,
+    s.overscanAuto ? "" : s.overscanMm,
+    s.overscanAuto ? s.accelerationMmS2 : "",
+  ];
 }
 
-/** 影响刀路的签名：改了任何一项，旧预览就算过期（切割设置只在外框切割时算进去）。 */
+function activeCutSignatureValues(s) {
+  const hasLead = (Number(s.leadInMm) || 0) > 0 || (Number(s.leadOutMm) || 0) > 0;
+  return [
+    s.kerfMm,
+    s.tabMode,
+    s.tabMode === "count" ? s.tabCount : "",
+    s.tabMode === "spacing" ? s.tabSpacingMm : "",
+    s.tabMode !== "off" ? s.tabWidthMm : "",
+    s.tabMode !== "off" ? s.tabsSkipInner : false,
+    s.leadInMm,
+    s.leadOutMm,
+    hasLead ? s.leadAngleDeg : "",
+    s.overcutMm,
+  ];
+}
+
+/** 位图扫描设置的签名：只看当前真正生效的扫描子集键。 */
+export function rasterScanSignature(settings) {
+  const s = normalizeFillSettings(settings);
+  return `scan:${JSON.stringify(activeScanSignatureValues(s))}`;
+}
+
+/** 影响刀路的签名：只计入当前打开且生效的项，隐藏项变化不误判旧预览过期。 */
 export function fillSettingsSignature(settings, { withFill = true, withCut = false } = {}) {
   const s = normalizeFillSettings(settings);
-  const cutSig = withCut ? `|cut:${JSON.stringify(CUT_KEYS.map((key) => s[key]))}` : "";
+  const cutSig = withCut ? `|cut:${JSON.stringify(activeCutSignatureValues(s))}` : "";
   if (!withFill) return `path:${s.preferCorners}/${s.removeOverlaps}${cutSig}`;
-  const fillOnly = Object.fromEntries(Object.entries(s).filter(([key]) => !CUT_KEYS.includes(key)));
+  const fillOnly = {
+    grouping: s.grouping,
+    angleDeg: s.angleDeg,
+    crossHatch: s.crossHatch,
+    scan: activeScanSignatureValues(s),
+    preferCorners: s.preferCorners,
+    removeOverlaps: s.removeOverlaps,
+  };
   return JSON.stringify(fillOnly) + cutSig;
 }
 
@@ -273,7 +306,7 @@ export function fillSettingsSummary(settings, { withFill = true, withCut = false
     if (s.crossHatch) parts.push("交叉");
     parts.push(s.bidirectional ? "双向" : "单向");
     parts.push(s.overscanAuto ? "过扫描自动" : `过扫描 ${s.overscanMm || 0} mm`);
-    if (offsetTablePayload(s.scanOffsetTable).value) parts.push("偏移按速度表");
+    if (s.bidirectional && offsetTablePayload(s.scanOffsetTable).value) parts.push("偏移按速度表");
   }
   if (!s.preferCorners) parts.push("起刀不限尖角");
   if (!s.removeOverlaps) parts.push("保留重复线");

@@ -754,7 +754,13 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                 </>
               )}
               <h3 className="voice-section-h">MOSS 内置工具（所有链路共用）</h3>
-              <VoiceToolsCard overview={status.mcp} busy={busy} run={run} />
+              <VoiceToolsCard
+                overview={status.mcp}
+                mode={mode}
+                strictEnabled={Boolean(status.strict?.enabled)}
+                busy={busy}
+                run={run}
+              />
               <h3 className="voice-section-h">第三方扩展与本机代理（内置服务链路调用）</h3>
               {mode !== "builtin" && (
                 <div className="voice-hint voice-hint--warn">

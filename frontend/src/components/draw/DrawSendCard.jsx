@@ -126,19 +126,21 @@ export function DrawSendCard({
             <Eye size={14} aria-hidden="true" />
             <span>先走边框</span>
           </button>
-          <label className="checkbox-row wb-framing-shape" title="沿图形外轮廓（橡皮筋）走，而不是外接矩形">
-            <input
-              type="checkbox"
-              id="draw-framing-hull"
-              checked={framingShape === "hull"}
-              onChange={(event) => {
-                const next = event.target.checked ? "hull" : "box";
-                setFramingShape(next);
-                writeFramingShape(next);
-              }}
-            />
-            <span>沿外轮廓</span>
-          </label>
+          {Array.isArray(result?.result?.artifacts?.frame_hull_mm) && result.result.artifacts.frame_hull_mm.length >= 3 ? (
+            <label className="checkbox-row wb-framing-shape" title="沿图形外轮廓（橡皮筋）走，而不是外接矩形">
+              <input
+                type="checkbox"
+                id="draw-framing-hull"
+                checked={framingShape === "hull"}
+                onChange={(event) => {
+                  const next = event.target.checked ? "hull" : "box";
+                  setFramingShape(next);
+                  writeFramingShape(next);
+                }}
+              />
+              <span>沿外轮廓</span>
+            </label>
+          ) : null}
           {web.gcode_download_url ? (
             <button
               type="button"

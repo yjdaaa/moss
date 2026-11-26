@@ -15,10 +15,11 @@ const hintStyle = { fontSize: "12px", color: "var(--ink-dim)", marginBottom: "10
  * - 电脑上：开关“允许手机连接”、显示本机地址、生成配对码；
  * - 手机 App 上：填写电脑地址连接 / 断开回到本机模式。
  */
-export function PhoneLinkSection() {
+export function PhoneLinkSection({ canEdit = true }) {
   const inApp = typeof window !== "undefined" && Boolean(window.__TAURI__?.core?.invoke);
   if (isRemoteMode()) return <RemoteConnectedPanel />;
   if (inApp && isAndroidDevice()) return <ConnectToComputerPanel />;
+  if (!canEdit) return null;
   return <ComputerHostPanel />;
 }
 

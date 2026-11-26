@@ -1,5 +1,5 @@
 import React from "react";
-import { MATRIX_MODE_OPTIONS, TEST_TYPE_OPTIONS, axisOptionsForMode, thicknessChipLabel } from "../../materialLabState.js";
+import { TEST_TYPE_OPTIONS, axisOptionsForMode, modeOptionsForThickness, thicknessChipLabel } from "../../materialLabState.js";
 import { PowerPercentInput } from "./PowerPercentInput.jsx";
 
 /** 材料实验室 ③ 校准矩阵 · 标定条件：标题与模式、状态行、功率 / 速度区间、行列、测试类型与轴参数。原样搬自 pages/MaterialLabPage.jsx（2026-11-16 按职责拆分） */
@@ -53,7 +53,7 @@ export function LabMatrixSettings({
           className="select-input lab-matrix-mode-select"
           aria-label="标定矩阵加工模式"
         >
-          {MATRIX_MODE_OPTIONS.map((m) => (
+          {modeOptionsForThickness(selectedThickness).map((m) => (
             <option key={m.id} value={m.id}>{m.label}标定</option>
           ))}
         </select>
@@ -62,72 +62,78 @@ export function LabMatrixSettings({
         <div className="lab-matrix-status-line">{matrixStatus}</div>
       )}
 
-      {/* Matrix Parameters */}
-      <div className="lab-grid-2">
-        <div>
-          <label className="lab-label-3">功率区间 (0–100%)</label>
-          <div className="lab-row-10">
-            <PowerPercentInput
-              sValue={matrixPowerMin}
-              onChangeSValue={setMatrixPowerMin}
-              className="text-input lab-field-4"
-              ariaLabel="最小功率百分比"
-            />
-            <PowerPercentInput
-              sValue={matrixPowerMax}
-              onChangeSValue={setMatrixPowerMax}
-              className="text-input lab-field-4"
-              ariaLabel="最大功率百分比"
-            />
-          </div>
-          <small className="lab-s-hint" id="lab-matrix-power-s">
-            对应 S{Number.isFinite(Number(matrixPowerMin)) ? Math.round(Number(matrixPowerMin)) : "—"}~S
-            {Number.isFinite(Number(matrixPowerMax)) ? Math.round(Number(matrixPowerMax)) : "—"}
-          </small>
-        </div>
+      {/* Matrix Parameters（仅在参数网格模式下按实际选用的坐标轴展示） */}
+      {matrixTestType !== "interval" && (
+        <div className="lab-grid-2">
+          {(matrixXAxis === "power" || matrixYAxis === "power") && (
+            <div>
+              <label className="lab-label-3">功率区间 (0–100%)</label>
+              <div className="lab-row-10">
+                <PowerPercentInput
+                  sValue={matrixPowerMin}
+                  onChangeSValue={setMatrixPowerMin}
+                  className="text-input lab-field-4"
+                  ariaLabel="最小功率百分比"
+                />
+                <PowerPercentInput
+                  sValue={matrixPowerMax}
+                  onChangeSValue={setMatrixPowerMax}
+                  className="text-input lab-field-4"
+                  ariaLabel="最大功率百分比"
+                />
+              </div>
+              <small className="lab-s-hint" id="lab-matrix-power-s">
+                对应 S{Number.isFinite(Number(matrixPowerMin)) ? Math.round(Number(matrixPowerMin)) : "—"}~S
+                {Number.isFinite(Number(matrixPowerMax)) ? Math.round(Number(matrixPowerMax)) : "—"}
+              </small>
+            </div>
+          )}
 
-        <div>
-          <label className="lab-label-3">速度区间 (Min-Max)</label>
-          <div className="lab-row-10">
-            <input
-              type="number"
-              min={1}
-              value={matrixSpeedMin}
-              onChange={(e) => setMatrixSpeedMin(Number(e.target.value))}
-              className="text-input lab-field-4"
-            />
-            <input
-              type="number"
-              min={1}
-              value={matrixSpeedMax}
-              onChange={(e) => setMatrixSpeedMax(Number(e.target.value))}
-              className="text-input lab-field-4"
-            />
-          </div>
-        </div>
+          {(matrixXAxis === "speed" || matrixYAxis === "speed") && (
+            <div>
+              <label className="lab-label-3">速度区间 (Min-Max)</label>
+              <div className="lab-row-10">
+                <input
+                  type="number"
+                  min={1}
+                  value={matrixSpeedMin}
+                  onChange={(e) => setMatrixSpeedMin(Number(e.target.value))}
+                  className="text-input lab-field-4"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  value={matrixSpeedMax}
+                  onChange={(e) => setMatrixSpeedMax(Number(e.target.value))}
+                  className="text-input lab-field-4"
+                />
+              </div>
+            </div>
+          )}
 
-        <div>
-          <label className="lab-label-3">矩阵行列 ({matrixRows}x{matrixCols})</label>
-          <div className="lab-row-10">
-            <input
-              type="number"
-              min={1}
-              max={25}
-              value={matrixRows}
-              onChange={(e) => setMatrixRows(Number(e.target.value))}
-              className="text-input lab-field-4"
-            />
-            <input
-              type="number"
-              min={1}
-              max={25}
-              value={matrixCols}
-              onChange={(e) => setMatrixCols(Number(e.target.value))}
-              className="text-input lab-field-4"
-            />
+          <div>
+            <label className="lab-label-3">矩阵行列 ({matrixRows}x{matrixCols})</label>
+            <div className="lab-row-10">
+              <input
+                type="number"
+                min={1}
+                max={25}
+                value={matrixRows}
+                onChange={(e) => setMatrixRows(Number(e.target.value))}
+                className="text-input lab-field-4"
+              />
+              <input
+                type="number"
+                min={1}
+                max={25}
+                value={matrixCols}
+                onChange={(e) => setMatrixCols(Number(e.target.value))}
+                className="text-input lab-field-4"
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* 测试类型与轴参数（2026-11-16 对齐 LightBurn Material Test / Interval Test）。
           放在 .lab-grid-2 之外，保持上面区间与行列输入框的顺序不变 */}

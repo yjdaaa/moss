@@ -9,7 +9,8 @@ import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
 import { ProcessTraceSection } from "./ProcessTraceSection.jsx";
 import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
-import { isRemoteMode } from "../authSession.js";
+import { hasDesktopSession, isReadOnlyReferenceClient, isRemoteMode } from "../authSession.js";
+import { shouldShowExportSettings } from "../exportSettings.js";
 import { voiceApi } from "../voiceApi.js";
 import { preferencesShowJev } from "../voiceState.js";
 import { readHideTopPills, writeHideTopPills } from "../foldState.js";
@@ -419,6 +420,10 @@ function SettingsModalBody({
     }
   };
 
+  const canEditOperatorSettings =
+    !isReadOnlyReferenceClient() && systemInfo?.can_edit_operator_settings !== false;
+  const showDesktopTraySettings = shouldShowExportSettings() && !isRemoteMode();
+
   const portSummary = systemInfo
     ? systemInfo.is_fallback
       ? `${systemInfo.actual_port}（首选 ${systemInfo.preferred_port} 占用）`
@@ -482,10 +487,10 @@ function SettingsModalBody({
 
         <div className="mat-modal-body">
           {/* 手机连接（电脑端：允许连接 / 配对码；手机端：连接电脑） */}
-          <PhoneLinkSection />
+          <PhoneLinkSection canEdit={canEditOperatorSettings} />
 
-          {/* 连接电脑时这些设置属于电脑，手机只读（后端也会拒绝），直接隐藏 */}
-          {!isRemoteMode() && (<>
+          {/* 连接电脑或只读浏览器身份下系统级设置不可修改（后端同样 403 拒绝），直接隐藏 */}
+          {canEditOperatorSettings && (<>
           {/* 网络与服务端口设置 */}
           <div className="ob-fold settings-box-3">
             <FoldHeader variant="section" id="settings-port" icon={Network} title="服务端口" summary={portSummary} defaultOpen={false} />
@@ -652,11 +657,11 @@ function SettingsModalBody({
           {/* 导出目录（仅桌面版） */}
           <ExportSettingsSection />
 
-          {/* 完整过程记录（n105，默认关；只在电脑本机） */}
-          <ProcessTraceSection />
+          {/* 完整过程记录（n105，默认关；只在有操作者设置权限的本机显示） */}
+          <ProcessTraceSection canEdit={canEditOperatorSettings} hasVoice={Boolean(onOpenVoice)} />
 
           {/* 软件更新（Magpie 风格：当前版本 + 启动时自动检查更新 + 包含预览版 + 立即检查更新） */}
-          {!isRemoteMode() && (
+          {canEditOperatorSettings && (
             <div className="ob-fold settings-box-3" id="settings-update-section">
               <FoldHeader variant="section" id="settings-update" icon={RefreshCw} title="软件更新" summary={updateSummary} defaultOpen={false} />
               <div className="settings-box-4">
@@ -761,97 +766,103 @@ function SettingsModalBody({
             </div>
           )}
 
-          {/* 桌面客户端关闭行为 */}
-          <div className="ob-fold settings-spacer">
-            <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" summary={closeSummary} defaultOpen={false} />
+          {/* 桌面客户端关闭行为（仅桌面端有托盘 / 菜单栏图标与主窗口关闭拦截） */}
+          {showDesktopTraySettings && (
+            <div className="ob-fold settings-spacer">
+              <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" summary={closeSummary} defaultOpen={false} />
 
-            <div className="settings-box-4">
-              关闭主窗口时的默认行为：
+              <div className="settings-box-4">
+                关闭主窗口时的默认行为：
+              </div>
+
+              <div className="settings-row-6">
+                <label className={`close-confirm-option${closeAction === "ask" ? " is-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="settingCloseAction"
+                    value="ask"
+                    checked={closeAction === "ask"}
+                    onChange={() => handleActionChange("ask")}
+                    className="settings-field-3"
+                  />
+                  <div>
+                    <div className="settings-box-9">
+                      每次询问（推荐）
+                    </div>
+                    <div className="settings-box-10">
+                      关闭时弹窗询问隐藏还是完全退出
+                    </div>
+                  </div>
+                </label>
+
+                <label className={`close-confirm-option${closeAction === "tray" ? " is-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="settingCloseAction"
+                    value="tray"
+                    checked={closeAction === "tray"}
+                    onChange={() => handleActionChange("tray")}
+                    className="settings-field-3"
+                  />
+                  <div>
+                    <div className="settings-box-9">
+                      {trayActionCopy().title}
+                    </div>
+                    <div className="settings-box-10">
+                      {trayActionCopy().settingsDetail}
+                    </div>
+                  </div>
+                </label>
+
+                <label className={`close-confirm-option is-danger${closeAction === "exit" ? " is-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="settingCloseAction"
+                    value="exit"
+                    checked={closeAction === "exit"}
+                    onChange={() => handleActionChange("exit")}
+                    className="settings-field-3"
+                  />
+                  <div>
+                    <div className="settings-box-9">
+                      完全退出程序
+                    </div>
+                    <div className="settings-box-10">
+                      停止激光任务与语音服务并直接退出程序
+                    </div>
+                  </div>
+                </label>
+              </div>
             </div>
-
-            <div className="settings-row-6">
-              <label className={`close-confirm-option${closeAction === "ask" ? " is-active" : ""}`}>
-                <input
-                  type="radio"
-                  name="settingCloseAction"
-                  value="ask"
-                  checked={closeAction === "ask"}
-                  onChange={() => handleActionChange("ask")}
-                  className="settings-field-3"
-                />
-                <div>
-                  <div className="settings-box-9">
-                    每次询问（推荐）
-                  </div>
-                  <div className="settings-box-10">
-                    关闭时弹窗询问隐藏还是完全退出
-                  </div>
-                </div>
-              </label>
-
-              <label className={`close-confirm-option${closeAction === "tray" ? " is-active" : ""}`}>
-                <input
-                  type="radio"
-                  name="settingCloseAction"
-                  value="tray"
-                  checked={closeAction === "tray"}
-                  onChange={() => handleActionChange("tray")}
-                  className="settings-field-3"
-                />
-                <div>
-                  <div className="settings-box-9">
-                    {trayActionCopy().title}
-                  </div>
-                  <div className="settings-box-10">
-                    {trayActionCopy().settingsDetail}
-                  </div>
-                </div>
-              </label>
-
-              <label className={`close-confirm-option is-danger${closeAction === "exit" ? " is-active" : ""}`}>
-                <input
-                  type="radio"
-                  name="settingCloseAction"
-                  value="exit"
-                  checked={closeAction === "exit"}
-                  onChange={() => handleActionChange("exit")}
-                  className="settings-field-3"
-                />
-                <div>
-                  <div className="settings-box-9">
-                    完全退出程序
-                  </div>
-                  <div className="settings-box-10">
-                    停止激光任务与语音服务并直接退出程序
-                  </div>
-                </div>
-              </label>
-            </div>
-          </div>
+          )}
 
           {/* 顶栏右上角状态显示 */}
-          <div className="ob-fold settings-spacer" id="settings-top-pills-section">
-            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" summary={topPillsSummary} defaultOpen={false} />
-            <label className="settings-label">
-              <input
-                type="checkbox"
-                id="settings-hide-top-pills"
-                checked={hideTopPills}
-                onChange={(e) => handleHideTopPillsChange(e.target.checked)}
-              />
-              <span>隐藏右上角状态胶囊（硬件 / 小智 / 审批）</span>
-            </label>
-            <div className="settings-box-4" style={{ marginTop: "6px", marginBottom: 0 }}>
-              不影响常驻急停按钮与新审批弹窗。
+          {!isRemoteMode() && (
+            <div className="ob-fold settings-spacer" id="settings-top-pills-section">
+              <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" summary={topPillsSummary} defaultOpen={false} />
+              <label className="settings-label">
+                <input
+                  type="checkbox"
+                  id="settings-hide-top-pills"
+                  checked={hideTopPills}
+                  onChange={(e) => handleHideTopPillsChange(e.target.checked)}
+                />
+                <span>{hasDesktopSession() ? "隐藏右上角状态胶囊（硬件 / 小智 / 审批）" : "隐藏右上角状态胶囊（硬件 / 小智）"}</span>
+              </label>
+              <div className="settings-box-4" style={{ marginTop: "6px", marginBottom: 0 }}>
+                {hasDesktopSession() ? "不影响常驻急停按钮与新审批弹窗。" : "不影响常驻急停按钮。"}
+              </div>
             </div>
-          </div>
+          )}
 
-          <div className="settings-row-7">
-            <ShieldAlert size={16} className="settings-icon-2" />
-            <div className="settings-box-11">
-              <strong>安全提示</strong>：完全退出会停止正在下发的任务，并向加工中的设备发送软件停止请求。软件停止不代表激光已熄灭或断电，请以设备实际状态为准，紧急情况立即使用硬件急停。
+          {showDesktopTraySettings && (
+            <div className="settings-row-7">
+              <ShieldAlert size={16} className="settings-icon-2" />
+              <div className="settings-box-11">
+                <strong>安全提示</strong>：完全退出会停止正在下发的任务，并向加工中的设备发送软件停止请求。软件停止不代表激光已熄灭或断电，请以设备实际状态为准，紧急情况立即使用硬件急停。
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="mat-modal-foot">

@@ -89,12 +89,14 @@ export function WorkbenchImageTool({
           </div>
         )}
       </div>
-      <QualityPresetBar
-        id="wb-image-preset"
-        value={detectImagePreset(imageMode, imageExtras.intervalScale)}
-        hints={IMAGE_PRESET_HINTS}
-        onSelect={applyImageQualityPreset}
-      />
+      {!imageExtras.passThrough && (
+        <QualityPresetBar
+          id="wb-image-preset"
+          value={detectImagePreset(imageMode, imageExtras.intervalScale)}
+          hints={IMAGE_PRESET_HINTS}
+          onSelect={applyImageQualityPreset}
+        />
+      )}
       <div className="wb-params-grid">
         <label>
           <span>成品宽 mm</span>
@@ -148,21 +150,23 @@ export function WorkbenchImageTool({
               ))}
             </select>
           </label>
-          <label title="行间距 = 材料推荐线距 × 倍数；大于 1 更快更粗，小于 1 更细更深（直通模式不用）">
-            <span>行间距倍数</span>
-            <input
-              id="wb-image-interval-scale"
-              type="number"
-              inputMode="decimal"
-              min={IMAGE_INTERVAL_SCALE_LIMITS.min}
-              max={IMAGE_INTERVAL_SCALE_LIMITS.max}
-              step={0.1}
-              placeholder="1"
-              value={imageExtras.intervalScale}
-              onChange={(e) => setImageExtra("intervalScale", e.target.value)}
-              className="text-input"
-            />
-          </label>
+          {!imageExtras.passThrough && (
+            <label title="行间距 = 材料推荐线距 × 倍数；大于 1 更快更粗，小于 1 更细更深">
+              <span>行间距倍数</span>
+              <input
+                id="wb-image-interval-scale"
+                type="number"
+                inputMode="decimal"
+                min={IMAGE_INTERVAL_SCALE_LIMITS.min}
+                max={IMAGE_INTERVAL_SCALE_LIMITS.max}
+                step={0.1}
+                placeholder="1"
+                value={imageExtras.intervalScale}
+                onChange={(e) => setImageExtra("intervalScale", e.target.value)}
+                className="text-input"
+              />
+            </label>
+          )}
           {imageFields.halftone && (
             <>
               <label>

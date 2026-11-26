@@ -315,7 +315,6 @@ export function builtinSectionSourceView(section, status) {
   const colab = status?.local?.colab;
   const colabActive = Boolean(colab?.active);
   if (section === "llm") {
-    const colabLlmModel = colab?.llm_model || "qwen3-vl-8b";
     if (colabActive) {
       return {
         section,
@@ -324,10 +323,10 @@ export function builtinSectionSourceView(section, status) {
         localOn: false,
         localReady: true,
         cloudConfigured: true,
-        cloudModel: colabLlmModel,
-        activeText: `Colab T4 联动（${colabLlmModel}）`,
+        cloudModel: "qwen3-vl-8b",
+        activeText: "Colab T4 联动（qwen3-vl-8b）",
         selectValue: "colab",
-        options: [{ value: "colab", label: `Colab T4 联动（${colabLlmModel} · 多模态+看图）`, installed: true }],
+        options: [{ value: "colab", label: "Colab T4 联动（qwen3-vl-8b · 多模态+看图）", installed: true }],
         installedLocalModel: null,
         selectedLocalModel: null,
       };
@@ -358,8 +357,6 @@ export function builtinSectionSourceView(section, status) {
       ? selectedLocalModel
       : kindModels.find((item) => item.installed) || null;
   if (section === "tts" && colabActive) {
-    const colabTtsModel = colab?.tts_model || "qwen3-tts";
-    const colabVoice = colab?.tts_voice || "moss";
     return {
       section,
       canUseLocal: true,
@@ -367,10 +364,10 @@ export function builtinSectionSourceView(section, status) {
       localOn: false,
       localReady: true,
       cloudConfigured: true,
-      cloudModel: colabTtsModel,
-      activeText: `Colab T4 联动（${colabTtsModel} · ${colabVoice}）`,
+      cloudModel: "qwen3-tts",
+      activeText: "Colab T4 联动（qwen3-tts · 550W 克隆声）",
       selectValue: "colab",
-      options: [{ value: "colab", label: `Colab T4 联动（${colabTtsModel} · 550W 克隆声）`, installed: true }],
+      options: [{ value: "colab", label: "Colab T4 联动（qwen3-tts · 550W 克隆声）", installed: true }],
       installedLocalModel,
       selectedLocalModel,
     };

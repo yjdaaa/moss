@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getJson, postJson } from "./api/client.js";
 import { showAlert } from "./appDialog.js";
-import { isRemoteMode } from "./authSession.js";
+import { isReadOnlyReferenceClient } from "./authSession.js";
 import {
   DEFAULT_TEXT_ORIGIN,
   TEXT_ORIGIN_EVENT,
@@ -36,7 +36,7 @@ export async function fetchTextOrigin() {
 
 /** `{ origin, setOrigin, readOnly }`。 */
 export function useTextOrigin() {
-  const readOnly = isRemoteMode();
+  const readOnly = isReadOnlyReferenceClient();
   const [origin, setOriginState] = useState(() => lastKnownOrigin || DEFAULT_TEXT_ORIGIN);
   const originRef = useRef(origin);
   useEffect(() => {

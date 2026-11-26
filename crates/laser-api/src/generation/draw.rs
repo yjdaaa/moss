@@ -116,6 +116,11 @@ pub(crate) fn generate_draw_artifacts(
         (_, mode) if mode != "vector" => None,
         (None, _) => Some("没有收到画板的矢量数据，已按光栅生成"),
         (Some(sketch), _) if sketch.has_image => {
+            if is_cut {
+                return Err(
+                    "画板里有插入的图片，矢量切割无法处理位图；请先移除图片或切换为雕刻刻法".into(),
+                );
+            }
             Some("画板里有插入的图片，矢量模式刻不了图片，已按光栅生成")
         }
         (Some(sketch), _) if sketch.is_empty() => {

@@ -887,6 +887,7 @@ try {
   await page.waitForFunction(() => document.querySelector("#voice-local-colab-bridge")?.open === true);
   assert.equal(await page.locator("#voice-colab-enabled").isVisible(), true, "展开后显示 Colab 开关与配置");
   assert.equal(await page.locator("#voice-colab-export-ipynb").isVisible(), true, "展开后显示导出笔记本按钮");
+  assert.equal(await page.locator("#voice-colab-advanced").count(), 0, "Colab 固定模型与音色，不再显示无效高级覆盖框");
   if (process.env.VOICE_QA_DIR) {
     await page.locator("#voice-local-colab-bridge").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-local-colab-expanded.png") });
   }
@@ -951,7 +952,13 @@ try {
   assert.equal(await page.locator("#voice-jev-filter-state").count(), 0, "n73：Jev 状态只在顶部链路栏显示");
   assert.equal(await page.locator("#voice-experience-accuracy").getAttribute("open"), null, "识别准确度默认收起");
   assert.equal(await page.locator("#voice-experience-advanced").getAttribute("open"), null, "高级默认收起");
-  assert.equal(await page.locator("#voice-llm-fast-reply").isChecked(), true, "快速回答默认开");
+  assert.equal(await page.locator("#voice-llm-fast-reply").count(), 0, "当前已保存的非兼容测试域名不显示快速回答开关");
+  state.builtin.models.llm.url = "https://openrouter.ai/api/v1";
+  await page.locator("#voice-local-colab-bridge > summary").click();
+  await page.locator("#voice-colab-cli-refresh").click();
+  await page.locator("#voice-local-colab-bridge > summary").click();
+  await page.locator("#voice-llm-fast-reply").waitFor();
+  assert.equal(await page.locator("#voice-llm-fast-reply").isChecked(), true, "切到支持关闭思考的服务商后显示快速回答且默认开");
   assert.equal(await page.locator("#voice-barge-in-ms").count(), 0, "插话关闭时不显示插话时长");
   await page.locator("#voice-experience-advanced > summary").click();
   await page.locator("#voice-jev-off-note").waitFor();

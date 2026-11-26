@@ -7,6 +7,7 @@ import {
   GOGGLE_BOT_POSES,
   SCREEN_CARD_STYLE_OPTIONS,
   builtinDeviceView,
+  hasColorScreenPreviewTarget,
   voiceErrorText,
 } from "../../voiceState.js";
 
@@ -20,7 +21,7 @@ export function BuiltinScreenPreview({ builtin }) {
   const [botNotice, setBotNotice] = useState("");
   const [optimisticStyle, setOptimisticStyle] = useState("");
   const [lastPushedPose, setLastPushedPose] = useState("");
-  if (!status || status.error) return null;
+  if (!status || status.error || !hasColorScreenPreviewTarget(status)) return null;
 
   const devices = Array.isArray(status.devices) ? status.devices : [];
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];

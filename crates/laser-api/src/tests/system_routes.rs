@@ -1479,3 +1479,61 @@ fn process_trace_timeline_records_api_calls_in_order_and_hides_secrets() {
         "{readable}"
     );
 }
+
+#[test]
+fn system_info_and_stop_targets_expose_caller_capability_flags() {
+    let service = cors_test_service();
+    let token = service.enable_desktop_session().unwrap();
+
+    // 1. 携带桌面会话的本机请求：拥有操作员设置、材料/路线写入与确认停稳三项权限
+    let desktop_info_req = format!(
+        "GET /api/system/info HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nX-Moss-Desktop-Session: {token}\r\n\r\n"
+    );
+    let desktop_info = parse_json_response(&service.handle_http(desktop_info_req.as_bytes()));
+    assert_eq!(desktop_info["result"]["can_edit_operator_settings"], true);
+    assert_eq!(desktop_info["result"]["can_write_reference_data"], true);
+    assert_eq!(desktop_info["result"]["can_acknowledge_stop"], true);
+
+    let desktop_targets_req = format!(
+        "GET /api/jobs/stop-targets HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nX-Moss-Desktop-Session: {token}\r\n\r\n"
+    );
+    let desktop_targets = parse_json_response(&service.handle_http(desktop_targets_req.as_bytes()));
+    assert_eq!(desktop_targets["result"]["can_acknowledge_stop"], true);
+
+    // 2. 桌面版运行时同机外部浏览器（无桌面会话）：不能改操作员设置、不能确认停稳，回环仍可读写材料与路线
+    let loopback_browser_info = parse_json_response(
+        &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n"),
+    );
+    assert_eq!(
+        loopback_browser_info["result"]["can_edit_operator_settings"],
+        false
+    );
+    assert_eq!(
+        loopback_browser_info["result"]["can_write_reference_data"],
+        true
+    );
+    assert_eq!(
+        loopback_browser_info["result"]["can_acknowledge_stop"],
+        false
+    );
+
+    let loopback_browser_targets = parse_json_response(
+        &service
+            .handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n"),
+    );
+    assert_eq!(
+        loopback_browser_targets["result"]["can_acknowledge_stop"],
+        false
+    );
+
+    // 3. 局域网非回环访问：不能改设置、不能写材料/路线
+    let lan_info = parse_json_response(&service.handle_http_from(
+        b"GET /api/system/info HTTP/1.1\r\nHost: 192.0.2.10:9666\r\n\r\n",
+        false,
+        "192.0.2.50",
+        None,
+    ));
+    assert_eq!(lan_info["result"]["can_edit_operator_settings"], false);
+    assert_eq!(lan_info["result"]["can_write_reference_data"], false);
+    assert_eq!(lan_info["result"]["can_acknowledge_stop"], false);
+}

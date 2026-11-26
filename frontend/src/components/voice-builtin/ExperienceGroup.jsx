@@ -10,6 +10,9 @@ import {
   personaOptions,
   canonicalLocalJevModel,
   experienceSettingsError,
+  isAsrHotwordsSupported,
+  isJevUnfinishedHoldSupported,
+  isLlmFastReplySupported,
   isSpecificLocalJevInstalled,
 } from "../../voiceState.js";
 import { JEV_GROUP_TITLE } from "./shared.js";
@@ -94,11 +97,13 @@ export function ExperienceGroup({ builtin }) {
   const corrCount = String(baseline.custom_asr_corrections || "").split(/\r?\n/).filter((w) => w.trim()).length;
   // 热词：本地 SenseVoice 与 FireRedASR2-CTC 不支持；X-ASR 热词识别只对本地 X-ASR 有意义（2026-11-08 n73 只在用得上时显示）
   const localAsrModel = baseline.asr ? String(baseline.asr_model || "") : "";
-  const hotwordsSupported = !localAsrModel.startsWith("sense_voice") && localAsrModel !== "firered_asr2_ctc";
+  const hotwordsSupported = isAsrHotwordsSupported(form, builtin.status);
+  const fastReplySupported = isLlmFastReplySupported(builtin.status);
+  const unfinishedHoldSupported = isJevUnfinishedHoldSupported(form, builtin.status);
   const xAsrInUse = localAsrModel.startsWith("x_asr");
   const summary = [
     styleLabel,
-    baseline.llm_fast_reply !== false ? "快速回答开" : "快速回答关",
+    ...(fastReplySupported ? [baseline.llm_fast_reply !== false ? "快速回答开" : "快速回答关"] : []),
     baseline.barge_in ? "插话开" : "插话关",
     baseline.asr_homophone_fix !== false ? `同音纠偏开${corrCount ? `(+${corrCount})` : ""}` : "同音纠偏关",
   ].join(" · ");
@@ -156,12 +161,14 @@ export function ExperienceGroup({ builtin }) {
             id="voice-persona-prompt"
           />
         </label>
-        <label className="voice-check voice-wide">
-          <input type="checkbox" checked={form.llm_fast_reply !== false} onChange={(e) => update("llm_fast_reply", e.target.checked)} id="voice-llm-fast-reply" />
-          <span title="对阿里云百炼、硅基流动、火山方舟、智谱、OpenRouter、OpenAI GPT-5 等请求关闭大模型思考，每轮少等几秒；服务不支持时自动按原样调用。复述确认、电脑审批与急停由程序把关，不受影响。推理专用模型（如 DeepSeek-R1）关不掉。">
-            快速回答（让大模型不先思考，回答更快；默认开）
-          </span>
-        </label>
+        {fastReplySupported && (
+          <label className="voice-check voice-wide">
+            <input type="checkbox" checked={form.llm_fast_reply !== false} onChange={(e) => update("llm_fast_reply", e.target.checked)} id="voice-llm-fast-reply" />
+            <span title="对阿里云百炼、硅基流动、火山方舟、智谱、OpenRouter、OpenAI GPT-5 等请求关闭大模型思考，每轮少等几秒；服务不支持时自动按原样调用。复述确认、电脑审批与急停由程序把关，不受影响。">
+              快速回答（让大模型不先思考，回答更快；默认开）
+            </span>
+          </label>
+        )}
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={form.job_done_announce} onChange={(e) => update("job_done_announce", e.target.checked)} id="voice-job-announce" />
           <span title="只在设备在线且当前不在说话时播报；播报中被打断按插话机制处理。">加工结束后主动播报结果</span>
@@ -225,20 +232,16 @@ export function ExperienceGroup({ builtin }) {
               id="voice-asr-corrections"
             />
           </label>
-          {hotwordsSupported ? (
-            <label className="voice-wide">
-              <span title="自动合并材料名称和行业词。X-ASR 暂不支持英文热词。">自定义热词（每行一条，最多 64 条）</span>
-              <textarea className="text-input" rows={3} value={form.custom_hotwords} onChange={(e) => update("custom_hotwords", e.target.value)} id="voice-hotwords" />
-            </label>
-          ) : (
-            <p className="voice-muted voice-wide" id="voice-hotwords-unsupported">
-              当前本地识别模型 {localAsrModel === "firered_asr2_ctc" ? "FireRedASR2" : "SenseVoice"} 不支持热词，可用上面的同音纠偏修正常错的词。
-            </p>
-          )}
           {xAsrInUse && (
             <label className="voice-check voice-wide">
               <input type="checkbox" checked={form.asr_beam_search} onChange={(e) => update("asr_beam_search", e.target.checked)} id="voice-asr-beam" />
               <span>X-ASR 热词识别（识别较慢时可关闭）</span>
+            </label>
+          )}
+          {hotwordsSupported && (
+            <label className="voice-wide">
+              <span title="自动合并材料名称和行业词。X-ASR 暂不支持英文热词。">自定义热词（每行一条，最多 64 条）</span>
+              <textarea className="text-input" rows={3} value={form.custom_hotwords} onChange={(e) => update("custom_hotwords", e.target.value)} id="voice-hotwords" />
             </label>
           )}
         </div>
@@ -262,10 +265,12 @@ export function ExperienceGroup({ builtin }) {
                     ? `Jev 已开启：${selectedJevModel}；超时或限流时自动回退常规链路。`
                     : `尚未配置 OpenRouter API Key：请到本标签上方“${JEV_GROUP_TITLE}”保存密钥；未配置时自动回退常规链路。`}
               </div>
-              <label className="voice-check voice-wide">
-                <input type="checkbox" checked={form.jev_unfinished_hold} onChange={(e) => update("jev_unfinished_hold", e.target.checked)} id="voice-jev-unfinished" />
-                <span title="停顿想词时单次最多多等 1.2 秒，并提前缓存本句路由。">半截话不抢话</span>
-              </label>
+              {unfinishedHoldSupported && (
+                <label className="voice-check voice-wide">
+                  <input type="checkbox" checked={form.jev_unfinished_hold} onChange={(e) => update("jev_unfinished_hold", e.target.checked)} id="voice-jev-unfinished" />
+                  <span title="停顿想词时单次最多多等 1.2 秒，并提前缓存本句路由。">半截话不抢话</span>
+                </label>
+              )}
               <label className="voice-check voice-wide">
                 <input type="checkbox" checked={form.read_only_shortcuts && form.jev_fast_route} disabled={!form.read_only_shortcuts} onChange={(e) => update("jev_fast_route", e.target.checked)} id="voice-jev-fast-route" />
                 <span>口语问状态也直接回答{form.read_only_shortcuts ? "" : "（需先开启快捷查询）"}</span>

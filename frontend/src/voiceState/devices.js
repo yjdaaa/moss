@@ -173,15 +173,24 @@ export function builtinDeviceControlsView(device, session, devicePrefs = {}) {
         ? "press_to_talk"
         : "click_to_talk";
 
-  // n130：设备在线且已上报工具清单时，它没有的控制项不显示；离线或清单还没读到时照旧显示（置灰），免得忽隐忽现
-  const hideMissing = Boolean(session) && hasToolList;
+  const onlineHasScreen =
+    canBrightness
+    || canTheme
+    || tools.includes("self.screen.preview_image")
+    || screenMonochrome === true
+    || Boolean(screenResolution);
+  const offlineNoMcp = !session && helloObj?.mcp === false;
+  // n130 + n132：在线已报工具列表时隐藏设备不支持的控制项（含无屏设备的投屏按钮）；
+  // 离线设备仅在 hello 明确声明 mcp=false 时隐藏，其余照 n130 置灰保留（避免单色 OLED / AMOLED 因 status_json 无 screen 键误判无屏）
+  const hideMissing = Boolean(session && hasToolList);
   return {
     online: Boolean(session),
     mcpSupported,
-    showVolume: !hideMissing || canVolume,
-    showBrightness: !hideMissing || canBrightness,
-    showTheme: !hideMissing || canTheme,
-    showPressToTalk: !hideMissing || canPressToTalk,
+    showVolume: hideMissing ? canVolume : !offlineNoMcp,
+    showBrightness: hideMissing ? canBrightness : !offlineNoMcp,
+    showTheme: hideMissing ? canTheme : !offlineNoMcp,
+    showPreview: hideMissing ? onlineHasScreen : !offlineNoMcp,
+    showPressToTalk: hideMissing ? canPressToTalk : !offlineNoMcp,
     canVolume,
     canBrightness,
     canTheme,
@@ -200,6 +209,38 @@ export function builtinDeviceControlsView(device, session, devicePrefs = {}) {
       talk_mode: pref.talk_mode || "",
     },
   };
+}
+
+/**
+ * 是否应展示「副屏预览（小智彩屏画风）」卡片：
+ * - 尚未绑定任何设备时保留展示（方便预先浏览选画风）；
+ * - 已有未撤销设备时，若所有设备均已确认是单色 OLED 或无屏设备，则隐藏彩屏专属画风卡。
+ */
+export function hasColorScreenPreviewTarget(status) {
+  const devices = Array.isArray(status?.devices) ? status.devices.filter((d) => d && d.status !== "revoked") : [];
+  if (devices.length === 0) return true;
+  const sessions = Array.isArray(status?.sessions) ? status.sessions : [];
+  const isKnownNonColor = (device) => {
+    const sess = sessions.find((s) => s.device_id === device.device_id);
+    if (sess) {
+      if (sess.screen_monochrome === true) return true;
+      const tools = Array.isArray(sess.device_tools) ? sess.device_tools : [];
+      if (tools.length > 0) {
+        const hasColorPreview = tools.includes("self.screen.preview_image");
+        const hasColorSize = Number(sess.screen_width) > 0 && Number(sess.screen_height) > 0 && sess.screen_monochrome === false;
+        return !hasColorPreview && !hasColorSize;
+      }
+      return false;
+    }
+    try {
+      const helloObj = device?.hello_json ? JSON.parse(device.hello_json) : null;
+      if (helloObj?.mcp === false) return true;
+    } catch {
+      // 忽略损坏快照
+    }
+    return false;
+  };
+  return devices.some((d) => !isKnownNonColor(d));
 }
 /** 内置语音服务的设备状态与可用操作（内置语音技术书 §6：新设备首次连接需在电脑上允许）。 */
 export function builtinDeviceView(device) {
@@ -224,8 +265,8 @@ export function allowDeviceConfirmText(device) {
   return [
     ...facts,
     "",
-    "允许后，这台设备可以通过 MOSS 的内置语音服务对话。请确认是你自己的设备。",
-    "允许后需重启设备，让它重新获取授权。",
+    "允许后，这台设备可以通过 MOSS 的内置语音服务对话，并永久记住。请确认是你自己的设备。",
+    "允许后直接唤醒设备即可对话（常连模式需重启设备生效）。",
   ].join("\n");
 }
 

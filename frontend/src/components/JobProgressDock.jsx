@@ -78,7 +78,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
       if (cancelled || !alive.current || myGen !== pollGen) return;
       const jobs = res?.data?.result?.jobs;
       if (res?.ok && res?.data?.success && Array.isArray(jobs)) {
-        const next = jobsView(jobs);
+        const next = jobsView(res.data.result);
         setError("");
         setViews((previous) => {
           if (next.length === 0 && previous.length === 0) {

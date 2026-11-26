@@ -1,6 +1,6 @@
 import React from "react";
 import { Save, Settings2, Trash2 } from "lucide-react";
-import { MATRIX_MODE_OPTIONS, formatPowerScaleHint, isSurfaceKey, thicknessChipLabel } from "../../materialLabState.js";
+import { formatPowerScaleHint, isSurfaceKey, modeOptionsForThickness, thicknessChipLabel } from "../../materialLabState.js";
 import { FoldHeader } from "../FoldHeader.jsx";
 import { PowerPercentInput } from "./PowerPercentInput.jsx";
 
@@ -19,20 +19,14 @@ export function LabParamsPanel({
   handleSaveParams,
   setMaterialModalData,
   setShowMaterialModal,
-  minPower,
-  setMinPower,
   maxPower,
   setMaxPower,
   feedRate,
   setFeedRate,
-  travelRate,
-  setTravelRate,
   passes,
   setPasses,
   pixelSize,
   setPixelSize,
-  threshold,
-  setThreshold,
   aliases,
   setAliases,
   entryTitle,
@@ -40,6 +34,7 @@ export function LabParamsPanel({
   notes,
   setNotes,
 }) {
+  const modeOptions = modeOptionsForThickness(selectedThickness);
   return (
     <div className="hud-card ob-card lab-row-4">
       <FoldHeader id="lab-params" title="材料参数" n={2} />
@@ -102,7 +97,7 @@ export function LabParamsPanel({
 
       {/* Mode Tabs */}
       <div className="lab-row-7" role="tablist" aria-label="加工模式">
-        {MATRIX_MODE_OPTIONS.map((m) => (
+        {modeOptions.map((m) => (
           <button
             type="button"
             key={m.id}
@@ -118,22 +113,6 @@ export function LabParamsPanel({
 
       {/* Form Fields */}
       <div className="lab-grid">
-        <div>
-          <label className="lab-label-2" htmlFor="lab-min-power">
-            最小激光功率 (0–100%)
-          </label>
-          <PowerPercentInput
-            id="lab-min-power"
-            sValue={minPower}
-            onChangeSValue={setMinPower}
-            readOnly={readOnly}
-            className="text-input lab-field-3"
-          />
-          <small className="lab-s-hint" id="lab-min-power-s">
-            {formatPowerScaleHint(minPower, { withScale: true })}
-          </small>
-        </div>
-
         <div>
           <label className="lab-label-2" htmlFor="lab-max-power">
             最大激光功率 (0–100%)
@@ -166,26 +145,12 @@ export function LabParamsPanel({
 
         <div>
           <label className="lab-label-2">
-            空移速度 (mm/min)
-          </label>
-          <input
-            type="number"
-            min={1}
-            value={travelRate}
-            onChange={(e) => setTravelRate(Number(e.target.value))}
-            readOnly={readOnly}
-            className="text-input lab-field-3"
-          />
-        </div>
-
-        <div>
-          <label className="lab-label-2">
             加工遍数
           </label>
           <input
             type="number"
             min={1}
-            max={100}
+            max={5}
             value={passes}
             onChange={(e) => setPasses(Number(e.target.value))}
             readOnly={readOnly}
@@ -193,35 +158,22 @@ export function LabParamsPanel({
           />
         </div>
 
-        <div>
-          <label className="lab-label-2" title="填充扫描线距 / 光栅点距，对应 LightBurn 的 Interval；可用线距测试标定">
-            线距 / 点距 (mm)
-          </label>
-          <input
-            type="number"
-            step="0.01"
-            min="0.01"
-            value={pixelSize}
-            onChange={(e) => setPixelSize(Number(e.target.value))}
-            readOnly={readOnly}
-            className="text-input lab-field-3"
-          />
-        </div>
-
-        <div>
-          <label className="lab-label-2">
-            二值阈值 (-1 为自动)
-          </label>
-          <input
-            type="number"
-            min={-1}
-            max={255}
-            value={threshold}
-            onChange={(e) => setThreshold(Number(e.target.value))}
-            readOnly={readOnly}
-            className="text-input lab-field-3"
-          />
-        </div>
+        {activeMode === "raster" && (
+          <div>
+            <label className="lab-label-2" title="填充扫描线距 / 光栅点距，对应 LightBurn 的 Interval；可用线距测试标定">
+              线距 / 点距 (mm)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0.01"
+              value={pixelSize}
+              onChange={(e) => setPixelSize(Number(e.target.value))}
+              readOnly={readOnly}
+              className="text-input lab-field-3"
+            />
+          </div>
+        )}
 
         <div className="lab-box-3">
           <label className="lab-label-2">

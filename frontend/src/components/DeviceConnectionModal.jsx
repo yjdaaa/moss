@@ -6,7 +6,8 @@ import { showPrompt } from "../appDialog.js";
 import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 import { MACHINE_MOTION_EVENT, SERIAL_BAUDRATES, probeControllerConnection } from "../deviceConnection.js";
 import { machineMotionFromLimits, writeMachineMotion } from "../fillOptions.js";
-import { defaultSerialPortHint } from "../platform.js";
+import { isRemoteMode } from "../authSession.js";
+import { defaultSerialPortHint, detectClientOs } from "../platform.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
@@ -48,12 +49,21 @@ function DeviceConnectionModalBody({
   const [notice, setNotice] = useState(null);
   const [telnetPortText, setTelnetPortText] = useState(() => String(telnetPort || 23));
 
+  const serialAvailable = isRemoteMode() || detectClientOs() !== "android";
+  const effectiveMode = serialAvailable ? connectionMode : "network";
+
+  useEffect(() => {
+    if (!serialAvailable && connectionMode === "serial") {
+      setConnectionMode("network");
+    }
+  }, [serialAvailable, connectionMode, setConnectionMode]);
+
   useEffect(() => {
     setTelnetPortText(String(telnetPort || 23));
   }, [telnetPort]);
 
   const targetKey =
-    connectionMode === "serial"
+    effectiveMode === "serial"
       ? `serial:${serialPort}:${baudrate}`
       : `network:${networkHost.trim()}:${telnetPort}`;
   const probeEpochRef = useRef(0);
@@ -302,8 +312,8 @@ function DeviceConnectionModalBody({
             <select
               ref={modeSelectRef}
               id="conn-mode-select"
-              value={connectionMode}
-              disabled={modalBusy}
+              value={effectiveMode}
+              disabled={modalBusy || !serialAvailable}
               onChange={(e) => {
                 setConnectionMode(e.target.value);
                 setNotice(null);
@@ -311,11 +321,11 @@ function DeviceConnectionModalBody({
               className="select-input wb-field"
             >
               <option value="network">网络 (Telnet / TCP)</option>
-              <option value="serial">串口 (USB / Serial)</option>
+              {serialAvailable && <option value="serial">串口 (USB / Serial)</option>}
             </select>
           </div>
 
-          {connectionMode === "serial" ? (
+          {effectiveMode === "serial" ? (
             <>
               <div className="mat-field">
                 <label htmlFor="conn-serial-port">串口</label>
@@ -482,8 +492,8 @@ function DeviceConnectionModalBody({
             </>
           )}
 
-          <div className={`wb-link-actions${connectionMode === "network" ? " is-dual" : ""}`}>
-            {connectionMode === "network" ? (
+          <div className={`wb-link-actions${effectiveMode === "network" ? " is-dual" : ""}`}>
+            {effectiveMode === "network" ? (
               <button
                 type="button"
                 id="conn-discover-btn"

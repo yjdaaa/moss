@@ -100,8 +100,8 @@ export const TOOL_META = {
   command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
 };
 
-/** 工具按分组排好，未登记的工具放进“其他”，用后端给的说明。 */
-export function groupedTools(tools) {
+/** 工具按分组排好，未登记的工具放进“其他”，用后端给的说明；内置语音与严格模式下隐藏永不开放的电脑控制组。 */
+export function groupedTools(tools, { hideDesktop = false } = {}) {
   const list = Array.isArray(tools) ? tools : [];
   return TOOL_GROUPS.map((group) => ({
     ...group,
@@ -116,6 +116,7 @@ export function groupedTools(tools) {
           summary: meta?.summary || tool.description || "",
         };
       })
+      .filter((tool) => !hideDesktop || (tool.group !== "desktop" && !tool.voice_hidden))
       .filter((tool) => tool.group === group.id),
   })).filter((group) => group.tools.length > 0);
 }

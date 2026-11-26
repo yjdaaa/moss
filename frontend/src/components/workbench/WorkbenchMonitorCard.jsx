@@ -206,44 +206,45 @@ export function WorkbenchMonitorCard({
           {/* 辅助操作条（仅在已生成预览时出现，不增加默认空态高度）：先走边框 · 导出 G-code · 温和取消 */}
           {currentWorkflow?.workflow_id && (
             <div className="wb-secondary-actions" id="wb-secondary-actions">
-              <button
-                type="button"
-                id="wb-btn-framing"
-                className="btn btn-ghost wb-sec-btn"
-                onClick={handleFraming}
-                disabled={
-                  busy
-                  || framingBusy
-                  || previewStale
-                  || !currentWorkflow?.artifacts?.frame_mm
-                  || overlayStatus === "running"
-                  || overlayStatus === "sending"
-                }
-                title={
-                  !currentWorkflow?.artifacts?.frame_mm
-                    ? "外部导入刀路起点由文件自身决定，不支持相对当前位置走边框"
-                    : "激光头沿刀路外框绕一圈（默认不出光），核对木牌摆放位置"
-                }
-              >
-                <Square size={13} aria-hidden="true" />
-                <span>{framingBusy ? "走边框中…" : "先走边框"}</span>
-              </button>
-              <label
-                className="checkbox-row wb-framing-shape"
-                title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形；带圆弧的外部刀路自动退回矩形"
-              >
-                <input
-                  type="checkbox"
-                  id="wb-framing-hull"
-                  checked={framingShape === "hull"}
-                  onChange={(e) => {
-                    const next = e.target.checked ? "hull" : "box";
-                    setFramingShape(next);
-                    writeFramingShape(next);
-                  }}
-                />
-                <span>沿外轮廓</span>
-              </label>
+              {Boolean(currentWorkflow?.artifacts?.frame_mm) && (
+                <>
+                  <button
+                    type="button"
+                    id="wb-btn-framing"
+                    className="btn btn-ghost wb-sec-btn"
+                    onClick={handleFraming}
+                    disabled={
+                      busy
+                      || framingBusy
+                      || previewStale
+                      || overlayStatus === "running"
+                      || overlayStatus === "sending"
+                    }
+                    title="激光头沿刀路外框绕一圈（默认不出光），核对木牌摆放位置"
+                  >
+                    <Square size={13} aria-hidden="true" />
+                    <span>{framingBusy ? "走边框中…" : "先走边框"}</span>
+                  </button>
+                  {Array.isArray(currentWorkflow?.artifacts?.frame_hull_mm) && currentWorkflow.artifacts.frame_hull_mm.length >= 3 && (
+                    <label
+                      className="checkbox-row wb-framing-shape"
+                      title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形"
+                    >
+                      <input
+                        type="checkbox"
+                        id="wb-framing-hull"
+                        checked={framingShape === "hull"}
+                        onChange={(e) => {
+                          const next = e.target.checked ? "hull" : "box";
+                          setFramingShape(next);
+                          writeFramingShape(next);
+                        }}
+                      />
+                      <span>沿外轮廓</span>
+                    </label>
+                  )}
+                </>
+              )}
               <button
                 type="button"
                 id="wb-btn-export-gcode"

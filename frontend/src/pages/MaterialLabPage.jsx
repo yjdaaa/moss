@@ -10,7 +10,7 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import { apiFetch, DEFAULT_READ_TIMEOUT_MS, getJson, postJson } from "../api/client.js";
-import { isRemoteMode } from "../authSession.js";
+import { isReadOnlyReferenceClient } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { showAlert, showChoice, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
@@ -171,10 +171,17 @@ export function MaterialLabPage({
 
       const targetMat = preferred.material ?? selectedMaterialRef.current;
       const targetThick = preferred.thickness ?? selectedThicknessRef.current;
-      const targetMode = preferred.mode ?? activeModeRef.current;
       const sel = resolveMaterialLabSelection(mats, targetMat, targetThick);
+      const rawMode = preferred.mode ?? activeModeRef.current;
+      const targetMode = isSurfaceKey(sel.thickness) && rawMode === "cut" ? "raster" : rawMode;
       setSelectedMaterial(sel.material);
       setSelectedThickness(sel.thickness);
+      if (targetMode !== activeModeRef.current) {
+        setActiveMode(targetMode);
+      }
+      if (isSurfaceKey(sel.thickness)) {
+        setMatrixMode((prev) => (prev === "cut" ? "raster" : prev));
+      }
       applyEditorState(mats, sel.material, sel.thickness, targetMode);
     }
   }, [applyEditorState]);
@@ -221,15 +228,18 @@ export function MaterialLabPage({
     },
   );
 
-  // 手机连接电脑 MOSS 时材料与校准结果只读（后端同样拒绝）：修改类按钮不显示，参数只能查看
-  const readOnly = isRemoteMode();
+  // 手机连接电脑或局域网浏览器访问时材料与校准结果只读（后端同样拒绝）：修改类按钮不显示，参数只能查看
+  const readOnly = isReadOnlyReferenceClient();
 
   const handleSelectMaterialAndThick = (matName, thickKey) => {
+    const nextMode = isSurfaceKey(thickKey) && activeMode === "cut" ? "raster" : activeMode;
     setSelectedMaterial(matName);
     setSelectedThickness(thickKey);
+    if (nextMode !== activeMode) setActiveMode(nextMode);
+    if (isSurfaceKey(thickKey) && matrixMode === "cut") changeMatrixMode("raster");
     writeLocalSafe("laser-forge-mat", matName);
     writeLocalSafe("laser-forge-thick", thickKey);
-    applyEditorState(materials, matName, thickKey, activeMode);
+    applyEditorState(materials, matName, thickKey, nextMode);
   };
 
   // 切换标定模式：线距只对光栅填充有意义，离开光栅时把线距测试 / 线距轴换回默认
@@ -276,12 +286,19 @@ export function MaterialLabPage({
       setEditorStatus("保存失败: 厚度必须大于 0");
       return;
     }
-    const minP = Number(minPower);
     const maxP = Number(maxPower);
-    if (!Number.isFinite(minP) || !Number.isFinite(maxP) || minP < 0 || maxP > 1000 || minP > maxP) {
-      setEditorStatus("保存失败: 激光功率须在 0 ~ 100% 之间，且最小功率不大于最大功率");
+    if (!Number.isFinite(maxP) || maxP < 0 || maxP > 1000) {
+      setEditorStatus("保存失败: 最大激光功率须在 0 ~ 100% 之间");
       return;
     }
+    const passesNum = Number(passes);
+    if (!Number.isInteger(passesNum) || passesNum < 1 || passesNum > 5) {
+      setEditorStatus("保存失败: 加工遍数须为 1 ~ 5 的整数");
+      return;
+    }
+    const safeMinP = Number.isFinite(Number(minPower))
+      ? Math.max(0, Math.min(Math.round(Number(minPower)), Math.round(maxP)))
+      : 0;
 
     setEditorStatus("正在保存...");
     const payload = {
@@ -291,11 +308,11 @@ export function MaterialLabPage({
       title: entryTitle.trim(),
       laser_mode: activeMode === "cut" ? "cut" : "engrave",
       engraving_mode: activeMode === "cut" ? "" : activeMode,
-      laser_min_power: Math.round(minP),
+      laser_min_power: safeMinP,
       laser_max_power: Math.round(maxP),
       feed_rate: Number(feedRate),
       travel_rate: Number(travelRate),
-      passes: Number(passes),
+      passes: passesNum,
       pixel_size_mm: Number(pixelSize),
       threshold: Number(threshold),
       notes: notes.trim(),

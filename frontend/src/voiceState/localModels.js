@@ -1,6 +1,7 @@
 // 本地模型：下载状态、本地设置表单与载荷、视觉看图来源与 Colab T4 联动。
 
 import { canonicalPersonaStyle, experienceSettingsError, parseAsrCorrectionLine, parseCustomPersonas } from "./experience.js";
+import { canonicalLocalJevModel } from "./jev.js";
 
 /** 字节数显示为 MB（保留 1 位小数，小于 1 MB 显示 KB）。 */
 export function formatBytes(bytes) {
@@ -255,6 +256,9 @@ export function selectLocalModel(form, models, kind, id) {
     } else if (outOfChineseRange) {
       next.tts_speaker = id === "kokoro" ? "50" : id === "kokoro_v11" ? "3" : "0";
     }
+    if (id === "qwen3_tts_1_7b") {
+      next.tts_speed = normalizeQwen3Tts17bSpeed(form?.tts_speed);
+    }
   }
   return next;
 }
@@ -273,6 +277,59 @@ export function localTtsSpeedFixed(model) {
   if (!model) return false;
   if (typeof model.speed_adjustable === "boolean") return !model.speed_adjustable;
   return model.id === "qwen3_tts_0_6b";
+}
+
+/** 本地 `qwen3_tts_1_7b` 的 5 档说话指令语速选项（严格对齐 `tts_voices.rs::speech_tts_instructions`）。 */
+export const QWEN3_TTS_1_7B_SPEED_OPTIONS = [
+  { value: "0.6", label: "很慢（一字一句）" },
+  { value: "0.8", label: "稍慢" },
+  { value: "1", label: "标准语速（默认）" },
+  { value: "1.2", label: "稍快" },
+  { value: "1.4", label: "较快（约 1.2x 上限）" },
+];
+
+export function normalizeQwen3Tts17bSpeed(rawSpeed) {
+  const s = Number(rawSpeed);
+  if (!Number.isFinite(s)) return "1";
+  if (s <= 0.65) return "0.6";
+  if (s <= 0.9) return "0.8";
+  if (s < 1.1) return "1";
+  if (s < 1.35) return "1.2";
+  return "1.4";
+}
+
+/** 当前生效的语音识别链路是否真正消费 `custom_hotwords` 热词。 */
+export function isAsrHotwordsSupported(localSettings, status = null) {
+  const s = localSettings || {};
+  if (s.asr) {
+    const model = String(s.asr_model || "");
+    if (model.startsWith("sense_voice") || model === "firered_asr2_ctc") return false;
+    if (model.startsWith("x_asr")) return s.asr_beam_search !== false;
+    return true;
+  }
+  const cloudAsr = status?.models?.asr;
+  if (cloudAsr?.configured && cloudAsr.kind !== "doubao") {
+    const cloudModel = String(cloudAsr.model || "").trim();
+    if (/sensevoice|telespeech/i.test(cloudModel)) return false;
+  }
+  return true;
+}
+
+/** 当前选用的 Jev 决策模型是否支持“半截话不抢话”（`onejev_1_6_9b` 与无显卡加速的 `onejev_1_6_4b` 后端强制关闭）。 */
+export function isJevUnfinishedHoldSupported(form, status = null) {
+  const raw = form?.jev_model || status?.local?.settings?.jev_model || status?.jev?.model || "";
+  const localId = canonicalLocalJevModel(raw);
+  if (!localId) return true;
+  if (localId === "onejev_1_6_9b") return false;
+  if (localId === "onejev_1_6_4b") {
+    const runtimeAccel = status?.local?.jev_runtime?.model === "onejev_1_6_4b"
+      ? status?.local?.jev_runtime?.accelerator
+      : null;
+    const envAccel = status?.local?.onejev_env?.accelerator;
+    const accel = String(runtimeAccel || envAccel || "").toLowerCase();
+    if (accel && !["metal", "cuda", "vulkan"].includes(accel)) return false;
+  }
+  return true;
 }
 
 /**
@@ -316,7 +373,9 @@ export function localModelSettingsError(form, models = []) {
   const max = voices ? voices.max : 999;
   const speaker = Number(form.tts_speaker);
   if (!Number.isInteger(speaker) || speaker < 0 || speaker > max) return `音色编号须为 0 ~ ${max} 的整数`;
-  const speed = Number(form.tts_speed);
+  const speed = Number(
+    form?.tts_model === "qwen3_tts_1_7b" ? normalizeQwen3Tts17bSpeed(form.tts_speed) : form.tts_speed,
+  );
   if (!(speed >= 0.5 && speed <= 2)) return "本地合成语速须在 0.5 ~ 2.0 之间";
   const mirror = String(form.mirror || "").trim();
   if (mirror && (!/^https?:\/\//i.test(mirror) || /\s/.test(mirror))) return "下载地址必须以 http:// 或 https:// 开头";
@@ -376,7 +435,9 @@ export function localSettingsPayload(form) {
     asr_model: form.asr_model,
     tts_model: form.tts_model,
     tts_speaker: Number(form.tts_speaker),
-    tts_speed: Number(form.tts_speed),
+    tts_speed: Number(
+      form?.tts_model === "qwen3_tts_1_7b" ? normalizeQwen3Tts17bSpeed(form.tts_speed) : form.tts_speed,
+    ),
     mirror: String(form.mirror || "").trim(),
   };
 }

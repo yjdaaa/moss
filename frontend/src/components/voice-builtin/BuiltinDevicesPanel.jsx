@@ -114,6 +114,12 @@ export function BuiltinDevicesPanel({ builtin }) {
                   const online = Boolean(session);
                   const details = builtinDeviceInfoView(device);
                   const controls = builtinDeviceControlsView(device, session, status.device_prefs);
+                  const hasAnyControl =
+                    controls.showVolume ||
+                    controls.showBrightness ||
+                    controls.showTheme ||
+                    controls.showPreview ||
+                    controls.showPressToTalk;
                   const draftCtrl = controlDrafts[device.device_id] || {};
                   const volVal = draftCtrl.volume ?? controls.volume;
                   const briVal = draftCtrl.brightness ?? controls.brightness;
@@ -181,7 +187,7 @@ export function BuiltinDevicesPanel({ builtin }) {
                     {expanded === device.device_id && (
                       <tr>
                         <td colSpan={5}>
-                          {device.status === "allowed" && (
+                          {device.status === "allowed" && hasAnyControl && (
                             <div className="voice-device-controls" id={`voice-device-controls-${device.device_id}`}>
                               <div className="voice-device-controls-head">
                                 <span className="voice-actions">
@@ -280,57 +286,67 @@ export function BuiltinDevicesPanel({ builtin }) {
                                     </div>
                                   </div>
                                 )}
-                                <div className="voice-device-control-item">
-                                  <span className="voice-device-control-label">
-                                    <span>{controls.showTheme ? "屏幕主题与激光预览投屏" : "激光预览投屏"}</span>
-                                  </span>
-                                  <div className="voice-actions">
-                                    {controls.showTheme && (
-                                      <>
+                                {(controls.showTheme || controls.showPreview) && (
+                                  <div className="voice-device-control-item">
+                                    <span className="voice-device-control-label">
+                                      <span>
+                                        {controls.showTheme && controls.showPreview
+                                          ? "屏幕主题与激光预览投屏"
+                                          : controls.showTheme
+                                            ? "屏幕主题"
+                                            : "激光预览投屏"}
+                                      </span>
+                                    </span>
+                                    <div className="voice-actions">
+                                      {controls.showTheme && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
+                                            disabled={Boolean(asking) || !online || !controls.canTheme}
+                                            onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
+                                          >
+                                            深色屏
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
+                                            disabled={Boolean(asking) || !online || !controls.canTheme}
+                                            onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
+                                          >
+                                            浅色屏
+                                          </button>
+                                        </>
+                                      )}
+                                      {controls.showPreview && (
                                         <button
                                           type="button"
-                                          className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
-                                          disabled={Boolean(asking) || !online || !controls.canTheme}
-                                          onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
+                                          className="btn btn-primary"
+                                          disabled={Boolean(asking) || !online}
+                                          title={
+                                            controls.screenMonochrome === true
+                                              ? "已识别为单色 OLED 官方固件：将把最新雕刻预览的材料、尺寸、功率与速度作为滚动文字预览卡投送到 OLED 屏"
+                                              : controls.canPreviewImage
+                                                ? "已识别为彩屏：将把最近生成的激光雕刻预览缩略图推送到小智屏幕上显示"
+                                                : "彩屏推送 PNG 缩略图，普通单色 OLED 自动适配推送滚动参数预览卡（无需改官方固件）"
+                                          }
+                                          onClick={() =>
+                                            sendDeviceControl(
+                                              device,
+                                              "push_preview",
+                                              undefined,
+                                              controls.screenMonochrome === true
+                                                ? "已将雕刻预览参数卡推送到小智 OLED 屏幕滚动显示"
+                                                : "已将最新雕刻预览推送到小智屏幕",
+                                            )
+                                          }
                                         >
-                                          深色屏
+                                          {controls.screenMonochrome === true ? "投送预览参数卡" : "投送雕刻预览"}
                                         </button>
-                                        <button
-                                          type="button"
-                                          className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
-                                          disabled={Boolean(asking) || !online || !controls.canTheme}
-                                          onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
-                                        >
-                                          浅色屏
-                                        </button>
-                                      </>
-                                    )}
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary"
-                                      disabled={Boolean(asking) || !online}
-                                      title={
-                                        controls.screenMonochrome === true
-                                          ? "已识别为单色 OLED 官方固件：将把最新雕刻预览的材料、尺寸、功率与速度作为滚动文字预览卡投送到 OLED 屏"
-                                          : controls.canPreviewImage
-                                            ? "已识别为彩屏：将把最近生成的激光雕刻预览缩略图推送到小智屏幕上显示"
-                                            : "彩屏推送 PNG 缩略图，普通单色 OLED 自动适配推送滚动参数预览卡（无需改官方固件）"
-                                      }
-                                      onClick={() =>
-                                        sendDeviceControl(
-                                          device,
-                                          "push_preview",
-                                          undefined,
-                                          controls.screenMonochrome === true
-                                            ? "已将雕刻预览参数卡推送到小智 OLED 屏幕滚动显示"
-                                            : "已将最新雕刻预览推送到小智屏幕",
-                                        )
-                                      }
-                                    >
-                                      {controls.screenMonochrome === true ? "投送预览参数卡" : "投送雕刻预览"}
-                                    </button>
+                                      )}
+                                    </div>
                                   </div>
-                                </div>
+                                )}
                                 {controls.showPressToTalk && (
                                   <div className="voice-device-control-item">
                                     <span className="voice-device-control-label">

@@ -60,6 +60,10 @@ test("转图片时文字刻法只有实心：描边 / 排线 / 外框切割都�
   assert.equal(effectiveTextStyle("outline", "image"), "fill");
   assert.equal(effectiveTextStyle("hatch", "image"), "fill");
   assert.equal(effectiveTextStyle("cut", "image"), "fill");
+  assert.equal(textStyleAvailable("cut", "vector", { surfaceOnly: true }), false);
+  assert.equal(textStyleAvailable("fill", "vector", { surfaceOnly: true }), true);
+  assert.equal(effectiveTextStyle("cut", "vector", { surfaceOnly: true }), "outline");
+  assert.equal(effectiveTextStyle("fill", "vector", { surfaceOnly: true }), "fill");
 });
 
 test("工作台签名：切换雕刻路线让文字预览过期；图片签名带扫描设置、与路线无关", () => {
@@ -165,8 +169,21 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.match(wbVector, /<option value="cut">外框切割<\/option>/, "矢量时四种刻法都在");
 
     const { DrawMaterialCard } = await server.ssrLoadModule("/src/components/draw/DrawMaterialCard.jsx");
-    const card = (form, drawMode, route) => renderToStaticMarkup(React.createElement(DrawMaterialCard, {
-      form: { material: "椴木", thickness_mm: "3", width_mm: "", height_mm: "", image_strategy: "raster", image_mode: "auto", line_interval_scale: "", vector_simplify_factor: "3", ...form },
+    const card = (form, drawMode, route, extraProps = {}) => renderToStaticMarkup(React.createElement(DrawMaterialCard, {
+      form: {
+        material: "椴木",
+        thickness_mm: "3",
+        width_mm: "",
+        height_mm: "",
+        image_strategy: "raster",
+        image_mode: "auto",
+        line_interval_scale: "",
+        halftone_cell_mm: "",
+        halftone_angle_deg: "",
+        gray_min_power_percent: "10",
+        vector_simplify_factor: "3",
+        ...form,
+      },
       updateForm: () => {},
       drawMode,
       engraveRoute: route,
@@ -190,6 +207,7 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
       hasRec: false,
       customParams: false,
       setCustomParams: () => {},
+      ...extraProps,
     }));
     const drawRasterNoCut = () => card({}, "raster", "image");
     const drawVector = card({}, "vector", "vector");
@@ -208,8 +226,15 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.match(drawVectorCut, /id="draw-cut-kerf"/, "切割时显示切缝、桥位等切割设置");
     assert.doesNotMatch(drawVectorCut, /draw-fill-preset|draw-fill-grouping/, "切割不显示填充设置");
     assert.doesNotMatch(drawRasterNoCut(), /value="cut"/, "转图片时没有切割");
-    const drawVectorFill = card({ vector_style: "fill" }, "vector", "vector");
+    const drawVectorFill = card({ vector_style: "fill" }, "vector", "vector", { materialLayer: { key: "k", label: "椴木 3mm" } });
     assert.match(drawVectorFill, /id="draw-fill-preset"/, "填充时显示填充设置");
+    assert.match(drawVectorFill, /id="draw-material-save"/, "填充刻法可保存到材料库");
+    const drawVectorOutlineWithLayer = card({ vector_style: "outline" }, "vector", "vector", { materialLayer: { key: "k", label: "椴木 3mm" } });
+    assert.doesNotMatch(drawVectorOutlineWithLayer, /id="draw-material-save"/, "纯轮廓刻法无随材料保存字段，隐藏保存到材料库按钮");
+    const drawVectorWithBitmap = card({ vector_style: "fill" }, "vector", "vector", { hasSceneImages: true });
+    assert.doesNotMatch(drawVectorWithBitmap, /value="cut"|id="draw-selected-only"/, "画布含位图时隐藏矢量切割与只刻选中图形");
+    assert.match(drawVectorWithBitmap, /id="draw-vector-image-note"/);
+    assert.match(drawVectorWithBitmap, /id="draw-scan-fill-options"/);
 
     const drawRaster = card({ image_mode: "jarvis", line_interval_scale: "0.8" }, "raster", "image");
     assert.match(drawRaster, /id="draw-image-strategy"/);
@@ -217,9 +242,15 @@ test("雕刻路线开关、工作台刻法与画板转图片界面", async () =>
     assert.doesNotMatch(drawRaster, /<option value="vector"/, "转图片方式里没有矢量");
     assert.match(drawRaster, /<option value="raster" selected="">填充（逐行扫描/);
     assert.match(drawRaster, /<option value="outline">轮廓（描出深色边缘）/);
-    // 转图片填充时显示扫描设置（双向、偏移、过扫描），不显示矢量的分组 / 角度
+    // 转图片填充时显示扫描设置（双向、偏移、过扫描）与行间距倍数，不显示矢量的分组 / 角度
     assert.match(drawRaster, /id="draw-scan-fill-offset"/);
-    assert.doesNotMatch(drawRaster, /draw-scan-fill-grouping|draw-scan-fill-angle/);
+    assert.match(drawRaster, /id="draw-image-interval-scale"/);
+    assert.doesNotMatch(drawRaster, /draw-scan-fill-grouping|draw-scan-fill-angle|draw-image-halftone-cell|draw-image-gray-min/);
+    const drawHalftone = card({ image_mode: "halftone" }, "raster", "image");
+    assert.match(drawHalftone, /id="draw-image-halftone-cell"/);
+    assert.match(drawHalftone, /id="draw-image-halftone-angle"/);
+    const drawGrayscale = card({ image_mode: "grayscale" }, "raster", "image");
+    assert.match(drawGrayscale, /id="draw-image-gray-min"/);
     assert.match(drawRaster, /id="draw-image-mode"/);
     assert.match(drawRaster, /<option value="jarvis" selected="">/);
     assert.match(drawRaster, /aria-checked="true" id="draw-image-preset-fine"/, "Jarvis ×0.8 对应精细预设");

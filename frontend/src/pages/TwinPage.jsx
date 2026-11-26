@@ -122,6 +122,7 @@ function loadSavedWorkspaceLimits() {
           y_travel_mm: y,
           z_travel_mm: z >= 5 && z <= MAX_Z_TRAVEL_MM ? z : YISU_V1_PROFILE.zTravelMm,
           from_hardware: Boolean(parsed?.from_hardware),
+          manual: Boolean(parsed?.manual),
         };
       }
     }
@@ -218,7 +219,20 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
 
   // 控制器硬件行程与实时遥测状态（默认对齐大鱼 DIY 翼宿 V1.0 的 100×100mm 可调范围）
   const [machineLimits, setMachineLimits] = useState(() => loadSavedWorkspaceLimits());
-  const [, setMachineFeatures] = useState(null);
+  const [machineFeatures, setMachineFeatures] = useState(() => connectionStatus?.features || null);
+  const connTargetKey = `${connectionMode}|${serialPort}|${baudrate}|${networkHost}|${telnetPort}`;
+  const prevConnTargetRef = useRef(connTargetKey);
+  useEffect(() => {
+    if (prevConnTargetRef.current !== connTargetKey) {
+      prevConnTargetRef.current = connTargetKey;
+      setMachineFeatures(null);
+    }
+  }, [connTargetKey]);
+  useEffect(() => {
+    if (connectionStatus && "features" in connectionStatus) {
+      setMachineFeatures(connectionStatus.features || null);
+    }
+  }, [connectionStatus]);
 
   // 材料外框尺寸、台面摆放起点 (offsetX, offsetY) 与激光雕刻文字在材料内的位置 (textOffsetX, textOffsetY)
   const [materialConfig, setMaterialConfig] = useState(() => loadSavedMaterialConfig());
@@ -563,21 +577,27 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
           connected: isConn,
           summary: r.summary || (isConn ? "硬件握手通过" : "未连接"),
           checkedAt: Date.now(),
+          isFluidnc: Boolean(r.features),
+          features: r.features || null,
         });
         if (r.machine_limits) {
           updateWorkspaceLimits({
             ...r.machine_limits,
             from_hardware: true,
+            manual: false,
           });
         }
-        if (r.features) setMachineFeatures(r.features);
+        setMachineFeatures(r.features || null);
       } else {
         const msg = (typeof res.data?.result === "string" && res.data.result) || "读取实机行程失败，请检查设备连接";
         setConnectionStatus?.({
           connected: false,
           summary: msg,
           checkedAt: Date.now(),
+          isFluidnc: false,
+          features: null,
         });
+        setMachineFeatures(null);
         setTelemetry(parseGrblStatusReport("", msg));
       }
     } catch (err) {
@@ -587,7 +607,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
         connected: false,
         summary: msg,
         checkedAt: Date.now(),
+        isFluidnc: false,
+        features: null,
       });
+      setMachineFeatures(null);
       setTelemetry(parseGrblStatusReport("", msg));
     } finally {
       if (mountedRef.current) setProbingDevice(false);
@@ -618,11 +641,12 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
         setTelemetry(parsed);
         setLastTelemetryAt(new Date().toLocaleTimeString());
         if (parsed.online) {
-          setConnectionStatus?.({
+          setConnectionStatus?.((prev) => ({
+            ...(prev || {}),
             connected: true,
             summary: `状态 ${parsed.state}`,
             checkedAt: Date.now(),
-          });
+          }));
         }
         return parsed;
       }
@@ -824,6 +848,21 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     setSimProgress(ratio);
   };
 
+  const hasZAxis =
+    (machineFeatures?.axes
+      ? String(machineFeatures.axes).toUpperCase().includes("Z")
+      : Boolean(
+          workspace.hasHardwareLimits
+          && Number(machineLimits?.z_travel_mm) > 0
+          && Number(machineLimits?.z_travel_mm) !== YISU_V1_PROFILE.zTravelMm,
+        ))
+    || Math.abs(Number(telemetry.wpos?.z) || 0) > 1e-4
+    || Math.abs(Number(telemetry.mpos?.z) || 0) > 1e-4;
+  const hasSafetySwitchHardware = Boolean(
+    machineFeatures?.has_door || machineFeatures?.has_estop_or_fault_pin || machineLimits?.homing_enabled,
+  );
+  const hasBufferTelemetry = telemetry.bf?.plannerFree != null || telemetry.bf?.rxBufferFree != null;
+
   return (
     <div className="twin-page ob-page">
       {/* 顶部模式切换与状态横幅 */}
@@ -895,6 +934,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
               workspace={workspace}
               toolpath={toolpath}
               pose={activePose}
+              showZAxis={hasZAxis}
               showRapid={showRapid}
               followHead={followHead}
               onToggleRapid={() => setShowRapid((v) => !v)}
@@ -1582,7 +1622,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   <span>工作坐标</span>
                   <span>机械坐标</span>
                 </div>
-                {["x", "y", "z"].map((axis) => (
+                {(hasZAxis ? ["x", "y", "z"] : ["x", "y"]).map((axis) => (
                   <div key={axis} className="twin-pos-row">
                     <span className="twin-axis-tag">{axis.toUpperCase()} 轴</span>
                     <b>{telemetry.wpos ? `${telemetry.wpos[axis].toFixed(3)} mm` : "—"}</b>
@@ -1591,17 +1631,19 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 ))}
               </div>
 
-              {/* 运动队列与接收缓冲余量 */}
-              <div className="twin-metrics-grid">
-                <div className="twin-metric-box" title="控制器规划器空闲缓冲块数 (Bf)">
-                  <span>运动队列余量</span>
-                  <b>{telemetry.bf?.plannerFree != null ? `${telemetry.bf.plannerFree} 块` : "—"}</b>
+              {/* 运动队列与接收缓冲余量（仅在控制器实际汇报 Bf: 字段时显示） */}
+              {hasBufferTelemetry && (
+                <div className="twin-metrics-grid">
+                  <div className="twin-metric-box" title="控制器规划器空闲缓冲块数 (Bf)">
+                    <span>运动队列余量</span>
+                    <b>{telemetry.bf?.plannerFree != null ? `${telemetry.bf.plannerFree} 块` : "—"}</b>
+                  </div>
+                  <div className="twin-metric-box" title="控制器串口 / 网络接收缓冲余量 (RX)">
+                    <span>指令接收余量</span>
+                    <b>{telemetry.bf?.rxBufferFree != null ? `${telemetry.bf.rxBufferFree} B` : "—"}</b>
+                  </div>
                 </div>
-                <div className="twin-metric-box" title="控制器串口 / 网络接收缓冲余量 (RX)">
-                  <span>指令接收余量</span>
-                  <b>{telemetry.bf?.rxBufferFree != null ? `${telemetry.bf.rxBufferFree} B` : "—"}</b>
-                </div>
-              </div>
+              )}
 
               {/* 限位与安全开关状态 */}
               <div className="twin-pins-box">
@@ -1621,7 +1663,15 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 ) : (
                   <div className="twin-pin-ok">
                     <CheckCircle2 size={13} />
-                    <span>{telemetry.online ? "限位、安全门与急停均正常" : "尚未读取控制器状态"}</span>
+                    <span>
+                      {!telemetry.online
+                        ? "尚未读取控制器状态"
+                        : hasSafetySwitchHardware
+                          ? "限位、安全门与急停均正常"
+                          : machineFeatures
+                            ? "无限位或控制开关"
+                            : "当前无报警或开关触发信号"}
+                    </span>
                   </div>
                 )}
               </div>
@@ -1642,7 +1692,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 <button
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 100 && workspace.yTravelMm === 100 ? "active" : ""}`}
-                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100, from_hardware: false })}
+                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100, from_hardware: false, manual: false })}
                   title="设为默认 100×100 mm 满行程"
                 >
                   <span>100×100 满行程</span>
@@ -1650,7 +1700,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 <button
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 90 && workspace.yTravelMm === 90 ? "active" : ""}`}
-                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90, from_hardware: false })}
+                  onClick={() => updateWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90, from_hardware: false, manual: true })}
                   title="四周预留 5mm 安全边距 (90×90 mm 安全雕刻区)"
                 >
                   <span>90×90 安全区</span>
@@ -1678,7 +1728,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.xTravelMm}
-                    onChange={(e) => updateWorkspaceLimits({ x_travel_mm: e.target.value, from_hardware: false })}
+                    onChange={(e) => updateWorkspaceLimits({ x_travel_mm: e.target.value, from_hardware: false, manual: true })}
                     className="text-input"
                     aria-label="X 轴可调行程 (mm)"
                   />
@@ -1691,7 +1741,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.yTravelMm}
-                    onChange={(e) => updateWorkspaceLimits({ y_travel_mm: e.target.value, from_hardware: false })}
+                    onChange={(e) => updateWorkspaceLimits({ y_travel_mm: e.target.value, from_hardware: false, manual: true })}
                     className="text-input"
                     aria-label="Y 轴可调行程 (mm)"
                   />
@@ -1704,7 +1754,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                 </div>
                 <div className="twin-metric-box">
                   <span>行程来源</span>
-                  <b>{workspace.hasHardwareLimits ? "已从实机读取" : "默认配置（100×100）"}</b>
+                  <b>
+                    {workspace.hasHardwareLimits
+                      ? "已从实机读取"
+                      : machineLimits?.manual || workspace.xTravelMm !== 100 || workspace.yTravelMm !== 100
+                        ? "手动设置"
+                        : "默认配置（100×100）"}
+                  </b>
                 </div>
               </div>
               {boundsWarning ? (

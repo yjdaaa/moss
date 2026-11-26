@@ -63,9 +63,6 @@ function ColabBridgeSection({ builtin }) {
   const dirty =
     form.enabled !== baseline.enabled ||
     form.url.trim() !== baseline.url.trim() ||
-    form.llm_model.trim() !== baseline.llm_model.trim() ||
-    form.tts_model.trim() !== baseline.tts_model.trim() ||
-    form.tts_voice.trim() !== baseline.tts_voice.trim() ||
     String(form.tts_speed).trim() !== String(baseline.tts_speed).trim() ||
     Boolean(form.api_key.trim());
   const validationError = colabSettingsError(form, keyConfigured, cliLoggedIn);
@@ -517,41 +514,6 @@ function ColabBridgeSection({ builtin }) {
           />
         </label>
       </div>
-      <details className="voice-fold" id="voice-colab-advanced">
-        <summary>高级：自定义模型名与音色标识（一般无需修改）</summary>
-        <div className="voice-form-grid">
-          <label>
-            <span>多模态大模型名</span>
-            <input
-              className="text-input mono"
-              value={form.llm_model}
-              disabled={Boolean(busy || testing)}
-              onChange={(e) => updateField("llm_model", e.target.value)}
-              id="voice-colab-llm-model"
-            />
-          </label>
-          <label>
-            <span>克隆合成模型名</span>
-            <input
-              className="text-input mono"
-              value={form.tts_model}
-              disabled={Boolean(busy || testing)}
-              onChange={(e) => updateField("tts_model", e.target.value)}
-              id="voice-colab-tts-model"
-            />
-          </label>
-          <label>
-            <span>克隆音色标识</span>
-            <input
-              className="text-input mono"
-              value={form.tts_voice}
-              disabled={Boolean(busy || testing)}
-              onChange={(e) => updateField("tts_voice", e.target.value)}
-              id="voice-colab-tts-voice"
-            />
-          </label>
-        </div>
-      </details>
       {dirty && validationError && (
         <div className="voice-hint voice-hint--bad" role="alert" id="voice-colab-error">
           {validationError}

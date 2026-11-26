@@ -46,11 +46,25 @@ export const WIZARD_STEPS = Object.freeze([
 ]);
 
 const STEP_IDS = new Set(WIZARD_STEPS.map((step) => step.id));
+const SURFACE_UNSUPPORTED_STEP_IDS = new Set(["scan_offset", "overscan", "kerf"]);
 const STATUSES = new Set(["done", "skipped"]);
 
 /** 材料步骤的进度键：材料名 + 厚度。 */
 export function wizardMaterialKey(material, thickness) {
   return `${String(material || "").trim()}|${String(thickness ?? "").trim()}`;
+}
+
+/** 当前厚度可用的向导步骤：“表面通用”条目无真实厚度且不存切割参数，隐藏必报错的第 3/4/5 步。 */
+export function wizardStepsForThickness(thickness) {
+  if (String(thickness ?? "").trim() === "surface") {
+    return WIZARD_STEPS.filter((step) => !SURFACE_UNSUPPORTED_STEP_IDS.has(step.id));
+  }
+  return WIZARD_STEPS;
+}
+
+function stepsForMaterialKey(materialKey) {
+  const parts = String(materialKey || "").split("|");
+  return wizardStepsForThickness(parts.length > 1 ? parts[1] : "");
 }
 
 function cleanRecord(raw) {
@@ -135,7 +149,7 @@ export function markWizardStep(state, id, status, { materialKey = "", note = "",
 
 /** 当前该做的一步（第一步既没完成也没跳过的）；全部处理过时为 null。 */
 export function currentWizardStep(state, materialKey) {
-  return WIZARD_STEPS.find((step) => !stepRecord(state, step.id, materialKey))?.id ?? null;
+  return stepsForMaterialKey(materialKey).find((step) => !stepRecord(state, step.id, materialKey))?.id ?? null;
 }
 
 /**
@@ -155,14 +169,15 @@ export function toggleWizardStep(activeStep, stepId) {
 
 /** 进度：完成、跳过与总步数。 */
 export function wizardProgress(state, materialKey) {
+  const steps = stepsForMaterialKey(materialKey);
   let done = 0;
   let skipped = 0;
-  for (const step of WIZARD_STEPS) {
+  for (const step of steps) {
     const record = stepRecord(state, step.id, materialKey);
     if (record?.status === "done") done += 1;
     if (record?.status === "skipped") skipped += 1;
   }
-  return { done, skipped, total: WIZARD_STEPS.length };
+  return { done, skipped, total: steps.length };
 }
 
 /** 读取向导整体展开/收起偏好（遵循 foldState 约定，存储受限时返回 null）。 */

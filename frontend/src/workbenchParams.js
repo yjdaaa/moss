@@ -93,13 +93,16 @@ function imageExtrasPayload(imageMode, extras = {}) {
     return { value: Math.round(val * 1000) / 1000 };
   };
   if (extras.negative) payload.negative = true;
-  if (extras.passThrough) payload.pass_through = true;
-  // 行间距倍数：为 1 时不提交（与以前的请求完全相同）；直通模式按原图像素出行，不用倍数
-  const scale = intervalScaleValue(extras.intervalScale);
-  if (!Number.isFinite(scale) || scale < IMAGE_INTERVAL_SCALE_LIMITS.min || scale > IMAGE_INTERVAL_SCALE_LIMITS.max) {
-    return { error: "行间距倍数要在 0.5 ~ 3 之间（留空为 1）" };
+  if (extras.passThrough) {
+    payload.pass_through = true;
+  } else {
+    // 行间距倍数：为 1 时不提交（与以前的请求完全相同）；直通模式按原图像素出行，不用倍数
+    const scale = intervalScaleValue(extras.intervalScale);
+    if (!Number.isFinite(scale) || scale < IMAGE_INTERVAL_SCALE_LIMITS.min || scale > IMAGE_INTERVAL_SCALE_LIMITS.max) {
+      return { error: "行间距倍数要在 0.5 ~ 3 之间（留空为 1）" };
+    }
+    if (scale !== 1) payload.line_interval_scale = Math.round(scale * 1000) / 1000;
   }
-  if (scale !== 1 && !extras.passThrough) payload.line_interval_scale = Math.round(scale * 1000) / 1000;
   const dot = parse(extras.dotWidthMm, (v) => v >= 0 && v < 1, "点宽补偿要是 0 ~ 1 mm 的数字，且须小于行间距（留空不补偿）");
   if (dot.error) return { error: dot.error };
   if (!dot.empty && dot.value > 0) payload.dot_width_mm = dot.value;
@@ -298,7 +301,7 @@ function imageExtrasSignature(imageMode, extras = {}) {
     extras.negative ? "neg" : "",
     extras.passThrough ? "pass" : "",
     text(extras.dotWidthMm),
-    `x${intervalScaleValue(extras.intervalScale)}`,
+    extras.passThrough ? "" : `x${intervalScaleValue(extras.intervalScale)}`,
     fields.halftone ? `${text(extras.halftoneCellMm)}@${text(extras.halftoneAngleDeg)}` : "",
     fields.grayscale ? text(extras.grayMinPowerPercent) : "",
   ].join("|");

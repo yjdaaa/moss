@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getJson, postJson } from "./api/client.js";
 import { showAlert } from "./appDialog.js";
-import { isRemoteMode } from "./authSession.js";
+import { isReadOnlyReferenceClient } from "./authSession.js";
 import {
   DEFAULT_ENGRAVE_ROUTE,
   ENGRAVE_ROUTE_EVENT,
@@ -45,7 +45,7 @@ export function useEngraveRoute() {
   const [saving, setSaving] = useState(false);
   const routeRef = useRef(route);
   routeRef.current = route;
-  const readOnly = isRemoteMode();
+  const readOnly = isReadOnlyReferenceClient();
 
   useEffect(() => {
     let alive = true;

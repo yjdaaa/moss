@@ -261,6 +261,13 @@ const DASHSCOPE_QWEN_VOICE_PRESETS = [
   { id: "huozhuoshi_v3.1", hint: "霍卓石 · 浑厚低沉男声" },
 ];
 
+const DASHSCOPE_QWEN3_TTS_VOICE_PRESETS = [
+  { id: "Cherry", hint: "Cherry · 亲切自然女声（默认）" },
+  { id: "Serena", hint: "Serena · 温和知性女声" },
+  { id: "Ethan", hint: "Ethan · 阳光标准男声" },
+  { id: "Chelsie", hint: "Chelsie · 活力甜美女声" },
+];
+
 const OPENAI_VOICE_PRESETS = [
   { id: "alloy", hint: "Alloy · 中性均衡（默认）" },
   { id: "nova", hint: "Nova · 活力女声" },
@@ -297,11 +304,45 @@ const DOUBAO_V1_VOICE_PRESETS = [
   { id: "zh_female_wanwanxiaohe_moon_bigtts", hint: "湾湾小何 · 温柔女声" },
 ];
 
+/** 千问 / 百炼当前填写的合成模型是否支持 `voice-enrollment` 声音克隆（`qwen3-tts*` 仅支持系统音色）。 */
+export function canCloneDashscopeModel(form) {
+  if (!isDashscope(form)) return false;
+  const model = String(form?.model || "").trim();
+  return !/^qwen3-tts/i.test(model);
+}
+
+/**
+ * 当前生效的大模型是否支持 `llm_fast_reply`（关闭思考参数，对齐 `openai.rs::thinking_off_params`）：
+ * - Colab T4 接管期间固定走云端 vLLM，不传该参数 -> `false`；
+ * - 未配置大模型时保留显示（方便预先开关）；
+ * - 已配置大模型时仅对百炼/千问、硅基流动、火山方舟、智谱/Z.ai、OpenRouter 及 OpenAI `gpt-5*`（且非纯推理模型）返回 `true`。
+ */
+export function isLlmFastReplySupported(status) {
+  if (status?.local?.colab?.active) return false;
+  const llm = status?.models?.llm;
+  const rawUrl = cleanSchemeAndWhitespace(llm?.url);
+  if (!llm?.configured || !rawUrl) return true;
+  let host = "";
+  try {
+    host = new URL(/^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const model = String(llm?.model || "").trim().toLowerCase();
+  if (/(?:^|\/)(?:deepseek-r1|qwq)(?:$|[-_.:])/i.test(model)) return false;
+  const on = (suffix) => host === suffix || host.endsWith(`.${suffix}`);
+  if (isAlibabaCompatHost(host) || on("siliconflow.cn") || on("siliconflow.com")) return true;
+  if (on("volces.com") || on("bigmodel.cn") || on("z.ai") || on("openrouter.ai")) return true;
+  if (on("api.openai.com") && model.startsWith("gpt-5")) return true;
+  return false;
+}
+
 /** 根据当前语音合成表单（接口类型 + 模型名）返回推荐音色列表，仍支持手动填写任意音色。 */
 export function ttsVoiceOptionsFor(form) {
   const model = String(form?.model || "").trim();
   if (isDashscope(form)) {
     if (!model || /^qwen-audio-3\.1-tts/i.test(model)) return DASHSCOPE_QWEN_VOICE_PRESETS;
+    if (/^qwen3-tts/i.test(model)) return DASHSCOPE_QWEN3_TTS_VOICE_PRESETS;
     return [];
   }
   if (isDoubao(form)) {
@@ -319,7 +360,9 @@ export function ttsVoiceOptionsFor(form) {
 
 const ALL_OPENAI_PRESET_IDS = new Set(OPENAI_VOICE_PRESETS.map((v) => v.id));
 const ALL_DOUBAO_PRESET_IDS = new Set([...DOUBAO_V2_VOICE_PRESETS, ...DOUBAO_V1_VOICE_PRESETS].map((v) => v.id));
-const ALL_DASHSCOPE_PRESET_IDS = new Set(DASHSCOPE_QWEN_VOICE_PRESETS.map((v) => v.id));
+const ALL_DASHSCOPE_PRESET_IDS = new Set(
+  [...DASHSCOPE_QWEN_VOICE_PRESETS, ...DASHSCOPE_QWEN3_TTS_VOICE_PRESETS].map((v) => v.id),
+);
 
 /** 选定合成模型或切换接口类型时，若音色为空或与新模型/接口不兼容，自动填入新模型默认音色。 */
 export function applyDefaultTtsVoice(form, nextModel = form?.model) {

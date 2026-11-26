@@ -459,7 +459,7 @@ test("前端安全与状态止血回归护栏（发送未知结果、拖拽不�
   assert.match(aiPreviewSrc, /const canonicalTarget =[\s\S]{0,160}\$\{liveConn\.payload\.port\}@\$\{Number\(liveConn\.payload\.baudrate\) \|\| 115200\}/);
 
   const drawMatSrc = readFileSync(path.join(srcRoot, "components/draw/DrawMaterialCard.jsx"), "utf8");
-  assert.match(drawMatSrc, /表面通用（\$\{form\.thickness_mm \|\| 3\} mm）/);
+  assert.match(drawMatSrc, /if \(isSurfaceOnly\) return null;/, "仅表面通用条目的材料直接隐藏厚度选择框");
 
   const twinSrc = readFileSync(path.join(srcRoot, "pages/TwinPage.jsx"), "utf8");
   assert.equal((twinSrc.match(/telemetryInFlightRef\.current = false;/g) || []).length >= 3, true);

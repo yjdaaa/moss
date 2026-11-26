@@ -38,6 +38,23 @@ export function isRemoteMode() {
   return remoteMode;
 }
 
+/** 浏览器是否通过局域网 / 非回环地址访问（后端归为 `CallerContext::Lan`，参考数据与系统设置只读）。 */
+export function isNonLoopbackWebHost(win = globalThis.window) {
+  const loc = win?.location;
+  if (!loc) return false;
+  if (loc.protocol === "tauri:") return false;
+  const host = String(loc.hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || host === "tauri.localhost" || host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    return false;
+  }
+  return true;
+}
+
+/** 当前客户端对材料库、标定写回与全局参考数据是否为只读身份（连接电脑模式或局域网浏览器）。 */
+export function isReadOnlyReferenceClient(win = globalThis.window) {
+  return remoteMode || isNonLoopbackWebHost(win);
+}
+
 /** 远程模式的电脑地址（仅用于界面显示）。 */
 export function remoteOriginLabel() {
   return remoteMode ? backendOrigin : "";

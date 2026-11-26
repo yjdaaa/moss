@@ -11,6 +11,7 @@ import {
   unwrapImportedMaterialLibrary,
   buildMatrixPreviewPayload,
   axisOptionsForMode,
+  modeOptionsForThickness,
   validateMatrixAxes,
   cellAxisText,
   isSurfaceKey,
@@ -25,6 +26,7 @@ import {
   MATERIAL_LIBRARY_CHANNEL,
   notifyMaterialsUpdated,
 } from "../src/materialSelectState.js";
+import { wizardProgress, wizardStepsForThickness } from "../src/calibrationWizard.js";
 
 const SAMPLE_MATERIALS = {
   亚克力: {
@@ -380,4 +382,20 @@ test("B2 实验室功率 0–100% 与后端 S 值 (0–1000) 换算、S 值提�
   assert.equal(formatPowerScaleHint(420, { withScale: true }), "对应 S420 / 1000");
   assert.equal(formatPowerScaleHint(0, { withScale: false }), "对应 S0");
   assert.equal(formatPowerScaleHint(NaN, { withScale: true }), "对应 S— / 1000");
+
+  // 表面通用条目隐藏边缘切割模式与切缝/偏移向导步，矩阵过期签名忽略未选轴与非线距字段
+  assert.deepEqual(modeOptionsForThickness("surface").map((m) => m.id), ["raster", "outline"]);
+  assert.deepEqual(modeOptionsForThickness("3").map((m) => m.id), ["raster", "outline", "cut"]);
+  assert.deepEqual(wizardStepsForThickness("surface").map((s) => s.id), ["interval", "matrix", "time"]);
+  assert.equal(wizardProgress({}, "椴木|surface").total, 3);
+  assert.equal(
+    matrixInputSignature({ material: "椴木", thickness: "3", mode: "raster", xAxis: "power", yAxis: "passes", speedMin: 400 }),
+    matrixInputSignature({ material: "椴木", thickness: "3", mode: "raster", xAxis: "power", yAxis: "passes", speedMin: 2400 }),
+    "未选速度轴时改速度区间不应令矩阵过期",
+  );
+  assert.equal(
+    matrixInputSignature({ material: "椴木", thickness: "3", mode: "raster", testType: "interval", powerMin: 100, rows: 3 }),
+    matrixInputSignature({ material: "椴木", thickness: "3", mode: "raster", testType: "interval", powerMin: 500, rows: 7 }),
+    "线距测试改功率或矩阵行数不应令预览过期",
+  );
 });
