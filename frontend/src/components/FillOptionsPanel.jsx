@@ -73,7 +73,7 @@ function FillOptionsDetails({
             {onSaveToMaterial ? (
               <button
                 type="button"
-                className="btn-ghost"
+                className="btn btn-ghost"
                 id={id("material-save")}
                 onClick={onSaveToMaterial}
                 title="把扫描角度、过扫描、切割设置等存进当前材料条目；扫描偏移与机器加速度跟机器走，不存进材料库"
@@ -224,7 +224,7 @@ function FillOptionsDetails({
                   />
                   <button
                     type="button"
-                    className="btn-ghost"
+                    className="btn btn-ghost"
                     onClick={() => set("scanOffsetTable", s.scanOffsetTable.filter((_, i) => i !== index))}
                   >
                     删除
@@ -234,7 +234,7 @@ function FillOptionsDetails({
               {s.scanOffsetTable.length < MAX_SCAN_OFFSET_ROWS ? (
                 <button
                   type="button"
-                  className="btn-ghost"
+                  className="btn btn-ghost"
                   id={id("fill-offset-add")}
                   onClick={() => set("scanOffsetTable", [...s.scanOffsetTable, { speed: "", offset: "" }])}
                 >

@@ -32,7 +32,9 @@ export default function VoiceFirmwareCard() {
   useEffect(() => {
     mountedRef.current = true;
     void refresh(false);
-    const timer = setInterval(() => { void refresh(true); }, 5000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh(true);
+    }, 5000);
     return () => {
       mountedRef.current = false;
       pollSeqRef.current += 1;

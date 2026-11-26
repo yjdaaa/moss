@@ -253,7 +253,9 @@ export default function VoiceHomeCard() {
       } finally { inFlight = false; }
     };
     void refresh();
-    const timer = setInterval(refresh, 15_000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, 15_000);
     return () => { active = false; clearInterval(timer); };
   }, [syncEnabled, loaded, credentialConfigured, revision, credentialRevision]);
 
@@ -319,8 +321,8 @@ export default function VoiceHomeCard() {
             onChange={(event) => setToken(event.target.value)} placeholder="输入新令牌以替换" />
         </label>
         <div className="voice-form-actions">
-          <button type="button" disabled={!loaded || busy || token.length < 20} onClick={() => saveToken("set")}>保存 / 更换令牌</button>
-          {credentialConfigured && <button type="button" disabled={!loaded || busy} onClick={() => saveToken("clear")}>撤销令牌</button>}
+          <button type="button" className="btn btn-primary" disabled={!loaded || busy || token.length < 20} onClick={() => saveToken("set")}>保存 / 更换令牌</button>
+          {credentialConfigured && <button type="button" className="btn btn-ghost" disabled={!loaded || busy} onClick={() => saveToken("clear")}>撤销令牌</button>}
         </div>
       </details>
 
@@ -332,7 +334,7 @@ export default function VoiceHomeCard() {
             ...current, base_url: event.target.value,
           }))} />
       </label>
-      <div className="voice-form-actions"><button type="button" disabled={!loaded || busy}
+      <div className="voice-form-actions"><button type="button" className="btn btn-primary" disabled={!loaded || busy}
         onClick={save}>{busy ? "正在保存…" : "保存地址与设备设置"}</button></div>
       {message && <p role="status">{message}</p>}
       {error && <p role="alert">{error}</p>}
@@ -369,15 +371,17 @@ export default function VoiceHomeCard() {
               }}
             />
           </label>}
-          <button type="button" disabled={!loaded || busy}
+          <button type="button" className="btn btn-ghost" disabled={!loaded || busy}
             onClick={() => remove(index)}>移除该项</button>
         </div>
       ))}
-      <button type="button" disabled={!loaded || busy || form.entities.length >= 128}
-        onClick={add}>添加白名单实体</button>
-      <button type="button" disabled={busy} onClick={reload}>重新加载设备设置</button>
+      <div className="voice-form-actions">
+        <button type="button" className="btn btn-ghost" disabled={!loaded || busy || form.entities.length >= 128}
+          onClick={add}>添加白名单实体</button>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}>重新加载设备设置</button>
+      </div>
       <p>更改设备或令牌会撤销旧审批；结果未知时不会自动重发。尚未用真实 Home Assistant 验收。</p>
-      <button type="button" disabled={!loaded || busy} onClick={() => controlConsent(!voiceControlEnabled)} id="voice-home-control-consent">
+      <button type="button" className="btn btn-primary" disabled={!loaded || busy} onClick={() => controlConsent(!voiceControlEnabled)} id="voice-home-control-consent">
         {voiceControlEnabled ? "关闭家居语音控制" : "开启家居语音控制"}
       </button>
       </details>
@@ -387,9 +391,9 @@ export default function VoiceHomeCard() {
         <summary>备份与迁移</summary>
         <p>这里只导出已保存的 HTTPS 地址和白名单，不导出令牌、本机加密凭据、审批或设备授权；不要直接复制数据库文件当作凭据备份。</p>
         <div className="voice-form-actions">
-          <button type="button" disabled={!loaded || busy} onClick={exportPortable}>生成脱敏配置备份</button>
-          <button type="button" disabled={busy} onClick={auditHistoricalBackup}>选择历史备份文件并审计（只读）</button>
-          <button type="button" disabled={!loaded || busy || !portableBackup.trim() || portableBackup.length > 65536}
+          <button type="button" className="btn btn-ghost" disabled={!loaded || busy} onClick={exportPortable}>生成脱敏配置备份</button>
+          <button type="button" className="btn btn-ghost" disabled={busy} onClick={auditHistoricalBackup}>选择历史备份文件并审计（只读）</button>
+          <button type="button" className="btn btn-ghost" disabled={!loaded || busy || !portableBackup.trim() || portableBackup.length > 65536}
             onClick={restorePortable}>从粘贴的备份恢复（撤销旧令牌）</button>
         </div>
         {backupAudit && <p role="status">历史文件只读审计：{backupAudit.risk === "suspected_legacy_credential" ? "疑似包含旧访问令牌" : backupAudit.risk === "encrypted_credential_material" ? "包含凭据加密材料标记" : "无法确认安全，按敏感文件处理"}；读取 {backupAudit.inspected_bytes} 字节。请勿公开分享；若疑似泄漏应在 HA 服务端撤销并更换令牌。未读取或显示令牌内容。</p>}
@@ -405,13 +409,13 @@ export default function VoiceHomeCard() {
         <p>小智查询家里状态：{voiceReadEnabled ? "已允许" : "未允许"}。该授权绑定当前白名单与令牌版本，任何变更都会使旧授权失效。</p>
         {voiceReadEnabled ? (
           <div className="voice-form-actions">
-            <button type="button" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
+            <button type="button" className="btn btn-ghost" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
               onClick={discover} id="voice-home-read-sync">重新同步设备状态</button>
-            <button type="button" disabled={!loaded || busy}
+            <button type="button" className="btn btn-ghost" disabled={!loaded || busy}
               onClick={() => consent(false)} id="voice-home-read-revoke">撤销查询权限</button>
           </div>
         ) : (
-          <button type="button" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
+          <button type="button" className="btn btn-ghost" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
             onClick={allowReadOnlyQuery} id="voice-home-read-allow" title="允许后立即做一次只读同步">
             允许小智查询家里的状态（只读）
           </button>

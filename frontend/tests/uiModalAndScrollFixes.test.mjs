@@ -115,6 +115,11 @@ test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖�
     /if\s*\(event\.key === "Escape"\)\s*\{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*closeMenu\(\);/,
     "ObsidianSelectHost 按 Escape 收起下拉浮层时须阻止事件继续冒泡关闭外层模态框",
   );
+  assert.match(
+    selectSrc,
+    /className="ob-select-group-label"/,
+    "ObsidianSelectHost 须渲染 <optgroup> 分组小标题，避免本地音色语种与方言分组在浮层中丢失",
+  );
 
   const sideNavSrc = fs.readFileSync(path.join(SRC_DIR, "components/SideNav.jsx"), "utf8");
   assert.match(
@@ -202,6 +207,20 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     );
     assert.match(connHtml, /id="device-connection-modal"/);
     assert.match(connHtml, /设备连接/);
+
+    const { buildSelectOptions } = await server.ssrLoadModule("/src/components/ObsidianSelectHost.jsx");
+    const parsedOpts = buildSelectOptions({
+      options: [
+        { value: "45", textContent: "45 · 晓北（女声）", disabled: false, parentElement: { tagName: "OPTGROUP", label: "中文普通话（推荐）" } },
+        { value: "8", textContent: "8 · Eric（男声 · 四川话）", disabled: false, parentElement: { tagName: "OPTGROUP", label: "中文 · 方言 / 口音" } },
+        { value: "0", textContent: "默认项", disabled: false, parentElement: { tagName: "SELECT" } },
+      ],
+    });
+    assert.equal(parsedOpts[0].group, "中文普通话（推荐）");
+    assert.equal(parsedOpts[0].title, "45 · 晓北");
+    assert.equal(parsedOpts[0].badge, "女声");
+    assert.equal(parsedOpts[1].group, "中文 · 方言 / 口音");
+    assert.equal(parsedOpts[2].group, "");
   } finally {
     await server.close();
   }

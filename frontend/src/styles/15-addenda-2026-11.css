@@ -1175,6 +1175,62 @@ button.conn-pill:hover {
   --ob-dock-clearance: 310px;
 }
 
+/* 2026-11-26 材料实验室校准矩阵网格：响应式横向滚动容器与键盘可聚焦按钮单元格 */
+.lab-box-4 {
+  max-width: 100%;
+  min-width: 0;
+}
+.lab-matrix-grid-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.lab-matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--lab-matrix-cols, 5), 44px);
+  gap: 4px;
+  width: max-content;
+  margin: 0 auto;
+}
+.lab-matrix-cell {
+  appearance: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 1.15;
+  cursor: pointer;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.lab-matrix-cell:hover:not(:disabled) {
+  border-color: rgba(139, 123, 255, 0.65);
+  background: rgba(139, 123, 255, 0.18);
+}
+.lab-matrix-cell:focus-visible {
+  outline: 2px solid var(--ob-accent-2, #8b7bff);
+  outline-offset: 1px;
+}
+.lab-matrix-cell.is-selected {
+  background: var(--laser, #8b7bff);
+  border-color: var(--laser, #8b7bff);
+  color: #000000;
+}
+.lab-matrix-cell:disabled {
+  opacity: 1 !important;
+  filter: none !important;
+  cursor: default !important;
+}
+
+
 
 
 

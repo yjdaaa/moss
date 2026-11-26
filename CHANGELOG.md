@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复自定义下拉框 `<optgroup>` 分组丢失、校准矩阵网格键盘可访问性及语音中心隐藏标签后台轮询（2026-11-26）
+
+- **现象**：本地合成音色下拉框（`#voice-local-speaker`）按语种和方言拆分的 `<optgroup>` 标题在 `ObsidianSelectHost` 自定义浮层中被丢弃，所有音色混为扁平长列表；材料实验室 `LabMatrixGrid` 使用内联固定宽度 `<div>` 单元格，多列时撑破卡片且无法用键盘聚焦选格；`FillOptionsPanel`、`VoiceHomeCard`、`VoiceHomeApprovalCard`、`VoiceContextCard`、`VoiceAgentCard` 存在漏挂 `.btn` 基类的裸按钮，`LocalTtsSettings` 存在 1 条 `react-hooks/exhaustive-deps` ESLint 警告，且 `VoiceMcpCard` / `VoiceAgentCard` 在未激活的“扩展”标签页下仍持续后台轮询。
+- **根因与修复**：`ObsidianSelectHost` 的 `buildSelectOptions` 读取父级 `<optgroup label>` 并在浮层列表中渲染 `.ob-select-group-label` 分组小标题；`LabMatrixGrid` 改为横向可滚动容器与 `<button type="button" class="lab-matrix-cell">`；补齐上述 5 个组件的 `.btn` / `.voice-link-btn` 样式类，将 `LocalTtsSettings` 的 `cancelPendingTrial` 收进 `useCallback` 清零全库 ESLint 警告，`LocalTtsVoicesModal` 单语种模型不再逐行重复渲染语种胶囊并将内部代号移入悬停提示；`VoicePage` 向 `VoiceMcpCard` 与 `VoiceAgentCard` 传入 `active={activeTab === "features"}`，非激活标签页与最小化隐藏窗口（`document.hidden`）暂停周期轮询。不改外部接口与设置契约。
+- **验证**：`uiModalAndScrollFixes.test.mjs` 新增 `buildSelectOptions` `<optgroup>` 分组解析断言，`uiPolishB.test.mjs` 新增 `LabMatrixGrid` 按钮语义、按钮类名完整性与扩展标签激活态轮询门禁断言；`npm --prefix frontend run lint` 0 warning，`node scripts/verify.mjs --finish` 通过。
+- **关联**：`frontend/src/components/ObsidianSelectHost.jsx`、`frontend/src/components/material-lab/LabMatrixGrid.jsx`、`frontend/src/components/FillOptionsPanel.jsx`、`frontend/src/components/voice-builtin/LocalTtsSettings.jsx`、`frontend/src/components/LocalTtsVoicesModal.jsx`、`frontend/src/components/VoiceMcpCard.jsx`、`frontend/src/components/VoiceAgentCard.jsx`、`frontend/src/components/VoiceHomeCard.jsx`、`frontend/src/components/VoiceHomeApprovalCard.jsx`、`frontend/src/components/VoiceContextCard.jsx`、`frontend/src/pages/VoicePage.jsx`。
+
 ### 修复双显卡笔记本本地声音克隆误用核显及 Windows 编译告警（2026-11-25）
 
 - **现象**：在带核显与独显的双显卡 Windows 笔记本上，本地声音克隆引擎 `audiocpp_server` 固定传 `device = 0` 会落在核显（`type = "igpu"`）导致合成比实时慢数倍，且 Windows 目标编译 `moss-voice` 存在条件编译告警。

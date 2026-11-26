@@ -450,14 +450,15 @@ function LocalTtsVoicesModalDialog({
                         <div className="tts-speaker-main">
                           <div className="tts-speaker-title">
                             <span className="mono tts-speaker-id">#{sp.id}</span>
-                            <b>{sp.name}</b>
-                            <span className="mono voice-muted tts-speaker-code">{sp.code}</span>
+                            <b title={sp.code ? `音色代号：${sp.code}` : undefined}>{sp.name}</b>
                             <span className={`ob-pill ${sp.gender === "female" ? "ob-pill--info" : "ob-pill--off"}`}>
                               {sp.gender_label}
                             </span>
-                            <span className={`ob-pill ${sp.recommended_for_zh ? "ob-pill--ok" : "ob-pill--off"}`}>
-                              {sp.lang_label}
-                            </span>
+                            {canFilterLang && (
+                              <span className={`ob-pill ${sp.recommended_for_zh ? "ob-pill--ok" : "ob-pill--off"}`}>
+                                {sp.lang_label}
+                              </span>
+                            )}
                             {!allCached && sp.cached && (
                               <span className="ob-pill ob-pill--ok" title="试听语音已缓存在本机磁盘，点击秒播">
                                 本机已缓存

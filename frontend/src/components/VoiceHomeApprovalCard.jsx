@@ -33,7 +33,9 @@ export default function VoiceHomeApprovalCard() {
   useEffect(() => {
     mountedRef.current = true;
     void refresh(false);
-    const timer = setInterval(() => { void refresh(true); }, 5000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh(true);
+    }, 5000);
     return () => {
       mountedRef.current = false;
       pollSeqRef.current += 1;
@@ -70,7 +72,7 @@ export default function VoiceHomeApprovalCard() {
     <section className="voice-card" aria-label="HomeControl 独立审批收件箱">
       <h3>家居控制审批（NV15）</h3>
       <p role="status">语音申请的家居动作在这里逐个批准；批准后会实际控制设备，结果未知时不会自动重发。不确定时请拒绝。</p>
-      <button type="button" disabled={!!busy} onClick={() => void refresh(false)}>刷新家居审批</button>
+      <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={() => void refresh(false)}>刷新家居审批</button>
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
       {items.length === 0 ? <p>当前没有家居审批记录。</p> : (
@@ -82,9 +84,9 @@ export default function VoiceHomeApprovalCard() {
             <p>动作参数：{JSON.stringify(item.parameters)} · 来源：语音设备 …{item.device_suffix}</p>
             <p>摘要：{item.digest.slice(0, 8)}… · 到期时间：{new Date(item.expires_at * 1000).toLocaleString("zh-CN")}</p>
             {item.outcome && <p>结果：{item.outcome.phase || "未知"} · {item.outcome.message}</p>}
-            {item.can_revoke && <button type="button" disabled={!!busy}
+            {item.can_revoke && <button type="button" className="btn btn-ghost" disabled={!!busy}
               onClick={() => cancel(item)}>拒绝 / 撤销此请求</button>}
-            {item.status === "pending" && <button type="button" disabled={!!busy || !item.can_approve}
+            {item.status === "pending" && <button type="button" className="btn btn-primary" disabled={!!busy || !item.can_approve}
               title={item.can_approve ? "批准后实际执行一次" : "家居控制未开启、配置已变化或请求已失效"}
               onClick={() => approve(item)}>批准执行一次</button>}
           </li>)}

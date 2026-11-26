@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Square, Upload, Trash2, Check } from "lucide-react";
 import { voiceApi } from "../../voiceApi.js";
 import {
@@ -44,7 +44,7 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
   const trialSeqRef = useRef(0);
   const cloneFileRef = useRef(null);
 
-  const stopAudio = () => {
+  const stopAudio = useCallback(() => {
     if (audioRef.current) {
       try {
         audioRef.current.pause();
@@ -54,8 +54,8 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
       }
       audioRef.current = null;
     }
-  };
-  useEffect(() => () => stopAudio(), []);
+  }, []);
+  useEffect(() => () => stopAudio(), [stopAudio]);
 
   // 后端参考录音代次或原话变化时同步输入框（含同名文件重传）
   useEffect(() => {
@@ -80,11 +80,11 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
     };
   }, [modelId]);
 
-  const cancelPendingTrial = () => {
+  const cancelPendingTrial = useCallback(() => {
     trialSeqRef.current += 1;
     stopAudio();
     setTrial({ state: "idle", text: "" });
-  };
+  }, [stopAudio]);
 
   // 切换合成模型时清空克隆操作提示；改音色或语速时仅重置上一次试听状态
   useEffect(() => {
@@ -93,7 +93,7 @@ export function LocalTtsSettings({ form, update, models, voices, local = null, o
 
   useEffect(() => {
     cancelPendingTrial();
-  }, [form.tts_model, form.tts_speaker, form.tts_speed]);
+  }, [form.tts_model, form.tts_speaker, form.tts_speed, cancelPendingTrial]);
 
   const speakers = catalog.modelId === modelId ? catalog.speakers : null;
   const groups = speakers ? localTtsSpeakerGroups(speakers, form.tts_speaker) : null;

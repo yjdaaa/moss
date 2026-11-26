@@ -528,5 +528,48 @@ test("B1/B2/B4/B5/B6/B7/B8：界面组件 SSR 渲染与状态交互契约全覆�
     assert.doesNotMatch(consoleSrc, /borderRadius:\s*"50%"|var\(--laser-green/, "网关状态点与文字颜色已迁入样式表");
     assert.doesNotMatch(homeSrc, /hud-tool-sub/, "工作台加工内容四个按钮统一两元素结构");
     assert.match(homeSrc, /hud-tool-jump-icon/, "创意画板按钮保留内联外跳箭头提示");
+
+    // 6. 2026-11-26 校准矩阵网格响应式按钮、按钮基类补齐与后台隐藏标签轮询门禁
+    const { LabMatrixGrid } = await server.ssrLoadModule("/src/components/material-lab/LabMatrixGrid.jsx");
+    const gridHtml = renderToStaticMarkup(
+      React.createElement(LabMatrixGrid, {
+        matrixPreview: {
+          material: "椴木",
+          thickness_mm: 3,
+          columns: 2,
+          x_axis: "power",
+          y_axis: "speed",
+          cells: [
+            { id: "A1", power: 200, speed: 1200, passes: 1 },
+            { id: "A2", power: 400, speed: 1200, passes: 1 },
+          ],
+        },
+        matrixCols: 2,
+        readOnly: false,
+        selectedMaterial: "椴木",
+        selectedThickness: "3",
+        selectedCellNum: 2,
+        handleSaveBestCell: () => {},
+        matrixSendState: null,
+      }),
+    );
+    assert.match(gridHtml, /class="lab-matrix-grid-scroll"/);
+    assert.match(gridHtml, /<button type="button"[^>]*aria-pressed="true"[^>]*class="lab-matrix-cell is-selected"/);
+
+    for (const rel of [
+      "components/FillOptionsPanel.jsx",
+      "components/VoiceAgentCard.jsx",
+      "components/VoiceHomeCard.jsx",
+      "components/VoiceHomeApprovalCard.jsx",
+      "components/VoiceContextCard.jsx",
+    ]) {
+      const src = readFileSync(path.join(srcRoot, rel), "utf8");
+      assert.doesNotMatch(src, /className="btn-ghost"|className="btn-link"/, `${rel} 不得遗留缺 .btn 基类或未定义的 .btn-link 类名`);
+    }
+    const voicePageSrc = readFileSync(path.join(srcRoot, "pages/VoicePage.jsx"), "utf8");
+    assert.match(voicePageSrc, /<VoiceMcpCard defaultOpen=\{false\} active=\{activeTab === "features"\} \/>/);
+    assert.match(voicePageSrc, /<VoiceAgentCard active=\{activeTab === "features"\} \/>/);
+    const agentSrc = readFileSync(path.join(srcRoot, "components/VoiceAgentCard.jsx"), "utf8");
+    assert.match(agentSrc, /if \(loadedRef\.current && !document\.hidden\) void refreshRef\.current\(true\);/, "切回扩展标签时立即刷新一次 Agent 状态");
   });
 });

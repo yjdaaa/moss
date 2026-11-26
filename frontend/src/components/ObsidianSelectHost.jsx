@@ -22,12 +22,16 @@ function parseOptionLabel(rawText) {
   return { title, badge, tone };
 }
 
-function buildSelectOptions(selectEl) {
-  return Array.from(selectEl.options).map((opt, index) => ({
+export function buildSelectOptions(selectEl) {
+  return Array.from(selectEl?.options || []).map((opt, index) => ({
     index,
     value: opt.value,
     label: opt.textContent || opt.label || opt.value,
     disabled: Boolean(opt.disabled),
+    group:
+      opt.parentElement?.tagName === "OPTGROUP"
+        ? String(opt.parentElement.getAttribute?.("label") || opt.parentElement.label || "").trim()
+        : "",
     ...parseOptionLabel(opt.textContent || opt.label || opt.value),
   }));
 }
@@ -366,43 +370,51 @@ export function ObsidianSelectHost() {
         {menu.options.map((opt, idx) => {
           const selected = opt.value === menu.value;
           const active = idx === menu.activeIndex;
+          const prevGroup = idx > 0 ? menu.options[idx - 1].group : "";
+          const showGroupHeader = Boolean(opt.group) && (idx === 0 || opt.group !== prevGroup);
           return (
-            <button
-              key={`${opt.index}-${opt.value}`}
-              type="button"
-              role="option"
-              data-ob-idx={idx}
-              aria-selected={selected}
-              disabled={opt.disabled}
-              title={opt.label}
-              className={`ob-select-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}`}
-              onMouseEnter={() => setMenu((prev) => (prev ? { ...prev, activeIndex: idx } : prev))}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (opt.disabled) return;
-                const targetSelect = menu.selectEl;
-                if (activeSelectRef.current) {
-                  activeSelectRef.current.removeAttribute("data-ob-open");
-                  activeSelectRef.current = null;
-                }
-                setMenu(null);
-                triggerSelectValue(targetSelect, opt.value);
-                targetSelect?.focus?.();
-              }}
-            >
-              <span className="ob-select-option-main">
-                <span className="ob-select-option-title">{opt.title}</span>
-                {opt.badge && (
-                  <span className={`ob-select-option-badge ob-select-option-badge--${opt.tone}`}>
-                    {opt.badge}
-                  </span>
-                )}
-              </span>
-              <span className="ob-select-option-check" aria-hidden="true">
-                {selected && <Check size={14} strokeWidth={2.4} />}
-              </span>
-            </button>
+            <React.Fragment key={`${opt.index}-${opt.value}`}>
+              {showGroupHeader && (
+                <div className="ob-select-group-label" role="presentation">
+                  {opt.group}
+                </div>
+              )}
+              <button
+                type="button"
+                role="option"
+                data-ob-idx={idx}
+                aria-selected={selected}
+                disabled={opt.disabled}
+                title={opt.label}
+                className={`ob-select-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}`}
+                onMouseEnter={() => setMenu((prev) => (prev ? { ...prev, activeIndex: idx } : prev))}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (opt.disabled) return;
+                  const targetSelect = menu.selectEl;
+                  if (activeSelectRef.current) {
+                    activeSelectRef.current.removeAttribute("data-ob-open");
+                    activeSelectRef.current = null;
+                  }
+                  setMenu(null);
+                  triggerSelectValue(targetSelect, opt.value);
+                  targetSelect?.focus?.();
+                }}
+              >
+                <span className="ob-select-option-main">
+                  <span className="ob-select-option-title">{opt.title}</span>
+                  {opt.badge && (
+                    <span className={`ob-select-option-badge ob-select-option-badge--${opt.tone}`}>
+                      {opt.badge}
+                    </span>
+                  )}
+                </span>
+                <span className="ob-select-option-check" aria-hidden="true">
+                  {selected && <Check size={14} strokeWidth={2.4} />}
+                </span>
+              </button>
+            </React.Fragment>
           );
         })}
       </div>

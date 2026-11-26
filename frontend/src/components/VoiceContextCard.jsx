@@ -49,24 +49,25 @@ function MemoryItemRow({ row, multiScope, busy, onEdit, onDelete }) {
         </small>
         <span>
           {draft === null ? (
-            <button type="button" disabled={busy} onClick={() => setDraft(row.content)}>
+            <button type="button" className="btn btn-ghost voice-inline-btn" disabled={busy} onClick={() => setDraft(row.content)}>
               编辑
             </button>
           ) : (
             <>
               <button
                 type="button"
+                className="btn btn-primary voice-inline-btn"
                 disabled={busy || !draft.trim()}
                 onClick={() => onEdit(row, draft).then((ok) => ok && setDraft(null))}
               >
                 保存修改
               </button>
-              <button type="button" disabled={busy} onClick={() => setDraft(null)}>
+              <button type="button" className="btn btn-ghost voice-inline-btn" disabled={busy} onClick={() => setDraft(null)}>
                 取消
               </button>
             </>
           )}
-          <button type="button" disabled={busy} onClick={() => onDelete(row)}>
+          <button type="button" className="btn btn-ghost voice-inline-btn" disabled={busy} onClick={() => onDelete(row)}>
             删除
           </button>
         </span>
@@ -255,6 +256,7 @@ export default function VoiceContextCard() {
                   />
                   <button
                     type="button"
+                    className="btn btn-ghost voice-inline-btn"
                     disabled={busy}
                     onClick={() => {
                       setAppliedQuery(query);
@@ -266,6 +268,7 @@ export default function VoiceContextCard() {
                   {(query || appliedQuery) && (
                     <button
                       type="button"
+                      className="btn btn-ghost voice-inline-btn"
                       disabled={busy}
                       onClick={() => {
                         setQuery("");
@@ -279,7 +282,7 @@ export default function VoiceContextCard() {
                 </span>
               )}
               {rows.length > 0 && (
-                <button type="button" disabled={busy} onClick={handleClearAll}>
+                <button type="button" className="btn btn-ghost voice-inline-btn" disabled={busy} onClick={handleClearAll}>
                   清空全部
                 </button>
               )}

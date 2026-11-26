@@ -34,46 +34,37 @@ export function LabMatrixGrid({
               {TEST_AXIS_LABELS[matrixPreview.y_axis] || matrixPreview.y_axis}（预览第一行即样板最下面一行 A）
             </div>
           ) : null}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: `repeat(${matrixPreview.columns || matrixCols}, 44px)`,
-              gap: "4px",
-              margin: "0 auto",
-            }}
-          >
-            {(matrixPreview.cells || []).map((cell, i) => (
-              <div
-                key={cell.id || i}
-                onClick={readOnly || matrixPreview.wizard_pattern ? undefined : () => handleSaveBestCell(i)}
-                style={{
-                  width: "44px",
-                  height: "44px",
-                  background: selectedCellNum === i + 1 ? "var(--laser, #8b7bff)" : "rgba(255,255,255,0.08)",
-                  color: selectedCellNum === i + 1 ? "#000" : "#fff",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: "9px",
-                  lineHeight: 1.15,
-                  cursor: readOnly || matrixPreview.wizard_pattern ? "default" : "pointer",
-                  borderRadius: "2px",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                }}
-                title={`#${i + 1} ${cell.id}: ${powerScaleToPercent(cell.power)}%（S${cell.power}） F${cell.speed} × ${cell.passes}${
-                  cell.line_interval_mm != null ? ` · 线距 ${cell.line_interval_mm} mm` : ""
-                }${cell.run_index ? ` · 第 ${cell.run_index} 个加工` : ""}`}
-              >
-                <span className="lab-text-2">{i + 1}</span>
-                <span>
-                  {matrixPreview.wizard_pattern ? cell.x_label : cellAxisText(cell, matrixPreview.x_axis || "power", "x")}
-                </span>
-                {matrixPreview.test_type === "interval" || matrixPreview.wizard_pattern ? null : (
-                  <span>{cellAxisText(cell, matrixPreview.y_axis || "speed", "y")}</span>
-                )}
-              </div>
-            ))}
+          <div className="lab-matrix-grid-scroll">
+            <div
+              className="lab-matrix-grid"
+              style={{ "--lab-matrix-cols": matrixPreview.columns || matrixCols }}
+            >
+              {(matrixPreview.cells || []).map((cell, i) => {
+                const interactive = !readOnly && !matrixPreview.wizard_pattern;
+                const selected = selectedCellNum === i + 1;
+                return (
+                  <button
+                    type="button"
+                    key={cell.id || i}
+                    disabled={!interactive}
+                    aria-pressed={interactive ? selected : undefined}
+                    onClick={interactive ? () => handleSaveBestCell(i) : undefined}
+                    className={`lab-matrix-cell${selected ? " is-selected" : ""}`}
+                    title={`#${i + 1} ${cell.id}: ${powerScaleToPercent(cell.power)}%（S${cell.power}） F${cell.speed} × ${cell.passes}${
+                      cell.line_interval_mm != null ? ` · 线距 ${cell.line_interval_mm} mm` : ""
+                    }${cell.run_index ? ` · 第 ${cell.run_index} 个加工` : ""}`}
+                  >
+                    <span className="lab-text-2">{i + 1}</span>
+                    <span>
+                      {matrixPreview.wizard_pattern ? cell.x_label : cellAxisText(cell, matrixPreview.x_axis || "power", "x")}
+                    </span>
+                    {matrixPreview.test_type === "interval" || matrixPreview.wizard_pattern ? null : (
+                      <span>{cellAxisText(cell, matrixPreview.y_axis || "speed", "y")}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
           {matrixSendState ? (
             <div className="lab-box-6">

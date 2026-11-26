@@ -8,7 +8,7 @@ import { MCP_POLICIES, mcpForm, mcpFormError, mcpSavePayload, mcpConfirmation, m
 
 const time = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "未调用";
 const AUDIT = { external_mcp_config_changed: "配置更新", external_tool_requested: "开始调用", external_tool_completed: "调用返回", external_tool_denied: "调用被拒绝", approval_created: "生成审批", approval_approved: "已批准", approval_executed: "消费授权", approval_expired: "审批已过期", approval_rejected: "已拒绝", approval_failed: "执行未完成" };
-export function VoiceMcpCard({ defaultOpen = true }) {
+export function VoiceMcpCard({ defaultOpen = true, active = true }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,18 +20,25 @@ export function VoiceMcpCard({ defaultOpen = true }) {
   const epoch = useRef(0);
   useEffect(() => {
     alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  useEffect(() => {
     let cancelled = false;
     let timer;
-    const poll = async () => {
+    const poll = async (fromTimer = false) => {
+      if (fromTimer && (!active || document.hidden)) {
+        if (!cancelled && active) timer = setTimeout(() => void poll(true), VOICE_POLL_MS);
+        return;
+      }
       const version = epoch.current;
       try {
         if (!busyRef.current) { const next = await voiceApi.mcpStatus(); if (!cancelled && version === epoch.current) { setStatus(next); setError(""); } }
       } catch (e) { if (!cancelled && version === epoch.current) setError(voiceErrorText(e)); }
-      if (!cancelled) timer = setTimeout(poll, VOICE_POLL_MS);
+      if (!cancelled && active) timer = setTimeout(() => void poll(true), VOICE_POLL_MS);
     };
-    void poll();
-    return () => { cancelled = true; alive.current = false; clearTimeout(timer); };
-  }, []);
+    if (active || !status) void poll(false);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
   const act = async (work) => {
     if (busyRef.current) return false;
     setBusy(true); busyRef.current = true; epoch.current += 1;

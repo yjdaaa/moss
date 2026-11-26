@@ -42,7 +42,9 @@ export default function VoiceWakeWordCard() {
   useEffect(() => {
     mountedRef.current = true;
     void refresh(true, false);
-    const timer = setInterval(() => { void refresh(false, true); }, 5000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh(false, true);
+    }, 5000);
     return () => {
       mountedRef.current = false;
       pollSeqRef.current += 1;

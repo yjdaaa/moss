@@ -761,8 +761,8 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                   {`当前为“${VOICE_MODE_LABEL[mode]}”链路：第三方 MCP 工具与本机 Agent 仅在“MOSS 内置服务”链路下对语音开放；此处可预先配置，切换至内置服务后生效。`}
                 </div>
               )}
-              <VoiceMcpCard defaultOpen={false} />
-              <VoiceAgentCard />
+              <VoiceMcpCard defaultOpen={false} active={activeTab === "features"} />
+              <VoiceAgentCard active={activeTab === "features"} />
             </div>
           </VoiceTabPanel>
 

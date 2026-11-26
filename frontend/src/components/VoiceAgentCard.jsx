@@ -25,7 +25,7 @@ export function shouldSyncAgentFormOnPoll({
   return !formDirty(saved, config);
 }
 
-export default function VoiceAgentCard() {
+export default function VoiceAgentCard({ active = true }) {
   const [saved, setSaved] = useState(EMPTY);
   const [config, setConfig] = useState(EMPTY);
   const [info, setInfo] = useState({});
@@ -125,16 +125,26 @@ export default function VoiceAgentCard() {
       if (seq === pollSeqRef.current) pollInFlightRef.current = false;
     }
   };
-  // 小智可能随时发起任务：每 5 秒刷新一次状态（运行中的任务结束时会显示为已完成 / 已停止）。
-  // 定时器只建一次，经 ref 调用最新的 refresh
+  // 小智可能随时发起任务：仅在当前标签页激活且窗口可见时每 5 秒刷新一次状态，切回标签或恢复窗口时立即刷新一次。
   const refreshRef = useRef(refresh);
   useEffect(() => {
     refreshRef.current = refresh;
   });
   useEffect(() => {
-    const timer = setInterval(() => { void refreshRef.current(true); }, 5000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!active) return undefined;
+    if (loadedRef.current && !document.hidden) void refreshRef.current(true);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshRef.current(true);
+    }, 5000);
+    const onVisibility = () => {
+      if (!document.hidden) void refreshRef.current(true);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [active]);
   const change = (name, value) => {
     epochRef.current += 1;
     setConfig((current) => {
@@ -240,7 +250,7 @@ export default function VoiceAgentCard() {
               {autoPath && manualValue && manualValue !== autoPath && (
                 <small className="voice-muted">
                   本机已检测到 <span className="mono">{autoPath}</span>{" "}
-                  <button type="button" className="btn-link" disabled={!loaded || busy} onClick={() => change(name, "")}>
+                  <button type="button" className="voice-link-btn" disabled={!loaded || busy} onClick={() => change(name, "")}>
                     改用自动读取
                   </button>
                 </small>
