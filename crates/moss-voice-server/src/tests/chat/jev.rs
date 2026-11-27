@@ -1,6 +1,14 @@
 //! 判停抢跑：口语状态直达、半句等待续说、慢判停与并发任务、Smart Turn 闸门。
 use super::*;
 
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ok() {
+        assert!(Instant::now() < deadline, "等待超时：{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[tokio::test]
 async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_tools_for_chat() {
     use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
@@ -604,7 +612,7 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
 fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_and_defer_notice() {
     use crate::audio::{EnergyVad, Vad, VadConfig, VadEvent, VadFactory};
     use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct DelayedContinuationVad {
         inner: EnergyVad,
@@ -640,9 +648,12 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
         }
     }
 
-    struct TwoPartStreamingAsr;
+    struct TwoPartStreamingAsr {
+        heard_samples: Arc<AtomicUsize>,
+    }
     impl StreamingAsr for TwoPartStreamingAsr {
         fn start(&self) -> AsrStream {
+            let heard_samples = self.heard_samples.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
@@ -655,6 +666,7 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
                     } else {
                         interim_tx.send_replace("把激光功率调到四百".into());
                     }
+                    heard_samples.store(total_samples, Ordering::SeqCst);
                 }
                 let text = if total_samples >= 7000 {
                     "把激光功率调到四百"
@@ -688,6 +700,7 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
 
     struct SwitchableJobTools {
         completed: Arc<AtomicBool>,
+        sending_polls: Arc<AtomicUsize>,
     }
     impl ToolExecutor for SwitchableJobTools {
         fn tools(&self) -> Vec<ToolSpec> {
@@ -703,7 +716,11 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
         }
         fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
             let done = self.completed.load(Ordering::SeqCst);
+            let sending_polls = self.sending_polls.clone();
             Box::pin(async move {
+                if !done {
+                    sending_polls.fetch_add(1, Ordering::SeqCst);
+                }
                 Some(serde_json::json!({"workflows":[{
                     "workflow_id": "wf-during-hold",
                     "status": if done { "completed" } else { "sending" },
@@ -714,6 +731,8 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
     }
 
     let completed = Arc::new(AtomicBool::new(false));
+    let sending_polls = Arc::new(AtomicUsize::new(0));
+    let heard_samples = Arc::new(AtomicUsize::new(0));
     let llm = Arc::new(FakeLlm::default());
     let tts = Arc::new(FakeTts::default());
     let filter = Arc::new(VoiceJevFilter::new(
@@ -732,11 +751,20 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
         tts.clone(),
         Arc::new(SwitchableJobTools {
             completed: completed.clone(),
+            sending_polls: sending_polls.clone(),
         }),
         ConversationSettings::default(),
     )
-    .with_streaming_asr(Arc::new(TwoPartStreamingAsr))
+    .with_streaming_asr(Arc::new(TwoPartStreamingAsr {
+        heard_samples: heard_samples.clone(),
+    }))
     .with_jev_filter(filter);
+
+    let first_part = uplink(&tone(UP, 300.0, 300, 8000.0));
+    let first_part_samples = 300 * UP as usize / 1000;
+    let mut continuation_frames = uplink(&silence(UP, 460));
+    continuation_frames.extend(uplink(&tone(UP, 300.0, 320, 8000.0)));
+    continuation_frames.extend(uplink(&silence(UP, 460)));
 
     let registry = Arc::new(FakeRegistry::default());
     let server = VoiceServer::start(
@@ -755,22 +783,39 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
     .unwrap();
     let mut device = chat_device(&server, &registry, 1);
 
-    // 先让空闲轮询记录一次 sending 基线
-    std::thread::sleep(Duration::from_millis(45));
+    // 先等空闲轮询记录至少一次 sending 基线
+    wait_until("空闲轮询记录 sending 基线", || {
+        sending_polls.load(Ordering::SeqCst) >= 1
+    });
     send_json(
         &mut device,
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
+    // 等服务端真正处理完 listen start 进入自动拾音占线态，再将任务翻转为 completed
+    wait_until("服务端进入自动拾音状态", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.state == "listening")
+    });
     // 录音与续听挂起期间任务变为 completed，不得抢占覆盖正在拾音/挂起的半句话
     completed.store(true, Ordering::SeqCst);
 
-    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
-    std::thread::sleep(Duration::from_millis(50));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
-    std::thread::sleep(Duration::from_millis(10));
+    send_audio(&mut device, 1, &first_part);
+    wait_until(
+        "首段语音已被流式识别接收并生成中间结果",
+        || heard_samples.load(Ordering::SeqCst) >= first_part_samples,
+    );
     // 第 2 段音频在 Jev 35ms 返回 false 之前已经送入慢速 VadWorker（每帧 12ms，尚未吐出 SpeechStart）
-    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
+    for (index, frame) in continuation_frames.iter().enumerate() {
+        device
+            .write(Message::binary(
+                encode_frame(1, frame, index as u32 * 60).unwrap(),
+            ))
+            .unwrap();
+    }
+    device.flush().unwrap();
 
     // 第 1 次播报必须是完整拼接后的用户回答（不能被 worker.reset 截断，也不能被任务播报抢断）
     let (turn_texts, _, _) = collect_playback(&mut device, 1);

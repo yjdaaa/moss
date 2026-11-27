@@ -358,3 +358,177 @@ test("工作台连接字段、规范目标与结果未知时的进度保留", as
   });
   assert.deepEqual(sendProgressForUnknownResult(null, 99, "x"), { sent: 0, total: 99, target: "x" });
 });
+
+test("工作台发送确认框与监视舱：超速提示、软限位风险预判、无提示干净态与发送后 warnings 展示", async () => {
+  const path = (await import("node:path")).default;
+  const { fileURLToPath } = await import("node:url");
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { createServer } = await import("vite");
+  const { resolveSoftLimitSendWarning, syncHardwareWorkspaceLimits } = await import("../src/deviceConnection.js");
+  const { sendProgressFromResult } = await import("../src/estopResumeState.js");
+  const { workbenchPreviewWarnings, workbenchSendWarnings } = await import("../src/workbenchParams.js");
+
+  const speedWarn = "雕刻速度 4500 mm/min 超过固件最大速度 3000 mm/min，固件会自动降速，工时与出光效果会偏离设定";
+  const softOffWarn = "固件未报告行程且软限位未开启，越界不会被拦截";
+  const mposWarn = "按当前机械坐标估算，X 轴预计走到 -20.0 ~ 30.0 mm（机械坐标范围 -200 ~ 0 mm），可能撞到行程尽头，请核对起点位置";
+
+  const baseWorkflow = {
+    workflow_id: "wf-k1",
+    confirmation_snapshot: { gcode_sha256: "b".repeat(64) },
+    artifacts: { actual_params: { laser_max_power: 400, feed_rate: 1200, passes: 1, power_scale: 1000 } },
+    input: {},
+  };
+
+  // 1) 有超速提示时，确认框与断点续雕确认框都包含这一行
+  const wfWithSpeedWarn = {
+    ...baseWorkflow,
+    artifacts: { ...baseWorkflow.artifacts, warnings: [speedWarn] },
+  };
+  assert.deepEqual(workbenchPreviewWarnings(wfWithSpeedWarn), [speedWarn]);
+  const promptSpeed = workbenchConfirmSendPrompt({
+    workflow: wfWithSpeedWarn,
+    material: "椴木",
+    thickness: "3",
+    targetLabel: "网络 192.0.2.10:23",
+    dimensions: { width: 30, height: 15 },
+  });
+  assert.match(promptSpeed.message, /超过固件最大速度 3000 mm\/min/);
+  assert.equal(promptSpeed.confirmText, "确认开刻", "只提示不拦截，confirmed 流程不变");
+
+  // 2) 软限位未开且行程未知时，前端按握手信息预判并在确认框带出风险行
+  const memStore = (() => {
+    const data = new Map();
+    return {
+      getItem: (k) => (data.has(k) ? data.get(k) : null),
+      setItem: (k, v) => data.set(k, String(v)),
+      removeItem: (k) => data.delete(k),
+    };
+  })();
+  const targetForm = { connection_mode: "network", network_host: "192.0.2.10", network_telnet_port: "23" };
+  syncHardwareWorkspaceLimits(null, targetForm, memStore, {
+    probed: true,
+    softLimitsEnabled: false,
+    homingEnabled: false,
+  });
+  const predictedSafety = resolveSoftLimitSendWarning(targetForm, memStore);
+  assert.equal(predictedSafety, softOffWarn);
+  const promptSoftOff = workbenchConfirmSendPrompt({
+    workflow: baseWorkflow,
+    material: "椴木",
+    thickness: "3",
+    targetLabel: "网络 192.0.2.10:23",
+    safetyWarning: predictedSafety,
+  });
+  assert.match(promptSoftOff.message, /固件未报告行程且软限位未开启，越界不会被拦截/);
+
+  const resumeWithRisk = workbenchResumeSendPrompt({
+    workflow: wfWithSpeedWarn,
+    material: "椴木",
+    thickness: "3",
+    targetLabel: "网络 192.0.2.10:23",
+    startLine: 18,
+    totalLines: 100,
+    safetyWarning: predictedSafety,
+  });
+  assert.match(resumeWithRisk.message, /超过固件最大速度 3000 mm\/min/);
+  assert.match(resumeWithRisk.message, /固件未报告行程且软限位未开启，越界不会被拦截/);
+
+  // 3) 都没有时，确认框不显示任何风险提示行
+  syncHardwareWorkspaceLimits({ x_travel_mm: 300, y_travel_mm: 200 }, targetForm, memStore, {
+    probed: true,
+    softLimitsEnabled: true,
+    homingEnabled: true,
+  });
+  assert.equal(resolveSoftLimitSendWarning(targetForm, memStore), "");
+  const cleanPrompt = workbenchConfirmSendPrompt({
+    workflow: baseWorkflow,
+    material: "椴木",
+    thickness: "3",
+    targetLabel: "网络 192.0.2.10:23",
+    safetyWarning: resolveSoftLimitSendWarning(targetForm, memStore),
+  });
+  assert.doesNotMatch(cleanPrompt.message, /风险提示/);
+  assert.deepEqual(cleanPrompt.warnings, []);
+
+  // 4) 发送后的 warnings 经 sendProgressFromResult 提取并在 WorkbenchMonitorCard 监视区渲染（无提示时不渲染警告块）
+  const progressWithWarnings = sendProgressFromResult({
+    running: true,
+    lines_sent: 12,
+    total_lines: 60,
+    target: "192.0.2.10:23",
+    phase: "streaming",
+    warnings: [softOffWarn, mposWarn],
+  });
+  assert.deepEqual(workbenchSendWarnings(progressWithWarnings, baseWorkflow), [softOffWarn, mposWarn]);
+
+  const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const ssrServer = await createServer({
+    root: frontendRoot,
+    configFile: false,
+    appType: "custom",
+    logLevel: "silent",
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true, hmr: false, watch: null },
+  });
+  try {
+    const { WorkbenchMonitorCard } = await ssrServer.ssrLoadModule(
+      "/src/components/workbench/WorkbenchMonitorCard.jsx",
+    );
+    const commonProps = {
+      onNavigate: () => {},
+      previewUrl: "",
+      previewStale: false,
+      dimensions: { width: 30, height: 15, originNote: "" },
+      gcodeText: "G1 X10",
+      timeEstimate: null,
+      fitNote: "",
+      routeNote: "",
+      fillNote: "",
+      busy: false,
+      framingBusy: false,
+      overlayStatus: "pending",
+      framingShape: "box",
+      setFramingShape: () => {},
+      connectionForm: targetForm,
+      connectionStatus: null,
+      activeJobs: [],
+      motionPayload: {},
+      addLog: () => {},
+      adoptDerivedWorkflow: () => {},
+      handleGeneratePreview: () => {},
+      handleConfirmSend: () => {},
+      handleResumeSend: () => {},
+      handleFraming: () => {},
+      handleExportGcode: () => {},
+      handleCancelJob: () => {},
+      handleEStop: () => {},
+    };
+
+    const cleanHtml = renderToStaticMarkup(
+      React.createElement(WorkbenchMonitorCard, {
+        ...commonProps,
+        currentWorkflow: baseWorkflow,
+        sendProgress: null,
+      }),
+    );
+    assert.doesNotMatch(cleanHtml, /wb-preview-warnings/);
+    assert.doesNotMatch(cleanHtml, /wb-send-warnings/);
+
+    const warnHtml = renderToStaticMarkup(
+      React.createElement(WorkbenchMonitorCard, {
+        ...commonProps,
+        currentWorkflow: wfWithSpeedWarn,
+        overlayStatus: "running",
+        sendProgress: progressWithWarnings,
+      }),
+    );
+    assert.match(warnHtml, /wb-preview-warnings/);
+    assert.match(warnHtml, /超过固件最大速度 3000 mm\/min/);
+    assert.match(warnHtml, /wb-send-warnings/);
+    assert.match(warnHtml, /固件未报告行程且软限位未开启，越界不会被拦截/);
+    assert.match(warnHtml, /可能撞到行程尽头/);
+  } finally {
+    await ssrServer.close();
+  }
+});

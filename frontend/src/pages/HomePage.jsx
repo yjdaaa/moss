@@ -81,6 +81,7 @@ import {
   probeControllerConnection,
   readBufferedDeviceLogs,
   readWorkspaceLimitsStore,
+  resolveSoftLimitSendWarning,
   resolveWorkspaceLimitsForTarget,
   syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
@@ -624,10 +625,10 @@ export function HomePage({
     if (probeEpochRef.current !== epoch) return false;
     setConnectionStatus(outcome.status);
     if (outcome.connected) {
-      syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm);
+      syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm, undefined, outcome.handshakeMeta);
       syncHardwareMachineFeatures(outcome.status?.features ?? null, connectionForm);
       writeMachineMotion(outcome.machineLimits, connectionForm);
-      addLog("DEVICE", outcome.text, "ok");
+      addLog("DEVICE", outcome.text, outcome.logLevel || "ok");
     }
     return outcome.connected;
   };
@@ -828,6 +829,11 @@ export function HomePage({
         setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
         setFillNote(fillResultNote(artifacts.fill_options, artifacts.removed_duplicates, artifacts.cut_options));
         setRouteNote(typeof artifacts.route_note === "string" ? artifacts.route_note : "");
+        if (Array.isArray(artifacts.warnings)) {
+          for (const warn of artifacts.warnings) {
+            if (typeof warn === "string" && warn.trim()) addLog("PREVIEW", warn.trim(), "warn");
+          }
+        }
         if (artifacts.width_mm && artifacts.height_mm) {
           // 2026-11-06：文字默认以激光头对准中心为起点、图片以左下角为起点，开刻前提示放哪
           setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
@@ -907,6 +913,11 @@ export function HomePage({
     );
     addLog("PREVIEW", `${label}已生成：${workflow.workflow_id}，尚未发送`, "ok");
     if (artifacts.origin_note) addLog("HOST", artifacts.origin_note, "warn");
+    if (Array.isArray(artifacts.warnings)) {
+      for (const warn of artifacts.warnings) {
+        if (typeof warn === "string" && warn.trim()) addLog("PREVIEW", warn.trim(), "warn");
+      }
+    }
   };
 
   // 先走边框（会真实驱动激光头移动，单击不得直接执行，须先经 showConfirm 二次确认）
@@ -1030,6 +1041,7 @@ export function HomePage({
     }
 
     const targetName = drawTargetReady(connectionForm) ? drawTargetLabel(connectionForm) : "";
+    const safetyWarning = resolveSoftLimitSendWarning(connectionForm, undefined, connectionStatus);
     const prompt = workbenchConfirmSendPrompt({
       workflow: currentWorkflow,
       material: selectedMaterial,
@@ -1037,6 +1049,7 @@ export function HomePage({
       targetLabel: targetName || (connectionMode === "serial" ? serialPort || "未选串口" : `${networkHost || "未填 IP"}:${telnetPort}`),
       dimensions,
       lastSentSha256,
+      safetyWarning,
     });
     const confirmed = await showConfirm(prompt.message, {
       title: prompt.title,
@@ -1098,10 +1111,19 @@ export function HomePage({
         }
         const sr = res.data.result?.send_result || {};
         const total = sr.total_lines || gcodeLineCount;
-        setSendProgress({ sent: 0, total, target: sr.target || "" });
+        const parsedProgress = sendProgressFromResult(sr);
+        const initialProgress = parsedProgress
+          ? { ...parsedProgress, sent: 0, total }
+          : { sent: 0, total, target: sr.target || "" };
+        setSendProgress(initialProgress);
+        if (Array.isArray(initialProgress.warnings)) {
+          for (const warn of initialProgress.warnings) {
+            addLog("GATE", warn, "warn");
+          }
+        }
         addLog("STREAM", `进度同步: 0% (0 / ${total} 行)`, "info");
         setOverlayStatus("running");
-        startStatusPolling(currentWorkflow.workflow_id);
+        startStatusPolling(currentWorkflow.workflow_id, initialProgress);
       } else if (res.status === 0) {
         // 网络中断或超时：后端可能已启动激光任务，严禁报失败或放开重发，立刻补全目标并拉起原任务轮询以保留急停绑定
         const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
@@ -1147,6 +1169,7 @@ export function HomePage({
     const startLine = getResumeStartLine(sendProgress);
     const totalLines = sendProgress?.total || 0;
     const targetName = drawTargetReady(connectionForm) ? drawTargetLabel(connectionForm) : "";
+    const safetyWarning = resolveSoftLimitSendWarning(connectionForm, undefined, connectionStatus);
     const resumePrompt = workbenchResumeSendPrompt({
       workflow: currentWorkflow,
       material: selectedMaterial,
@@ -1158,6 +1181,8 @@ export function HomePage({
           : `${networkHost || "未填 IP"}:${telnetPort}`),
       startLine,
       totalLines,
+      safetyWarning,
+      sendWarnings: sendProgress?.warnings,
     });
     const confirmed = await showConfirm(resumePrompt.message, {
       title: resumePrompt.title,
@@ -1206,10 +1231,16 @@ export function HomePage({
         const sr = res.data.result?.send_result || {};
         const total = sr.total_lines || sendProgress?.total || 0;
         const sent = sr.lines_sent || sendProgress?.sent || 0;
-        setSendProgress(sendProgressFromResult(sr) || { sent, total, target: sr.target || "" });
+        const nextProgress = sendProgressFromResult(sr) || { sent, total, target: sr.target || "" };
+        setSendProgress(nextProgress);
+        if (Array.isArray(nextProgress.warnings)) {
+          for (const warn of nextProgress.warnings) {
+            addLog("GATE", warn, "warn");
+          }
+        }
         addLog("STREAM", `断点续雕已启动：正在从第 ${startLine}/${total} 行继续执行`, "ok");
         setOverlayStatus("running");
-        startStatusPolling(currentWorkflow.workflow_id);
+        startStatusPolling(currentWorkflow.workflow_id, nextProgress);
       } else if (res.status === 0) {
         const canonicalTarget = workbenchCanonicalTarget(deviceConnection);
         setSendProgress((prev) => sendProgressForUnknownResult(prev, gcodeLineCount, canonicalTarget));
@@ -1239,9 +1270,9 @@ export function HomePage({
   };
 
   // Query errors preserve the last known job state and never remove its stop controls.
-  const startStatusPolling = (workflowId) => {
+  const startStatusPolling = (workflowId, initialProgress = sendProgress) => {
     pollingCleanupRef.current?.();
-    let state = { id:workflowId, kind:"workflow", status:"sending", progress:sendProgress };
+    let state = { id:workflowId, kind:"workflow", status:"sending", progress:initialProgress };
     const stop = startJobPolling(
       (signal) => postJson("/api/workflow", { action:"status", workflow_id:workflowId }, { signal }),
       (res) => {
@@ -1255,7 +1286,10 @@ export function HomePage({
         const sr = res.data.result?.send_result || {};
         const fromSr = sendProgressFromResult(sr);
         if (fromSr && fromSr.total > 0) {
-          setSendProgress(fromSr);
+          setSendProgress((prev) => {
+            if (fromSr.warnings?.length || !prev?.warnings?.length) return fromSr;
+            return { ...fromSr, warnings: prev.warnings };
+          });
           const pct = Math.min(100, Math.round(fromSr.sent / fromSr.total * 100));
           if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {
             lastLoggedPctRef.current = pct;

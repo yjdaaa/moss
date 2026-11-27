@@ -634,7 +634,17 @@ pub(crate) fn overlay_live_progress(
         && let Some(job) = jobs.get(workflow_id)
         && let Some(map) = payload.as_object_mut()
     {
-        map.insert("send_result".into(), job.live_send_result());
+        let prev_warnings = map
+            .get("send_result")
+            .and_then(|sr| sr.get("warnings"))
+            .and_then(serde_json::Value::as_array)
+            .filter(|arr| !arr.is_empty())
+            .cloned();
+        let mut live = job.live_send_result();
+        if let (Some(warnings), Some(live_map)) = (prev_warnings, live.as_object_mut()) {
+            live_map.insert("warnings".into(), serde_json::Value::Array(warnings));
+        }
+        map.insert("send_result".into(), live);
         map.insert("status".into(), serde_json::Value::String("sending".into()));
     }
 }

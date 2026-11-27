@@ -5,7 +5,12 @@ import { isRemoteMode, readAuthToken } from "../../authSession.js";
 import { writeFramingShape } from "../../aiPreviewState.js";
 import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
 import { timeEstimateNote } from "../../fillOptions.js";
-import { actualParamsText, workbenchStatusLabel } from "../../workbenchParams.js";
+import {
+  actualParamsText,
+  workbenchPreviewWarnings,
+  workbenchSendWarnings,
+  workbenchStatusLabel,
+} from "../../workbenchParams.js";
 import { FoldHeader } from "../FoldHeader.jsx";
 import RegistrationPanel from "../RegistrationPanel.jsx";
 import { WbCard } from "../WorkbenchCanvas.jsx";
@@ -57,6 +62,8 @@ export function WorkbenchMonitorCard({
   handleCancelJob,
   handleEStop,
 }) {
+  const previewWarnings = workbenchPreviewWarnings(currentWorkflow);
+  const sendWarnings = workbenchSendWarnings(sendProgress, currentWorkflow);
   return (
     <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
       <FoldHeader id="wb-monitor" title="加工监视舱" n={4} />
@@ -171,6 +178,15 @@ export function WorkbenchMonitorCard({
           )}
           {timeEstimateNote(timeEstimate) && (
             <div className="wb-origin-note" id="wb-time-note">耗时：{timeEstimateNote(timeEstimate)}</div>
+          )}
+          {previewWarnings.length > 0 && (
+            <div className="wb-preview-warnings" id="wb-preview-warnings" role="status">
+              {previewWarnings.map((warning, idx) => (
+                <div key={`${idx}-${warning}`} className="wb-stale-notice">
+                  {warning}
+                </div>
+              ))}
+            </div>
           )}
 
           {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行 */}
@@ -341,6 +357,15 @@ export function WorkbenchMonitorCard({
                 {workbenchStatusLabel(overlayStatus, sendProgress?.phase, Boolean(currentWorkflow?.workflow_id))}
               </span>
             </div>
+            {sendWarnings.length > 0 && (
+              <div className="wb-send-warnings" id="wb-send-warnings" role="status">
+                {sendWarnings.map((warning, idx) => (
+                  <div key={`${idx}-${warning}`} className="wb-stale-notice">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
     </WbCard>

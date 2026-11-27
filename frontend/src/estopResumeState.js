@@ -18,6 +18,9 @@ export function sendProgressFromResult(sendResult) {
     completedRaw !== undefined && completedRaw !== null && Number.isFinite(Number(completedRaw))
       ? Math.trunc(Number(completedRaw))
       : undefined;
+  const warnings = Array.isArray(sendResult.warnings)
+    ? sendResult.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
+    : [];
   return {
     sent,
     total,
@@ -28,6 +31,7 @@ export function sendProgressFromResult(sendResult) {
     ...(linesCompleted !== undefined ? { lines_completed: linesCompleted } : {}),
     target: typeof sendResult.target === "string" ? sendResult.target : "",
     ...(typeof sendResult.phase === "string" ? { phase: sendResult.phase } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 

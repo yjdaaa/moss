@@ -390,7 +390,33 @@ export function workbenchStatusLabel(overlayStatus, phase, hasWorkflow = false) 
   return hasWorkflow ? "就绪 · 等待开刻" : "等待计算轨迹";
 }
 
-/** 构造点击「开始雕刻」时的二次确认弹窗内容；相同物理 SHA-256 再次下发时追加防重刻烧穿提醒。 */
+function normalizeWarningList(items) {
+  if (!Array.isArray(items)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const text = typeof item === "string" ? item.trim() : "";
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      out.push(text);
+    }
+  }
+  return out;
+}
+
+/** 提取预览产物 `artifacts.warnings` 中的提示（如雕刻速度超过固件最大速度）。 */
+export function workbenchPreviewWarnings(workflow) {
+  return normalizeWarningList(workflow?.artifacts?.warnings);
+}
+
+/** 提取发送阶段后端返回的 `send_result.warnings`（软限位未开启/未知、机械坐标估算越界等）。 */
+export function workbenchSendWarnings(sendProgress, workflow = null) {
+  const fromProgress = normalizeWarningList(sendProgress?.warnings);
+  if (fromProgress.length > 0) return fromProgress;
+  return normalizeWarningList(workflow?.send_result?.warnings);
+}
+
+/** 构造点击「开始雕刻」时的二次确认弹窗内容；相同物理 SHA-256 再次下发时追加防重刻烧穿提醒，并透出超速与软限位风险提示（不新增拦截）。 */
 export function workbenchConfirmSendPrompt({
   workflow,
   material,
@@ -398,6 +424,8 @@ export function workbenchConfirmSendPrompt({
   targetLabel,
   dimensions,
   lastSentSha256 = "",
+  safetyWarning = "",
+  sendWarnings = [],
 } = {}) {
   const sha256 = String(
     workflow?.confirmation_snapshot?.gcode_sha256 || workflow?.artifacts?.gcode_sha256 || "",
@@ -420,12 +448,18 @@ export function workbenchConfirmSendPrompt({
           : originLine
             ? "lower_left"
             : null;
+  const riskWarnings = normalizeWarningList([
+    ...workbenchPreviewWarnings(workflow),
+    ...(Array.isArray(sendWarnings) ? sendWarnings : []),
+    safetyWarning,
+  ]);
   const lines = [
     `目标设备：${targetLabel || "当前连接设备"}`,
     `加工材质：${material || "—"} ${thickness ? `${thickness} mm` : ""}`.trim(),
     sizeLine,
     paramsLine ? `加工参数：${paramsLine}` : "",
     originLine ? `对刀起点：${originLine}` : "",
+    ...riskWarnings.map((w) => `⚠️ 风险提示：${w}`),
     "请确认我在机器旁、材料已放稳、排风已开启且佩戴护目镜。",
   ].filter(Boolean);
   if (isRepeat) {
@@ -438,6 +472,7 @@ export function workbenchConfirmSendPrompt({
     danger: isRepeat,
     sha256,
     origin,
+    warnings: riskWarnings,
   };
 }
 
@@ -465,7 +500,13 @@ export function workbenchCanonicalTarget({ connectionMode, serialPort, baudrate,
  */
 export function sendProgressForUnknownResult(previous, fallbackTotal, target) {
   if (previous?.target) return previous;
-  return { sent: previous?.sent ?? 0, total: previous?.total ?? fallbackTotal, target };
+  const warnings = normalizeWarningList(previous?.warnings);
+  return {
+    sent: previous?.sent ?? 0,
+    total: previous?.total ?? fallbackTotal,
+    target,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
 /** 构造点击「断点续雕」时的二次确认弹窗内容，防止误触直接出光或丢步错位。 */
@@ -476,15 +517,23 @@ export function workbenchResumeSendPrompt({
   targetLabel,
   startLine = 1,
   totalLines = 0,
+  safetyWarning = "",
+  sendWarnings = [],
 } = {}) {
   const safeStart = Math.max(1, Number(startLine) || 1);
   const safeTotal = Number(totalLines) || 0;
   const paramsLine = actualParamsText(workflow);
+  const riskWarnings = normalizeWarningList([
+    ...workbenchPreviewWarnings(workflow),
+    ...(Array.isArray(sendWarnings) ? sendWarnings : workbenchSendWarnings(null, workflow)),
+    safetyWarning,
+  ]);
   const lines = [
     `目标设备：${targetLabel || "当前连接设备"}`,
     `加工材质：${material || "—"} ${thickness ? `${thickness} mm` : ""}`.trim(),
     `续雕位置：从第 ${safeStart}${safeTotal > 0 ? ` / ${safeTotal}` : ""} 行继续下发（自动先发 $X 解锁）`,
     paramsLine ? `加工参数：${paramsLine}` : "",
+    ...riskWarnings.map((w) => `⚠️ 风险提示：${w}`),
     "请现场核实：材料没有挪动、急停或断连没有造成激光头丢步偏移、排风已开启且佩戴护目镜；若坐标系已偏请点取消并重新对刀生成预览。",
   ].filter(Boolean);
   return {
@@ -492,6 +541,7 @@ export function workbenchResumeSendPrompt({
     message: lines.join("\n"),
     confirmText: `确认从第 ${safeStart} 行续雕`,
     danger: false,
+    warnings: riskWarnings,
   };
 }
 

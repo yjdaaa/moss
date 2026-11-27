@@ -11,6 +11,13 @@
 - **验证**：`laser-api` 全部 269 项通过，`draw_natural_size_is_fitted_into_the_machine_and_explicit_size_is_not`（100 mm 机器缩到 94、400 mm 机器每边 8 mm）与 `draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big`（300 × 150 缩到 96 × 48）已更新。未在真机出光验证。
 - **关联**：`crates/laser-api/src/generation/{mod.rs,draw.rs}`、`crates/laser-api/src/tests/preview.rs`。
 
+### 雕刻工作台确认框与加工监视舱接入超速、软限位与机械坐标越界提示（2026-11-26）
+
+- **现象**：创作画板与 AI 预览窗已接入雕刻超速、软限位缺失与机械坐标估算越界提示，雕刻工作台的开刻/续雕确认框与加工监视舱尚未展示这些风险信息。
+- **根因与修复**：`workbenchConfirmSendPrompt` 与 `workbenchResumeSendPrompt` 接入预览产物 `artifacts.warnings`（速度超过固件最大速度）和按当前连接目标握手状态预判的 `resolveSoftLimitSendWarning`（固件未报行程且软限位未开启或未知），发送后经 `sendProgressFromResult` 与 `overlay_live_progress` 保留 `send_result.warnings` 并在 `WorkbenchMonitorCard` 预览摘要区与下发进度区展示；只作风险提示，不新增任何拦截，不改 `confirmed` 契约。
+- **验证**：`workbenchParams.test.mjs` 新增确认框与监视舱提示用例（超速、软限位预判、无提示干净态、发送后 warnings 展示）；同批修稳 `moss-voice-server` 时序测试 `slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_and_defer_notice`（固定睡眠改为等待可观测条件，断言不变，连跑 20 次与 4 进程并发压测 0 失败）；`node scripts/verify.mjs --finish` 通过（Rust 1584 项、前端单测 425 项、浏览器测试 20 个文件、回环 E2E 41 项，已快更）。真实机器上的提示触发未实机复测（`unverified`）。
+- **关联**：`frontend/src/workbenchParams.js`、`frontend/src/estopResumeState.js`、`frontend/src/pages/HomePage.jsx`、`frontend/src/components/workbench/WorkbenchMonitorCard.jsx`、`crates/laser-api/src/jobs.rs`。
+
 ### 创作画板导入的 SVG / DXF 默认按原尺寸 1:1 输出，超出机器行程才等比缩小（2026-11-26）
 
 - **现象**：导入的 SVG / DXF 在宽、高留空时按导出图 0.1 mm / 像素换算，填了宽高也是含四周留边的整幅画板尺寸，CAD 零件无法按图纸原尺寸切出。
