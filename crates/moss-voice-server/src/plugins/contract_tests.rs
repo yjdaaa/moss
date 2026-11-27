@@ -79,26 +79,73 @@ impl Reply {
     }
 }
 
+fn shared_tls_fixture() -> &'static (Vec<u8>, Arc<ServerConfig>) {
+    static FIXTURE: std::sync::OnceLock<(Vec<u8>, Arc<ServerConfig>)> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let cert = rcgen::generate_simple_self_signed(vec![HOST.into()]).unwrap();
+        let der = cert.cert.der().to_vec();
+        let crypto = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = ServerConfig::builder_with_provider(crypto)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(der.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der())),
+            )
+            .unwrap();
+        (der, Arc::new(tls))
+    })
+}
+
+fn read_http_request(
+    stream: &mut StreamOwned<ServerConnection, std::net::TcpStream>,
+    deadline_test: bool,
+) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut packet = [0; 4096];
+    loop {
+        let count = match stream.read(&mut packet) {
+            Ok(count) => count,
+            // A deadline test whose client already gave up must not panic here;
+            // the test below asserts the request arrived in full instead.
+            Err(_) if deadline_test => return Some(raw),
+            Err(e) => panic!("fixture read: {e}"),
+        };
+        if count == 0 {
+            return deadline_test.then_some(raw);
+        }
+        raw.extend_from_slice(&packet[..count]);
+        assert!(raw.len() <= 65536);
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            let length = String::from_utf8_lossy(&raw[..pos])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if raw.len() >= pos + 4 + length {
+                return Some(raw);
+            }
+        }
+    }
+}
+
 fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec<u8>) {
     let deadline_test = reply.delay_headers || reply.delay_body;
-    let cert = rcgen::generate_simple_self_signed(vec![HOST.into()]).unwrap();
-    let der = cert.cert.der().to_vec();
-    let crypto = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = ServerConfig::builder_with_provider(crypto)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(der.clone())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der())),
-        )
-        .unwrap();
+    let (der, tls) = shared_tls_fixture();
+    let der = der.clone();
+    let tls = tls.clone();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
     let server = thread::spawn(move || {
         // Bounded accept ensures fixture failure cannot hang the workspace.
         listener.set_nonblocking(true).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let _ = ready_tx.send(());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let socket = loop {
             match listener.accept() {
                 Ok((socket, _)) => break socket,
@@ -113,43 +160,31 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         };
         socket.set_nonblocking(false).unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         socket
             .set_write_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        let mut stream = StreamOwned::new(ServerConnection::new(Arc::new(tls)).unwrap(), socket);
-        let mut raw = Vec::new();
-        let mut packet = [0; 4096];
-        loop {
-            let count = match stream.read(&mut packet) {
-                Ok(count) => count,
-                // A deadline test whose client already gave up (e.g. the
-                // handshake itself was slow under load) must not panic here;
-                // the test below asserts the request arrived in full instead.
-                Err(_) if deadline_test => return raw,
-                Err(e) => panic!("fixture read: {e}"),
-            };
-            if count == 0 && deadline_test {
-                return raw;
-            }
-            assert!(count > 0);
-            raw.extend_from_slice(&packet[..count]);
-            assert!(raw.len() <= 65536);
-            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                let length = String::from_utf8_lossy(&raw[..pos])
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                if raw.len() >= pos + 4 + length {
-                    break;
-                }
-            }
+        let mut stream = StreamOwned::new(ServerConnection::new(tls).unwrap(), socket);
+        if deadline_test {
+            // Complete the TCP + TLS handshake on a warm keep-alive connection before
+            // the timed provider call begins, so client deadline tests measure reply
+            // timeout rather than OS thread startup or certificate verification load.
+            let warm = read_http_request(&mut stream, false).expect("warmup request");
+            assert!(warm.starts_with(b"HEAD /warmup HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
         }
+        // Only deadline tests may see the client give up mid-request; every other
+        // provider call must deliver a complete request (the old `assert!(count > 0)`).
+        let raw = match read_http_request(&mut stream, deadline_test) {
+            Some(raw) => raw,
+            None => panic!("fixture read: client closed before sending a full request"),
+        };
         if reply.delay_headers {
             wait_for_client_to_give_up(&mut stream);
         }
@@ -181,6 +216,7 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         let _ = stream.flush();
         raw
     });
+    ready_rx.recv().unwrap();
     // Same builder/policies as production, with only synthetic CA/DNS and a
     // shorter TEST-ONLY total deadline. Certificate verification stays enabled.
     let client = http::client_builder()
@@ -194,6 +230,16 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         })
         .build()
         .unwrap();
+    if deadline_test {
+        let warmup_url = format!("https://{HOST}:{}/warmup", addr.port());
+        let warm_resp = client
+            .head(&warmup_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .unwrap();
+        assert_eq!(warm_resp.status().as_u16(), 200);
+        let _ = warm_resp.bytes().unwrap();
+    }
     let base = format!("https://{HOST}:{}/feed.xml", addr.port());
     let result = provider.invoke(&client, &base);
     // Dropping the client closes any connection it still holds, which is what

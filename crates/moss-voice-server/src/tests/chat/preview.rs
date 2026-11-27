@@ -619,10 +619,12 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
     // 严格复刻 OfflineAsrBuffer：未出非空文字前按 5120 步长试认（前导静音空串不退化步长），出字后切 8000 步长
     struct PeriodicOfflineLikeAsr {
         turn: std::sync::atomic::AtomicUsize,
+        second_burst_sent: Arc<std::sync::atomic::AtomicBool>,
     }
     impl StreamingAsr for PeriodicOfflineLikeAsr {
         fn start(&self) -> AsrStream {
             let turn_idx = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let second_burst_sent = self.second_burst_sent.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
@@ -655,6 +657,7 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
                             tokio::time::sleep(Duration::from_millis(40)).await;
                             // 400ms 冷却窗内紧跟跳字：不应连续刷两次屏幕
                             interim_tx.send_replace("你好摩斯早".into());
+                            second_burst_sent.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                         (0, _) => {
                             interim_tx.send_replace("你好摩斯助手".into());
@@ -682,8 +685,10 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         }
     }
 
+    let second_burst_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let asr = Arc::new(PeriodicOfflineLikeAsr {
         turn: std::sync::atomic::AtomicUsize::new(0),
+        second_burst_sent: second_burst_sent.clone(),
     });
     let conversation = Arc::new(
         Conversation::new(
@@ -719,18 +724,28 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         &mut device,
         r#"{"type":"listen","state":"start","mode":"manual"}"#,
     );
+    wait_until("第 1 轮服务端进入手动拾音状态", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.state == "listening")
+    });
     std::thread::sleep(Duration::from_millis(320));
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
 
     let first_live = read_json(&mut device);
+    let first_live_at = Instant::now();
     assert_eq!(first_live["type"], "stt");
     assert_eq!(
         first_live["text"], "你好MOSS",
         "满 320ms 首轮重认应在说话未结束前立即上屏（不被 500ms 门槛误丢）"
     );
 
-    // 用 ping 验证 40ms 后的紧跟跳字在 400ms 冷却窗内未刷屏
-    std::thread::sleep(Duration::from_millis(70));
+    // 等 40ms 后的紧跟跳字已发出，再用 ping 验证其在 400ms 冷却窗内未刷屏
+    wait_until("冷却窗内二次跳字已发出", || {
+        second_burst_sent.load(std::sync::atomic::Ordering::SeqCst)
+    });
     send_json(&mut device, r#"{"type":"ping"}"#);
     let pong = read_json(&mut device);
     assert_eq!(
@@ -738,8 +753,8 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         "冷却窗内不应抢发第二条中间 stt: {pong:?}"
     );
 
-    // 再等 390ms（总间隔约 460ms < 500ms，验证推理轻微加速抖动不会吞掉 500ms 步长的第二次重认）
-    std::thread::sleep(Duration::from_millis(390));
+    // 补足到距首屏约 460ms（< 500ms，验证推理轻微加速抖动不会吞掉 500ms 步长的第二次重认）
+    std::thread::sleep(Duration::from_millis(460).saturating_sub(first_live_at.elapsed()));
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 540, 8000.0)));
     let second_live = read_json(&mut device);
     assert_eq!(second_live["type"], "stt");
@@ -759,6 +774,13 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         &mut device,
         r#"{"type":"listen","state":"start","mode":"manual"}"#,
     );
+    wait_until("第 2 轮服务端进入手动拾音状态", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.state == "listening")
+    });
     std::thread::sleep(Duration::from_millis(320));
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
     let live_same = read_json(&mut device);
@@ -778,6 +800,13 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         &mut device,
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
+    wait_until("第 3 轮服务端进入自动拾音状态", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.state == "listening")
+    });
     send_audio(&mut device, 1, &uplink(&silence(UP, 420)));
     for _ in 0..7 {
         std::thread::sleep(Duration::from_millis(55));
@@ -867,6 +896,13 @@ fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_
         &mut delayed_dev,
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
+    wait_until("第 4 轮服务端进入自动拾音状态", || {
+        delayed_server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.state == "listening")
+    });
     send_audio(&mut delayed_dev, 1, &uplink(&silence(UP, 420)));
     for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(55));

@@ -373,3 +373,11 @@ fn reply_mcp(device: &mut Device, id: &Value, result: Value) {
     let message = serde_json::json!({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": id, "result": result}});
     send_json(device, &message.to_string());
 }
+
+fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ok() {
+        assert!(Instant::now() < deadline, "等待超时：{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

@@ -5,9 +5,11 @@ use crate::mqtt::codec;
 use moss_voice_providers::BoxFuture;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct JobTools {
     payload: Arc<Mutex<Value>>,
+    sending_polls: Arc<AtomicUsize>,
 }
 
 impl ToolExecutor for JobTools {
@@ -23,8 +25,20 @@ impl ToolExecutor for JobTools {
         Box::pin(async { ToolOutcome::Reply("{}".into()) })
     }
     fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
-        let snap = self.payload.lock().unwrap().clone();
-        Box::pin(async move { Some(snap) })
+        let payload = self.payload.clone();
+        let sending_polls = self.sending_polls.clone();
+        Box::pin(async move {
+            let snap = payload.lock().unwrap().clone();
+            if snap["workflows"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|w| w["status"].as_str())
+                == Some("sending")
+            {
+                sending_polls.fetch_add(1, Ordering::SeqCst);
+            }
+            Some(snap)
+        })
     }
 }
 
@@ -167,17 +181,10 @@ impl UdpVoice {
     }
 }
 
-fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !ok() {
-        assert!(std::time::Instant::now() < deadline, "等待超时：{what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
     let payload = Arc::new(Mutex::new(serde_json::json!({ "workflows": [] })));
+    let sending_polls = Arc::new(AtomicUsize::new(0));
     let conversation = Conversation::new(
         Arc::new(FakeAsr {
             replies: Mutex::new(VecDeque::from([Ok("你好".to_owned())])),
@@ -190,6 +197,7 @@ fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
         Arc::new(FakeTts::default()),
         Arc::new(JobTools {
             payload: payload.clone(),
+            sending_polls: sending_polls.clone(),
         }),
         ConversationSettings::default(),
     );
@@ -290,8 +298,24 @@ fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
     assert_eq!(hello["udp"]["key"].as_str().unwrap().len(), 32);
     let session_id = hello["session_id"].as_str().unwrap().to_owned();
     let mut voice = UdpVoice::open(&hello);
+    let uplink_frames = uplink(&tone(UP, 300.0, 400, 8000.0));
     device.publish(&serde_json::json!({"session_id": session_id, "type": "listen", "state": "start", "mode": "manual"}));
-    voice.send(&uplink(&tone(UP, 300.0, 400, 8000.0)));
+    // MQTT 控制报文与 UDP 语音分走两个独立接收任务：先等会话真正进入手动拾音，再发 UDP 音频并确认已收音后发 stop
+    wait_until("会话进入手动拾音状态", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == "listening")
+    });
+    voice.send(&uplink_frames);
+    wait_until("UDP 上行语音已送达会话", || {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.session_id == session_id && s.level > 0)
+    });
     device
         .publish(&serde_json::json!({"session_id": session_id, "type": "listen", "state": "stop"}));
     let mut saw = (false, false);
@@ -333,9 +357,14 @@ fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
     assert_eq!(goodbye["session_id"], session_id.as_str());
     assert_eq!(server.status().sessions.len(), 1, "这一轮对话结束后仍在线");
     // 设备在收到 goodbye 前按固件逻辑（tts stop 后自动回聆听）发出的 listen start 迟到：
-    // 不能把已结束的对话拉回聆听
+    // 不能把已结束的对话拉回聆听；紧跟同连接 ping/pong 确认迟到消息已被会话处理完毕
     device.publish(&serde_json::json!({"session_id": session_id, "type": "listen", "state": "start", "mode": "auto"}));
-    std::thread::sleep(Duration::from_millis(200));
+    device.publish(&serde_json::json!({"type": "ping"}));
+    loop {
+        if device.read_json()["type"] == "pong" {
+            break;
+        }
+    }
     assert_eq!(
         server.status().sessions[0].state,
         "idle",
@@ -354,7 +383,9 @@ fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
         "workflows": [{"workflow_id": "wf-mqtt-1", "status": "sending",
             "live_progress": {"lines_sent": 10, "total_lines": 100, "elapsed_ms": 1000}}]
     });
-    std::thread::sleep(Duration::from_millis(200));
+    wait_until("常连空闲轮询记录 sending 基线", || {
+        sending_polls.load(Ordering::SeqCst) >= 2
+    });
     *payload.lock().unwrap() = serde_json::json!({
         "workflows": [{"workflow_id": "wf-mqtt-1", "status": "completed",
             "send_result": {"lines_sent": 100, "total_lines": 100}}]

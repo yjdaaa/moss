@@ -1,14 +1,6 @@
 //! 判停抢跑：口语状态直达、半句等待续说、慢判停与并发任务、Smart Turn 闸门。
 use super::*;
 
-fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !ok() {
-        assert!(Instant::now() < deadline, "等待超时：{what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 #[tokio::test]
 async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_tools_for_chat() {
     use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
@@ -191,10 +183,14 @@ async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_to
 #[test]
 fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_early() {
     use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct TwoPartStreamingAsr;
+    struct TwoPartStreamingAsr {
+        heard_samples: Arc<AtomicUsize>,
+    }
     impl StreamingAsr for TwoPartStreamingAsr {
         fn start(&self) -> AsrStream {
+            let heard_samples = self.heard_samples.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
@@ -208,6 +204,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
                     } else {
                         interim_tx.send_replace("把激光功率调到四百".into());
                     }
+                    heard_samples.store(total_samples, Ordering::SeqCst);
                 }
                 let final_text = if total_samples >= 7000 {
                     "把激光功率调到四百"
@@ -252,6 +249,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
         }
     }
 
+    let heard_samples = Arc::new(AtomicUsize::new(0));
     let llm = Arc::new(FakeLlm::default());
     let tts = Arc::new(FakeTts::default());
     let filter = Arc::new(VoiceJevFilter::new(
@@ -270,9 +268,12 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
         Arc::new(NoTools),
         ConversationSettings::default(),
     )
-    .with_streaming_asr(Arc::new(TwoPartStreamingAsr))
+    .with_streaming_asr(Arc::new(TwoPartStreamingAsr {
+        heard_samples: heard_samples.clone(),
+    }))
     .with_jev_filter(filter);
 
+    let first_part_samples = 300 * UP as usize / 1000;
     let registry = Arc::new(FakeRegistry::default());
     let server = VoiceServer::start(
         ServerConfig {
@@ -294,18 +295,17 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
 
     // 第 1 段：说 300ms（半截话“把激光功率调到”）+ 停顿 260ms 触发首次 VAD SpeechEnd
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
-    std::thread::sleep(Duration::from_millis(40));
+    wait_until("首段语音流式识别产出半句中间结果", || {
+        heard_samples.load(Ordering::SeqCst) >= first_part_samples
+    });
     send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
-    let wait_deadline = Instant::now() + Duration::from_millis(2500);
-    while !server
-        .status()
-        .events
-        .iter()
-        .any(|e| e.text.contains("尚未说完"))
-        && Instant::now() < wait_deadline
-    {
-        std::thread::sleep(Duration::from_millis(15));
-    }
+    wait_until("记录尚未说完延长拾音事件", || {
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("尚未说完"))
+    });
 
     // 第 2 段：在 1.2s 宽限窗内继续说 300ms（“四百”）+ 停顿 260ms 结束整句
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
@@ -340,7 +340,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
 fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuation_without_storm() {
     use crate::audio::{EnergyVad, Vad, VadConfig, VadFactory};
     use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct WorkerEnergyVadFactory;
     impl VadFactory for WorkerEnergyVadFactory {
@@ -349,9 +349,12 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
         }
     }
 
-    struct RapidInterimStreamingAsr;
+    struct RapidInterimStreamingAsr {
+        first_part_ready: Arc<AtomicBool>,
+    }
     impl StreamingAsr for RapidInterimStreamingAsr {
         fn start(&self) -> AsrStream {
+            let first_part_ready = self.first_part_ready.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
@@ -378,6 +381,9 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
                             }
                         } else {
                             interim_tx.send_replace("把激光功率调到".into());
+                        }
+                        if total_samples >= 300 * UP as usize / 1000 {
+                            first_part_ready.store(true, Ordering::SeqCst);
                         }
                     } else {
                         interim_tx.send_replace("把激光功率调到四百".into());
@@ -428,6 +434,7 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
         }
     }
 
+    let first_part_ready = Arc::new(AtomicBool::new(false));
     let llm = Arc::new(FakeLlm::default());
     let jev_client = Arc::new(CountingUnfinishedJev(AtomicUsize::new(0)));
     let filter = Arc::new(VoiceJevFilter::new(
@@ -446,8 +453,15 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
         Arc::new(NoTools),
         ConversationSettings::default(),
     )
-    .with_streaming_asr(Arc::new(RapidInterimStreamingAsr))
+    .with_streaming_asr(Arc::new(RapidInterimStreamingAsr {
+        first_part_ready: first_part_ready.clone(),
+    }))
     .with_jev_filter(filter);
+
+    let first_part = uplink(&tone(UP, 300.0, 300, 8000.0));
+    let mut continuation_frames = uplink(&silence(UP, 460));
+    continuation_frames.extend(uplink(&tone(UP, 300.0, 320, 8000.0)));
+    continuation_frames.extend(uplink(&silence(UP, 460)));
 
     let registry = Arc::new(FakeRegistry::default());
     let server = VoiceServer::start(
@@ -470,12 +484,19 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
     );
 
     // 第 1 段语音 + 260ms 停顿，紧接着不等 35ms Jev 返回就送入第 2 段开头，验证 VadWorker 在途帧绝不被清空
-    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
-    std::thread::sleep(Duration::from_millis(80));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
-    std::thread::sleep(Duration::from_millis(10));
-    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
+    send_audio(&mut device, 1, &first_part);
+    wait_until(
+        "首段高频跳字已完成且半句中间结果就绪",
+        || first_part_ready.load(Ordering::SeqCst),
+    );
+    for (index, frame) in continuation_frames.iter().enumerate() {
+        device
+            .write(Message::binary(
+                encode_frame(1, frame, index as u32 * 60).unwrap(),
+            ))
+            .unwrap();
+    }
+    device.flush().unwrap();
 
     let (texts, _, _) = collect_playback(&mut device, 1);
     let stt = texts
@@ -498,16 +519,25 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
 #[test]
 fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_cancel_utterance() {
     use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct PartialAsr;
+    struct PartialAsr {
+        interim_ready: Arc<AtomicBool>,
+    }
     impl StreamingAsr for PartialAsr {
         fn start(&self) -> AsrStream {
+            let interim_ready = self.interim_ready.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
             let handle = tokio::spawn(async move {
-                while rx.recv().await.is_some() {
+                let mut total_samples = 0usize;
+                while let Some(chunk) = rx.recv().await {
+                    total_samples += chunk.len();
                     interim_tx.send_replace("把激光功率调到".into());
+                    if total_samples >= 300 * UP as usize / 1000 {
+                        interim_ready.store(true, Ordering::SeqCst);
+                    }
                 }
                 let _ = done_tx.send(Ok("把激光功率调到".into()));
             });
@@ -515,13 +545,16 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
         }
     }
 
-    struct SlowHoldJev;
+    struct SlowHoldJev {
+        in_flight: Arc<AtomicBool>,
+    }
     impl DecisionClient for SlowHoldJev {
         fn decide<'a>(
             &'a self,
             _payload: &'a Value,
             _timeout: Duration,
         ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            self.in_flight.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(280)).await;
                 Ok(serde_json::json!({
@@ -533,9 +566,13 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
         }
     }
 
+    let interim_ready = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicBool::new(false));
     let llm = Arc::new(FakeLlm::default());
     let filter = Arc::new(VoiceJevFilter::new(
-        Arc::new(SlowHoldJev),
+        Arc::new(SlowHoldJev {
+            in_flight: in_flight.clone(),
+        }),
         JevFilterOptions {
             enabled: true,
             fast_route: false,
@@ -551,7 +588,9 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
         Arc::new(NoTools),
         ConversationSettings::default(),
     )
-    .with_streaming_asr(Arc::new(PartialAsr))
+    .with_streaming_asr(Arc::new(PartialAsr {
+        interim_ready: interim_ready.clone(),
+    }))
     .with_jev_filter(filter);
 
     let registry = Arc::new(FakeRegistry::default());
@@ -573,8 +612,13 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
-    std::thread::sleep(Duration::from_millis(30));
+    wait_until("首段流式中间识别已就绪", || {
+        interim_ready.load(Ordering::SeqCst)
+    });
     send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
+    wait_until("慢速 Jev 续听检查已进入在途状态", || {
+        in_flight.load(Ordering::SeqCst)
+    });
 
     // Jev 280ms 续听检查仍在途：此时发 ping 必须零阻塞立即收到 pong（远早于 280ms）
     let ping_at = Instant::now();
@@ -593,6 +637,13 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
 
     // 在途或挂起期间发 abort：必须立即取消挂起录音，宽限窗过后也绝不把半截话送进大模型
     send_json(&mut device, r#"{"type":"abort","reason":"user_cancel"}"#);
+    wait_until("服务端已处理拾音取消", || {
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("拾音已取消"))
+    });
     std::thread::sleep(Duration::from_millis(1450));
     assert!(
         llm.seen.lock().unwrap().is_empty(),
@@ -1038,10 +1089,14 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
     use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct ScriptedInterimAsr(Mutex<VecDeque<&'static str>>);
+    struct ScriptedInterimAsr {
+        scripts: Mutex<VecDeque<&'static str>>,
+        interims_sent: Arc<AtomicUsize>,
+    }
     impl StreamingAsr for ScriptedInterimAsr {
         fn start(&self) -> AsrStream {
-            let text = self.0.lock().unwrap().pop_front().unwrap_or("你好");
+            let text = self.scripts.lock().unwrap().pop_front().unwrap_or("你好");
+            let interims_sent = self.interims_sent.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
@@ -1051,6 +1106,7 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
                     if !pushed {
                         pushed = true;
                         interim_tx.send_replace(text.into());
+                        interims_sent.fetch_add(1, Ordering::SeqCst);
                     }
                 }
                 let _ = done_tx.send(Ok(text.into()));
@@ -1084,6 +1140,7 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
         }
     }
 
+    let interims_sent = Arc::new(AtomicUsize::new(0));
     let jev_client = Arc::new(CountingJev(AtomicUsize::new(0)));
     let filter = Arc::new(VoiceJevFilter::new(
         jev_client.clone(),
@@ -1102,10 +1159,10 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
         Arc::new(NoTools),
         ConversationSettings::default(),
     )
-    .with_streaming_asr(Arc::new(ScriptedInterimAsr(Mutex::new(VecDeque::from([
-        "你是什么",
-        "退下退下",
-    ])))))
+    .with_streaming_asr(Arc::new(ScriptedInterimAsr {
+        scripts: Mutex::new(VecDeque::from(["你是什么", "退下退下"])),
+        interims_sent: interims_sent.clone(),
+    }))
     .with_jev_filter(filter);
 
     let registry = Arc::new(FakeRegistry::default());
@@ -1129,7 +1186,9 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
-    std::thread::sleep(Duration::from_millis(160));
+    wait_until("说话期防抖预热已发起 Jev 请求", || {
+        jev_client.0.load(Ordering::SeqCst) >= 1
+    });
     send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
     let _ = collect_items(&mut device);
     assert_eq!(
@@ -1145,7 +1204,9 @@ fn reduplicated_exit_skips_jev_hold_and_same_interim_prewarm_is_reused_without_d
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
     );
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
-    std::thread::sleep(Duration::from_millis(40));
+    wait_until("第 2 轮连说退出词中间结果已发出", || {
+        interims_sent.load(Ordering::SeqCst) >= 2
+    });
     send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
     let exit_items = texts(&collect_items(&mut device));
     assert!(

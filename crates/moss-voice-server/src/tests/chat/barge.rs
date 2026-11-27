@@ -723,11 +723,17 @@ fn speech_to_someone_else_after_an_answer_gets_no_reply() {
     // 固件播完重新拾音：先是旁人的一句，再是对小智说的一句
     send_json(&mut device, listen);
     send_audio(&mut device, 1, &uplink(&speech));
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while llm.tools.lock().unwrap().len() < 2 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::thread::sleep(Duration::from_millis(200));
+    wait_until(
+        "旁人话语已判定非对小智说并回到自动拾音",
+        || {
+            let status = server.status();
+            status
+                .events
+                .iter()
+                .any(|event| event.text.starts_with("这句不是对小智说的"))
+                && status.sessions.iter().any(|s| s.state == "listening")
+        },
+    );
     send_audio(&mut device, 1, &uplink(&speech));
     assert_eq!(
         texts(&collect_items(&mut device)),
@@ -815,11 +821,14 @@ fn staying_silent_after_a_tool_round_ends_the_turn_normally() {
     speech.extend(silence(UP, 700));
     send_json(&mut device, listen);
     send_audio(&mut device, 1, &uplink(&speech));
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while llm.tools.lock().unwrap().len() < 2 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::thread::sleep(Duration::from_millis(200));
+    wait_until(
+        "执行过工具的无声轮次正常收尾并回到自动拾音",
+        || {
+            let status = server.status();
+            status.timings.iter().any(|t| t.outcome == "done")
+                && status.sessions.iter().any(|s| s.state == "listening")
+        },
+    );
     assert!(
         !server
             .status()

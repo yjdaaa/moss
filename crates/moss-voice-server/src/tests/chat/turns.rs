@@ -854,7 +854,9 @@ fn speaking_on_while_a_tool_is_running_does_not_restart_the_turn() {
     first.extend(silence(UP, 600));
     send_audio(&mut device, 1, &uplink(&first));
     assert_eq!(read_json(&mut device)["text"], "几点了");
-    std::thread::sleep(Duration::from_millis(300));
+    wait_until("工具已执行且进入第二轮回复等待", || {
+        !fakes.tools.calls.lock().unwrap().is_empty() && fakes.llm.seen.lock().unwrap().len() >= 2
+    });
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 600, 8000.0)));
     assert_eq!(
         texts(&collect_items(&mut device)),
@@ -878,7 +880,14 @@ fn empty_transcript_keeps_listening_in_auto_mode() {
     pcm.extend(silence(UP, 600));
     send_audio(&mut device, 1, &uplink(&pcm));
     // 第一次识别为空：不回复，继续拾音；不发 listen start 再说一次
-    std::thread::sleep(Duration::from_millis(300));
+    wait_until("空识别收尾并重新进入自动拾音", || {
+        let status = server.status();
+        status
+            .events
+            .iter()
+            .any(|event| event.text.contains("没有识别出文字"))
+            && status.sessions.iter().any(|s| s.state == "listening")
+    });
     send_audio(&mut device, 1, &uplink(&pcm));
     assert_eq!(
         texts(&collect_items(&mut device)),

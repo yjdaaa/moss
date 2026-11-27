@@ -155,7 +155,7 @@ fn a_slow_search_runs_in_the_background_while_the_user_keeps_chatting() {
 /// 审查修正：播报正在请求大模型（还没开口）时用户开口说话——这句话不能丢，播报让路，之后重新播报。
 #[test]
 fn a_report_talked_over_before_it_speaks_yields_and_is_delivered_later() {
-    let (server, registry, _llm, _) = start_background(
+    let (server, registry, llm, _) = start_background(
         &["帮我查一下今天天气", "讲个笑话"],
         vec![
             call("web_search"),
@@ -178,17 +178,17 @@ fn a_report_talked_over_before_it_speaks_yields_and_is_delivered_later() {
     collect_items(&mut device);
     // 固件播完重新拾音；等播报开始请求大模型
     send_json(&mut device, listen);
-    let deadline = Instant::now() + Duration::from_secs(6);
-    while !server
-        .status()
-        .events
-        .iter()
-        .any(|event| event.text == "播报后台查询结果")
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::thread::sleep(Duration::from_millis(100));
+    wait_until(
+        "后台查询结果播报轮已进入思考并请求大模型",
+        || {
+            server
+                .status()
+                .sessions
+                .iter()
+                .any(|s| s.state == "thinking")
+                && llm.seen.lock().unwrap().len() >= 2
+        },
+    );
     send_audio(&mut device, 1, &uplink(&speech));
     let mut items = texts(&collect_items(&mut device));
     if !items.contains(&"句:好的笑话。".into()) {

@@ -129,6 +129,16 @@ fn thinking_llm() -> FakeLlm {
     }
 }
 
+/// 同连接发一次 ping/pong，确认此前发出的上行音频帧已被会话消费并启动 `follow_probe` 计时。
+fn sync_probe_started(device: &mut Device) {
+    send_json(device, r#"{"type":"ping"}"#);
+    loop {
+        if read_json(device)["type"] == "pong" {
+            return;
+        }
+    }
+}
+
 /// 思考中传来一阵敲击声：能量检测会当成“接着说”，判停模型不认——照常回答，不放弃、不重新识别。
 #[test]
 fn a_bang_while_thinking_does_not_throw_away_the_answer_when_the_model_vad_hears_no_speech() {
@@ -143,8 +153,9 @@ fn a_bang_while_thinking_does_not_throw_away_the_answer_when_the_model_vad_hears
     first.extend(silence(UP, 700));
     send_audio(&mut device, 1, &uplink(&first));
     assert_eq!(read_json(&mut device)["text"], "帮我看看状态");
-    // 设备按实时节奏上传：敲击声之后确认窗口到期
+    // 设备按实时节奏上传：确认敲击声已被服务端消费后再等待 700ms 确认窗口到期
     send_audio(&mut device, 1, &uplink(&bang(300)));
+    sync_probe_started(&mut device);
     std::thread::sleep(Duration::from_millis(800));
     send_audio(&mut device, 1, &uplink(&silence(UP, 120)));
     assert_eq!(
@@ -213,8 +224,9 @@ fn a_short_stop_while_thinking_is_not_lost_when_the_model_vad_misses_it() {
     first.extend(silence(UP, 700));
     send_audio(&mut device, 1, &uplink(&first));
     assert_eq!(read_json(&mut device)["text"], "帮我看看状态");
-    // 判停模型不认的一阵声音（这里用宽带冲击模拟）；设备按实时节奏继续上传，确认窗口到期后的下一帧触发识别
+    // 判停模型不认的一阵声音（这里用宽带冲击模拟）；确认已被消费后等 700ms 窗口到期，下一帧触发识别
     send_audio(&mut device, 1, &uplink(&bang(300)));
+    sync_probe_started(&mut device);
     std::thread::sleep(Duration::from_millis(800));
     send_audio(&mut device, 1, &uplink(&silence(UP, 120)));
     let items = texts(&collect_items(&mut device));
@@ -383,6 +395,7 @@ fn a_late_recognized_stop_still_interrupts_an_answer_that_already_started() {
     assert_eq!(read_json(&mut device)["text"], "讲个长故事");
     // 思考中一声判停模型不认的短促声音；确认窗口到期后送去识别（要 1.2 秒），期间回答开口了
     send_audio(&mut device, 1, &uplink(&bang(300)));
+    sync_probe_started(&mut device);
     std::thread::sleep(Duration::from_millis(800));
     send_audio(&mut device, 1, &uplink(&silence(UP, 120)));
     let answer = texts(&collect_items(&mut device));
