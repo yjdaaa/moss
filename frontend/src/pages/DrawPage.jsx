@@ -74,6 +74,7 @@ import {
   connectionSummaryView,
   MACHINE_MOTION_EVENT,
   readWorkspaceLimitsStore,
+  resolveSoftLimitSendWarning,
   resolveWorkspaceLimitsForTarget,
   WORKSPACE_LIMITS_EVENT,
 } from "../deviceConnection.js";
@@ -106,7 +107,6 @@ import {
 } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DrawMaterialCard } from "../components/draw/DrawMaterialCard.jsx";
-import { DrawDeviceCard } from "../components/draw/DrawDeviceCard.jsx";
 import { DrawSendCard } from "../components/draw/DrawSendCard.jsx";
 import { SendConfirmDialog } from "../components/draw/SendConfirmDialog.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
@@ -1302,8 +1302,8 @@ export function DrawPage({
         thickness_mm: Number(form.thickness_mm) || 3.0,
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
-        ...(maxWidthMm !== 100 ? { work_area_width_mm: maxWidthMm } : {}),
-        ...(maxHeightMm !== 100 ? { work_area_height_mm: maxHeightMm } : {}),
+        work_area_width_mm: maxWidthMm,
+        work_area_height_mm: maxHeightMm,
         mode: modeSnapshot,
         ...(modeSnapshot === "vector" ? { vector_style: effectiveVectorStyle } : {}),
         ...(drawIsCut(modeSnapshot, effectiveVectorStyle) ? { laser_mode: "cut" } : {}),
@@ -1438,7 +1438,11 @@ export function DrawPage({
           }
         }
         if (res.ok && data.success) {
-          setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度..."));
+          const sendWarnings = Array.isArray(data.result?.send_result?.warnings)
+            ? data.result.send_result.warnings.filter((w) => typeof w === "string" && w.trim())
+            : [];
+          const baseMsg = data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度...");
+          setStatus(sendWarnings.length > 0 ? `${baseMsg}；⚠️ ${sendWarnings.join("；")}` : baseMsg);
           startDrawJobPolling(workflowId, inFlight);
         } else {
           setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
@@ -1472,6 +1476,7 @@ export function DrawPage({
     if (inFlightJobsRef.current.has(workflowId)) return;
 
     const startLine = getResumeStartLine(sendProgress);
+    const safetyWarning = resolveSoftLimitSendWarning(form, undefined, connectionStatus);
     const resumePrompt = workbenchResumeSendPrompt({
       workflow: result?.result,
       material: form.material,
@@ -1479,6 +1484,8 @@ export function DrawPage({
       targetLabel: drawTargetLabel(form),
       startLine,
       totalLines: sendProgress.total,
+      safetyWarning,
+      sendWarnings: sendProgress?.warnings,
     });
     const confirmed = await showConfirm(resumePrompt.message, {
       title: resumePrompt.title,
@@ -1525,7 +1532,11 @@ export function DrawPage({
       setJobStatusUnknown(false);
       setResult(data);
       if (res.ok && data.success) {
-        setStatus(data.result?.speech || `断点续雕已启动：正在从第 ${startLine} 行继续执行...`);
+        const sendWarnings = Array.isArray(data.result?.send_result?.warnings)
+          ? data.result.send_result.warnings.filter((w) => typeof w === "string" && w.trim())
+          : [];
+        const baseMsg = data.result?.speech || `断点续雕已启动：正在从第 ${startLine} 行继续执行...`;
+        setStatus(sendWarnings.length > 0 ? `${baseMsg}；⚠️ ${sendWarnings.join("；")}` : baseMsg);
         startDrawJobPolling(workflowId, inFlight);
       } else {
         setStatus((typeof data.result === "string" && data.result) || "断点恢复失败");
@@ -2056,13 +2067,6 @@ export function DrawPage({
           onResetManualLimits={handleResetManualLimits}
         />
 
-        <DrawDeviceCard
-          form={form}
-          connectionStatus={connectionStatus}
-          onOpenConnection={onOpenConnection}
-          busy={busy}
-        />
-
         <DrawSendCard
           form={form}
           busy={busy}
@@ -2109,6 +2113,8 @@ export function DrawPage({
           onMovedAckChange={(value) =>
             setRepeatSend((current) => setMovedMaterialAcknowledged(current, value))
           }
+          safetyWarning={resolveSoftLimitSendWarning(form, undefined, connectionStatus)}
+          sendWarnings={result?.result?.send_result?.warnings}
         />
       )}
     </div>

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Send, Wifi, X } from "lucide-react";
 import { isTopmostModalBackdrop } from "../AppDialog.jsx";
 import { readUnifiedConnection, resolveSoftLimitSendWarning } from "../../deviceConnection.js";
+import { controllerOverrideWarning, readControllerOverride } from "../../workbenchParams.js";
 import { OriginBadge, inferOriginKind } from "../OriginBadge.jsx";
 import { useModalFocusTrap } from "../useModalFocusTrap.js";
 import { JobSummaryCard } from "./JobSummaryCard.jsx";
@@ -22,6 +23,8 @@ export function SendConfirmDialog({
   movedAcknowledged = false,
   onMovedAckChange,
   safetyWarning,
+  sendWarnings = [],
+  controllerOverride,
 }) {
   // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开脱机文件支持时默认脱机直接报错失败
   const [offlineSdChoice, setOfflineSd] = React.useState(false);
@@ -32,9 +35,19 @@ export function SendConfirmDialog({
   // SD 脱机只能经网口上传；串口只能逐行发送
   const offlineSd = sdAvailable && offlineSdChoice;
   const canConfirm = !requireMovedAck || movedAcknowledged;
-  const effectiveSafetyWarning = safetyWarning !== undefined
+  const unifiedConn = safetyWarning === undefined || controllerOverride === undefined ? readUnifiedConnection() : null;
+  const baseSafetyWarning = safetyWarning !== undefined
     ? String(safetyWarning || "").trim()
-    : resolveSoftLimitSendWarning(readUnifiedConnection());
+    : resolveSoftLimitSendWarning(unifiedConn);
+  const overrideNotice = controllerOverrideWarning(
+    controllerOverride !== undefined ? controllerOverride : readControllerOverride(unifiedConn),
+  );
+  const extraSendWarnings = Array.isArray(sendWarnings)
+    ? sendWarnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
+    : [];
+  const effectiveSafetyWarning = [
+    ...new Set([baseSafetyWarning, overrideNotice, ...extraSendWarnings].filter(Boolean)),
+  ].join("；");
 
   useModalFocusTrap({ backdropRef, dialogRef, initialFocusRef: cancelBtnRef });
 

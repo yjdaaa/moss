@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+### 修复实时调参目标绑定、倍率残留预警、铭牌先雕后切与 4 项审查问题（2026-11-27）
+
+- **现象**：工作台加工中实时调参按连接表单寻址且后端允许无任务新开连接，途中改面板会发错设备，严格模式晚到审批会把倍率残留给空闲控制器；监视区不显示 `Ov:` 且开刻确认框无非 100% 提醒；“切下外框”勾选框隐藏时仍可能提交 `border_cut`；“回工作原点”发 `G0` 会忽略 `F1000`；审批卡缺 `target.fields` 会误读当前界面连接预判软限位；数字孪生仍读取并在改板宽时写入旧偏移 `textOffsetX/Y`；文档与无用组件/提示词残留未清。
+- **根因与修复**：后端 `safe_action.rs` / `routes/device.rs` 规定倍率只能命中运行中任务走原通道并绑定 `override_job_id` 在审批执行当刻复核，前端 `WorkbenchMonitorCard` 改走任务原通道并展示 `Ov:`，确认框对非 100% 倍率提示（不拦截）；铭牌测试补齐内文落外框内及两阶段 S 值校验，前端 `HomePage` 同步屏蔽隐藏态 `border_cut`；`absolute_move` 改用 `G1 ... S0 F` 控速移动；`ApprovalCenter` 去掉 `readUnifiedConnection` 回退；`TwinPage` 改用 `loadTwinMaterialConfig` / `saveTwinMaterialConfig` 恒置偏移 0 并清理存储残留；删除 `DrawDeviceCard.jsx` 与 `TOOL_EDIT_PROMPTS` / `toolEditPrompt`，同步文档与技术书 r73。
+- **验证**：新增 `live_override_requires_matching_running_job_and_never_opens_new_transport`、`strict_mode_override_approval_rechecks_running_job_at_execution_time`，`text_border_cut_engraves_inner_text_before_cutting_outer_border_with_single_g92` 补内文落在外框内与分档功率断言；`node scripts/verify.mjs --finish` 通过（Rust 1587 项、前端单测 425 项、浏览器测试 20 个文件、回环 E2E 41 项，已快更）。实时倍率、`G1` 回原点与 `Ov:` 上报未实机验证（`unverified`）。
+- **关联**：`crates/laser-api/src/{safe_action.rs,routes/device.rs,approval/desktop.rs}`、`crates/laser-tools/src/lib.rs`、`frontend/src/{registrationState.js,workbenchParams.js,estopResumeState.js,approvalState.js,twinState.js}`、`frontend/src/components/{ApprovalCenter.jsx,workbench/WorkbenchMonitorCard.jsx,draw/SendConfirmDialog.jsx}`、`frontend/src/pages/{HomePage.jsx,TwinPage.jsx}`。
+
+### 精简 3 个旧 MCP 工具与冗余界面卡片，补齐移头回零、加工中实时调参、图片提取矢量轮廓及铭牌先雕后切（2026-11-27）
+
+- **现象**：工具目录仍保留 `generate_text_image_tool`、`generate_text_image_gcode_tool`、`shortcut_key_execution_tool` 三个非工作流历史遗留工具；语音中心内置工具区底部展示面向开发者的施工提示词折叠块，创作画板下方单独占一格的「② 设备」卡与画布底部常驻连接条重复，数字孪生“刀路在材料内的预览位置”只挪动 3D 预览不改真实刀路易造成误解；工作台移头面板缺少回工作原点与 `$H` 机械回零，加工下发中缺少实时调速/调功率入口，图片处理无法提取矢量轮廓，文字铭牌无法在同一任务里先雕内文再切下外框。
+- **根因与修复**：删除上述 3 个旧工具（工具目录由 18 个减为 15 个，同步风险分级與 golden 清单）；移除 `#voice-tool-prompts`、`DrawDeviceCard`（画板下方改为「① 材料与尺寸」「② 预览与发送」各 24 列并排）与数字孪生材料内偏移控件；工作台移头面板接入 `/api/safe-action` 的「回工作原点」（`absolute_move X0 Y0`）与「机械回零 `$H`」（`home`，固件 `$22=0` 时自动禁用），监视舱在流式下发运行中提供实时功率/速度 `−10% / 100% / +10%` 按钮（`0x90~0x92`、`0x99~0x9B`）；图片处理新增 `engraving_mode: "outline"` 矢量轮廓描边，图片选“切割”时，由按切割功率逐行扫描整张图，改为提取轮廓后沿轮廓切；文字任务新增 `border_cut: true`（先按雕刻参数生成内文与双线框内圈，再按同材料厚度的 `cut` 推荐参数生成最外圈切割刀路并统一到同一 `G92` 原点，合并计算物理 SHA-256）。
+- **验证**：`laser-tools`、`laser-contracts`、`laser-mcp`、`laser-api`、`moss-voice-server` 与前端 `registrationState.test.mjs`、`workbenchTextBorder.test.mjs`、`workbenchLayout.test.mjs`、浏览器及 E2E 测试全部通过；`node scripts/verify.mjs --finish` 通过并快更 `/Applications/MOSS.app`。未连接实机出光验证（`unverified`）。
+- **关联**：`crates/laser-tools/src/lib.rs`、`crates/laser-contracts/src/{lib.rs,risk.rs}`、`crates/laser-mcp/src/{dispatch.rs,schema.rs,tests.rs}`、`crates/laser-api/src/generation/{image_upload.rs,text.rs}`、`frontend/src/{registrationState.js,workbenchParams.js,workbenchLayout.js}`、`frontend/src/components/workbench/{WorkbenchHeadJogPanel,WorkbenchMonitorCard,WorkbenchImageTool,WorkbenchTextTool}.jsx`、`frontend/src/pages/{HomePage,DrawPage,TwinPage}.jsx`。
+
+### 补齐画板 100mm 显式幅面透传、AI 记忆固件运动参数及材料实验室风险提示接线（2026-11-27）
+
+- **现象**：创作画板在当前目标行程为 `100×100 mm` 时省略 `work_area_*`，若后端记有上一台大机器的握手行程会被反向覆盖；工作台与材料实验室生成预览未随请求附带连接目标，切换机器或切到空串口目标时会被后端注入旧机器的 `machine_motion`；AI / 语音生成任务省略 `machine_motion` 时后端未回填握手记下的固件最大速度与加速度，且小智语音工具回包、AI 预览窗、严格模式审批卡与材料实验室确认框未完整同步超速、软限位与越界警告。
+- **根因与修复**：`DrawPage` 始终显式传入 `work_area_*`，`HomePage` 与 `MaterialLabPage` 生成预览随请求附带当前连接目标字段，`laser-api` 的 `request_matches_verified_connection` 在显式携带不同目标或空目标时拒绝套用旧机器记忆；`verified_connection_value` 与 `with_remembered_work_area` 一并持久化并回填固件 `machine_motion`（最大速度、加速度、转角偏差）；`laser-mcp` 工具返回摘要、`AiPreviewCenter`、`ApprovalCenter`、`SendConfirmDialog`、`approvalJobMonitor` 与 `buildMatrixConfirmPrompt` 全面同步超速、软限位与 `send_result.warnings` 提示（只提示不阻断）。
+- **验证**：`laser-api` 新增 AI 省略 `machine_motion` 沿用握手固件最大速度告警、跨目标及空串口目标不套用旧行程单测，`materialLabState.test.mjs` 与 `approvalJobMonitor.test.mjs` 新增风险提示断言，同批修稳 `moss-home` TLS 合成测试连接预热；`node scripts/verify.mjs --finish` 通过。真实多机切换与超速降速未实机出光复测（`unverified`）。
+- **关联**：`crates/laser-api/src/connection.rs`、`crates/laser-mcp/src/dispatch.rs`、`crates/laser-api/src/material_lab/preview.rs`、`frontend/src/pages/{HomePage,DrawPage,MaterialLabPage}.jsx`、`frontend/src/components/{AiPreviewCenter,ApprovalCenter}.jsx`、`frontend/src/{aiPreviewState,approvalState,approvalJobMonitor,materialLabState}.js`。
+
+### 工作台移头面板补齐 0.1 / 0.5 mm 微调步长，最近任务支持回填图片与 G-code 任务（2026-11-27）
+
+- **现象**：工作台两点对位合并复用顶部的「现场移头与对刀原点」后，最小点动步长只有 `1 mm`，对准十字标记时无法微调；「最近任务」回填图片或 G-code 任务时只改了材质和功率，未切到对应工具也未带回原图路径、尺寸与转换模式；材料实验室矩阵与测试图案预览在请求显式指向非握手设备目标时仍沿用了旧目标记忆的固件行程。
+- **根因与修复**：`WORKBENCH_JOG_STEPS_MM` 扩充为 `[0.1, 0.5, 1, 5, 10]` mm（默认仍为 `1 mm`，上限 `10 mm` 与每次二次确认门禁不变）；`recentTaskRecall`、`recentTaskLabel` 与 `HomePage.jsx::handleRecallTask` 补齐 `source_type === "image"`（切换至图片处理工具并回填原图路径、文件名、宽高、转换方式与高级项）和 `source_type === "gcode"`（切换至已有 G 码并回填刀路路径）的完整回填；`ApiService::remembered_work_area` 按 `request_matches_verified_connection` 核对请求目标。
+- **验证**：`registrationState.test.mjs`、`workbenchTextBorder.test.mjs` 与 `laser-api::tests::system_routes::connection_check_reports_soft_limits_homing_identity_and_remembers_firmware_work_area` 通过；`node scripts/verify.mjs --finish` 全部通过并快更本机桌面包。未连接实机验证（`unverified`）。
+- **关联**：`frontend/src/registrationState.js`、`frontend/src/workbenchParams.js`、`frontend/src/pages/HomePage.jsx`、`crates/laser-api/src/{connection.rs,material_lab/preview.rs,material_lab_patterns.rs}`。
+
 ### 创作画板自动等比缩小时不再拉满机器行程，四周各留 2% 余量（2026-11-26）
 
 - **现象**：导入图形按原尺寸或画板按 0.1 mm/像素超出机器幅面时，自动缩小会正好贴满行程边缘，没有余量。

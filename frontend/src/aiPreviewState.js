@@ -75,8 +75,8 @@ export function canStartAiPreview({ checked, busy, targetReady }) {
 
 const TEXT_FILL_LABEL = { outline: "只描轮廓", fill: "扫描填充", hatch: "排线填充" };
 
-/** 预览产物里的提示：刻法、雕刻路线（r45）、自动缩小到幅面内、照片抖动。 */
-export function aiPreviewNotes(record) {
+/** 预览产物里的提示：刻法、雕刻路线（r45）、自动缩小到幅面内、照片抖动、超速与软限位风险提示。 */
+export function aiPreviewNotes(record, { safetyWarning = "" } = {}) {
   const notes = [];
   const artifacts = record?.artifacts || {};
   if (TEXT_FILL_LABEL[artifacts.text_fill]) notes.push(`刻法：${TEXT_FILL_LABEL[artifacts.text_fill]}`);
@@ -89,8 +89,14 @@ export function aiPreviewNotes(record) {
   if (artifacts.negative === true) notes.push("已反相：原图浅色处出光");
   if (Array.isArray(artifacts.warnings)) {
     for (const warning of artifacts.warnings) {
-      if (typeof warning === "string" && warning.trim()) notes.push(warning.trim());
+      if (typeof warning === "string" && warning.trim() && !notes.includes(warning.trim())) {
+        notes.push(warning.trim());
+      }
     }
+  }
+  const cleanSafety = typeof safetyWarning === "string" ? safetyWarning.trim() : "";
+  if (cleanSafety && !notes.includes(cleanSafety)) {
+    notes.push(cleanSafety);
   }
   return notes;
 }

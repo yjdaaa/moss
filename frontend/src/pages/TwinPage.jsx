@@ -36,8 +36,11 @@ import {
   MAX_XY_TRAVEL_MM,
   buildTwinConnectionPayload,
   canResetTwinToDemo,
+  loadTwinMaterialConfig,
+  saveTwinMaterialConfig,
   twinEstopContext,
 } from "../twinState.js";
+import { recordControllerOverride } from "../workbenchParams.js";
 import { TERMINAL_STATUSES, normalizeWorkflowStatus } from "../state/statusNormalize.js";
 import { workflowDetails } from "../approvalState.js";
 import { showAlert } from "../appDialog.js";
@@ -124,40 +127,6 @@ const DEMO_GCODE = [
 ].join("\n");
 
 const SIM_FRAME_MS = 1000 / 30;
-const MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
-
-function loadSavedMaterialConfig() {
-  try {
-    const raw = localStorage.getItem(MATERIAL_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        return {
-          autoSize: Boolean(parsed.autoSize),
-          widthMm: Number(parsed.widthMm) > 0 ? Number(parsed.widthMm) : 80,
-          heightMm: Number(parsed.heightMm) > 0 ? Number(parsed.heightMm) : 80,
-          thicknessMm: Number(parsed.thicknessMm) > 0 ? Number(parsed.thicknessMm) : 3,
-          offsetX: Number.isFinite(Number(parsed.offsetX)) ? Number(parsed.offsetX) : 0,
-          offsetY: Number.isFinite(Number(parsed.offsetY)) ? Number(parsed.offsetY) : 0,
-          textOffsetX: Number.isFinite(Number(parsed.textOffsetX)) ? Number(parsed.textOffsetX) : 0,
-          textOffsetY: Number.isFinite(Number(parsed.textOffsetY)) ? Number(parsed.textOffsetY) : 0,
-        };
-      }
-    }
-  } catch (_e) {
-    // ignore
-  }
-  return {
-    autoSize: false,
-    widthMm: 80,
-    heightMm: 80,
-    thicknessMm: 3,
-    offsetX: 0,
-    offsetY: 0,
-    textOffsetX: 0,
-    textOffsetY: 0,
-  };
-}
 export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, onOpenConnection = null }) {
   const {
     connectionMode,
@@ -258,24 +227,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   }, [connectionStatus]);
   const machineFeatures = liveFeatures || storedFeatures;
 
-  // 材料外框尺寸、台面摆放起点 (offsetX, offsetY) 与激光雕刻文字在材料内的位置 (textOffsetX, textOffsetY)
-  const [materialConfig, setMaterialConfig] = useState(() => loadSavedMaterialConfig());
+  // 材料外框尺寸与台面摆放起点 (offsetX, offsetY)；材料内偏移恒为 0，与真实刀路一致（N6）
+  const [materialConfig, setMaterialConfig] = useState(() => loadTwinMaterialConfig());
   const [widthDraft, setWidthDraft] = useState(null);
   const [heightDraft, setHeightDraft] = useState(null);
 
   const updateMaterialConfig = useCallback((patch) => {
-    setMaterialConfig((prev) => {
-      const next = {
-        ...prev,
-        ...patch,
-      };
-      try {
-        localStorage.setItem(MATERIAL_STORAGE_KEY, JSON.stringify(next));
-      } catch (_e) {
-        // ignore
-      }
-      return next;
-    });
+    setMaterialConfig((prev) => saveTwinMaterialConfig(prev, patch));
   }, []);
   const updateManualWorkspaceLimits = useCallback((patch) => {
     const conn = readUnifiedConnection();
@@ -343,7 +301,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     [driveMode, simPose, jobPose, telemetry, isJobRunning],
   );
 
-  // 刀路与材料包络越界检查（包含板材台面起点 offsetX/Y、材料内雕刻偏移 textOffsetX/Y 与缩放比例）
+  // 刀路与材料包络越界检查（包含板材台面起点 offsetX/Y 与缩放比例）
   const boundsWarning = useMemo(() => {
     if (!toolpath || toolpath.segments.length === 0) return "";
     const { minX, maxX, minY, maxY } = toolpath.bounds;
@@ -405,6 +363,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       setJobSendResult(wf.send_result);
       if (wf.send_result.last_status_report) {
         const parsed = parseGrblStatusReport(wf.send_result.last_status_report);
+        recordControllerOverride(wf.send_result.target || readUnifiedConnection(), parsed);
         if (parsed.online) {
           setTelemetry(parsed);
           setLastTelemetryAt(new Date().toLocaleTimeString());
@@ -550,6 +509,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
             setJobSendResult(wf.send_result);
             if (wf.send_result.last_status_report) {
               const parsed = parseGrblStatusReport(wf.send_result.last_status_report);
+              recordControllerOverride(wf.send_result.target || readUnifiedConnection(), parsed);
               if (parsed.online) {
                 setTelemetry(parsed);
                 setLastTelemetryAt(new Date().toLocaleTimeString());
@@ -691,6 +651,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       if (res.ok && res.data?.success) {
         const detail = res.data.detail ?? res.data.result;
         const parsed = parseGrblStatusReport(detail, String(res.data.result || ""));
+        recordControllerOverride(readUnifiedConnection(), parsed);
         setTelemetry(parsed);
         setLastTelemetryAt(new Date().toLocaleTimeString());
         if (parsed.online) {
@@ -786,11 +747,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
       setSelectedWorkflowId("");
       setGcodeText(content);
       setGcodeSourceLabel(`本地文件 · ${file.name}`);
-      updateMaterialConfig({
-        autoSize: true,
-        textOffsetX: 0,
-        textOffsetY: 0,
-      });
+      updateMaterialConfig({ autoSize: true });
       setSimProgress(0);
       setSimPlaying(true);
       setDriveMode("sim");
@@ -801,64 +758,6 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     reader.readAsText(file);
     e.target.value = "";
   };
-
-  // 在材料内对齐激光雕刻文字/刀路（若当前处于 1:1 同尺寸无余量状态则自动扩展材料外框，且始终钳制在材料内）
-  const alignTextInMaterial = useCallback(
-    (preset) => {
-      let matW = workspace.material.widthMm;
-      let matH = workspace.material.heightMm;
-      let nextAutoSize = !workspace.material.autoSize ? false : true;
-      const minTX = workspace.material.minTextOffsetX || 0;
-      const minTY = workspace.material.minTextOffsetY || 0;
-      const contentW = Math.max(toolpath.bounds.widthMm || 0, toolpath.bounds.maxX || 0);
-      const contentH = Math.max(toolpath.bounds.heightMm || 0, toolpath.bounds.maxY || 0);
-
-      if (
-        preset !== "bottom-left" &&
-        workspace.material.maxTextOffsetX <= minTX &&
-        workspace.material.maxTextOffsetY <= minTY &&
-        (contentW < workspace.xTravelMm || contentH < workspace.yTravelMm)
-      ) {
-        nextAutoSize = false;
-        matW = Math.min(
-          workspace.xTravelMm - workspace.offsetX,
-          Math.max(80, Number(((contentW || 60) + 20).toFixed(1))),
-        );
-        matH = Math.min(
-          workspace.yTravelMm - workspace.offsetY,
-          Math.max(80, Number(((contentH || 60) + 20).toFixed(1))),
-        );
-      }
-
-      const maxTX = Math.max(minTX, Number(Math.max(0, matW - contentW).toFixed(1)));
-      const maxTY = Math.max(minTY, Number(Math.max(0, matH - contentH).toFixed(1)));
-
-      let tx = minTX;
-      let ty = minTY;
-      if (preset === "center") {
-        tx = Number(((minTX + maxTX) / 2).toFixed(1));
-        ty = Number(((minTY + maxTY) / 2).toFixed(1));
-      } else if (preset === "top-left") {
-        tx = minTX;
-        ty = maxTY;
-      } else if (preset === "top-right") {
-        tx = maxTX;
-        ty = maxTY;
-      } else if (preset === "bottom-right") {
-        tx = maxTX;
-        ty = minTY;
-      }
-
-      updateMaterialConfig({
-        autoSize: nextAutoSize,
-        widthMm: matW,
-        heightMm: matH,
-        textOffsetX: tx,
-        textOffsetY: ty,
-      });
-    },
-    [workspace, toolpath.bounds, updateMaterialConfig],
-  );
 
   // 页面内急停按钮与顶栏急停（2026-11-05）：与工作台 / 画板共用 `usePageEmergencyStop` 两段式机制——
   // 运行中先按任务编号走原设备通道，失败或超时再按页面连接目标写 0x18；无运行任务时直接按连接目标急停。
@@ -1261,7 +1160,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   <button
                     type="button"
                     className={`btn btn-ghost twin-speed-btn ${workspace.material.autoSize ? "active" : ""}`}
-                    onClick={() => updateMaterialConfig({ autoSize: true, textOffsetX: 0, textOffsetY: 0 })}
+                    onClick={() => updateMaterialConfig({ autoSize: true })}
                     title="让 3D 材料外框尺寸与 G-code 几何包络严格 1:1 一致"
                   >
                     <span>1:1 同步刀路尺寸</span>
@@ -1335,13 +1234,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                         const num = Number(raw);
                         if (raw !== "" && Number.isFinite(num) && num >= 1) {
                           const clampedW = Math.min(workspace.xTravelMm, Math.max(1, Number(num.toFixed(1))));
-                          const contentW = Math.max(toolpath.bounds.widthMm || 0, toolpath.bounds.maxX || 0);
-                          const nextTX = Math.max(0, Number(((clampedW - contentW) / 2).toFixed(1)));
                           updateMaterialConfig({
                             autoSize: false,
                             widthMm: clampedW,
                             heightMm: workspace.material.heightMm,
-                            textOffsetX: nextTX,
                           });
                         }
                       }}
@@ -1358,13 +1254,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                       onChange={(e) => {
                         setWidthDraft(null);
                         const clampedW = Math.min(workspace.xTravelMm, Math.max(1, Number(e.target.value)));
-                        const contentW = Math.max(toolpath.bounds.widthMm || 0, toolpath.bounds.maxX || 0);
-                        const nextTX = Math.max(0, Number(((clampedW - contentW) / 2).toFixed(1)));
                         updateMaterialConfig({
                           autoSize: false,
                           widthMm: clampedW,
                           heightMm: workspace.material.heightMm,
-                          textOffsetX: nextTX,
                         });
                       }}
                       className="twin-range-slider"
@@ -1385,13 +1278,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                         const num = Number(raw);
                         if (raw !== "" && Number.isFinite(num) && num >= 1) {
                           const clampedH = Math.min(workspace.yTravelMm, Math.max(1, Number(num.toFixed(1))));
-                          const contentH = Math.max(toolpath.bounds.heightMm || 0, toolpath.bounds.maxY || 0);
-                          const nextTY = Math.max(0, Number(((clampedH - contentH) / 2).toFixed(1)));
                           updateMaterialConfig({
                             autoSize: false,
                             widthMm: workspace.material.widthMm,
                             heightMm: clampedH,
-                            textOffsetY: nextTY,
                           });
                         }
                       }}
@@ -1408,13 +1298,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                       onChange={(e) => {
                         setHeightDraft(null);
                         const clampedH = Math.min(workspace.yTravelMm, Math.max(1, Number(e.target.value)));
-                        const contentH = Math.max(toolpath.bounds.heightMm || 0, toolpath.bounds.maxY || 0);
-                        const nextTY = Math.max(0, Number(((clampedH - contentH) / 2).toFixed(1)));
                         updateMaterialConfig({
                           autoSize: false,
                           widthMm: workspace.material.widthMm,
                           heightMm: clampedH,
-                          textOffsetY: nextTY,
                         });
                       }}
                       className="twin-range-slider"
@@ -1465,116 +1352,6 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                       onChange={(e) => updateMaterialConfig({ offsetY: e.target.value })}
                       className="twin-range-slider"
                       aria-label="拖动调节 Y0 坐标"
-                    />
-                  </label>
-                </div>
-              </div>
-
-              {/* 激光雕刻刀路在材料内部的位置预览 —— 严格钳制在材料四周边距内 */}
-              <div className="twin-pins-box twin-layout-group">
-                <div className="twin-telemetry-head twin-layout-group-head">
-                  <span className="twin-field-label">
-                    刀路在材料内的预览位置
-                  </span>
-                  <span className="ob-pill ob-pill--ok">
-                    <span>
-                      材料内偏移 (+{workspace.material.textOffsetX}, +{workspace.material.textOffsetY} mm)
-                    </span>
-                  </span>
-                </div>
-
-                <div className="twin-row-actions twin-layout-group-actions">
-                  <button
-                    type="button"
-                    className={`btn btn-ghost twin-speed-btn ${workspace.material.textOffsetX === workspace.material.minTextOffsetX && workspace.material.textOffsetY === workspace.material.minTextOffsetY ? "active" : ""}`}
-                    onClick={() => alignTextInMaterial("bottom-left")}
-                    title="将雕刻文字放置在材料左下角起点"
-                  >
-                    <span>材料左下</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost twin-speed-btn"
-                    onClick={() => alignTextInMaterial("center")}
-                    title="将雕刻文字移动到整块材料正中央（始终在材料内部）"
-                  >
-                    <span>材料内居中</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost twin-speed-btn"
-                    onClick={() => alignTextInMaterial("top-left")}
-                    title="将雕刻文字贴合到材料内左上角"
-                  >
-                    <span>材料左上</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost twin-speed-btn"
-                    onClick={() => alignTextInMaterial("top-right")}
-                    title="将雕刻文字贴合到材料内右上角"
-                  >
-                    <span>材料右上</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost twin-speed-btn"
-                    onClick={() => alignTextInMaterial("bottom-right")}
-                    title="将雕刻文字贴合到材料内右下角"
-                  >
-                    <span>材料右下</span>
-                  </button>
-                </div>
-
-                <div className="twin-metrics-grid">
-                  <label className="twin-metric-box">
-                    <span>
-                      材料内横向 X (0~{workspace.material.maxTextOffsetX} mm)
-                    </span>
-                    <input
-                      type="number"
-                      min={workspace.material.minTextOffsetX}
-                      max={workspace.material.maxTextOffsetX}
-                      step={0.5}
-                      value={workspace.material.textOffsetX}
-                      onChange={(e) => updateMaterialConfig({ textOffsetX: e.target.value })}
-                      className="text-input"
-                      aria-label="雕刻文字在材料内横向位置 X (mm)"
-                    />
-                    <input
-                      type="range"
-                      min={workspace.material.minTextOffsetX}
-                      max={workspace.material.maxTextOffsetX}
-                      step={0.5}
-                      value={workspace.material.textOffsetX}
-                      onChange={(e) => updateMaterialConfig({ textOffsetX: e.target.value })}
-                      className="twin-range-slider"
-                      aria-label="拖动调节雕刻文字在材料内横向位置 X"
-                    />
-                  </label>
-                  <label className="twin-metric-box">
-                    <span>
-                      材料内纵向 Y (0~{workspace.material.maxTextOffsetY} mm)
-                    </span>
-                    <input
-                      type="number"
-                      min={workspace.material.minTextOffsetY}
-                      max={workspace.material.maxTextOffsetY}
-                      step={0.5}
-                      value={workspace.material.textOffsetY}
-                      onChange={(e) => updateMaterialConfig({ textOffsetY: e.target.value })}
-                      className="text-input"
-                      aria-label="雕刻文字在材料内纵向位置 Y (mm)"
-                    />
-                    <input
-                      type="range"
-                      min={workspace.material.minTextOffsetY}
-                      max={workspace.material.maxTextOffsetY}
-                      step={0.5}
-                      value={workspace.material.textOffsetY}
-                      onChange={(e) => updateMaterialConfig({ textOffsetY: e.target.value })}
-                      className="twin-range-slider"
-                      aria-label="拖动调节雕刻文字在材料内纵向位置 Y"
                     />
                   </label>
                 </div>

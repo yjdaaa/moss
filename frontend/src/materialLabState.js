@@ -631,10 +631,20 @@ export function matrixSendOutcome(res, built) {
   const sendResult = res?.data?.result?.send_result;
   if (res?.ok && res?.data?.success && sendResult?.running) {
     const total = sendResult.total_lines || 0;
+    const warnings = Array.isArray(sendResult.warnings)
+      ? sendResult.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
+      : [];
+    const warnSuffix = warnings.length > 0 ? `；⚠️ ${warnings.join("；")}` : "";
     return {
       kind: "sending",
-      sendState: { status: "sending", lines_sent: 0, total_lines: total, target: sendResult.target },
-      status: `握手通过，正在逐行下发 (0/${total} 行)…`,
+      sendState: {
+        status: "sending",
+        lines_sent: 0,
+        total_lines: total,
+        target: sendResult.target,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      },
+      status: `握手通过，正在逐行下发 (0/${total} 行)…${warnSuffix}`,
       poll: true,
     };
   }
@@ -719,6 +729,8 @@ export function buildMatrixConfirmPrompt({
   thickness,
   mode,
   targetLabel,
+  safetyWarning = "",
+  sendWarnings = [],
 } = {}) {
   const modeInfo = resolveMatrixModeParams(mode);
   const mat = preview?.material || material || "当前材料";
@@ -754,15 +766,24 @@ export function buildMatrixConfirmPrompt({
   const labelLine = preview?.labels?.enabled
     ? `行列标注：单线文字，功率 S${preview.labels.power} · 速度 F${preview.labels.speed}`
     : "";
+  const rawWarnings = [
+    ...(Array.isArray(preview?.warnings) ? preview.warnings : []),
+    ...(Array.isArray(preview?.artifacts?.warnings) ? preview.artifacts.warnings : []),
+    ...(Array.isArray(sendWarnings) ? sendWarnings : []),
+    safetyWarning,
+  ];
+  const riskWarnings = [...new Set(rawWarnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean))];
   return {
     title: "确认下发标定矩阵出光测试",
     confirmText: "确认开刻测试",
+    warnings: riskWarnings,
     message: [
       `目标设备：${targetLabel || "未指定"}`,
       `标定对象：${mat} · ${preview?.surface_entry ? "表面通用" : `${thick} mm`}（${modeInfo.label}）`,
       `矩阵规格：${cellCount} 格 · 外框尺寸 ${sizeText}`,
       `参数区间：功率 ${powerRangeText} · 速度 F${sMin}~F${sMax} mm/min`,
       ...[axisLine, orderLine, labelLine].filter(Boolean),
+      ...riskWarnings.map((w) => `⚠️ 风险提示：${w}`),
       "",
       "注意：标定刀路以当前激光头位置为左下角起点（G92 X0 Y0），行列标注也在这个范围内。请确认样板已放稳、排风开启并已佩戴护目镜。",
     ].join("\n"),

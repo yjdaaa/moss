@@ -5,10 +5,10 @@
 ## 1. 先确认运行时现实
 
 - MCP 工具由 `laser_tools::ToolCatalog` 登记、`laser_mcp::dispatch_tool_call_with` 分发；小智连接由 `laser_host::HostApplication::spawn_mcp_bridge` 在 `MCP_ENDPOINT` 有效时启动。桌面端与 `moss-host serve` 走同一条路径。
-- 目录共 18 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
+- 目录共 15 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
 - 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在语音中心“隐私与家居”同意后开启、每个动作逐次桌面批准，见 §4.4。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file` 与 `send_command` 一律拒绝并引导走 workflow 或 `laser_safe_action_tool`。
-- `generate_text_image_gcode_tool`、`generate_text_laser_task_tool` 只接受 `text` 素材，都转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
+- `generate_text_laser_task_tool` 只接受 `text` 素材，转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
 - 设备传输只有串口与 Telnet。没有 HTTP `/command`、`[ESP800]` 或 WebSocket 设备通道。
 
 ## 2. 高风险类别
@@ -19,7 +19,7 @@
 - 设备层：`laser-device` 的握手、预检、`JobWorker` 流控、实时字节、S 值换算、SD 脱机上传与监控。
 - 安全动作：`laser_tools::execute_laser_safe_action` 与 `/api/safe-action`，包括 `unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset`、进给/功率倍率，以及只对走边框作业的 `pause` / `resume` / `stop_framing`（2026-11-18）。
 - 退出路径：`laser_host::ShutdownCoordinator`、panic 钩子、控制台关闭钩子、Tauri 关闭事件（含 macOS `RunEvent::Exit`）与托盘/菜单栏退出。
-- 本地命令与桌面自动化：`command_execution_tool`（30 秒超时）、`open_app_tool`（Windows 经 `ShellExecuteW` 直调系统关联而不经过 `cmd /C start`，禁止向 `.cmd`/`.bat` 传参并对非 `.exe` 目标拦截 `cmd.exe` 元字符；macOS `/Applications/*.app` + `open -a <app> -- <payload>` 10 秒超时，拒绝 NUL/控制字符）、`shortcut_key_execution_tool`（Windows 上通过 PowerShell `SendKeys`、macOS 上媒体/音量白名单走 `osascript`，均 10 秒超时）；`generate_text_image_tool` 单边像素上限 8192。
+- 本地命令与桌面自动化：`command_execution_tool`（30 秒超时）、`open_app_tool`（Windows 经 `ShellExecuteW` 直调系统关联而不经过 `cmd /C start`，禁止向 `.cmd`/`.bat` 传参并对非 `.exe` 目标拦截 `cmd.exe` 元字符；macOS `/Applications/*.app` + `open -a <app> -- <payload>` 10 秒超时，拒绝 NUL/控制字符）。
 - 局域网访问：`AuthManager`、`/v1/auth/*` 与公开路由白名单。
 - 浏览器来源校验（CORS）：`laser-api` 的 `is_allowed_origin`、`handle_http_from`、`MOSS_ALLOWED_ORIGINS` 解析（`laser_runtime::config::parse_allowed_origins`）。不得恢复 `Access-Control-Allow-Origin: *`，不得把来源校验改成前缀匹配；前端开发端口（`5173/5177/5178`）仅在 debug 构建的回环请求中允许，release 构建默认拒绝；回环连接的 `Host` 白名单（`is_allowed_loopback_host`，防 DNS 重绑定）不得放宽成任意主机名；回环请求免鉴权，所以跨站网页的 POST 必须在路由前以 403 `origin_not_allowed` 拦下（见 [api-contracts.md](api-contracts.md) §1.6）。
 
@@ -47,7 +47,7 @@
 
 - TCP 和串口共用有界读行。连续拼接半行满 500 毫秒后向上层返回读超时，并保留已读取的半行。已经开始的底层读取仍由传输自身的单次超时约束。上层可继续检查取消位和各阶段的截止时间。
 - 生成、预览、推荐参数、反馈调参、走边框预览 G-code 都不等于启动机器。例外是 `/api/device/framing`：它真实驱动机器沿外接矩形运动，改动时按发送链路对待。2026-10-14 起默认 `power=0` 不出光（弱光需显式传 `power`），与完整发送相同做同设备占用检查、握手与 Idle 预检，运行期间登记为活动作业 `framing-…`，顶栏急停与带 `job_id` 的 `emergency_stop` 可停止；失败或被停止后保留为“待确认停止”目标。语音 / 小智只能经 `laser_workflow_tool(action=frame)` 按预览走边框（2026-11-18，技术书 r51）：范围只取预览记录的 `frame_mm`、服务端锁死 `power=0`（带非 0 功率直接拒绝）、必须 `confirmed=true` 并先过与 `confirm_send` 相同的状态与物理 SHA-256 门禁；不得开放让模型自填坐标或功率的走边框入口。走边框途中可 `pause`（`!`）/ `resume`（`~`，须确认，严格模式 R3）/ `stop_framing`（先 `!` 再取消、停稳后 0x18），只作用于 `framing-…` 作业，正式加工不得用这套暂停（r52）。
-- `laser_safe_action_tool` 中 `status`、进给/功率倍率，以及走边框途中的 `pause` / `stop_framing`（只让机器停下，2026-11-18）不需要确认；其余动作必须 `confirmed=true`（或 `dry_run=true` 只返回计划），走边框的 `resume` 同样必须确认。
+- `laser_safe_action_tool` 中 `status`、进给/功率倍率，以及走边框途中的 `pause` / `stop_framing`（只让机器停下，2026-11-18）不需要确认；其余动作必须 `confirmed=true`（或 `dry_run=true` 只返回计划），走边框的 `resume` 同样必须确认。2026-11-27（技术书 r73）：进给/功率倍率只能命中正在运行（未取消）的加工任务并经原任务通道发送，无运行中任务或显式目标不匹配直接拒绝（`no_active_job` / `override_target_mismatch` / `override_target_ambiguous`），绝不新开连接；严格模式下提高倍率需桌面审批，批准执行当刻重新核对原任务仍在运行（原任务已结束返回 `no_active_job` / `override_job_ended`，不向空闲控制器或下一件发倍率字节）；前端监视区显示状态报告 `Ov:` 倍率，非 100% 时在开刻确认框提示。急停与停止路径不受影响。
 - 两点对位（2026-11-16，[api-contracts.md](api-contracts.md) §3.13a）：`/api/registration/read-position` 只走 `status`（实时 `?`），丢弃请求里的运动字段，不得改成会发 G-code 行的实现；点动沿用 `/api/safe-action relative_move` 与其确认 / R3 授权。`/api/registration/preview` 只生成：原刀路先按冻结 SHA-256 核对，变换结果是新文件、新 SHA 的 `preview_ready` workflow，发送走完整门禁；变换器遇到机床坐标、坐标系切换、英制、非 XY 平面、`$` 命令等一律拒绝而不是猜测。新任务以第 2 个标记点为开始位置（`G92 X0 Y0`），前端生成前复核激光头仍在该点，软件无法保证开刻时激光头没被挪动，确认框的“对刀起点”写明这一点。画板任务同样可对位（2026-11-16，技术书 r42）：结果带画板视图，发送仍走画板确认框、`confirmed=true` 与全部门禁，内容指纹换成新刀路 SHA，不绕过重复发送防呆。
 - 低功率点射（2026-11-16，技术书 r42，[api-contracts.md](api-contracts.md) §3.13b）：`/api/device/pointer-fire` 会真实出光。不变量：① 只接受工作台身份，语音 / MCP 桥 / 网关 / 审批重放不论严格模式一律 403 `pointer_fire_not_allowed`，不得加进 `ToolCatalog`、`laser_safe_action_tool` 或任何语音工具；桌面版（启用了桌面会话）里不带会话的本机回环一律 403 `desktop_session_required`（r43）；② 严格模式下只有桌面会话可用，不创建审批；③ 功率上限 S10（0~1000 标尺 1%，按 `$30` 换算）、时长上限 200 ms，越界拒绝不截断，必须 `confirmed=true`；④ 与走边框相同的占用检查、握手、Idle 预检与活动作业登记（`pointer-…`），失败或取消补发 0x18 并保留为待确认停止目标；⑤ 必须用 `M3`（`M4` 原地不出光），关光行 `M5 S0` 与开光行一起写入控制器缓冲区，不得拆成两次请求或改成“等用户松手再关”。前端默认关闭，每次点射都弹确认框，本页第一次附护目镜与反光提醒。不得把上限放宽来“看得更清楚”。
 - 网络完整任务只走 Telnet；SD 脱机模式的 HTTP 只用于把文件上传到 SD 卡。

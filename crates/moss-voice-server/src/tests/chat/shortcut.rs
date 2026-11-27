@@ -332,8 +332,6 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
 
     // 2. 慢速 AI 生图/刀路预览生成（非 R3 发送审批）触发生成预览垫音
     for name in [
-        "generate_text_image_tool",
-        "generate_text_image_gcode_tool",
         "generate_text_laser_task_tool",
         "regenerate_text_laser_task_tool",
     ] {
@@ -388,7 +386,7 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     // 3. 安全边界：一旦携带 R3 动作参数或属于控制/审批/本地毫秒级快工具，绝不播垫音
     assert_eq!(
         slow_tool_filler(&[mk_call(
-            "generate_text_image_gcode_tool",
+            "generate_text_laser_task_tool",
             r#"{"confirmed":true,"send_after_generate":true}"#
         )]),
         None
@@ -645,7 +643,7 @@ async fn known_slow_tools_answer_at_once_while_quick_queries_stay_quiet() {
     }
     impl ToolExecutor for TimedTools {
         fn tools(&self) -> Vec<ToolSpec> {
-            ["generate_text_image_tool", "web_search"]
+            ["regenerate_text_laser_task_tool", "web_search"]
                 .into_iter()
                 .map(|name| ToolSpec {
                     name: name.into(),
@@ -673,7 +671,7 @@ async fn known_slow_tools_answer_at_once_while_quick_queries_stay_quiet() {
     let done = Arc::new(AtomicBool::new(false));
     let llm = Arc::new(FakeLlm {
         rounds: Mutex::new(VecDeque::from([
-            call("generate_text_image_tool"),
+            call("regenerate_text_laser_task_tool"),
             say(&["预览好了。"]),
             call("web_search"),
             say(&["查到了。"]),

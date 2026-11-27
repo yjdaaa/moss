@@ -1107,3 +1107,68 @@ export function resolveTwinSafetySwitchStatus({ telemetry = null, machineFeature
     text: "未配置安全门或急停输入 · 当前无触发信号",
   };
 }
+
+/** 数字孪生材料配置本地存储键（N6：材料内偏移控件已删除，读写时恒置 0 并清除遗留偏移键）。 */
+export const TWIN_MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
+const LEGACY_TWIN_OFFSET_KEYS = ["textOffsetX", "textOffsetY", "contentOffsetX", "contentOffsetY"];
+
+function sanitizeTwinMaterialBase(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    autoSize: Boolean(src.autoSize),
+    widthMm: Number(src.widthMm) > 0 ? Number(src.widthMm) : 80,
+    heightMm: Number(src.heightMm) > 0 ? Number(src.heightMm) : 80,
+    thicknessMm: Number(src.thicknessMm) > 0 ? Number(src.thicknessMm) : 3,
+    offsetX: Number.isFinite(Number(src.offsetX)) ? Number(src.offsetX) : 0,
+    offsetY: Number.isFinite(Number(src.offsetY)) ? Number(src.offsetY) : 0,
+  };
+}
+
+/**
+ * 读取数字孪生材料配置：恒令 `textOffsetX = 0`、`textOffsetY = 0`，
+ * 若本地存储中残留旧偏移字段则当场清理写回，确保 3D 预览与真实刀路一致。
+ */
+export function loadTwinMaterialConfig(storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem?.(TWIN_MATERIAL_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        const cleaned = sanitizeTwinMaterialBase(parsed);
+        const hadLegacyOffset = LEGACY_TWIN_OFFSET_KEYS.some((key) => key in parsed);
+        if (hadLegacyOffset) {
+          try {
+            storage?.setItem?.(TWIN_MATERIAL_STORAGE_KEY, JSON.stringify(cleaned));
+          } catch (_writeErr) {
+            // 存储不可写时仍保证内存态偏移归零
+          }
+        }
+        return { ...cleaned, textOffsetX: 0, textOffsetY: 0 };
+      }
+    }
+  } catch (_e) {
+    // ignore
+  }
+  return {
+    autoSize: false,
+    widthMm: 80,
+    heightMm: 80,
+    thicknessMm: 3,
+    offsetX: 0,
+    offsetY: 0,
+    textOffsetX: 0,
+    textOffsetY: 0,
+  };
+}
+
+/** 合并并持久化数字孪生材料配置：丢弃任何材料内偏移字段，内存态恒保持 `textOffsetX = 0, textOffsetY = 0`。 */
+export function saveTwinMaterialConfig(prev, patch, storage = globalThis.localStorage) {
+  const merged = { ...(prev && typeof prev === "object" ? prev : {}), ...(patch && typeof patch === "object" ? patch : {}) };
+  const cleaned = sanitizeTwinMaterialBase(merged);
+  try {
+    storage?.setItem?.(TWIN_MATERIAL_STORAGE_KEY, JSON.stringify(cleaned));
+  } catch (_e) {
+    // ignore
+  }
+  return { ...cleaned, textOffsetX: 0, textOffsetY: 0 };
+}

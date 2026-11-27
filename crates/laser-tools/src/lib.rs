@@ -17,17 +17,14 @@ const PRIORITY_TOOLS: [&str; 8] = [
     "start_tuned_job_tool",
 ];
 
-const SECONDARY_TOOLS: [&str; 10] = [
+const SECONDARY_TOOLS: [&str; 7] = [
     "command_execution_tool",
-    "generate_text_image_gcode_tool",
-    "generate_text_image_tool",
     "generate_text_laser_task_tool",
     "laser_grbl_tool",
     "laser_network_grbl_tool",
     "open_app_tool",
     "refine_laser_params_from_feedback_tool",
     "regenerate_text_laser_task_tool",
-    "shortcut_key_execution_tool",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,7 +440,7 @@ pub fn execute_laser_safe_action_with_gate_cancel_and_dispatch(
             vec![
                 "M5".into(),
                 "G90".into(),
-                format!("G0 X{x:.3} Y{y:.3} F{feed:.0}"),
+                format!("G1 X{x:.3} Y{y:.3} S0 F{feed:.0}"),
             ],
             format!("绝对安全移动到 ({x:.3}, {y:.3}) F{feed:.0}（激光关闭）"),
         ),
@@ -808,7 +805,6 @@ fn hide_console_window(cmd: &mut std::process::Command) -> &mut std::process::Co
 const COMMAND_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(not(target_os = "windows"))]
 const SYSTEM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-const SHORTCUT_EXEC_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_CAPTURE_BYTES: usize = 64 * 1024;
 
 fn wait_child_until(
@@ -1168,173 +1164,6 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
     }
 }
 
-const SHORTCUT_ACTIONS: [(&str, &str); 6] = [
-    ("播放音乐", "^ {ENTER}"),
-    ("暂停音乐", "^ {ENTER}"),
-    ("切换下一首", "^ {RIGHT}"),
-    ("切换上一首", "^ {LEFT}"),
-    ("音乐音量加", "^ {UP}"),
-    ("音乐音量减", "^ {DOWN}"),
-];
-
-fn macos_shortcut_script(action: &str) -> Option<&'static str> {
-    match action {
-        "播放音乐" | "暂停音乐" => Some(r#"tell application "Music" to playpause"#),
-        "切换下一首" => Some(r#"tell application "Music" to next track"#),
-        "切换上一首" => Some(r#"tell application "Music" to previous track"#),
-        "音乐音量加" => Some(
-            "set v to output volume of (get volume settings)\nif v > 90 then\nset volume output volume 100\nelse\nset volume output volume (v + 10)\nend if",
-        ),
-        "音乐音量减" => Some(
-            "set v to output volume of (get volume settings)\nif v < 10 then\nset volume output volume 0\nelse\nset volume output volume (v - 10)\nend if",
-        ),
-        _ => None,
-    }
-}
-
-pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
-    let action = args.action.trim();
-    if action.is_empty() {
-        return ToolCallResult::err("action 不能为空");
-    }
-    let Some((_, keys)) = SHORTCUT_ACTIONS.iter().find(|(name, _)| *name == action) else {
-        let supported = SHORTCUT_ACTIONS
-            .iter()
-            .map(|(n, _)| *n)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return ToolCallResult::err(format!(
-            "不支持的快捷键操作: {action}，支持的操作: {supported}"
-        ));
-    };
-    if cfg!(target_os = "windows") {
-        let script = format!("(New-Object -COM WScript.Shell).SendKeys(\"{keys}\")");
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.args(["-NoProfile", "-Command", &script]);
-        hide_console_window(&mut cmd);
-        return match run_status_with_timeout(&mut cmd, SHORTCUT_EXEC_TIMEOUT) {
-            Ok(status) if status.success() => {
-                ToolCallResult::ok(format!("快捷键动作已执行: {action}"))
-            }
-            Ok(status) => ToolCallResult::err(format!(
-                "快捷键 {action} 执行失败，退出码 {}",
-                status.code().unwrap_or(-1)
-            )),
-            Err(error) => {
-                ToolCallResult::err(format!("快捷键 {action} 执行 PowerShell 失败: {error}"))
-            }
-        };
-    }
-    if cfg!(target_os = "macos") {
-        let Some(script) = macos_shortcut_script(action) else {
-            return ToolCallResult::err(format!("不支持的快捷键操作: {action}"));
-        };
-        let mut cmd = std::process::Command::new("osascript");
-        cmd.args(["-e", script]);
-        return match run_status_with_timeout(&mut cmd, SHORTCUT_EXEC_TIMEOUT) {
-            Ok(status) if status.success() => {
-                ToolCallResult::ok(format!("快捷键动作已执行: {action}"))
-            }
-            Ok(status) => ToolCallResult::err(format!(
-                "快捷键 {action} 执行失败，退出码 {}",
-                status.code().unwrap_or(-1)
-            )),
-            Err(error) => {
-                ToolCallResult::err(format!("快捷键 {action} 执行 osascript 失败: {error}"))
-            }
-        };
-    }
-    ToolCallResult::err("快捷键执行当前仅支持 Windows 与 macOS")
-}
-
-// ---------------------------------------------------------------------------
-// generate_text_image_tool：真实渲染并落盘 PNG
-// ---------------------------------------------------------------------------
-
-pub fn execute_generate_text_image(args: &GenerateTextImageArgs) -> ToolCallResult {
-    let text = args.text.trim();
-    if text.is_empty() {
-        return ToolCallResult::err("text 不能为空");
-    }
-    const MAX_IMAGE_SIDE_PX: i32 = 8192;
-    let width = match args.width {
-        Some(v) if v > MAX_IMAGE_SIDE_PX => {
-            return ToolCallResult::err(format!("width 不能超过 {MAX_IMAGE_SIDE_PX} 像素"));
-        }
-        Some(v) if v > 0 => v as u32,
-        _ => 1024,
-    };
-    let height = match args.height {
-        Some(v) if v > MAX_IMAGE_SIDE_PX => {
-            return ToolCallResult::err(format!("height 不能超过 {MAX_IMAGE_SIDE_PX} 像素"));
-        }
-        Some(v) if v > 0 => v as u32,
-        _ => 1024,
-    };
-    let font_size = args.font_size.filter(|v| *v > 0).unwrap_or(320) as f64;
-    let font_path = args
-        .font_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| laser_core::font::find_system_font_for_text(text));
-    let font_data = match font_path.as_ref() {
-        Some(path) => match std::fs::read(path) {
-            Ok(data) => data,
-            Err(error) => {
-                return ToolCallResult::err(format!("字体读取失败 {}: {error}", path.display()));
-            }
-        },
-        None => include_bytes!("../../../tests/fixtures/fonts/geometry.ttf").to_vec(),
-    };
-    // 以像素为单位排版：font_size 视为字高像素
-    let layout =
-        match laser_core::font::layout_text(&font_data, 0, text, font_size, font_size * 0.05) {
-            Ok(layout) => layout,
-            Err(error) => return ToolCallResult::err(format!("字体排版失败: {error}")),
-        };
-    let image = match laser_core::gcode::preview_outline_rgba(
-        &layout.paths,
-        width,
-        height,
-        layout.width.max(1.0),
-        layout.height.max(1.0),
-    ) {
-        Ok(image) => image,
-        Err(error) => return ToolCallResult::err(format!("文字图片渲染失败: {error}")),
-    };
-    let output = args
-        .output_file
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("generated_images").join("text_image.png"));
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        return ToolCallResult::err(format!("创建输出目录失败: {error}"));
-    }
-    match image.save(&output) {
-        Ok(()) => ToolCallResult::with_detail(
-            true,
-            format!("文字图片已生成: {}", output.display()),
-            format!(
-                "尺寸={}x{}px, 字数={}, 字体={}",
-                width,
-                height,
-                layout.glyphs,
-                font_path
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "内置几何字体".into())
-            ),
-        ),
-        Err(error) => ToolCallResult::err(format!("保存文字图片失败: {error}")),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // laser_workflow_tool：本地门禁；真实 workflow 状态/发送由 host 后端承接
 // ---------------------------------------------------------------------------
@@ -1419,14 +1248,14 @@ mod tests {
         let catalog = ToolCatalog::safe_default();
         assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
         assert!(!catalog.names().contains(&"command_execution_tool"));
-        assert_eq!(catalog.specs().len(), 17);
+        assert_eq!(catalog.specs().len(), 14);
     }
 
     #[test]
     fn developer_mode_adds_command_only_after_priority_tools() {
         let catalog = ToolCatalog::developer_mode();
         assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
-        assert_eq!(catalog.specs().len(), 18);
+        assert_eq!(catalog.specs().len(), 15);
         assert!(
             catalog
                 .specs()
@@ -1539,8 +1368,8 @@ mod tests {
         assert_eq!(fake.realtime(), vec![0x18]);
         assert!(fake.lines().is_empty());
 
-        // 绝对移动：握手后写 M5/G90/G0，激光关闭
-        // 响应：握手($32=1, ok) → $CD(ok, 非 FluidNC 视为空配置) → M5/G90/G0 各一个 ok
+        // 绝对移动：握手后写 M5/G90/G1 S0 F，按指定速度可控移动且激光关闭（GRBL 的 G0 会忽略 F）
+        // 响应：握手($32=1, ok) → $CD(ok, 非 FluidNC 视为空配置) → M5/G90/G1 各一个 ok
         let (opener, _, fake) = fake_opener(vec!["$32=1", "ok", "ok", "ok", "ok", "ok"]);
         let mut mv = host_args("absolute_move", true);
         mv.x = Some(10.0);
@@ -1550,7 +1379,20 @@ mod tests {
         assert!(moved.success, "{moved:?}");
         assert_eq!(
             fake.lines(),
-            vec!["$$", "$CD", "M5", "G90", "G0 X10.000 Y5.500 F800"]
+            vec!["$$", "$CD", "M5", "G90", "G1 X10.000 Y5.500 S0 F800"]
+        );
+
+        // 回工作原点（N4）：必须用 G1 X0.000 Y0.000 S0 F1000，确保实际按 1000 mm/min 移回且关光
+        let (opener, _, fake) = fake_opener(vec!["$32=1", "ok", "ok", "ok", "ok", "ok"]);
+        let mut ret = host_args("absolute_move", true);
+        ret.x = Some(0.0);
+        ret.y = Some(0.0);
+        ret.feed_rate = Some(1000.0);
+        let returned = execute_laser_safe_action_with(&ret, &opener);
+        assert!(returned.success, "{returned:?}");
+        assert_eq!(
+            fake.lines(),
+            vec!["$$", "$CD", "M5", "G90", "G1 X0.000 Y0.000 S0 F1000"]
         );
 
         // $32=0 时运动动作拒绝，且不写运动指令
@@ -1675,11 +1517,6 @@ mod tests {
         assert!(!wf_bad_gate.success);
         assert!(wf_bad_gate.result.contains("门禁"));
 
-        let unsupported = execute_shortcut_key(&ShortcutKeyExecutionArgs {
-            action: "打开灯".into(),
-        });
-        assert!(!unsupported.success);
-
         assert_eq!(
             resolve_app_alias_for("macos", "微信"),
             "/Applications/WeChat.app"
@@ -1689,37 +1526,6 @@ mod tests {
             "/System/Applications/Utilities/Terminal.app"
         );
         assert_eq!(resolve_app_alias_for("windows", "终端"), "cmd.exe");
-        for (name, _) in SHORTCUT_ACTIONS {
-            assert!(
-                macos_shortcut_script(name).is_some(),
-                "missing macOS script for {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn text_image_tool_writes_png() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("nested").join("hello.png");
-        let result = execute_generate_text_image(&GenerateTextImageArgs {
-            text: "MOSS".into(),
-            width: Some(256),
-            height: Some(128),
-            font_size: Some(48),
-            output_file: Some(output.to_string_lossy().into_owned()),
-            ..Default::default()
-        });
-        assert!(result.success, "{result:?}");
-        let bytes = std::fs::read(&output).unwrap();
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
-
-        let oversized = execute_generate_text_image(&GenerateTextImageArgs {
-            text: "MOSS".into(),
-            width: Some(100_000),
-            height: Some(128),
-            ..Default::default()
-        });
-        assert!(!oversized.success);
     }
 
     #[test]

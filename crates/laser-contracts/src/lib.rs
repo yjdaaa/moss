@@ -956,34 +956,6 @@ pub struct OpenAppArgs {
     pub payload: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
-pub struct ShortcutKeyExecutionArgs {
-    pub action: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
-pub struct GenerateTextImageArgs {
-    pub text: String,
-    #[serde(default)]
-    pub width: Option<i32>,
-    #[serde(default)]
-    pub height: Option<i32>,
-    #[serde(default)]
-    pub font_size: Option<i32>,
-    #[serde(default)]
-    pub line_spacing: Option<f64>,
-    #[serde(default)]
-    pub auto_wrap: Option<bool>,
-    #[serde(default)]
-    pub max_lines: Option<i32>,
-    #[serde(default)]
-    pub layout_mode: Option<String>,
-    #[serde(default)]
-    pub output_file: Option<String>,
-    #[serde(default)]
-    pub font_path: Option<String>,
-}
-
 pub fn builtin_material_library() -> MaterialLibrary {
     let presets = [
         (

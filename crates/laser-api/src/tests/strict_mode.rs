@@ -1965,3 +1965,184 @@ fn approved_send_mark_running_error_writes_failed_outcome_without_connecting() {
     assert!(!outcome.success);
     assert!(outcome.job_id.is_none());
 }
+
+/// N2（2026-11-27，技术书 r73）：严格模式下倍率提高审批执行时按执行当刻状态重新判断——
+/// 批准时原任务已结束（空闲或已换成新任务），一律拒绝并不新开连接，避免倍率残留到下一件；
+/// 原任务仍在运行时才经原通道发送实时字节。
+#[test]
+fn strict_mode_override_approval_rechecks_running_job_at_execution_time() {
+    let fixture = strict_fixture(true, true);
+    let service = &fixture.service;
+    let session = service.enable_desktop_session().unwrap();
+
+    // 1. 无运行中任务时发起 R3 倍率提高：直接拒绝，不建废审批、不连设备
+    let (status, idle_refused) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "power_override_plus_10",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2301
+        }),
+        voice_ctx(),
+    );
+    assert_eq!(status, 400, "{idle_refused}");
+    assert_eq!(
+        idle_refused["detail"]["error_code"], "no_active_job",
+        "{idle_refused}"
+    );
+    assert!(
+        service
+            .approvals()
+            .unwrap()
+            .list(None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.targets.lock().unwrap().is_empty());
+
+    // 2. 任务 A 运行中发起审批；但在桌面批准前任务 A 已结束 → 批准执行时重新检查并拒绝，不连空闲控制器
+    let job_a_dev = laser_device::FakeGrbl::new(Vec::<String>::new());
+    service.active_jobs.lock().unwrap().insert(
+        "wf-ov-a".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-ov-a".into(),
+            mode: "network",
+            target: "127.0.0.1:2301".into(),
+            cancel: Default::default(),
+            progress: Default::default(),
+            transport: std::sync::Arc::new(job_a_dev.clone()),
+            started_at: std::time::Instant::now(),
+            spec: Some(laser_device::ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 2301,
+            }),
+        }),
+    );
+    let (status, pending_a) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "power_override_plus_10"}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 202, "{pending_a}");
+    let approval_a = pending_a["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record_a = service.approvals().unwrap().get(&approval_a).unwrap();
+    assert!(job_a_dev.realtime().is_empty(), "批准前不得发字节");
+
+    // 任务 A 结束
+    service.active_jobs.lock().unwrap().remove("wf-ov-a");
+    let (approve_status, approved_a) = desktop_request(
+        service,
+        "POST",
+        &format!("/v1/approvals/{approval_a}/approve"),
+        Some(&serde_json::json!({"digest": record_a.digest})),
+        Some(&session),
+    );
+    assert!(approve_status >= 400, "{approve_status}: {approved_a}");
+    assert_eq!(
+        approved_a["detail"]["error_code"], "no_active_job",
+        "{approved_a}"
+    );
+    assert!(job_a_dev.realtime().is_empty());
+    assert!(
+        fixture.targets.lock().unwrap().is_empty(),
+        "原任务已结束时批准倍率绝不能新开连接发给空闲控制器"
+    );
+
+    // 3. 任务 B 运行中发起审批；在批准前任务 B 结束、同台设备上开始了新任务 C → 批准时识别原任务已结束并拒绝，不污染任务 C
+    let job_b_dev = laser_device::FakeGrbl::new(Vec::<String>::new());
+    service.active_jobs.lock().unwrap().insert(
+        "wf-ov-b".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-ov-b".into(),
+            mode: "network",
+            target: "127.0.0.1:2301".into(),
+            cancel: Default::default(),
+            progress: Default::default(),
+            transport: std::sync::Arc::new(job_b_dev.clone()),
+            started_at: std::time::Instant::now(),
+            spec: Some(laser_device::ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 2301,
+            }),
+        }),
+    );
+    let (status, pending_b) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "feed_override_plus_10"}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 202, "{pending_b}");
+    let approval_b = pending_b["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record_b = service.approvals().unwrap().get(&approval_b).unwrap();
+
+    // 任务 B 结束，新任务 C 占用同一设备通道
+    service.active_jobs.lock().unwrap().remove("wf-ov-b");
+    let job_c_dev = laser_device::FakeGrbl::new(Vec::<String>::new());
+    service.active_jobs.lock().unwrap().insert(
+        "wf-ov-c".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-ov-c".into(),
+            mode: "network",
+            target: "127.0.0.1:2301".into(),
+            cancel: Default::default(),
+            progress: Default::default(),
+            transport: std::sync::Arc::new(job_c_dev.clone()),
+            started_at: std::time::Instant::now(),
+            spec: Some(laser_device::ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 2301,
+            }),
+        }),
+    );
+    let (approve_status, approved_b) = desktop_request(
+        service,
+        "POST",
+        &format!("/v1/approvals/{approval_b}/approve"),
+        Some(&serde_json::json!({"digest": record_b.digest})),
+        Some(&session),
+    );
+    assert!(approve_status >= 400, "{approve_status}: {approved_b}");
+    assert_eq!(
+        approved_b["detail"]["error_code"], "override_job_ended",
+        "{approved_b}"
+    );
+    assert!(job_b_dev.realtime().is_empty());
+    assert!(
+        job_c_dev.realtime().is_empty(),
+        "旧任务的倍率审批不得落到新任务 C 上"
+    );
+
+    // 4. 任务 C 仍在运行时申请并批准：经任务 C 原通道写入实时字节，不新开连接
+    let (status, pending_c) = post_with_ctx(
+        service,
+        "/api/safe-action",
+        &serde_json::json!({"action": "power_override_plus_10"}),
+        voice_ctx(),
+    );
+    assert_eq!(status, 202, "{pending_c}");
+    let approval_c = pending_c["result"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record_c = service.approvals().unwrap().get(&approval_c).unwrap();
+    let (approve_status, approved_c) = desktop_request(
+        service,
+        "POST",
+        &format!("/v1/approvals/{approval_c}/approve"),
+        Some(&serde_json::json!({"digest": record_c.digest})),
+        Some(&session),
+    );
+    assert_eq!(approve_status, 200, "{approved_c}");
+    assert_eq!(job_c_dev.realtime(), vec![0x9A]);
+    assert!(fixture.targets.lock().unwrap().is_empty());
+}

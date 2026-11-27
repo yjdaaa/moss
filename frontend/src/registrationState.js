@@ -4,7 +4,7 @@
 
 import { approvalPendingMessage, isApprovalRequiredResponse } from "./approvalState.js";
 import { drawTargetLabel } from "./drawConnection.js";
-import { estopTargetArgs } from "./globalEstop.js";
+import { estopTargetArgs, estopTargetFromDescription } from "./globalEstop.js";
 
 export const REGISTRATION_SESSION_KEY = "moss-registration-v1";
 /** 画板的对位进度单独存，和工作台互不清掉对方的记录点。 */
@@ -255,13 +255,13 @@ export function adoptRegisteredDrawRecord(record, sourceWorkflowId) {
 // ── 工作台“现场移头与对刀原点”（2026-11-23 r60 B3）：完全复用 `/api/safe-action` 与确认 / R3 审批门禁 ──
 
 export const HEAD_JOG_FOLD_ID = "wb-head-jog";
-export const WORKBENCH_JOG_STEPS_MM = Object.freeze([1, 5, 10]);
+export const WORKBENCH_JOG_STEPS_MM = Object.freeze([0.1, 0.5, 1, 5, 10]);
 export const WORKBENCH_MAX_JOG_STEP_MM = 10;
 
 const ACTIVE_OVERLAY_STATUSES = new Set(["running", "sending", "preparing", "awaiting_completion"]);
 
 /**
- * 工作台单步点动请求：严格限定在允许步长 `[1, 5, 10]` mm 且单步 `<= 10 mm`、单轴 `±1`，
+ * 工作台单步点动请求：严格限定在允许步长 `[0.1, 0.5, 1, 5, 10]` mm 且单步 `<= 10 mm`、单轴 `±1`，
  * 越界或非单轴一律返回 `null`（绝不静默截断），内部直接复用 `jogRequest`。
  */
 export function workbenchJogRequest(target, dxUnit, dyUnit, stepMm) {
@@ -282,11 +282,64 @@ export function workbenchJogRequest(target, dxUnit, dyUnit, stepMm) {
   return jogRequest(target, dx * step, dy * step, JOG_FEED_MM_PER_MIN);
 }
 
-/** 设为工作原点（`set_origin`）与解除报警锁定（`unlock`）请求体，仅走 `/api/safe-action`。 */
+/** 设为工作原点（`set_origin`）、回工作原点（`return_origin` → `absolute_move` X0 Y0）、机械回零（`home`）与解除报警锁定（`unlock`）请求体，仅走 `/api/safe-action`。 */
 export function safeOriginActionRequest(target, action) {
   if (!target) return null;
-  if (action !== "set_origin" && action !== "unlock") return null;
+  if (action === "return_origin") {
+    return {
+      action: "absolute_move",
+      confirmed: true,
+      x: 0,
+      y: 0,
+      feed_rate: JOG_FEED_MM_PER_MIN,
+      ...target,
+    };
+  }
+  if (action !== "set_origin" && action !== "unlock" && action !== "home") return null;
   return { action, confirmed: true, ...target };
+}
+
+/** 加工中实时调速 / 调功率（GRBL 实时字节 0x90~0x92、0x99~0x9B，不停机直达 `/api/safe-action`）。 */
+export const LIVE_OVERRIDE_ACTIONS = Object.freeze({
+  feed_override_minus_10: "实时速度 −10%",
+  feed_override_reset: "实时速度恢复 100%",
+  feed_override_plus_10: "实时速度 +10%",
+  power_override_minus_10: "实时功率 −10%",
+  power_override_reset: "实时功率恢复 100%",
+  power_override_plus_10: "实时功率 +10%",
+});
+
+export function liveOverrideRequest(target, action) {
+  if (!target || !Object.prototype.hasOwnProperty.call(LIVE_OVERRIDE_ACTIONS, action)) return null;
+  return { action, confirmed: true, ...target };
+}
+
+/**
+ * 解析加工中实时调参的目标通道（2026-11-27 N1，技术书 r73）：
+ * 仅从当前运行中任务记录的原通道（`sendProgress.target` 或后端 `activeJobs` 中匹配当前任务的 running 记录）取值，
+ * 绝不回退到连接表单 `connectionForm`，避免加工途中修改连接面板后把倍率发给另一台设备。
+ */
+export function resolveLiveOverrideTarget({
+  sendProgress = null,
+  activeJobs = [],
+  currentWorkflow = null,
+} = {}) {
+  const fromProgress = estopTargetFromDescription(sendProgress?.target);
+  if (fromProgress) return fromProgress;
+  const running = Array.isArray(activeJobs)
+    ? activeJobs.filter((job) => job && job.state === "running")
+    : [];
+  const wfId = typeof currentWorkflow?.workflow_id === "string" ? currentWorkflow.workflow_id.trim() : "";
+  if (wfId) {
+    const matched = running.find((job) => job.workflow_id === wfId || job.job_id === wfId);
+    const fromMatched = estopTargetFromDescription(matched?.target);
+    if (fromMatched) return fromMatched;
+  }
+  if (running.length === 1) {
+    const fromOnly = estopTargetFromDescription(running[0]?.target);
+    if (fromOnly) return fromOnly;
+  }
+  return null;
 }
 
 /**
@@ -304,6 +357,10 @@ export function resolveHeadJogGuard({
 } = {}) {
   const stopTarget = estopTargetArgs(connectionForm);
   const targetLabel = stopTarget ? drawTargetLabel(connectionForm) : "";
+  const homingDisabled = connectionStatus?.homingEnabled === false;
+  const homingReason = homingDisabled
+    ? "当前控制器未开启机械回零（$22=0），请使用手动移头与「设为工作原点」"
+    : "";
 
   if (workingAction) {
     return {
@@ -313,6 +370,8 @@ export function resolveHeadJogGuard({
       shortSummary: "执行中…",
       stopTarget,
       targetLabel,
+      homingDisabled,
+      homingReason,
     };
   }
   const hasRunningJob = Array.isArray(activeJobs) && activeJobs.some((job) => job && job.state === "running");
@@ -324,6 +383,8 @@ export function resolveHeadJogGuard({
       shortSummary: "加工进行中已锁定",
       stopTarget,
       targetLabel,
+      homingDisabled,
+      homingReason,
     };
   }
   if (busy) {
@@ -334,6 +395,8 @@ export function resolveHeadJogGuard({
       shortSummary: "解算轨迹中",
       stopTarget,
       targetLabel,
+      homingDisabled,
+      homingReason,
     };
   }
   if (!stopTarget) {
@@ -344,6 +407,8 @@ export function resolveHeadJogGuard({
       shortSummary: "尚未配置连接",
       stopTarget: null,
       targetLabel: "",
+      homingDisabled,
+      homingReason,
     };
   }
   if (!connectionStatus?.checkedAt) {
@@ -354,6 +419,8 @@ export function resolveHeadJogGuard({
       shortSummary: "需先握手探测",
       stopTarget,
       targetLabel,
+      homingDisabled,
+      homingReason,
     };
   }
   if (!connectionStatus?.connected) {
@@ -367,6 +434,8 @@ export function resolveHeadJogGuard({
       shortSummary: "设备未连接",
       stopTarget,
       targetLabel,
+      homingDisabled,
+      homingReason,
     };
   }
   return {
@@ -376,6 +445,8 @@ export function resolveHeadJogGuard({
     shortSummary: "",
     stopTarget,
     targetLabel,
+    homingDisabled,
+    homingReason,
   };
 }
 
@@ -387,10 +458,18 @@ function jogDirectionLabel(dxUnit, dyUnit) {
 }
 
 /**
- * 规划一次现场安全动作（点动 / 设工作原点 / 解锁 $X）：
+ * 规划一次现场安全动作（点动 / 设工作原点 / 回工作原点 / 机械回零 $H / 解锁 $X）：
  * 先校验参数并返回二次确认弹窗文案；`buildConfirmedPayload` 仅在用户点击确认后调用，杜绝未确认自动带 `confirmed=true`。
  */
-export function planHeadSafeAction({ kind, target, targetLabel, dxUnit = 0, dyUnit = 0, stepMm = 1 } = {}) {
+export function planHeadSafeAction({
+  kind,
+  target,
+  targetLabel,
+  dxUnit = 0,
+  dyUnit = 0,
+  stepMm = 1,
+  homingDisabled = false,
+} = {}) {
   if (!target) return null;
   const label = targetLabel || (target.connection_mode === "serial" ? target.port : `${target.host}:${target.telnet_port}`);
   if (kind === "jog") {
@@ -416,6 +495,29 @@ export function planHeadSafeAction({ kind, target, targetLabel, dxUnit = 0, dyUn
         confirmText: "设为工作原点",
       },
       buildConfirmedPayload: () => safeOriginActionRequest(target, "set_origin"),
+    };
+  }
+  if (kind === "return_origin") {
+    return {
+      actionLabel: "回工作原点",
+      dialog: {
+        title: "确认回工作原点 (G1 X0 Y0 · 机器将移动)",
+        message: `目标设备：${label}\n激光头将以 ${JOG_FEED_MM_PER_MIN} mm/min 移回当前工作原点 (X0, Y0)，激光全程关闭。\n请人在机器旁观察，确认移动路径无夹具或障碍物；严格模式开启时需桌面审批，急停随时可用。`,
+        confirmText: "确认回原点",
+      },
+      buildConfirmedPayload: () => safeOriginActionRequest(target, "return_origin"),
+    };
+  }
+  if (kind === "home") {
+    if (homingDisabled) return null;
+    return {
+      actionLabel: "机械回零 $H",
+      dialog: {
+        title: "确认机械回零 ($H · 机器将移动)",
+        message: `目标设备：${label}\n将向控制器发送 $H 执行机械回零（激光头将向限位开关方向移动，激光全程关闭）。\n请确认机器已安装限位开关且台面无障碍物；严格模式开启时需桌面审批，急停随时可用。`,
+        confirmText: "确认回零",
+      },
+      buildConfirmedPayload: () => safeOriginActionRequest(target, "home"),
     };
   }
   if (kind === "unlock") {
@@ -448,6 +550,7 @@ export function createHeadSafeActionRunner({ confirmFn, postFn, alertFn, onLog, 
       ...spec,
       target: guard?.stopTarget,
       targetLabel: guard?.targetLabel,
+      homingDisabled: guard?.homingDisabled === true,
     });
     if (!plan) {
       return { status: "invalid" };

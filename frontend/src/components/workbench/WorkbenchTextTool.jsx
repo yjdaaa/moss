@@ -9,6 +9,7 @@ import {
   WORKBENCH_TEXT_MAX_CHARS,
   WORKBENCH_TEXT_MAX_LINES,
   normalizeWorkbenchText,
+  textBorderCutAllowed,
   workbenchTextStats,
 } from "../../workbenchParams.js";
 import EngraveRouteSwitch from "../EngraveRouteSwitch.jsx";
@@ -178,12 +179,28 @@ export function WorkbenchTextTool({
                 onChange={(e) => updateBorder({ double: e.target.checked })}
               />
             </label>
+            {textBorderCutAllowed({ textIsCut, surfaceOnly }) ? (
+              <label
+                className="wb-check-inline"
+                title="先按雕刻参数刻完内部文字（双线框时含内圈装饰框），再自动按当前材料厚度的切割参数沿最外框切穿"
+              >
+                <span>切下外框</span>
+                <input
+                  id="wb-text-border-cut"
+                  type="checkbox"
+                  checked={Boolean(border.cutBorder)}
+                  onChange={(e) => updateBorder({ cutBorder: e.target.checked })}
+                />
+              </label>
+            ) : null}
           </>
         ) : null}
       </div>
       {hasBorder ? (
         <div className="wb-params-hint" id="wb-text-border-hint">
-          外框比木牌四周各内缩 3 mm（双线框内圈再缩 1.5 mm），文字按字高居中放进框里，放不下时会提示减小字高；外框按当前刻法只走线，选“外框切割”时文字和外框都会切穿。
+          {border.cutBorder && textBorderCutAllowed({ textIsCut, surfaceOnly })
+            ? "先按雕刻参数刻完框内文字（双线框含内圈），再按当前材料厚度的切割参数沿最外圈切穿（先内后外、先雕后切）。"
+            : "外框比木牌四周各内缩 3 mm（双线框内圈再缩 1.5 mm），文字按字高居中放进框里，放不下时会提示减小字高；外框按当前刻法只走线，选“外框切割”时文字和外框都会切穿。"}
         </div>
       ) : null}
       {engraveRoute === "image" ? (

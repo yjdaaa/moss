@@ -228,7 +228,7 @@ impl ApiService {
             )
         };
 
-        let (rem_w, rem_h) = self.remembered_work_area();
+        let (rem_w, rem_h) = self.remembered_work_area(object);
         let max_w = crate::generation::parse_work_area_mm_or(
             object.get("work_area_width_mm"),
             "work_area_width_mm",

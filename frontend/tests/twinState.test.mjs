@@ -20,6 +20,9 @@ import {
   YISU_V1_PROFILE,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
+  TWIN_MATERIAL_STORAGE_KEY,
+  loadTwinMaterialConfig,
+  saveTwinMaterialConfig,
   twinEstopContext,
 } from "../src/twinState.js";
 import { stopPageTarget } from "../src/globalEstop.js";
@@ -482,4 +485,45 @@ test("数字孪生运行态禁止切回演示刀路，且更新行程不在 setM
   });
   assert.equal(nonlinearPeriph.airAssistLabel, "未接线");
   assert.equal(nonlinearPeriph.speedMapWarning, NONLINEAR_SPEED_MAP_WARNING);
+
+  // N6：数字孪生删除偏移控件后，偏移恒为 0 并清除本地存储遗留的偏移键，修改材料宽高也不再写入 textOffsetX/Y
+  const backing = new Map();
+  const fakeStorage = {
+    getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: (k) => backing.delete(k),
+  };
+  fakeStorage.setItem(
+    TWIN_MATERIAL_STORAGE_KEY,
+    JSON.stringify({
+      autoSize: false,
+      widthMm: 90,
+      heightMm: 70,
+      thicknessMm: 3,
+      offsetX: 5,
+      offsetY: 8,
+      textOffsetX: 25,
+      textOffsetY: 18,
+      contentOffsetX: 10,
+    }),
+  );
+  const loaded = loadTwinMaterialConfig(fakeStorage);
+  assert.equal(loaded.textOffsetX, 0);
+  assert.equal(loaded.textOffsetY, 0);
+  assert.equal(loaded.widthMm, 90);
+  assert.equal(loaded.offsetX, 5);
+  const cleanedRaw = JSON.parse(fakeStorage.getItem(TWIN_MATERIAL_STORAGE_KEY));
+  assert.equal("textOffsetX" in cleanedRaw, false, "读取旧配置后应清理本地存储中的 textOffsetX");
+  assert.equal("textOffsetY" in cleanedRaw, false, "读取旧配置后应清理本地存储中的 textOffsetY");
+  assert.equal("contentOffsetX" in cleanedRaw, false);
+
+  const saved = saveTwinMaterialConfig(loaded, { widthMm: 95, textOffsetX: 30, textOffsetY: 20 }, fakeStorage);
+  assert.equal(saved.widthMm, 95);
+  assert.equal(saved.textOffsetX, 0);
+  assert.equal(saved.textOffsetY, 0);
+  const savedRaw = JSON.parse(fakeStorage.getItem(TWIN_MATERIAL_STORAGE_KEY));
+  assert.equal("textOffsetX" in savedRaw, false);
+  assert.equal("textOffsetY" in savedRaw, false);
+
+  assert.doesNotMatch(twinSource, /\bnextTX\b|\bnextTY\b|\btextOffsetX\b|\btextOffsetY\b/, "TwinPage 不再读写材料内偏移");
 });

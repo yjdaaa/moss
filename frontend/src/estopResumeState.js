@@ -21,6 +21,9 @@ export function sendProgressFromResult(sendResult) {
   const warnings = Array.isArray(sendResult.warnings)
     ? sendResult.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
     : [];
+  const lastStatusReport = typeof sendResult.last_status_report === "string"
+    ? sendResult.last_status_report.trim()
+    : "";
   return {
     sent,
     total,
@@ -31,6 +34,7 @@ export function sendProgressFromResult(sendResult) {
     ...(linesCompleted !== undefined ? { lines_completed: linesCompleted } : {}),
     target: typeof sendResult.target === "string" ? sendResult.target : "",
     ...(typeof sendResult.phase === "string" ? { phase: sendResult.phase } : {}),
+    ...(lastStatusReport ? { last_status_report: lastStatusReport } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 }

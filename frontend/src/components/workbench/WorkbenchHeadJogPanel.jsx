@@ -19,7 +19,7 @@ const JOG_DIRECTIONS = [
 /**
  * 雕刻工作台「加工监视舱」内的“现场移头与对刀原点”折叠面板（2026-11-23 r60 B3）：
  * - 默认收起，展开状态按 `foldState`（`moss_ui_fold_wb-head-jog`）记忆；
- * - 只提供单步 1 / 5 / 10 mm 的 X±/Y± 点动、「设为工作原点」与「解锁 $X」，不提供连续点动、不提供出光；
+ * - 只提供单步 0.1 / 0.5 / 1 / 5 / 10 mm 的 X±/Y± 点动、「设为工作原点」与「解锁 $X」，不提供连续点动、不提供出光；
  * - 全部动作先弹 `showConfirm` 二次确认，再走 `/api/safe-action` 与严格模式 R3 审批门禁；
  * - 未连接 / 未探测成功 / 正在加工或在途执行时禁用全部按钮并显示原因，同步锁拦截快速连点。
  */
@@ -123,6 +123,32 @@ export function WorkbenchHeadJogPanel({
               title={guard.disabled ? guard.reason : "把当前激光头位置设为工作原点 G92 X0 Y0（需二次确认）"}
             >
               设为工作原点
+            </button>
+            <button
+              type="button"
+              id="wb-jog-return-origin"
+              className="btn btn-ghost wb-sec-btn wb-jog-btn"
+              disabled={guard.disabled}
+              onClick={() => void runnerRef.current({ kind: "return_origin" }, guard)}
+              title={guard.disabled ? guard.reason : "激光关闭以 1000 mm/min 移回当前工作原点 G1 X0 Y0（需二次确认）"}
+            >
+              回工作原点
+            </button>
+            <button
+              type="button"
+              id="wb-jog-home"
+              className="btn btn-ghost wb-sec-btn wb-jog-btn"
+              disabled={guard.disabled || guard.homingDisabled}
+              onClick={() => void runnerRef.current({ kind: "home" }, guard)}
+              title={
+                guard.disabled
+                  ? guard.reason
+                  : guard.homingDisabled
+                  ? guard.homingReason
+                  : "发送 $H 执行机械回零（需限位开关与二次确认）"
+              }
+            >
+              机械回零 $H
             </button>
             <button
               type="button"

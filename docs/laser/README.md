@@ -10,18 +10,17 @@
 
 ## 当前 MCP 激光工具面
 
-`laser_tools::ToolCatalog` 登记 18 个工具，`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时列出。没有摄像头、Home Assistant 或 LaserGRBL GUI 工具。激光相关工具如下：
+`laser_tools::ToolCatalog` 登记 15 个工具（默认常规模式 14 个），`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时列出。没有摄像头、Home Assistant 或 LaserGRBL GUI 工具。激光相关工具如下：
 
 | 工具 | 主要用途 | 是否启动机器 |
 | --- | --- | --- |
 | `check_laser_connection_tool` | 打开串口或 Telnet 做有界握手（`$$` 到 `ok`、要求 `$32=1`），返回连通与就绪摘要 | 否 |
-| `laser_safe_action_tool` | 语义化单动作：`status`、`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset`，以及进给/功率倍率 `feed_plus_10` 等 | `status` 与倍率不需确认；其余需 `confirmed=true` |
+| `laser_safe_action_tool` | 语义化单动作：`status`、`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`（`G1 ... S0 F` 控速移动）、`relative_move`、`emergency_stop`、`soft_reset`，以及加工中进给/功率倍率 `feed_plus_10` 等 | `status` 与倍率不需确认（倍率仅对正在运行的任务经原通道发送，无运行中任务拒绝）；其余需 `confirmed=true` |
 | `laser_workflow_tool` | 小智与网页共享的高层工作流：`preview`（文字素材转 `/api/text-task/generate`）、`plan`、`create`、`status`、`cancel`、`confirm_send` / `send`、`recent` | 只有 `confirm_send` 且 `confirmed=true` 才发送 |
 | `run_calibration_grid_tool` / `select_calibration_cell_tool` | 生成测试矩阵；`calibration_id + confirmed=true` 时发送；选中最佳格写回材料库 | 生成不发送；发送需确认 |
 | `start_tuned_job_tool` | 对已有 `workflow_id` 执行 `confirm_send`；未确认或 `dry_run=true` 时只返回状态 | 需 `confirmed=true` |
 | `material_params_tool` / `recommend_laser_params_tool` | 材料库 `list` / `get` / `recommend` / `save` / `delete` / `import` / `export`；参数推荐 | 否 |
-| `generate_text_image_tool` | 生成白底黑字文字图片 | 否 |
-| `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` | 两者同一分支，只接受 `text` 素材，转发 `/api/text-task/generate`；可传 `text_fill`（`outline` 默认 / `fill` / `hatch`）、`text_align`、`origin`（`center` 默认）与木牌尺寸 `width_mm` / `height_mm`（不给字号时自动适配）；2026-11-06 起 `send_after_generate` 不再顺带发送，预览弹到桌面，提示模型等用户在预览窗“同意开刻”或（未开严格模式时）口头确认后再 `confirm_send` | 否 |
+| `generate_text_laser_task_tool` | 只接受 `text` 素材，转发 `/api/text-task/generate`；可传 `text_fill`（`outline` 默认 / `fill` / `hatch`）、`text_align`、`origin`（`center` 默认）与木牌尺寸 `width_mm` / `height_mm`（不给字号时自动适配）；2026-11-06 起 `send_after_generate` 不再顺带发送，预览弹到桌面，提示模型等用户在预览窗“同意开刻”或（未开严格模式时）口头确认后再 `confirm_send` | 否 |
 | `refine_laser_params_from_feedback_tool` / `regenerate_text_laser_task_tool` | 按"太焦/太浅/切不透/毛边/断线"有界调参；用原任务输入重新生成 | 否 |
 | `laser_grbl_tool` / `laser_network_grbl_tool` | 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file`、`send_command` 直接拒绝并引导走 workflow 或安全动作 | 否 |
 

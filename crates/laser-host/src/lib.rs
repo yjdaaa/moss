@@ -1238,11 +1238,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
         assert!(names.iter().any(|name| name == "laser_workflow_tool"));
-        for hidden in [
-            "command_execution_tool",
-            "open_app_tool",
-            "shortcut_key_execution_tool",
-        ] {
+        for hidden in ["command_execution_tool", "open_app_tool"] {
             assert!(
                 !names.iter().any(|name| name == hidden),
                 "{hidden} 不对内置语音开放"

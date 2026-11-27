@@ -162,9 +162,7 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                     tool["inputSchema"]["properties"][key] = value;
                 }
             }
-            "generate_text_laser_task_tool"
-            | "generate_text_image_gcode_tool"
-            | "laser_workflow_tool" => {
+            "generate_text_laser_task_tool" | "laser_workflow_tool" => {
                 // 2026-11-06 文字刻法、排版与起点（用户决定：默认描边、激光头对准木牌中心）
                 let props = &mut tool["inputSchema"]["properties"];
                 props["text_fill"] = serde_json::json!({
@@ -279,10 +277,7 @@ pub const COMPACT_LASER_TOOLS: [&str; 8] = [
 
 /// 不属于激光的电脑控制类工具：两种清单都原样列出（内置语音与严格模式下另由 `tool_never_exposed` 去掉）。
 fn is_desktop_control_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool"
-    )
+    matches!(name, "command_execution_tool" | "open_app_tool")
 }
 
 /// n72 精简清单：8 个激光工具用面向用户意图重写的说明与参数（`tests/golden/mcp_tools_compact.json`，

@@ -17,7 +17,7 @@ fn safe_tools_list_hides_developer_command() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 14);
     assert!(!names.contains(&"command_execution_tool"));
 }
 
@@ -34,7 +34,7 @@ fn developer_tools_list_has_eighteen_tools_matching_catalog() {
         .into_iter()
         .map(str::to_owned)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed.len(), 18);
+    assert_eq!(listed.len(), 15);
     assert_eq!(listed, catalog, "tools/list 与 ToolCatalog 必须一致");
 }
 
@@ -186,7 +186,7 @@ fn every_listed_tool_has_a_risk_level() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), 18);
+    assert_eq!(names.len(), 15);
     for name in &names {
         assert!(
             laser_contracts::tool_risk(name, &serde_json::json!({})).is_some(),
@@ -208,10 +208,6 @@ fn strict_bridge_refuses_r4_tools() {
     let backend = StrictBackend(FakeBackend::new(vec![]), Mutex::new(Vec::new()));
     for (name, arguments) in [
         ("open_app_tool", serde_json::json!({"app_name": "notepad"})),
-        (
-            "shortcut_key_execution_tool",
-            serde_json::json!({"keys": "ctrl+s"}),
-        ),
         (
             "command_execution_tool",
             serde_json::json!({"command": "dir"}),
@@ -256,17 +252,17 @@ fn strict_bridge_refuses_r4_tools() {
             .contains("strict_mode_blocked")
     );
     assert!(backend.0.calls().is_empty(), "被拒绝的调用不得触达后端");
-    // P1-08：每次拒绝都记审计（7 次 R4 + 1 次采用反馈）
+    // P1-08：每次拒绝都记审计（6 次 R4 + 1 次采用反馈）
     let audits = backend.1.lock().unwrap().clone();
-    assert_eq!(audits.len(), 8);
-    assert!(audits[..7].iter().all(
+    assert_eq!(audits.len(), 7);
+    assert!(audits[..6].iter().all(
         |entry| entry.action == laser_contracts::AuditAction::R4Denied
             && entry.client == "mcp"
             && entry.result == laser_contracts::AuditResult::Denied
     ));
     assert_eq!(audits[0].detail.tool.as_deref(), Some("open_app_tool"));
     assert_eq!(
-        audits[7].action,
+        audits[6].action,
         laser_contracts::AuditAction::StrictModeBlocked
     );
 
@@ -282,7 +278,7 @@ fn strict_bridge_refuses_r4_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 15, "{names:?}");
+    assert_eq!(names.len(), 13, "{names:?}");
     assert!(!names.contains(&"open_app_tool") && !names.contains(&"command_execution_tool"));
     assert!(names.contains(&"laser_grbl_tool") && names.contains(&"material_params_tool"));
 }
@@ -355,7 +351,7 @@ fn non_strict_bridge_behavior_is_unchanged() {
         Some(&backend),
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
 }
 
 #[test]
@@ -377,7 +373,7 @@ fn json_rpc_handles_initialize_tools_list_notifications_and_errors() {
         false,
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
     assert!(
         handle_json_rpc(
             &serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -461,9 +457,7 @@ fn compact_tool_list_is_small_described_and_consistent() {
         "laser_network_grbl_tool",
         "start_tuned_job_tool",
         "generate_text_laser_task_tool",
-        "generate_text_image_gcode_tool",
         "recommend_laser_params_tool",
-        "generate_text_image_tool",
         "command_execution_tool",
     ] {
         assert!(!names.contains(&hidden), "{hidden} 只在完整清单里");
@@ -1174,7 +1168,7 @@ fn disabled_tools_are_neither_listed_nor_callable() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 15, "{names:?}");
+    assert_eq!(names.len(), 12, "{names:?}");
     assert!(!names.contains(&"material_params_tool") && !names.contains(&"laser_safe_action_tool"));
 
     let call = handle_json_rpc_with(
@@ -1519,24 +1513,19 @@ fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
         200,
         serde_json::json!({"success": true, "result": {"workflow_id": "wf-ai", "status": "preview_ready"}}),
     );
-    let backend = FakeBackend::new(vec![ok.clone(), ok.clone(), ok]);
-    for name in [
+    let backend = FakeBackend::new(vec![ok.clone(), ok]);
+    let result = dispatch_tool_call_with(
         "generate_text_laser_task_tool",
-        "generate_text_image_gcode_tool",
-    ] {
-        let result = dispatch_tool_call_with(
-            name,
-            &serde_json::json!({"text": "生日快乐", "material": "椴木", "thickness_mm": 3, "confirmed": true, "send_after_generate": true, "host": "10.0.0.8"}),
-            false,
-            Some(&backend),
-        );
-        assert!(result.success, "{result:?}");
-        assert!(
-            result.result.contains("同意开刻") && result.result.contains("没有直接开始加工"),
-            "{}",
-            result.result
-        );
-    }
+        &serde_json::json!({"text": "生日快乐", "material": "椴木", "thickness_mm": 3, "confirmed": true, "send_after_generate": true, "host": "10.0.0.8"}),
+        false,
+        Some(&backend),
+    );
+    assert!(result.success, "{result:?}");
+    assert!(
+        result.result.contains("同意开刻") && result.result.contains("没有直接开始加工"),
+        "{}",
+        result.result
+    );
     let preview = dispatch_tool_call_with(
         "laser_workflow_tool",
         &serde_json::json!({"action": "preview", "text": "MOSS", "material": "椴木", "thickness_mm": 3}),
@@ -1545,7 +1534,7 @@ fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
     );
     assert!(preview.result.contains("同意开刻"), "{}", preview.result);
     let calls = backend.calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 2);
     assert!(
         calls.iter().all(|call| call.1 == "/api/text-task/generate"),
         "{calls:?}"
@@ -1621,4 +1610,79 @@ fn connection_probe_tools_route_through_backend_busy_protection() {
     assert_eq!(calls[1].2["auto_fallback"], false);
     assert_eq!(calls[2].2["connection_mode"], "network");
     assert_eq!(calls[2].2["auto_fallback"], false);
+}
+
+#[test]
+fn voice_mcp_tools_surface_preview_and_send_warnings_in_summaries() {
+    let backend = FakeBackend::new(vec![
+        (
+            200,
+            serde_json::json!({
+                "success": true,
+                "result": {
+                    "workflow_id": "wf-warn",
+                    "status": "preview_ready",
+                    "artifacts": {
+                        "actual_params": {
+                            "laser_max_power": 500.0,
+                            "power_scale": 1000.0,
+                            "feed_rate": 3600.0,
+                            "passes": 1
+                        },
+                        "warnings": [
+                            "进给速度 3600 mm/min 超过固件最大速度 2000 mm/min，控制器将自动降速并拉长实际用时"
+                        ]
+                    }
+                }
+            }),
+        ),
+        (
+            200,
+            serde_json::json!({
+                "success": true,
+                "result": {
+                    "workflow_id": "wf-warn",
+                    "status": "sending",
+                    "send_result": {
+                        "lines_sent": 0,
+                        "total_lines": 120,
+                        "warnings": [
+                            "软限位未开启（$20=0），超行程时控制器不会自动拦截",
+                            "按当前机械坐标 MPos=(85.0, 20.0) 估算，X 轴末端 115.0 mm 可能超出行程 100.0 mm"
+                        ]
+                    }
+                }
+            }),
+        ),
+    ]);
+
+    let preview = dispatch_tool_call_with(
+        "generate_text_laser_task_tool",
+        &serde_json::json!({"text": "注意安全", "material": "椴木", "thickness_mm": 3}),
+        false,
+        Some(&backend),
+    );
+    assert!(preview.success, "{preview:?}");
+    assert!(
+        preview
+            .result
+            .contains("注意：进给速度 3600 mm/min 超过固件最大速度 2000 mm/min"),
+        "{}",
+        preview.result
+    );
+
+    let send = dispatch_tool_call_with(
+        "laser_workflow_tool",
+        &serde_json::json!({"action": "confirm_send", "workflow_id": "wf-warn", "confirmed": true, "host": "10.0.0.5"}),
+        false,
+        Some(&backend),
+    );
+    assert!(send.success, "{send:?}");
+    assert!(
+        send.result.contains("⚠️")
+            && send.result.contains("软限位未开启")
+            && send.result.contains("机械坐标 MPos"),
+        "{}",
+        send.result
+    );
 }

@@ -461,7 +461,6 @@ fn is_slow_look_call(call: &ToolCall) -> bool {
 fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
     let name = call.function.name.as_str();
     match name {
-        "generate_text_image_tool" => true,
         // n72 精简清单的刻字预览与测试矩阵生成（都不动机器）；发送、续雕、开始刻矩阵不在此列
         "laser_workflow_tool" => {
             let parsed: Value =
@@ -477,7 +476,7 @@ fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|id| !id.trim().is_empty()))
         }
-        "generate_text_image_gcode_tool" | "generate_text_laser_task_tool" => {
+        "generate_text_laser_task_tool" => {
             let parsed: Value =
                 serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             !(arg_flag_true(&parsed, "confirmed") && arg_flag_true(&parsed, "send_after_generate"))

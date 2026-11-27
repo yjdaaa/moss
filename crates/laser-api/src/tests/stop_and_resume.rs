@@ -3145,3 +3145,115 @@ fn short_io_blocks_concurrent_double_open_but_allows_emergency_stop_reuse() {
         "复用在途通道写急停时不应重复打开新连接"
     );
 }
+
+/// N1（2026-11-27，技术书 r73）：倍率类实时动作必须命中正在运行的任务并走原任务通道，
+/// 无运行中任务或显式目标与运行中任务不一致时直接拒绝，绝不新开连接发送倍率字节。
+#[test]
+fn live_override_requires_matching_running_job_and_never_opens_new_transport() {
+    let factory_opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let opens_cb = factory_opens.clone();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(std::sync::Arc::new(move |_spec| {
+        opens_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        panic!("倍率调节不得新开连接")
+    }));
+
+    // 1. 没有正在运行的任务：即使传了显式设备目标，也直接拒绝，不新开连接
+    let idle_res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "power_override_plus_10",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2301
+        }),
+    );
+    assert_eq!(idle_res["success"], false, "{idle_res}");
+    assert_eq!(idle_res["detail"], "no_active_job", "{idle_res}");
+    assert_eq!(factory_opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 注册一个运行中的加工任务（原通道为 127.0.0.1:2301）
+    let job_device = laser_device::FakeGrbl::new(Vec::<String>::new());
+    let cancel = laser_device::CancellationToken::default();
+    service.active_jobs.lock().unwrap().insert(
+        "wf-override-1".into(),
+        std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-override-1".into(),
+            mode: "network",
+            target: "127.0.0.1:2301".into(),
+            cancel: cancel.clone(),
+            progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+            transport: std::sync::Arc::new(job_device.clone()),
+            started_at: std::time::Instant::now(),
+            spec: Some(laser_device::ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 2301,
+            }),
+        }),
+    );
+
+    // 2. 显式目标与运行中任务不一致（例如加工途中用户在连接表单改了别的 IP）：拒绝，且原通道不收字节、不新开连接
+    let mismatch_res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "feed_override_plus_10",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2399
+        }),
+    );
+    assert_eq!(mismatch_res["success"], false, "{mismatch_res}");
+    assert_eq!(
+        mismatch_res["detail"], "override_target_mismatch",
+        "{mismatch_res}"
+    );
+    assert!(job_device.realtime().is_empty());
+    assert_eq!(factory_opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 3. 显式目标命中正在运行的任务：经原任务通道发送实时倍率字节（0x9A / 0x92），不新开连接
+    let power_ok = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "power_override_plus_10",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2301
+        }),
+    );
+    assert_eq!(power_ok["success"], true, "{power_ok}");
+    let feed_ok = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "feed_override_minus_10",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2301
+        }),
+    );
+    assert_eq!(feed_ok["success"], true, "{feed_ok}");
+    assert_eq!(job_device.realtime(), vec![0x9A, 0x92]);
+    assert_eq!(factory_opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 4. 任务进入取消态后不再视为运行中任务：倍率拒绝
+    cancel.cancel();
+    let cancelled_res = post_json(
+        &service,
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "power_override_reset",
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 2301
+        }),
+    );
+    assert_eq!(cancelled_res["success"], false, "{cancelled_res}");
+    assert_eq!(cancelled_res["detail"], "no_active_job", "{cancelled_res}");
+    assert_eq!(job_device.realtime(), vec![0x9A, 0x92]);
+}

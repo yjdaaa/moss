@@ -121,12 +121,12 @@ test("会话记录读写容错：存储不可用不抛错", () => {
   assert.equal(readRegistrationSession(storage), null);
 });
 
-test("B3 工作台现场移头：步长严格限制为 1 / 5 / 10 mm（上限 10 mm），越界或斜向返回 null 不截断", () => {
+test("B3 工作台现场移头：步长严格限制为 0.1 / 0.5 / 1 / 5 / 10 mm（上限 10 mm），越界或斜向返回 null 不截断", () => {
   const target = { connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 };
-  assert.deepEqual(WORKBENCH_JOG_STEPS_MM, [1, 5, 10]);
+  assert.deepEqual(WORKBENCH_JOG_STEPS_MM, [0.1, 0.5, 1, 5, 10]);
   assert.equal(WORKBENCH_MAX_JOG_STEP_MM, 10);
 
-  for (const step of [1, 5, 10]) {
+  for (const step of [0.1, 0.5, 1, 5, 10]) {
     assert.deepEqual(workbenchJogRequest(target, 1, 0, step), {
       action: "relative_move",
       confirmed: true,
@@ -145,7 +145,7 @@ test("B3 工作台现场移头：步长严格限制为 1 / 5 / 10 mm（上限 10
     });
   }
 
-  for (const badStep of [0, -1, 0.1, 2, 10.1, 15, 20, 100, Number.NaN, Number.POSITIVE_INFINITY]) {
+  for (const badStep of [0, -1, 0.05, 0.2, 2, 10.1, 15, 20, 100, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.equal(workbenchJogRequest(target, 1, 0, badStep), null, `越界或非允许步长 ${badStep} 必须拒绝`);
     assert.equal(planHeadSafeAction({ kind: "jog", target, dxUnit: 1, dyUnit: 0, stepMm: badStep }), null);
   }
@@ -311,4 +311,84 @@ test("B3 工作台现场移头：每次动作先二次确认、在途防连点�
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].opts.title, "等待桌面审批");
   assert.match(alerts[0].msg, /批准/);
+
+  // 4. 回工作原点（absolute_move X0 Y0 · G1 控速）、机械回零（$H，固件未开回零时禁用）与加工中实时调参
+  const { liveOverrideRequest, resolveLiveOverrideTarget } = await import("../src/registrationState.js");
+  const returnPlan = planHeadSafeAction({
+    kind: "return_origin",
+    target: readyGuard.stopTarget,
+    targetLabel: "127.0.0.1:2302",
+  });
+  assert.match(returnPlan.dialog.title, /G1 X0 Y0/, "N4：回工作原点确认框须标明 G1 控速移回");
+  assert.match(returnPlan.dialog.message, /1000 mm\/min/);
+  assert.deepEqual(returnPlan.buildConfirmedPayload(), {
+    action: "absolute_move",
+    confirmed: true,
+    x: 0,
+    y: 0,
+    feed_rate: 1000,
+    connection_mode: "network",
+    host: "127.0.0.1",
+    telnet_port: 2302,
+  });
+  assert.deepEqual(
+    planHeadSafeAction({ kind: "home", target: readyGuard.stopTarget, targetLabel: "127.0.0.1:2302" })
+      .buildConfirmedPayload(),
+    {
+      action: "home",
+      confirmed: true,
+      connection_mode: "network",
+      host: "127.0.0.1",
+      telnet_port: 2302,
+    },
+  );
+  assert.equal(
+    planHeadSafeAction({ kind: "home", target: readyGuard.stopTarget, homingDisabled: true }),
+    null,
+    "固件未开启回零（$22=0）时不得生成机械回零请求",
+  );
+  const noHomingGuard = resolveHeadJogGuard({
+    connectionForm: { mode: "network", host: "127.0.0.1", telnetPort: "2302" },
+    connectionStatus: { checkedAt: 1700000000000, connected: true, homingEnabled: false },
+  });
+  assert.equal(noHomingGuard.homingDisabled, true);
+  assert.match(noHomingGuard.homingReason, /\$22=0/);
+  assert.deepEqual(liveOverrideRequest(readyGuard.stopTarget, "power_override_minus_10"), {
+    action: "power_override_minus_10",
+    confirmed: true,
+    connection_mode: "network",
+    host: "127.0.0.1",
+    telnet_port: 2302,
+  });
+  assert.equal(liveOverrideRequest(readyGuard.stopTarget, "unknown_action"), null);
+
+  // N1：加工中实时调参必须走任务原通道，连接面板中途改成别的设备时不受影响，无运行任务时返回 null
+  assert.deepEqual(
+    resolveLiveOverrideTarget({
+      sendProgress: { target: "127.0.0.1:2301" },
+      activeJobs: [{ job_id: "wf-1", workflow_id: "wf-1", state: "running", target: "127.0.0.1:2301" }],
+      currentWorkflow: { workflow_id: "wf-1" },
+    }),
+    { connection_mode: "network", host: "127.0.0.1", telnet_port: 2301 },
+  );
+  assert.deepEqual(
+    resolveLiveOverrideTarget({
+      sendProgress: { target: "" },
+      activeJobs: [
+        { job_id: "wf-other", workflow_id: "wf-other", state: "running", target: "10.0.0.9:23" },
+        { job_id: "wf-cur", workflow_id: "wf-cur", state: "running", target: "COM5@115200" },
+      ],
+      currentWorkflow: { workflow_id: "wf-cur" },
+    }),
+    { connection_mode: "serial", port: "COM5", baudrate: 115200 },
+  );
+  assert.equal(
+    resolveLiveOverrideTarget({
+      sendProgress: null,
+      activeJobs: [{ job_id: "wf-old", state: "unknown", target: "127.0.0.1:2301" }],
+      currentWorkflow: { workflow_id: "wf-1" },
+    }),
+    null,
+    "没有运行中任务通道时不得退回连接表单",
+  );
 });

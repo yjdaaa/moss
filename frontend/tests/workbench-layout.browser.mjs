@@ -166,15 +166,15 @@ try {
   // 7. 创作画板（/draw）同样支持缩放面板、折叠收起与独立布局记忆
   await page.goto(new URL("draw", local).href, { waitUntil: "domcontentloaded" });
   await page.locator(".ob-draw-page .ob-canvas").waitFor({ timeout: 20_000 });
-  for (const id of ["board", "draw-material", "draw-device", "draw-send"]) {
+  for (const id of ["board", "draw-material", "draw-send"]) {
     assert.equal(await card(id).count(), 1, `创作画板 ${id} 应在画布里`);
   }
-  // 画布占满整行，设置卡在画布下方三张并排（2026-11-07 用户决定）
+  // 画布占满整行，设置卡在画布下方两张并排
   assert.equal(await colOf("board"), "1 / span 48", "创作画布默认占满整行");
   assert.deepEqual(
-    await Promise.all(["draw-material", "draw-device", "draw-send"].map(colOf)),
-    ["1 / span 16", "17 / span 16", "33 / span 16"],
-    "三张设置卡在画布下方并排",
+    await Promise.all(["draw-material", "draw-send"].map(colOf)),
+    ["1 / span 24", "25 / span 24"],
+    "两张对称设置卡在画布下方并排",
   );
   const wideBoard = await card("board").boundingBox();
   assert.ok((await card("draw-send").boundingBox()).y >= wideBoard.y + wideBoard.height, "预览与发送在画布下方");
@@ -237,7 +237,7 @@ try {
     const board = await card("board").boundingBox();
     const drawMaterial = await card("draw-material").boundingBox();
     assert.ok(drawMaterial.y >= board.y + board.height, `画板 ${width}px：设置卡在画布下方`);
-    await sideBySide("draw-material", "draw-device", `画板 ${width}px`);
+    await sideBySide("draw-material", "draw-send", `画板 ${width}px`);
     // 用户反馈：窄窗口下画板也要能拖上下边框放大缩小
     for (const [dir, dy, grow] of [["s", 160, true], ["n", -120, true], ["s", -200, false]]) {
       const handle = card("board").locator(`[data-wb-resize="${dir}"]`);

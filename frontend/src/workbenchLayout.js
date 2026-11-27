@@ -24,7 +24,6 @@ export const MIN_COLS = {
   feedback: 12,
   board: 16,
   "draw-material": 12,
-  "draw-device": 12,
   "draw-send": 12,
 };
 
@@ -39,13 +38,12 @@ export const DEFAULT_LAYOUT = {
 
 /**
  * 创作画板默认排布（2026-11-07 用户决定“右边的设置放到下面，画板可以更好绘画”）：
- * 画布占满整行（62 行 ≈ 一屏），材料与尺寸 / 设备 / 预览与发送三张卡在画布下方并排。
+ * 画布占满整行（62 行 ≈ 一屏），设备连接已在画布底部常驻条，下方由「① 材料与尺寸」和「② 预览与发送」两张对称宽卡并排。
  */
 export const DRAW_DEFAULT_LAYOUT = {
   board: { x: 0, y: 0, w: 48, h: 62 },
-  "draw-material": { x: 0, y: 63, w: 16, h: 28 },
-  "draw-device": { x: 16, y: 63, w: 16, h: 22 },
-  "draw-send": { x: 32, y: 63, w: 16, h: 28 },
+  "draw-material": { x: 0, y: 63, w: 24, h: 28 },
+  "draw-send": { x: 24, y: 63, w: 24, h: 28 },
 };
 
 export function clamp(value, min, max) {

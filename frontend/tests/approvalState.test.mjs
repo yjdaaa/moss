@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   approvalErrorText,
@@ -8,6 +9,7 @@ import {
   isApprovalRequiredResponse,
   newPendingIds,
   orderPending,
+  resolveApprovalWarnings,
   secondsLeft,
   shortDigest,
   sourceLabel,
@@ -193,4 +195,42 @@ test("#17 严格模式 HTTP 202 approval_required：即使 success=true 也必�
     false,
   );
   assert.equal(isApprovalRequiredResponse(null), false);
+});
+
+test("N5：审批记录缺少 target.fields 时不退回读取当前界面连接预判软限位，但保留后端 warnings", () => {
+  let calledWith = null;
+  const softLimitStub = (fields) => {
+    calledWith = fields;
+    return "固件未报告行程且软限位未开启";
+  };
+
+  // 缺少 target.fields：不调用软限位预判，保留后端返回的 warnings
+  const noFields = resolveApprovalWarnings(
+    { kind: "workflow_confirm_send", target: { mode: "network", label: "网络设备" } },
+    { warnings: ["雕刻速度 4000 mm/min 超过固件最大速度 3000 mm/min"] },
+    softLimitStub,
+  );
+  assert.equal(calledWith, null, "审批记录无 target.fields 时不得调用基于界面连接的软限位预判");
+  assert.deepEqual(noFields, ["雕刻速度 4000 mm/min 超过固件最大速度 3000 mm/min"]);
+
+  // 带 target.fields：使用审批记录自己的目标预判并与后端 warnings 合并去重
+  const fields = { connection_mode: "serial", port: "COM5", baudrate: "115200" };
+  const withFields = resolveApprovalWarnings(
+    { kind: "calibration_send", target: { mode: "serial", label: "COM5", fields } },
+    { warnings: ["后端警告 A"] },
+    softLimitStub,
+  );
+  assert.deepEqual(calledWith, fields);
+  assert.deepEqual(withFields, ["后端警告 A", "固件未报告行程且软限位未开启"]);
+
+  // 非发送类审批不返回发送警告
+  assert.deepEqual(
+    resolveApprovalWarnings({ kind: "safe_action", target: { fields } }, { warnings: ["x"] }, softLimitStub),
+    [],
+  );
+
+  // 源码守卫：ApprovalCenter 不再回退调用 readUnifiedConnection()
+  const centerSrc = readFileSync(new URL("../src/components/ApprovalCenter.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(centerSrc, /readUnifiedConnection/, "ApprovalCenter 不得退回读取当前界面连接");
+  assert.match(centerSrc, /resolveApprovalWarnings\(/);
 });

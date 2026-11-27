@@ -15,7 +15,6 @@ pub fn laser_mcp_compact_tool(name: &str) -> bool {
             | "select_calibration_cell_tool"
             | "command_execution_tool"
             | "open_app_tool"
-            | "shortcut_key_execution_tool"
     )
 }
 

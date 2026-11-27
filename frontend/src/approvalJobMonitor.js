@@ -10,9 +10,16 @@ export function applyJobPoll(current, id, kind, response) {
     return { ...current, connectionLost: true, pollFailures: (current.pollFailures || 0) + 1 };
   }
   const send = record?.send_result || {};
-  const valid = Number.isFinite(send.total_lines) && send.total_lines > 0 && Number.isFinite(send.lines_sent) && send.lines_sent >= 0 && send.lines_sent <= send.total_lines;
+  const valid = Number.isFinite(send.total_lines) && send.total_lines > 0 && Number.isFinite(send.lines_sent) && send.lines_sent >= 0 && send.lines_sent <= totalLinesOr(send.total_lines);
+  const warnings = Array.isArray(send.warnings) && send.warnings.length > 0
+    ? send.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
+    : current.warnings;
   return { ...current, status, connectionLost: false, pollFailures: 0, target: send.target || current.target,
-    progress: valid ? { sent: send.lines_sent, total: send.total_lines, target: "" } : current.progress };
+    progress: valid ? { sent: send.lines_sent, total: send.total_lines, target: "" } : current.progress,
+    ...(Array.isArray(warnings) && warnings.length > 0 ? { warnings } : {}) };
+}
+function totalLinesOr(total) {
+  return total;
 }
 export function markStopRequested(current, id) {
   return current?.id === id ? { ...current, stopRequested: true } : current;
@@ -20,6 +27,9 @@ export function markStopRequested(current, id) {
 export function jobSafetyNotice(job) {
   if (job?.connectionLost) return "状态未知：暂时无法查询设备，机器可能仍在运行。正在重试；软件急停未送达时请使用实体急停。";
   if (job?.stopRequested) return "停止请求已发送，但尚未确认设备已停止。急停按钮仍然可用，请到设备旁确认。";
+  if (Array.isArray(job?.warnings) && job.warnings.length > 0) {
+    return job.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean).join("；");
+  }
   return "";
 }
 

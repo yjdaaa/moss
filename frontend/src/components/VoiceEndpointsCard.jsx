@@ -1,9 +1,9 @@
 import React, { useState } from "react";
-import { Copy, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { VoiceGroup } from "./VoiceLayout.jsx";
 import { showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
-import { TOOL_EDIT_PROMPTS, TOOL_RISK_LABELS, endpointLabel, endpointView, extraEndpointError, groupedTools, identityView, toolEditPrompt, toolStatText, toolSwitchPayload } from "../voiceState.js";
+import { TOOL_RISK_LABELS, endpointLabel, endpointView, extraEndpointError, groupedTools, identityView, toolStatText, toolSwitchPayload } from "../voiceState.js";
 
 // 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方链路渲染，放在“设备”标签）；
 // 内置工具开关与调用统计（所有链路共用，n69 起放在“扩展”标签，紧挨第三方 MCP 工具，方便对照两者区别）。
@@ -119,7 +119,6 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
 }
 
 export function VoiceToolsCard({ overview, mode = "official", strictEnabled = false, busy, run }) {
-  const [copiedPrompt, setCopiedPrompt] = useState("");
   if (!overview) return null;
   const tools = Array.isArray(overview.tools) ? overview.tools : [];
   const fullList = overview.full_tool_list === true;
@@ -131,16 +130,6 @@ export function VoiceToolsCard({ overview, mode = "official", strictEnabled = fa
     run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
   const switchFullList = (full) =>
     run("切换工具清单", () => voiceApi.saveSettings({ mcp_full_tool_list: full }));
-
-  // 内置工具是编译进 MOSS 的原生工具，界面只能开关；增删要改代码，所以给一段可复制的施工提示词交给 AI。
-  const copyPrompt = async (kind) => {
-    try {
-      await navigator.clipboard.writeText(toolEditPrompt(kind));
-      setCopiedPrompt(kind);
-    } catch {
-      setCopiedPrompt("error");
-    }
-  };
 
   const disabled = visibleTools.filter((tool) => tool.enabled === false).length;
   const offered = visibleTools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
@@ -197,23 +186,6 @@ export function VoiceToolsCard({ overview, mode = "official", strictEnabled = fa
           </ul>
         </section>
       ))}
-      <details className="voice-builtin-models" id="voice-tool-prompts">
-        <summary>要新增或删除内置工具？复制这两段提示词交给 AI</summary>
-        <p className="voice-muted">内置工具的增删是改代码：复制下面的施工说明，粘给任意 AI 编码助手（Codex / Claude Code / Cursor 等），它会按仓库规则改代码、加测试、同步文档。这里只是给你复制用，不会自己执行。</p>
-        {["add", "remove"].map((kind) => (
-          <div className="voice-stack" key={kind} id={`voice-tool-prompt-${kind}`}>
-            <div className="voice-actions">
-              <span className="voice-muted">{TOOL_EDIT_PROMPTS[kind].title}</span>
-              <button type="button" className="btn btn-ghost" onClick={() => copyPrompt(kind)} id={`voice-tool-prompt-copy-${kind}`}>
-                <Copy size={13} /> 复制提示词
-              </button>
-              {copiedPrompt === kind && <span className="voice-ok" role="status">✓ 已复制</span>}
-              {copiedPrompt === "error" && <span className="voice-bad">无法访问剪贴板，请手动选中下面文字复制</span>}
-            </div>
-            <pre className="voice-prompt mono">{TOOL_EDIT_PROMPTS[kind].text}</pre>
-          </div>
-        ))}
-      </details>
     </VoiceGroup>
   );
 }

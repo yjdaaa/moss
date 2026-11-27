@@ -100,7 +100,7 @@ export function DrawSendCard({
   const pathUrl = web.gcode_preview_url || web.image_preview_url;
   return (
     <WbCard id="draw-send" className="hud-card ob-card control-panel result-panel draw-send-card" label="预览与发送">
-      <FoldHeader id="draw-send" title="预览与发送" n={3} />
+      <FoldHeader id="draw-send" title="预览与发送" n={2} />
 
       <div className="draw-send-primary">
         <button type="button" className="primary-button" onClick={generatePreview} disabled={busy || !excalidrawAPI}>

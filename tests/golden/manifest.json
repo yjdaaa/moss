@@ -22,7 +22,7 @@
     ]
   },
   "mcp": {
-    "count": 18,
+    "count": 15,
     "names": [
       "check_laser_connection_tool",
       "laser_safe_action_tool",
@@ -35,13 +35,10 @@
       "generate_text_laser_task_tool",
       "refine_laser_params_from_feedback_tool",
       "regenerate_text_laser_task_tool",
-      "generate_text_image_gcode_tool",
       "laser_grbl_tool",
       "laser_network_grbl_tool",
       "command_execution_tool",
-      "open_app_tool",
-      "shortcut_key_execution_tool",
-      "generate_text_image_tool"
+      "open_app_tool"
     ]
   },
   "python_tests": {

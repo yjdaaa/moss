@@ -56,13 +56,10 @@ fn flag(arguments: &serde_json::Value, key: &str) -> bool {
     }
 }
 
-/// 无论参数如何都属于 R4 的工具（桌面命令、打开应用、快捷键、打开网站）。
+/// 无论参数如何都属于 R4 的工具（桌面命令、打开应用）。
 /// 严格模式下接入点的 `tools/list` 不再列出它们，避免模型尝试调用。
 pub fn tool_never_exposed(name: &str) -> bool {
-    matches!(
-        name,
-        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool"
-    )
+    matches!(name, "command_execution_tool" | "open_app_tool")
 }
 
 /// 不能被用户关闭的工具（NV8 工具开关）：语音“停”要靠它们（技术书 §6.1：停止只映射 `cancel` / `emergency_stop`）。
@@ -110,10 +107,8 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
             // 保存、导入可能覆盖已有参数，删除不可逆：材料库删除 / 覆盖属于 R4
             _ => R4,
         },
-        "generate_text_image_tool"
-        | "select_calibration_cell_tool"
-        | "refine_laser_params_from_feedback_tool" => R1,
-        "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" => {
+        "select_calibration_cell_tool" | "refine_laser_params_from_feedback_tool" => R1,
+        "generate_text_laser_task_tool" => {
             if flag(arguments, "confirmed") && flag(arguments, "send_after_generate") {
                 R3
             } else {
@@ -142,7 +137,7 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
                 R1
             }
         }
-        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool" => R4,
+        "command_execution_tool" | "open_app_tool" => R4,
         _ => return None,
     };
     Some(level)
@@ -211,7 +206,6 @@ mod tests {
             ("material_params_tool", json!({"action": "delete"}), R4),
             ("material_params_tool", json!({"action": "import"}), R4),
             ("recommend_laser_params_tool", json!({}), R0),
-            ("generate_text_image_tool", json!({}), R1),
             ("select_calibration_cell_tool", json!({}), R1),
             ("refine_laser_params_from_feedback_tool", json!({}), R1),
             (
@@ -222,11 +216,6 @@ mod tests {
             (
                 "generate_text_laser_task_tool",
                 json!({"confirmed": true, "send_after_generate": true}),
-                R3,
-            ),
-            (
-                "generate_text_image_gcode_tool",
-                json!({"confirmed": "true", "send_after_generate": "true"}),
                 R3,
             ),
             ("run_calibration_grid_tool", json!({"material": "椴木"}), R1),
@@ -263,7 +252,6 @@ mod tests {
             ),
             ("command_execution_tool", json!({}), R4),
             ("open_app_tool", json!({}), R4),
-            ("shortcut_key_execution_tool", json!({}), R4),
         ];
         for (name, arguments, expected) in cases {
             assert_eq!(
@@ -275,11 +263,7 @@ mod tests {
         assert_eq!(tool_risk("unknown_tool", &json!({})), None);
         assert!(RiskLevel::R2 < RiskLevel::R3 && RiskLevel::R3 < RiskLevel::R4);
         assert_eq!(RiskLevel::R3.as_str(), "R3");
-        for name in [
-            "command_execution_tool",
-            "open_app_tool",
-            "shortcut_key_execution_tool",
-        ] {
+        for name in ["command_execution_tool", "open_app_tool"] {
             assert!(tool_never_exposed(name));
         }
         assert!(!tool_never_exposed("laser_grbl_tool"));

@@ -235,5 +235,24 @@ export function workflowDetails(record) {
     size: width !== null && height !== null ? `${Math.round(width * 10) / 10} × ${Math.round(height * 10) / 10} mm` : null,
     duration: seconds !== null ? (seconds >= 60 ? `约 ${Math.round(seconds / 60)} 分钟` : `约 ${Math.round(seconds)} 秒`) : null,
     previewPath: artifacts.preview_file || artifacts.image_file || null,
+    warnings: Array.isArray(artifacts.warnings)
+      ? artifacts.warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean)
+      : [],
   };
+}
+
+/**
+ * 整理审批卡风险提示（2026-11-27 N5）：
+ * 后端返回的 `details.warnings` 照常显示；
+ * 基于握手信息预判的软限位提示只在审批记录自带 `target.fields` 时计算，
+ * 缺省时不退回读取当前界面连接，避免把另一台机器的握手状态张冠李戴到本次审批。
+ */
+export function resolveApprovalWarnings(shown, details, resolveSoftLimitFn) {
+  const isLaserSend = shown?.kind === "workflow_confirm_send" || shown?.kind === "calibration_send";
+  if (!isLaserSend) return [];
+  const warnings = Array.isArray(details?.warnings) ? [...details.warnings] : [];
+  if (shown?.target?.fields && typeof resolveSoftLimitFn === "function") {
+    warnings.push(resolveSoftLimitFn(shown.target.fields));
+  }
+  return [...new Set(warnings.map((w) => (typeof w === "string" ? w.trim() : "")).filter(Boolean))];
 }

@@ -89,12 +89,9 @@ export const TOOL_META = {
   recommend_laser_params_tool: { label: "推荐参数（旧入口）", group: "advanced", risk: "read", summary: "和“材料参数库”的查询重复。" },
   start_tuned_job_tool: { label: "按调参结果开刻（旧入口）", group: "advanced", risk: "confirm", summary: "和“刻字”的确认发送重复。" },
   generate_text_laser_task_tool: { label: "生成刻字任务（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
-  generate_text_image_gcode_tool: { label: "文字转刀路文件", group: "advanced", risk: "file", summary: "只生成图片和刀路文件。" },
-  generate_text_image_tool: { label: "生成文字图片", group: "advanced", risk: "file", summary: "只生成白底黑字图片。" },
   laser_grbl_tool: { label: "串口底层收发", group: "advanced", risk: "confirm", summary: "直接对串口查状态、取消；发任意 G-code 已禁用。" },
   laser_network_grbl_tool: { label: "网络底层收发", group: "advanced", risk: "confirm", summary: "直接对网络雕刻机查状态、取消；发任意 G-code 已禁用。" },
   open_app_tool: { label: "打开电脑应用", group: "desktop", risk: "desktop", summary: "打开浏览器、微信等应用或网址。" },
-  shortcut_key_execution_tool: { label: "电脑快捷键", group: "desktop", risk: "desktop", summary: "播放、暂停音乐，调电脑音量。" },
   command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
 };
 
@@ -127,57 +124,6 @@ export function toolStatText(tool) {
   if (tool.failures) parts.push(`失败 ${tool.failures}`);
   if (tool.denied) parts.push(`拒绝 ${tool.denied}`);
   return parts.join(" · ");
-}
-
-/**
- * 内置工具（编译在 MOSS 里的原生工具）不能在界面上增删，只能开关；
- * 这两段是交给 AI 编码助手的施工说明，用户复制后粘给 AI 由它改代码（2026-11-02 用户决定）。
- * 增删第三方外部工具走「扩展 → 第三方 MCP 工具」，与这里无关。
- */
-export const TOOL_EDIT_PROMPTS = {
-  add: {
-    title: "让 AI 新增一个内置工具",
-    text: [
-      "请在 MOSS 仓库里新增一个内置工具：<工具名>，用途是 <一句话说明它做什么>。",
-      "",
-      "按下面顺序改，只动相关文件，不要顺手重构：",
-      "1. 登记：crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单里加入新工具名（snake_case、以 _tool 结尾，不含双下划线 __，与现有工具一致）；ToolCatalog 会自动把它收进名单。",
-      "2. 声明：tests/golden/mcp_tools.json（被 crates/laser-mcp/src/schema.rs 的 tools_list_json / tools_list_with 编译期加载）增加它的 name、description 与 inputSchema（JSON Schema，必填项与取值范围写清楚）。默认给 AI 的是精简清单：若这个工具也要默认提供，同时把面向用户意图写的短说明加进 tests/golden/mcp_tools_compact.json、名字加进 laser_mcp::COMPACT_LASER_TOOLS 与 laser_api::laser_mcp_compact_tool，并在 frontend/src/voiceState.js 的 TOOL_META 里写中文名、分组与风险标签。",
-      "3. 分发与分级：crates/laser-mcp/src/dispatch.rs 的 dispatch_tool_call_with 增加同名 match 分支（非法参数返回结构化错误，不 panic），并在 crates/laser-contracts/src/risk.rs 的 tool_risk 显式标定 R0–R4 风险等级。",
-      "4. 实现：复用现有的连接解析 resolve_connection_spec、发送门禁 authorize_send 与错误处理，不新增抽象层。",
-      "5. 门禁：涉及运动、出光、发送 G-code、急停、删除、OTA、密钥的动作必须走现有审批与严格模式门禁，不得放宽；只读工具不得有副作用；急停类工具必须 can_disable=false。",
-      "6. Jev 粗筛归组：在 crates/moss-voice-server/src/jev.rs 的 groups_of_builtin_tool 将新工具归入现有 6 个粗粒度 ToolGroup（LaserQuery / LaserGenerate / LaserControl / InfoPlugin / HomeAndAgent / MusicAndDevice，跨类激光工具可挂多组）；严禁为单个新工具平铺独立的 noul 问题。",
-      "7. 测试：在 crates/laser-mcp、crates/laser-tools 与 crates/moss-voice-server 增加单元测试（参数校验、关闭后不可见、Jev 归组、失败路径），硬件与网络副作用一律用 mock 或 FakeGrbl。",
-      "8. 记录：同步 docs/developer/api-contracts.md 与对应技术书，在 CHANGELOG.md 的 [Unreleased] 加一条；跑 cargo test --workspace。",
-      "",
-      "完成后回报：新工具名、用途、风险等级与所属粗筛组、是否需要审批、改了哪些文件、跑了哪些测试及结果。",
-    ].join("\n"),
-  },
-  remove: {
-    title: "让 AI 删除或下线一个内置工具",
-    text: [
-      "请把 MOSS 内置工具里的 <工具名> 下线或删除。",
-      "",
-      "先判断用哪种做法：",
-      "1. 只是不想让模型用到它：不用改代码。在「扩展 → MOSS 内置工具」里取消勾选即可，关闭的工具不会出现在任何接入点与内置语音的工具列表中。",
-      "2. 要彻底删掉代码：按下面顺序执行。",
-      "",
-      "彻底删除的顺序：",
-      "1. 从 crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单移除。",
-      "2. 从 tests/golden/mcp_tools.json、tests/golden/mcp_tools_compact.json（若在精简清单里，同时从 COMPACT_LASER_TOOLS 与 laser_api::laser_mcp_compact_tool 去掉）、crates/laser-mcp/src/schema.rs（tools_list_with）与 dispatch.rs（dispatch_tool_call_with）及 crates/laser-contracts/src/risk.rs（tool_risk）移除对应 schema、分发与分级分支，并删掉 frontend/src/voiceState.js 的 TOOL_META 条目。",
-      "3. 删除该工具的实现、只属于它的测试，并从 crates/moss-voice-server/src/jev.rs 的 groups_of_builtin_tool 清理该工具名（Jev 按当轮启用工具动态提问，删空某组也无需改 ToolGroup 枚举）。",
-      "4. 在 crates/、frontend/、docs/、scripts/ 全局搜索残留引用并逐条清理，把清单告诉我。",
-      "",
-      "不要动：laser_safe_action_tool（急停与停机）、严格模式、审批与 ACL 门禁；crates/laser-host/src/lib.rs 的 validate_disabled_tools 中不可关闭的约束必须保留。",
-      "",
-      "完成后：跑 cargo test --workspace 与前端 npm test，同步 docs/developer/api-contracts.md 与 CHANGELOG.md，并回报实际做法、删除清单、残留引用检查结果与测试结果。",
-    ].join("\n"),
-  },
-};
-
-/** 取指定模板的纯文本；类型未知时返回空字符串。 */
-export function toolEditPrompt(kind) {
-  return TOOL_EDIT_PROMPTS[kind]?.text || "";
 }
 
 /** 新增附加接入点前的校验；通过时返回空字符串。 */

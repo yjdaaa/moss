@@ -42,8 +42,11 @@ import {
 import {
   WORKSPACE_LIMITS_EVENT,
   readWorkspaceLimitsStore,
+  resolveSoftLimitSendWarning,
   resolveWorkspaceLimitsForTarget,
 } from "../deviceConnection.js";
+import { drawConnectionPayload } from "../drawConnection.js";
+import { machineMotionPayload, readFillSettings, readMachineMotion } from "../fillOptions.js";
 import { readLocalSafe, writeLocalSafe } from "../components/material-lab/labStorage.js";
 import { LabLibraryPanel } from "../components/material-lab/LabLibraryPanel.jsx";
 import { LabParamsPanel } from "../components/material-lab/LabParamsPanel.jsx";
@@ -594,6 +597,8 @@ export function MaterialLabPage({
       ...built.payload,
       work_area_width_mm: effectiveWorkspaceLimits.x_travel_mm,
       work_area_height_mm: effectiveWorkspaceLimits.y_travel_mm,
+      ...drawConnectionPayload(labConnectionForm),
+      ...machineMotionPayload(readFillSettings(), readMachineMotion(labConnectionForm)),
     };
     const testLabel = matrixTestType === "interval" ? "线距测试" : `「${modeInfo.label}」标定矩阵`;
     setMatrixBusy(true);
@@ -615,8 +620,12 @@ export function MaterialLabPage({
         const sizeStr = resData.width_mm && resData.height_mm
           ? `，外框 ${Number(resData.width_mm).toFixed(0)}×${Number(resData.height_mm).toFixed(0)} mm`
           : "";
+        const warnList = Array.isArray(resData.warnings)
+          ? resData.warnings.filter((w) => typeof w === "string" && w.trim())
+          : [];
+        const warnStr = warnList.length > 0 ? `；⚠️ ${warnList.join("；")}` : "";
         setMatrixStatus(
-          `${resData.test_type === "interval" ? "线距测试" : `${modeInfo.label}矩阵`}已生成（${resData.cell_count || 0} 格${sizeStr}${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；发送实机测试后点选最佳格`,
+          `${resData.test_type === "interval" ? "线距测试" : `${modeInfo.label}矩阵`}已生成（${resData.cell_count || 0} 格${sizeStr}${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；发送实机测试后点选最佳格${warnStr}`,
         );
       } else if (res.ok && res.data?.success) {
         setMatrixStatus("生成失败：服务端未返回标定编号，请重启或更新 MOSS");
@@ -669,12 +678,15 @@ export function MaterialLabPage({
       return;
     }
 
+    const safetyWarning = resolveSoftLimitSendWarning(labConnectionForm, undefined, connectionStatus);
     const prompt = buildMatrixConfirmPrompt({
       preview: matrixPreview,
       material: selectedMaterial,
       thickness: selectedThickness,
       mode: matrixPreview?.wizard_pattern ? (matrixPreview.laser_mode === "cut" ? "cut" : "raster") : matrixMode,
       targetLabel: built.targetLabel,
+      safetyWarning,
+      sendWarnings: matrixSendState?.warnings,
     });
     const confirmed = await showConfirm(prompt.message, {
       title: prompt.title,
@@ -809,7 +821,13 @@ export function MaterialLabPage({
     setMatrixBusy(true);
     setMatrixStatus("正在生成向导测试刀路...");
     try {
-      const res = await postJson("/api/material-lab/preview", payload);
+      const res = await postJson("/api/material-lab/preview", {
+        ...payload,
+        work_area_width_mm: effectiveWorkspaceLimits.x_travel_mm,
+        work_area_height_mm: effectiveWorkspaceLimits.y_travel_mm,
+        ...drawConnectionPayload(labConnectionForm),
+        ...machineMotionPayload(readFillSettings(), readMachineMotion(labConnectionForm)),
+      });
       if (res.ok && res.data?.success && res.data.result?.calibration_id) {
         const record = res.data.result;
         matrixPollRef.current?.();
@@ -819,8 +837,12 @@ export function MaterialLabPage({
         setSelectedCellNum(null);
         setMatrixSendState(null);
         const est = record.time_estimate?.estimated_minutes;
+        const warnList = Array.isArray(record.warnings)
+          ? record.warnings.filter((w) => typeof w === "string" && w.trim())
+          : [];
+        const warnStr = warnList.length > 0 ? `；⚠️ ${warnList.join("；")}` : "";
         setMatrixStatus(
-          `向导测试已生成（${record.cell_count || 0} 块，外框 ${Number(record.width_mm || 0).toFixed(0)}×${Number(record.height_mm || 0).toFixed(0)} mm${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；放好样板后点【发送测试】`,
+          `向导测试已生成（${record.cell_count || 0} 块，外框 ${Number(record.width_mm || 0).toFixed(0)}×${Number(record.height_mm || 0).toFixed(0)} mm${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；放好样板后点【发送测试】${warnStr}`,
         );
         return record;
       }

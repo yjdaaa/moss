@@ -638,7 +638,6 @@ try {
   await connModal.waitFor({ state: "detached", timeout: 5_000 });
   assert.equal(await page.evaluate(() => document.activeElement?.id || ""), "draw-dock-send-btn", "按 Escape 关闭连接面板后焦点应回到触发按钮");
   assert.match(await page.locator("#draw-dock-connection").innerText(), /192\.0\.2\.88:2323/, "画板吸底条应看到同一份连接设置");
-  assert.match(await page.locator("#draw-device-summary").innerText(), /192\.0\.2\.88:2323/, "画板下方设备卡应看到同一份连接摘要");
   assert.match(await page.locator("#draw-dock-send-btn").innerText(), /确认发送/, "配好连接后吸底条按钮立即变为确认发送");
 
   // 点击材料胶囊滚动定位到材料与尺寸卡，再滚回顶部测确认发送弹窗

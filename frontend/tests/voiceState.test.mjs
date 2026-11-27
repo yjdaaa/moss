@@ -94,8 +94,6 @@ import {
   identityView,
   toolSwitchPayload,
   toolStatText,
-  TOOL_EDIT_PROMPTS,
-  toolEditPrompt,
   extraEndpointError,
   SETTINGS_GROUPS,
   LOCAL_MODEL_KEYS,
@@ -965,27 +963,6 @@ test("同源服务商地址/密钥复用、服务端 model_sections 融合与 TT
   assert.equal(switchedCosy.voice, "FunAudioLLM/CosyVoice-300M:anna", "切换 CosyVoice 模型时同步更新音色前缀");
   const openaiForm = applyDefaultTtsVoice(switchedCosy, "tts-1");
   assert.equal(openaiForm.voice, "alloy", "切回 OpenAI 合成模型时换成 alloy 默认音色");
-});
-
-test("内置工具增删提示词：给出真实改代码路径、Jev 粗筛归组并与第三方 MCP 区分（2026-11-02）", () => {
-  const add = toolEditPrompt("add");
-  assert.match(add, /crates\/laser-tools\/src\/lib\.rs/, "新增模板指向工具登记处");
-  assert.match(add, /tests\/golden\/mcp_tools\.json/, "新增模板指向编译期嵌入的黄金工具清单");
-  assert.match(add, /tools_list_with/);
-  assert.match(add, /dispatch_tool_call_with/);
-  assert.match(add, /tool_risk/, "新增模板要求登记风险分级");
-  assert.match(add, /groups_of_builtin_tool/, "新增模板要求归入既有 6 个 Jev 粗筛组而非逐工具平铺 noul");
-  assert.match(add, /审批与严格模式门禁/, "新增工具不得放宽门禁");
-  const remove = toolEditPrompt("remove");
-  assert.match(remove, /取消勾选/, "先说明只关开关就能让模型看不到");
-  assert.match(remove, /groups_of_builtin_tool/, "删除模板要求清理 Jev 静态归组残留");
-  assert.match(remove, /laser_safe_action_tool/, "急停工具不可删除");
-  assert.match(remove, /validate_disabled_tools/);
-  assert.equal(toolEditPrompt("unknown"), "", "未知类型返回空字符串");
-  assert.deepEqual(Object.keys(TOOL_EDIT_PROMPTS).sort(), ["add", "remove"]);
-  for (const value of Object.values(TOOL_EDIT_PROMPTS)) {
-    assert.ok(value.title && value.text.length > 200, `${value.title} 有标题与可复制的正文`);
-  }
 });
 
 test("schema 14 设备信息快照：缺字段显示破折号，AEC 只认设备上报", async () => {

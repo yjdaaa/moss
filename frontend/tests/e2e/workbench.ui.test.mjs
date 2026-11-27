@@ -232,7 +232,7 @@ test("[UI-05] 画板: 自动继承工作台设备 + 导入场景与自定义参�
   const diagnose = traceApi(page);
   try {
     await page.goto(`${API_BASE}/draw`);
-    const summaryCard = page.locator("#draw-device-summary");
+    const summaryCard = page.locator("#draw-dock-connection");
     await summaryCard.waitFor({ timeout: STEP_TIMEOUT_MS });
     assert.match(await summaryCard.innerText(), new RegExp(`${GRBL_HOST}:${rec.port}`), "画板应与工作台共用同一份设备连接设置");
 
@@ -418,7 +418,7 @@ test("[UI-07] 统一连接与常驻画板切页: 切到工作台改连接后按�
 
     // 1. 先打开创作画板，让 #draw-keepalive 常驻挂载（当前连接为 recDraw）
     await page.goto(`${API_BASE}/draw`);
-    await page.locator("#draw-device-summary").waitFor({ timeout: STEP_TIMEOUT_MS });
+    await page.locator("#draw-dock-connection").waitFor({ timeout: STEP_TIMEOUT_MS });
     await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
 
     // 2. 通过左侧导航切到雕刻工作台，并在统一连接面板切换端口到设备 B（recHome）；画板保持挂载但隐藏
@@ -442,7 +442,7 @@ test("[UI-07] 统一连接与常驻画板切页: 切到工作台改连接后按�
     // 4. 切回创作画板：自动同步显示设备 B，再通过顶栏硬件胶囊切回设备 A 后按顶栏急停，向设备 A 写出 0x18
     await page.locator("nav.ob-nav button", { hasText: "创作画板" }).click();
     await page.locator("#draw-keepalive").waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
-    assert.match(await page.locator("#draw-device-summary").innerText(), new RegExp(`${GRBL_HOST}:${recHome.port}`), "切回画板应实时同步统一连接目标");
+    assert.match(await page.locator("#draw-dock-connection").innerText(), new RegExp(`${GRBL_HOST}:${recHome.port}`), "切回画板应实时同步统一连接目标");
     await page.locator("#nav-hardware-status").click();
     await page.locator("#conn-telnet-port").fill(String(recDraw.port));
     await page.keyboard.press("Escape");

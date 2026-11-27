@@ -528,6 +528,117 @@ test("工作台发送确认框与监视舱：超速提示、软限位风险预�
     assert.match(warnHtml, /wb-send-warnings/);
     assert.match(warnHtml, /固件未报告行程且软限位未开启，越界不会被拦截/);
     assert.match(warnHtml, /可能撞到行程尽头/);
+
+    // N1 / N2：监视区按任务原通道渲染实时调参，并显示状态报告中的 Ov: 倍率；倍率非 100% 时开刻/续雕确认框给出提示
+    const {
+      clearControllerOverridesForTest,
+      controllerOverrideWarning,
+      formatControllerOverrideText,
+      parseControllerOverride,
+      readControllerOverride,
+      recordControllerOverride,
+    } = await import("../src/workbenchParams.js");
+    clearControllerOverridesForTest();
+    try {
+      const ov120 = parseControllerOverride("<Run|MPos:10,20,0|FS:1200,500|Ov:90,100,120>");
+      assert.deepEqual(ov120, { feed: 90, rapid: 100, spindle: 120 });
+      assert.equal(formatControllerOverrideText(ov120), "进给 90% · 快移 100% · 主轴 120%");
+      assert.match(controllerOverrideWarning(ov120), /控制器当前功率倍率为 120%.*速度倍率为 90%/);
+      assert.equal(controllerOverrideWarning({ feed: 100, rapid: 100, spindle: 100 }), "");
+
+      // 按目标分桶记录 Ov，且不含 Ov: 的后续状态报告不冲掉已记录倍率、不同目标互不串台
+      recordControllerOverride("127.0.0.1:2301", "<Run|MPos:10,20,0|Ov:100,100,120>");
+      recordControllerOverride("127.0.0.1:2301", "<Idle|MPos:0,0,0|FS:0,0>");
+      assert.deepEqual(
+        readControllerOverride({ connection_mode: "network", network_host: "127.0.0.1", network_telnet_port: "2301" }),
+        { feed: 100, rapid: 100, spindle: 120 },
+      );
+      assert.equal(
+        readControllerOverride({ connection_mode: "network", network_host: "127.0.0.1", network_telnet_port: "2399" }),
+        null,
+      );
+
+      // 开刻确认框与断点续雕确认框：倍率 != 100% 时出现提示（只提示不拦截），100% 时不提示
+      const promptWithOv = workbenchConfirmSendPrompt({
+        workflow: baseWorkflow,
+        material: "椴木",
+        thickness: "3",
+        targetLabel: "127.0.0.1:2301",
+        controllerOverride: ov120,
+      });
+      assert.match(promptWithOv.message, /控制器当前功率倍率为 120%/);
+      assert.match(promptWithOv.message, /速度倍率为 90%/);
+      const promptDefaultOv = workbenchConfirmSendPrompt({
+        workflow: baseWorkflow,
+        material: "椴木",
+        thickness: "3",
+        targetLabel: "127.0.0.1:2301",
+        controllerOverride: { feed: 100, rapid: 100, spindle: 100 },
+      });
+      assert.doesNotMatch(promptDefaultOv.message, /控制器当前.*倍率/);
+
+      const resumeWithOv = workbenchResumeSendPrompt({
+        workflow: baseWorkflow,
+        material: "椴木",
+        thickness: "3",
+        targetLabel: "127.0.0.1:2301",
+        startLine: 10,
+        totalLines: 100,
+        controllerOverride: { feed: 80, rapid: 100, spindle: 100 },
+      });
+      assert.match(resumeWithOv.message, /控制器当前速度倍率为 80%/);
+
+      // sendProgressFromResult 保留 last_status_report 供监视区解析 Ov:
+      const progressWithOv = sendProgressFromResult({
+        lines_sent: 5,
+        total_lines: 20,
+        target: "127.0.0.1:2301",
+        last_status_report: "<Run|MPos:1,2,0|FS:1200,500|Ov:90,100,120>",
+      });
+      assert.equal(progressWithOv.last_status_report, "<Run|MPos:1,2,0|FS:1200,500|Ov:90,100,120>");
+
+      // 监视区 SSR：显示 Ov: 倍率；即使连接表单改成另一台或留空，只要运行任务有原通道，实时调参条仍按原通道可用
+      const ovHtml = renderToStaticMarkup(
+        React.createElement(WorkbenchMonitorCard, {
+          ...commonProps,
+          connectionForm: { connection_mode: "network", network_host: "", network_telnet_port: "23" },
+          currentWorkflow: baseWorkflow,
+          overlayStatus: "running",
+          sendProgress: progressWithOv,
+        }),
+      );
+      assert.match(ovHtml, /wb-live-override-bar/, "运行中任务具备原通道时实时调参条可见，不依赖连接表单");
+      assert.match(ovHtml, /wb-live-override-status/);
+      assert.match(ovHtml, /进给 90% · 快移 100% · 主轴 120%/);
+      assert.match(ovHtml, /非 100%/);
+
+      // 监视区无运行中任务通道时：即使连接表单有填，也不渲染实时调参按钮（N1）
+      const noTargetHtml = renderToStaticMarkup(
+        React.createElement(WorkbenchMonitorCard, {
+          ...commonProps,
+          connectionForm: targetForm,
+          currentWorkflow: baseWorkflow,
+          overlayStatus: "running",
+          sendProgress: { sent: 1, total: 10, target: "" },
+          activeJobs: [],
+        }),
+      );
+      assert.doesNotMatch(noTargetHtml, /wb-live-override-bar/, "N1：无运行中任务通道时不得退回 connectionForm 显示调参条");
+
+      // 画板发送确认框同样在倍率非 100% 时显示提示
+      const { SendConfirmDialog } = await ssrServer.ssrLoadModule("/src/components/draw/SendConfirmDialog.jsx");
+      const drawDialogHtml = renderToStaticMarkup(
+        React.createElement(SendConfirmDialog, {
+          summary: { material: "椴木", thickness_mm: 3, can_send: true },
+          target: "127.0.0.1:2301",
+          safetyWarning: "",
+          controllerOverride: { feed: 100, rapid: 100, spindle: 120 },
+        }),
+      );
+      assert.match(drawDialogHtml, /控制器当前功率倍率为 120%/);
+    } finally {
+      clearControllerOverridesForTest();
+    }
   } finally {
     await ssrServer.close();
   }

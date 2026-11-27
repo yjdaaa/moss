@@ -3,6 +3,85 @@
 
 use super::*;
 
+fn parse_g92_origin(program: &str) -> (f64, f64) {
+    program
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("G92 ")?;
+            let mut x = 0.0;
+            let mut y = 0.0;
+            for token in rest.split_whitespace() {
+                if let Some(v) = token.strip_prefix('X').or_else(|| token.strip_prefix('x'))
+                    && let Ok(parsed) = v.parse::<f64>()
+                {
+                    x = parsed;
+                } else if let Some(v) = token.strip_prefix('Y').or_else(|| token.strip_prefix('y'))
+                    && let Ok(parsed) = v.parse::<f64>()
+                {
+                    y = parsed;
+                }
+            }
+            Some((x, y))
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
+fn shift_program_origin(program: &str, target_origin: (f64, f64)) -> String {
+    let source_origin = parse_g92_origin(program);
+    let dx = target_origin.0 - source_origin.0;
+    let dy = target_origin.1 - source_origin.1;
+    let clean = |v: f64| if v.abs() < 5e-4 { 0.0 } else { v };
+    let (tx, ty) = (clean(target_origin.0), clean(target_origin.1));
+    let mut out = String::with_capacity(program.len() + 64);
+    for line in program.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("G92 ") {
+            out.push_str(&format!("G92 X{tx:.3} Y{ty:.3} Z0\n"));
+        } else if trimmed.starts_with("G0 ") || trimmed.starts_with("G1 ") {
+            let mut tokens = Vec::new();
+            for token in trimmed.split_whitespace() {
+                if let Some(v) = token.strip_prefix('X')
+                    && let Ok(x) = v.parse::<f64>()
+                {
+                    tokens.push(format!("X{:.3}", clean(x + dx)));
+                } else if let Some(v) = token.strip_prefix('Y')
+                    && let Ok(y) = v.parse::<f64>()
+                {
+                    tokens.push(format!("Y{:.3}", clean(y + dy)));
+                } else {
+                    tokens.push(token.to_owned());
+                }
+            }
+            out.push_str(&tokens.join(" "));
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn append_stage_program(first: &str, second: &str) -> String {
+    let mut out = String::with_capacity(first.len() + second.len() + 64);
+    for line in first.lines() {
+        if line.trim() == "M2" {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("; --- Stage 2: outer border cut ---\n");
+    for line in second.lines() {
+        if line.trim().starts_with("G92 ") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 pub(crate) fn generate_text_artifacts(
     object: &serde_json::Map<String, serde_json::Value>,
     generated_root: Option<&std::path::Path>,
@@ -65,6 +144,35 @@ pub(crate) fn generate_text_artifacts(
         .filter(|s| !s.is_empty());
     let is_cut = raw_engraving_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"))
         || raw_laser_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"));
+    // 2026-11-27：铭牌“先雕内文、后切外框”（border_cut=true 或 border.cut=true）
+    let border_cut_requested = parse_bool(object.get("border_cut"), false)
+        || object
+            .get("border")
+            .and_then(|b| b.get("cut"))
+            .is_some_and(|v| parse_bool(Some(v), false));
+    if border_cut_requested && border.is_none() {
+        return Err("开启“切下外框”需要先选择外框样式（矩形框、圆角矩形框、圆牌或椭圆牌）".into());
+    }
+    let border_cut = border_cut_requested && !is_cut;
+    let border_cut_rec = if border_cut {
+        Some(
+            laser_core::material::recommend_in_library(
+                library,
+                material,
+                thickness,
+                "cut",
+                None,
+                1000.0,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "材料库里还没有「{material} {thickness}mm」的切割参数，无法切下外框；请换用支持切割的厚度或先在材料实验室保存切割参数"
+                )
+            })?,
+        )
+    } else {
+        None
+    };
     // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 实心填充用材料库 raster 参数
     // （2026-11-16 起改为矢量密排线，行距、速度与扫描填充同档），outline / hatch 用 outline 参数；
     // 有填满的图形时整件同样用 raster 参数（r44）
@@ -149,11 +257,19 @@ pub(crate) fn generate_text_artifacts(
                 .layer_options(laser_contracts::MATERIAL_CUT_OPTIONS_KEY),
             laser_contracts::MATERIAL_CUT_OPTION_KEYS,
         )
+    } else if let Some(ref cut_rec) = border_cut_rec {
+        merge_layer_options(
+            object.get("cut_options"),
+            cut_rec
+                .params
+                .layer_options(laser_contracts::MATERIAL_CUT_OPTIONS_KEY),
+            laser_contracts::MATERIAL_CUT_OPTION_KEYS,
+        )
     } else {
         (object.get("cut_options").cloned(), Vec::new())
     };
     let cut = parse_cut_options(cut_request.as_ref())?;
-    if !is_cut && cut.is_active() {
+    if !is_cut && !border_cut && cut.is_active() {
         return Err("cut_options（切缝补偿、桥位、引线、过切）只用于外框切割（laser_mode=cut），雕刻任务请去掉".into());
     }
     let spec = laser_core::TextTaskSpec {
@@ -190,7 +306,7 @@ pub(crate) fn generate_text_artifacts(
             inside_first: is_cut,
             ..parse_path_options(object)?
         },
-        cut,
+        cut: if is_cut { cut } else { Default::default() },
         shapes: &shapes,
         border,
         text_box,
@@ -212,7 +328,75 @@ pub(crate) fn generate_text_artifacts(
             artifacts.font_size_mm
         ));
     }
-    let gcode = feedback::repeat_generated(&artifacts.gcode, params.passes);
+    let (gcode, border_cut_params, effective_cut_report) = if let Some(ref cut_rec) = border_cut_rec
+    {
+        let border_val = border.expect("border_cut requires border");
+        let mut inner_shapes = shapes.clone();
+        if border_val.double {
+            let (rings, _) =
+                border_val.build(spec.board_width_mm, spec.board_height_mm, spec.margin_mm)?;
+            if rings.len() > 1 {
+                inner_shapes.extend(rings.into_iter().skip(1));
+            }
+        }
+        let outer_border = laser_core::shapes::Border {
+            double: false,
+            ..border_val
+        };
+        let cut_power = cut_rec.params.laser_max_power;
+        let cut_feed = cut_rec.params.feed_rate;
+        let cut_passes = cut_rec.params.passes.clamp(1, 5) as u32;
+        let outer_spec = laser_core::TextTaskSpec {
+            text: "",
+            shapes: &[],
+            border: Some(outer_border),
+            power: cut_power,
+            feed_rate: cut_feed,
+            fill: laser_core::engine::TextFill::Outline,
+            plan: laser_core::vector_plan::PlanOptions {
+                inside_first: true,
+                ..spec.plan
+            },
+            cut,
+            image: false,
+            ..spec
+        };
+        let outer_artifacts = laser_core::TextTaskEngine::generate(&outer_spec)?;
+        let outer_origin = parse_g92_origin(&outer_artifacts.gcode);
+        let stage2 = feedback::repeat_generated(&outer_artifacts.gcode, cut_passes);
+        let combined = if !text.is_empty() || !inner_shapes.is_empty() {
+            let inner_spec = laser_core::TextTaskSpec {
+                font_size_mm: artifacts.font_size_mm,
+                auto_size: false,
+                shapes: &inner_shapes,
+                border: None,
+                cut: Default::default(),
+                ..spec
+            };
+            let inner_artifacts = laser_core::TextTaskEngine::generate(&inner_spec)?;
+            let shifted_inner = shift_program_origin(&inner_artifacts.gcode, outer_origin);
+            let stage1 = feedback::repeat_generated(&shifted_inner, params.passes);
+            append_stage_program(&stage1, &stage2)
+        } else {
+            stage2
+        };
+        (
+            combined,
+            Some(serde_json::json!({
+                "laser_max_power": cut_power,
+                "feed_rate": cut_feed,
+                "passes": cut_passes,
+                "power_scale": 1000.0
+            })),
+            outer_artifacts.cut_report,
+        )
+    } else {
+        (
+            feedback::repeat_generated(&artifacts.gcode, params.passes),
+            None,
+            artifacts.cut_report,
+        )
+    };
     let estimate = laser_core::gcode::estimate_time_with(&gcode, &motion.profile);
 
     let root = generated_root.ok_or("生成目录未配置")?;
@@ -264,14 +448,22 @@ pub(crate) fn generate_text_artifacts(
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
         "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, &fill)),
-        "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref(), &cut_from_material)),
+        "cut_options": (is_cut || border_cut).then(|| cut_options_json(&cut, effective_cut_report.as_ref(), &cut_from_material)),
         "removed_duplicates": artifacts.removed_duplicates,
         "engrave_route": if image { "image" } else { "vector" },
         "route_note": route_note,
         "raster": artifacts.raster.map(|r| serde_json::json!({"grid_width": r.grid_width, "grid_height": r.grid_height, "pixel_size_mm": r.pixel_size_mm})),
         "shapes": super::shapes::shapes_json(&shapes),
         "shape_count": artifacts.shapes,
-        "border": border.as_ref().map(super::shapes::border_json),
+        "border": border.as_ref().map(|b| {
+            let mut val = super::shapes::border_json(b);
+            if border_cut {
+                val["cut"] = serde_json::json!(true);
+            }
+            val
+        }),
+        "border_cut": border_cut,
+        "border_cut_params": border_cut_params,
         "text_box": text_box.map(|b| serde_json::json!({"x_mm": b.x_mm, "y_mm": b.y_mm, "width_mm": b.width_mm, "height_mm": b.height_mm})),
         "weld": artifacts.weld.map(|w| serde_json::json!({"contours_before": w.before, "contours_after": w.after})),
         "time_estimate": time_estimate_json(&estimate, &motion)

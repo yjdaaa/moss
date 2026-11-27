@@ -1,12 +1,18 @@
-import React from "react";
+import React, { useState } from "react";
 import { AlertTriangle, Box, Clock, Cpu, Download, Flame, PauseCircle, Ruler, Square } from "lucide-react";
-import { resolveApiUrl } from "../../api/client.js";
+import { postJson, resolveApiUrl } from "../../api/client.js";
+import { showAlert } from "../../appDialog.js";
 import { isRemoteMode, readAuthToken } from "../../authSession.js";
 import { writeFramingShape } from "../../aiPreviewState.js";
+import { approvalPendingMessage, isApprovalRequiredResponse } from "../../approvalState.js";
 import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
 import { timeEstimateNote } from "../../fillOptions.js";
+import { LIVE_OVERRIDE_ACTIONS, liveOverrideRequest, resolveLiveOverrideTarget } from "../../registrationState.js";
 import {
   actualParamsText,
+  formatControllerOverrideText,
+  isControllerOverrideModified,
+  parseControllerOverride,
   workbenchPreviewWarnings,
   workbenchSendWarnings,
   workbenchStatusLabel,
@@ -51,6 +57,7 @@ export function WorkbenchMonitorCard({
   connectionForm,
   connectionStatus = null,
   activeJobs = [],
+  controllerOverride = null,
   motionPayload,
   addLog,
   adoptDerivedWorkflow,
@@ -64,6 +71,53 @@ export function WorkbenchMonitorCard({
 }) {
   const previewWarnings = workbenchPreviewWarnings(currentWorkflow);
   const sendWarnings = workbenchSendWarnings(sendProgress, currentWorkflow);
+  const [overrideBusy, setOverrideBusy] = useState("");
+  // N1（2026-11-27，技术书 r73）：实时调参必须走正在运行任务的原通道，与急停同口径，绝不随连接表单改动发到别的设备
+  const liveOverrideTarget = resolveLiveOverrideTarget({ sendProgress, activeJobs, currentWorkflow });
+  const canLiveOverride =
+    (overlayStatus === "running" || overlayStatus === "sending")
+    && sendProgress?.mode !== "sd_offline"
+    && Boolean(liveOverrideTarget);
+  const runningJobReport = Array.isArray(activeJobs)
+    ? activeJobs.find(
+        (job) =>
+          job
+          && job.state === "running"
+          && (!currentWorkflow?.workflow_id || job.workflow_id === currentWorkflow.workflow_id || job.job_id === currentWorkflow.workflow_id),
+      )?.last_status_report
+    : "";
+  const liveOverrideState =
+    parseControllerOverride(sendProgress?.last_status_report)
+    || parseControllerOverride(runningJobReport)
+    || parseControllerOverride(controllerOverride);
+  const overrideModified = isControllerOverrideModified(liveOverrideState);
+
+  const handleLiveOverride = async (action) => {
+    if (overrideBusy) return;
+    const payload = liveOverrideRequest(liveOverrideTarget, action);
+    if (!payload) return;
+    const label = LIVE_OVERRIDE_ACTIONS[action] || action;
+    setOverrideBusy(action);
+    try {
+      const res = await postJson("/api/safe-action", payload);
+      if (isApprovalRequiredResponse(res)) {
+        const msg = approvalPendingMessage(res, label);
+        addLog?.("SAFE", msg, "warn");
+        await showAlert(msg, { title: "等待桌面审批", tone: "info" });
+        return;
+      }
+      if (res?.ok && res?.data?.success) {
+        addLog?.("SAFE", res.data.result || `${label}已实时发送`, "ok");
+      } else {
+        const reason = res?.data?.result || `${label}发送失败`;
+        addLog?.("SAFE", reason, "error");
+      }
+    } catch (error) {
+      addLog?.("SAFE", `${label}请求异常：${error instanceof Error ? error.message : String(error)}`, "error");
+    } finally {
+      setOverrideBusy("");
+    }
+  };
   return (
     <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
       <FoldHeader id="wb-monitor" title="加工监视舱" n={4} />
@@ -321,8 +375,78 @@ export function WorkbenchMonitorCard({
             <span>紧急停止（软件复位）</span>
           </button>
 
-          {/* 雕刻下发进度 */}
+          {/* 雕刻下发进度与加工中实时调参 */}
           <div className="streaming-progress-group">
+            {canLiveOverride && (
+              <div className="wb-live-override-bar" id="wb-live-override-bar" role="group" aria-label="加工中实时功率与速度微调">
+                <div className="wb-live-override-group">
+                  <span className="wb-live-override-label">实时功率</span>
+                  <button
+                    type="button"
+                    id="wb-override-power-minus"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("power_override_minus_10")}
+                    title="边刻边把当前激光功率降低 10%（GRBL 实时指令 0x9B，不停机）"
+                  >
+                    −10%
+                  </button>
+                  <button
+                    type="button"
+                    id="wb-override-power-reset"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("power_override_reset")}
+                    title="把激光功率倍率恢复到 100%（GRBL 实时指令 0x99，不停机）"
+                  >
+                    100%
+                  </button>
+                  <button
+                    type="button"
+                    id="wb-override-power-plus"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("power_override_plus_10")}
+                    title="边刻边把当前激光功率提高 10%（GRBL 实时指令 0x9A，不停机；严格模式需桌面审批）"
+                  >
+                    +10%
+                  </button>
+                </div>
+                <div className="wb-live-override-group">
+                  <span className="wb-live-override-label">实时速度</span>
+                  <button
+                    type="button"
+                    id="wb-override-feed-minus"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("feed_override_minus_10")}
+                    title="边刻边把进给速度放慢 10%（GRBL 实时指令 0x92，不停机）"
+                  >
+                    −10%
+                  </button>
+                  <button
+                    type="button"
+                    id="wb-override-feed-reset"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("feed_override_reset")}
+                    title="把进给速度倍率恢复到 100%（GRBL 实时指令 0x90，不停机）"
+                  >
+                    100%
+                  </button>
+                  <button
+                    type="button"
+                    id="wb-override-feed-plus"
+                    className="btn btn-ghost wb-sec-btn wb-override-btn"
+                    disabled={Boolean(overrideBusy)}
+                    onClick={() => void handleLiveOverride("feed_override_plus_10")}
+                    title="边刻边把进给速度加快 10%（GRBL 实时指令 0x91，不停机；严格模式需桌面审批）"
+                  >
+                    +10%
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="streaming-progress-header">
               <span>雕刻下发进度</span>
               <span className="wb-text-6">
@@ -357,6 +481,16 @@ export function WorkbenchMonitorCard({
                 {workbenchStatusLabel(overlayStatus, sendProgress?.phase, Boolean(currentWorkflow?.workflow_id))}
               </span>
             </div>
+            {liveOverrideState && (
+              <div
+                className={`wb-live-override-status${overrideModified ? " is-modified" : ""}`}
+                id="wb-live-override-status"
+                role="status"
+              >
+                <span>当前倍率（Ov）：{formatControllerOverrideText(liveOverrideState)}</span>
+                {overrideModified && <span className="wb-live-override-badge">非 100%</span>}
+              </div>
+            )}
             {sendWarnings.length > 0 && (
               <div className="wb-send-warnings" id="wb-send-warnings" role="status">
                 {sendWarnings.map((warning, idx) => (

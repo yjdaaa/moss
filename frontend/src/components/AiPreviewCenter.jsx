@@ -27,7 +27,7 @@ import {
   strictHintText,
 } from "../aiPreviewState.js";
 import { createPollRunner } from "../pollGuard.js";
-import { DEVICE_CONNECTION_EVENT } from "../deviceConnection.js";
+import { DEVICE_CONNECTION_EVENT, resolveSoftLimitSendWarning } from "../deviceConnection.js";
 import { OriginBadge, inferOriginKind } from "./OriginBadge.jsx";
 import { SendOverlay } from "./SendOverlay.jsx";
 import { voiceApi } from "../voiceApi.js";
@@ -141,7 +141,16 @@ export function AiPreviewCenter({
         if (aiWorkflowStarted(record)) {
           const info = extractWorkflowInfo(record);
           watchedRef.current.delete(record.workflow_id);
-          setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null, target: record.send_result?.target });
+          setJob({
+            kind: "workflow",
+            id: record.workflow_id,
+            status: info.status || "sending",
+            progress: null,
+            target: record.send_result?.target,
+            ...(Array.isArray(record.send_result?.warnings) && record.send_result.warnings.length > 0
+              ? { warnings: record.send_result.warnings }
+              : {}),
+          });
         } else if (record.status !== "preview_ready") {
           watchedRef.current.delete(record.workflow_id);
         }
@@ -282,7 +291,15 @@ export function AiPreviewCenter({
     watchedRef.current.delete(record.workflow_id);
     forget(record.workflow_id);
     const info = extractWorkflowInfo(res.data.result);
-    setJob({ kind: "workflow", id: record.workflow_id, status: info.status || "sending", progress: null, target: res.data.result?.send_result?.target });
+    const sendWarnings = res.data.result?.send_result?.warnings;
+    setJob({
+      kind: "workflow",
+      id: record.workflow_id,
+      status: info.status || "sending",
+      progress: null,
+      target: res.data.result?.send_result?.target,
+      ...(Array.isArray(sendWarnings) && sendWarnings.length > 0 ? { warnings: sendWarnings } : {}),
+    });
   };
 
   // 先走边框（2026-11-06）：激光头从当前位置沿刀路范围绕一圈再回到起点，默认不出光；会移动机器，先确认
@@ -409,7 +426,7 @@ export function AiPreviewCenter({
 
   if (!enabled) return null;
   const details = shown ? workflowDetails(shown) : null;
-  const notes = shown ? aiPreviewNotes(shown) : [];
+  const notes = shown ? aiPreviewNotes(shown, { safetyWarning: resolveSoftLimitSendWarning(savedConnectionForm()) }) : [];
   const origin = shown ? originNote(shown) : "";
   const canFrame = Boolean(shown && framingRequest(shown, connection.payload));
 

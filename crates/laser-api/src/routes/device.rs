@@ -52,6 +52,9 @@ impl ApiService {
             Err(error) => return http_json(400, failure(error, None)),
         };
         strip_identity_fields(&mut object);
+        if !matches!(ctx, laser_contracts::CallerContext::Approval { .. }) {
+            object.remove("override_job_id");
+        }
         let mut args: laser_contracts::LaserSafeActionArgs =
             match serde_json::from_value(serde_json::Value::Object(object.clone())) {
                 Ok(a) => a,
@@ -74,6 +77,25 @@ impl ApiService {
             && !matches!(ctx, laser_contracts::CallerContext::Approval { .. })
         {
             if let Err(response) = self.bind_framing_resume(&mut object) {
+                return response;
+            }
+            args = match serde_json::from_value(serde_json::Value::Object(object.clone())) {
+                Ok(a) => a,
+                Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
+            };
+        }
+        // 严格模式下的 R3 倍率提高动作（2026-11-27，技术书 r73）：
+        // 申请创建审批前先校验命中正在运行的任务并绑定原任务与连接，无运行中任务不建废审批；
+        // 批准重放时仍由 handle_safe_action_with_override_job 按执行当刻状态重新校验。
+        let action_lower = args.action.trim().to_ascii_lowercase();
+        let is_override_action =
+            laser_tools::realtime_action(&action_lower).is_some_and(|rt| !rt.alters_alarm_state);
+        if is_override_action
+            && laser_contracts::safe_action_requires_approval(&args.action)
+            && self.strict_mode()
+            && laser_contracts::ApprovalSource::from_caller(ctx).is_some()
+        {
+            if let Err(response) = self.bind_live_override_for_approval(&args, &mut object) {
                 return response;
             }
             args = match serde_json::from_value(serde_json::Value::Object(object.clone())) {
@@ -113,7 +135,15 @@ impl ApiService {
             }
         }
         let job_id = object.get("job_id").and_then(serde_json::Value::as_str);
-        let res = self.handle_safe_action_for(&args, ctx, job_id);
+        let expected_override_job = matches!(ctx, laser_contracts::CallerContext::Approval { .. })
+            .then(|| {
+                object
+                    .get("override_job_id")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .flatten();
+        let res =
+            self.handle_safe_action_with_override_job(&args, ctx, job_id, expected_override_job);
         let action_name = args.action.trim().to_owned();
         if action_name == "emergency_stop" {
             self.emit_event(if res.success {
@@ -142,7 +172,11 @@ impl ApiService {
         let outcome: Result<serde_json::Value, (u16, serde_json::Value)> = if res.success {
             Ok(serde_json::Value::Null)
         } else {
-            Err((400, failure(res.result.clone(), None)))
+            let detail = res
+                .detail
+                .as_ref()
+                .map(|code| serde_json::json!({ "error_code": code }));
+            Err((400, failure(res.result.clone(), detail)))
         };
         self.finish_r3_authority(&authority, &outcome, None);
         http_json(

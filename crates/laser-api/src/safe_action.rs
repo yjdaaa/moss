@@ -17,6 +17,16 @@ impl ApiService {
         _ctx: &laser_contracts::CallerContext,
         job_id: Option<&str>,
     ) -> laser_contracts::ToolCallResult {
+        self.handle_safe_action_with_override_job(args, _ctx, job_id, None)
+    }
+
+    pub(crate) fn handle_safe_action_with_override_job(
+        &self,
+        args: &laser_contracts::LaserSafeActionArgs,
+        _ctx: &laser_contracts::CallerContext,
+        job_id: Option<&str>,
+        expected_override_job: Option<&str>,
+    ) -> laser_contracts::ToolCallResult {
         if !self.voice_caller_allowed(_ctx) {
             return laser_contracts::ToolCallResult::with_detail(
                 false,
@@ -44,6 +54,7 @@ impl ApiService {
         });
 
         let alters_alarm = realtime_cmd_info.is_some_and(|(_, _, alters)| alters);
+        let is_override = realtime_cmd_info.is_some_and(|(_, _, alters)| !alters);
         let has_host = args.host.as_deref().is_some_and(|s| !s.trim().is_empty());
         let has_port = args.port.as_deref().is_some_and(|s| !s.trim().is_empty());
         let mode_hint = args
@@ -104,7 +115,59 @@ impl ApiService {
                 };
                 uncertain
             };
-            if let Some(id) = job_id {
+            if is_override {
+                // 2026-11-27（技术书 r73）：倍率类实时动作只能命中正在运行的任务并走原任务通道，
+                // 绝不新开连接向空闲控制器或另一台设备发倍率字节，避免发错目标或倍率残留到下一件。
+                let running_jobs: Vec<std::sync::Arc<ActiveJob>> = jobs
+                    .values()
+                    .filter(|j| !j.cancel.is_cancelled())
+                    .cloned()
+                    .collect();
+                if running_jobs.is_empty() {
+                    return laser_contracts::ToolCallResult::with_detail(
+                        false,
+                        "当前没有正在运行的加工任务，倍率调节仅在加工运行中可用（未向设备发送）",
+                        "no_active_job",
+                    );
+                }
+                let selected = if let Some(spec) = explicit_spec.as_ref() {
+                    let Some(job) = running_jobs
+                        .into_iter()
+                        .find(|j| spec.matches_target(&j.target))
+                    else {
+                        return laser_contracts::ToolCallResult::with_detail(
+                            false,
+                            format!(
+                                "指定的设备（{}）没有正在运行的加工任务，倍率未发送，请检查目标设备",
+                                spec.describe()
+                            ),
+                            "override_target_mismatch",
+                        );
+                    };
+                    job
+                } else if running_jobs.len() > 1 {
+                    return laser_contracts::ToolCallResult::with_detail(
+                        false,
+                        "存在多个正在运行的设备任务，请指定要调节倍率的设备目标",
+                        "override_target_ambiguous",
+                    );
+                } else {
+                    running_jobs
+                        .into_iter()
+                        .next()
+                        .expect("non-empty running_jobs")
+                };
+                if let Some(expected_id) = expected_override_job
+                    && selected.workflow_id != expected_id
+                {
+                    return laser_contracts::ToolCallResult::with_detail(
+                        false,
+                        "原加工任务已结束，本次倍率审批不再作用于后续任务（未向设备发送）",
+                        "override_job_ended",
+                    );
+                }
+                Some(StopTarget::Running(selected))
+            } else if let Some(id) = job_id {
                 if let Some(job) = jobs.values().find(|j| j.workflow_id == id).cloned() {
                     if explicit_spec
                         .as_ref()
@@ -269,7 +332,15 @@ impl ApiService {
                     ));
                 }
             }
-            None => {}
+            None => {
+                if is_override {
+                    return laser_contracts::ToolCallResult::with_detail(
+                        false,
+                        "当前没有正在运行的加工任务，倍率调节仅在加工运行中可用（未向设备发送）",
+                        "no_active_job",
+                    );
+                }
+            }
         }
 
         if self.is_shutdown_requested() && !laser_contracts::is_emergency_stop_action(action) {
@@ -792,6 +863,150 @@ impl ApiService {
                     object.insert("connection_mode".into(), serde_json::json!("network"));
                     object.insert("network_host".into(), serde_json::json!(host));
                     object.insert("network_telnet_port".into(), serde_json::json!(port));
+                }
+                Some(laser_device::ConnectionSpec::Serial { port, baud_rate }) => {
+                    object.insert("connection_mode".into(), serde_json::json!("serial"));
+                    object.insert("port".into(), serde_json::json!(port));
+                    object.insert("baudrate".into(), serde_json::json!(baud_rate));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// 严格模式下 R3 倍率提高动作在创建审批前的绑定（2026-11-27，技术书 r73）：
+    /// 必须命中正在运行的任务才创建审批，写入 `override_job_id` 与该任务的连接参数；
+    /// 审批被桌面批准重放时，仍由 `handle_safe_action_with_override_job` 按执行当刻状态重新校验。
+    pub(crate) fn bind_live_override_for_approval(
+        &self,
+        args: &laser_contracts::LaserSafeActionArgs,
+        object: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), Vec<u8>> {
+        let refuse = |message: String, code: &str| {
+            http_json(
+                400,
+                failure(message, Some(serde_json::json!({"error_code": code}))),
+            )
+        };
+        let host_opt = args
+            .host
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                object
+                    .get("network_host")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            });
+        let port_opt = args
+            .port
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                object
+                    .get("serial_port")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            });
+        let telnet_port = args.telnet_port.or_else(|| {
+            object
+                .get("network_telnet_port")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+        });
+        let baudrate = args.baudrate.or_else(|| {
+            object
+                .get("baud")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+        });
+        let mode_hint = args
+            .connection_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let active_mode_field_present = match mode_hint.as_deref() {
+            Some("network") => host_opt.is_some(),
+            Some("serial") => port_opt.is_some(),
+            _ => host_opt.is_some() || port_opt.is_some(),
+        };
+        let explicit_spec = if active_mode_field_present {
+            match laser_tools::resolve_connection_spec(
+                port_opt,
+                host_opt,
+                baudrate,
+                telnet_port,
+                args.connection_mode.as_deref(),
+            ) {
+                Ok(spec) => Some(spec),
+                Err(error) => return Err(refuse(error, "invalid_override_target")),
+            }
+        } else {
+            None
+        };
+        let running_jobs: Vec<std::sync::Arc<ActiveJob>> = {
+            let Ok(jobs) = self.active_jobs.lock() else {
+                return Err(refuse(
+                    "无法读取正在运行的设备任务，倍率未发送".to_owned(),
+                    "no_active_job",
+                ));
+            };
+            jobs.values()
+                .filter(|j| !j.cancel.is_cancelled())
+                .cloned()
+                .collect()
+        };
+        if running_jobs.is_empty() {
+            return Err(refuse(
+                "当前没有正在运行的加工任务，倍率调节仅在加工运行中可用（未向设备发送）".to_owned(),
+                "no_active_job",
+            ));
+        }
+        let selected = if let Some(spec) = explicit_spec.as_ref() {
+            let Some(job) = running_jobs
+                .into_iter()
+                .find(|j| spec.matches_target(&j.target))
+            else {
+                return Err(refuse(
+                    format!(
+                        "指定的设备（{}）没有正在运行的加工任务，倍率未发送，请检查目标设备",
+                        spec.describe()
+                    ),
+                    "override_target_mismatch",
+                ));
+            };
+            job
+        } else if running_jobs.len() > 1 {
+            return Err(refuse(
+                "存在多个正在运行的设备任务，请指定要调节倍率的设备目标".to_owned(),
+                "override_target_ambiguous",
+            ));
+        } else {
+            running_jobs
+                .into_iter()
+                .next()
+                .expect("non-empty running_jobs")
+        };
+        object.insert(
+            "override_job_id".into(),
+            serde_json::json!(selected.workflow_id),
+        );
+        let has_target = ["port", "serial_port", "network_host", "host"]
+            .iter()
+            .any(|key| {
+                object
+                    .get(*key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty())
+            });
+        if !has_target {
+            match &selected.spec {
+                Some(laser_device::ConnectionSpec::Tcp { host, port }) => {
+                    object.insert("connection_mode".into(), serde_json::json!("network"));
+                    object.insert("host".into(), serde_json::json!(host));
+                    object.insert("telnet_port".into(), serde_json::json!(port));
                 }
                 Some(laser_device::ConnectionSpec::Serial { port, baud_rate }) => {
                     object.insert("connection_mode".into(), serde_json::json!("serial"));

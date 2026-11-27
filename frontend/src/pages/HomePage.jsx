@@ -21,7 +21,10 @@ import {
   isWorkbenchPreviewStale,
   manualParamsPayload,
   materialRecommendationModes,
+  readControllerOverride,
+  recordControllerOverride,
   resolveTextStyle,
+  textBorderCutAllowed,
   workbenchConfirmSendPrompt,
   workbenchFeedbackInputs,
   workbenchInputSignature,
@@ -199,6 +202,11 @@ export function HomePage({
   const textUsesFill = resolveTextStyle(textStyleEffective).textFill !== "outline";
   // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
   const textIsCut = resolveTextStyle(textStyleEffective).laserMode === "cut";
+  // N3：“切下外框”勾选框隐藏（切割刻法或表面通用材质）时，签名与提交同步屏蔽 cutBorder / border_cut
+  const canCutBorder = textBorderCutAllowed({ textIsCut, surfaceOnly: surfaceOnlyMaterial });
+  const effectiveTextBorder = textBorder?.cutBorder && !canCutBorder
+    ? { ...textBorder, cutBorder: false }
+    : textBorder;
   const currentConnectionTarget = {
     connection_mode: connectionMode,
     port: serialPort,
@@ -206,6 +214,37 @@ export function HomePage({
     network_host: networkHost,
     network_telnet_port: String(telnetPort),
   };
+  const currentConnectionTargetRef = useRef(currentConnectionTarget);
+  currentConnectionTargetRef.current = currentConnectionTarget;
+  const [controllerOverride, setControllerOverride] = useState(() => readControllerOverride(currentConnectionTarget));
+  useEffect(() => {
+    setControllerOverride(readControllerOverride({
+      connection_mode: connectionMode,
+      port: serialPort,
+      baudrate: String(baudrate),
+      network_host: networkHost,
+      network_telnet_port: String(telnetPort),
+    }));
+  }, [connectionMode, serialPort, baudrate, networkHost, telnetPort]);
+  useEffect(() => {
+    if (!Array.isArray(activeJobs) || activeJobs.length === 0) return;
+    const target = {
+      connection_mode: connectionMode,
+      port: serialPort,
+      baudrate: String(baudrate),
+      network_host: networkHost,
+      network_telnet_port: String(telnetPort),
+    };
+    let updated = false;
+    for (const job of activeJobs) {
+      if (job?.last_status_report && recordControllerOverride(job.target || target, job.last_status_report)) {
+        updated = true;
+      }
+    }
+    if (updated) {
+      setControllerOverride(readControllerOverride(target));
+    }
+  }, [activeJobs, connectionMode, serialPort, baudrate, networkHost, telnetPort]);
   // 握手读到的机器加速度 / 最大速度（按当前连接目标取值）：工时估算与自动过扫描用
   const [machineMotionStore, setMachineMotionStore] = useState(() => readMachineMotionStore());
   useEffect(() => {
@@ -237,6 +276,7 @@ export function HomePage({
   const [uploadedImageThumb, setUploadedImageThumb] = useState("");
   const [imageWidthMm, setImageWidthMm] = useState("");
   const [imageHeightMm, setImageHeightMm] = useState("");
+  const [imageEngravingMode, setImageEngravingMode] = useState("raster");
   const [imageMode, setImageMode] = useState("auto");
   // 2026-11-16（r38）LightBurn 对齐的图片高级项：反相、直通、点宽补偿、网点网格 / 角度、灰度最小功率
   const [imageExtras, setImageExtras] = useState(DEFAULT_IMAGE_EXTRAS);
@@ -287,7 +327,7 @@ export function HomePage({
   const signatureInputs = {
     activeTool,
     textContent,
-    textBorder,
+    textBorder: effectiveTextBorder,
     fontSizeMm,
     textStyle: textStyleEffective,
     textOrigin,
@@ -300,6 +340,7 @@ export function HomePage({
     uploadedImagePath,
     imageWidthMm,
     imageHeightMm,
+    imageEngravingMode,
     imageMode,
     imageExtras,
     // 图片同样按速度自动过扫描、套用双向扫描偏移表（r45）
@@ -388,6 +429,20 @@ export function HomePage({
     if (recall.textStyle) setTextStyle(recall.textStyle);
     if (recall.textOrigin) setTextOrigin(recall.textOrigin);
     if (recall.textBorder) setTextBorder(recall.textBorder);
+    if (recall.imagePath != null) {
+      setUploadedImagePath(recall.imagePath);
+      setUploadedImageName(recall.imageName || recall.imagePath);
+      setUploadedImageThumb("");
+    }
+    if (recall.imageWidthMm != null) setImageWidthMm(recall.imageWidthMm);
+    if (recall.imageHeightMm != null) setImageHeightMm(recall.imageHeightMm);
+    if (recall.imageEngravingMode) setImageEngravingMode(recall.imageEngravingMode);
+    if (recall.imageMode) setImageMode(recall.imageMode);
+    if (recall.imageExtras) setImageExtras(recall.imageExtras);
+    if (recall.gcodePath != null) {
+      setUploadedGcodePath(recall.gcodePath);
+      setUploadedGcodeName(recall.gcodeName || recall.gcodePath);
+    }
     const notes = [];
     if (recall.material) {
       const hit = materials.find((m) => m.name === recall.material);
@@ -533,7 +588,11 @@ export function HomePage({
         setHasRecommendation(false);
         return;
       }
-      const recMode = materialRecommendationModes({ activeTool, textStyle: textStyleEffective });
+      const recMode = materialRecommendationModes({
+        activeTool,
+        textStyle: textStyleEffective,
+        imageEngravingMode,
+      });
       const query = new URLSearchParams({
         material: selectedMaterial,
         thickness_mm: String(selectedThickness),
@@ -581,7 +640,7 @@ export function HomePage({
       cancelled = true;
       controller?.abort();
     };
-  }, [selectedMaterial, selectedThickness, activeTool, textStyleEffective, recRefreshTick]);
+  }, [selectedMaterial, selectedThickness, activeTool, textStyleEffective, imageEngravingMode, recRefreshTick]);
 
   // r40：把当前填充 / 切割设置存进材料库条目（只改图层设置，不动功率速度；扫描偏移与加速度不随材料保存）
   const saveFillToMaterial = async () => {
@@ -676,7 +735,12 @@ export function HomePage({
           setBusy(false);
           return;
         }
-        const borderPayload = textBorderPayload({ ...textBorder, maxWidthMm, maxHeightMm });
+        const borderPayload = textBorderPayload({
+          ...effectiveTextBorder,
+          allowCutBorder: canCutBorder,
+          maxWidthMm,
+          maxHeightMm,
+        });
         if (borderPayload.error) {
           showAlert(borderPayload.error, { title: "外框设置不对", tone: "warning" });
           setBusy(false);
@@ -709,6 +773,7 @@ export function HomePage({
           origin: textOrigin,
           work_area_width_mm: maxWidthMm,
           work_area_height_mm: maxHeightMm,
+          ...workbenchConnectionFields(deviceConnection),
           ...borderPayload,
           ...fillPayload,
           ...motionPayload,
@@ -746,9 +811,10 @@ export function HomePage({
           source_type: "image",
           image_file: uploadedImagePath,
           laser_mode: "engrave",
-          engraving_mode: "raster",
+          engraving_mode: imageEngravingMode === "outline" ? "outline" : "raster",
           work_area_width_mm: maxWidthMm,
           work_area_height_mm: maxHeightMm,
+          ...workbenchConnectionFields(deviceConnection),
           ...imgExtra,
           ...scanPayload,
           ...motionPayload,
@@ -766,6 +832,7 @@ export function HomePage({
           thickness_mm: Number(selectedThickness),
           source_type: "gcode",
           gcode_file: uploadedGcodePath,
+          ...workbenchConnectionFields(deviceConnection),
           ...motionPayload,
         });
       }
@@ -1050,6 +1117,7 @@ export function HomePage({
       dimensions,
       lastSentSha256,
       safetyWarning,
+      controllerOverride,
     });
     const confirmed = await showConfirm(prompt.message, {
       title: prompt.title,
@@ -1183,6 +1251,7 @@ export function HomePage({
       totalLines,
       safetyWarning,
       sendWarnings: sendProgress?.warnings,
+      controllerOverride,
     });
     const confirmed = await showConfirm(resumePrompt.message, {
       title: resumePrompt.title,
@@ -1284,19 +1353,31 @@ export function HomePage({
         }
         setPollSafetyNotice((notice) => notice.startsWith("状态未知") ? "" : notice);
         const sr = res.data.result?.send_result || {};
+        if (sr.last_status_report) {
+          recordControllerOverride(sr.target || state.progress?.target || currentConnectionTarget, sr.last_status_report);
+          setControllerOverride(readControllerOverride(currentConnectionTargetRef.current));
+        }
         const fromSr = sendProgressFromResult(sr);
         if (fromSr && fromSr.total > 0) {
-          setSendProgress((prev) => {
-            if (fromSr.warnings?.length || !prev?.warnings?.length) return fromSr;
-            return { ...fromSr, warnings: prev.warnings };
-          });
+          setSendProgress((prev) => ({
+            ...fromSr,
+            ...(!fromSr.warnings?.length && prev?.warnings?.length ? { warnings: prev.warnings } : {}),
+            ...(!fromSr.last_status_report && prev?.last_status_report ? { last_status_report: prev.last_status_report } : {}),
+          }));
           const pct = Math.min(100, Math.round(fromSr.sent / fromSr.total * 100));
           if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {
             lastLoggedPctRef.current = pct;
             addLog("STREAM", `进度同步: ${pct}% (${fromSr.sent} 行)`, "info");
           }
         } else if (state.progress) {
-          setSendProgress({ ...state.progress, target:sr.target || "", phase:sr.phase });
+          setSendProgress((prev) => ({
+            ...state.progress,
+            target: sr.target || prev?.target || "",
+            phase: sr.phase,
+            ...(sr.last_status_report || prev?.last_status_report
+              ? { last_status_report: sr.last_status_report || prev?.last_status_report }
+              : {}),
+          }));
           const pct = Math.min(100, Math.round(state.progress.sent / state.progress.total * 100));
           if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {
             lastLoggedPctRef.current = pct;
@@ -1421,6 +1502,8 @@ export function HomePage({
                 setUploadedImageName={setUploadedImageName}
                 uploadedImageThumb={uploadedImageThumb}
                 setUploadedImageThumb={setUploadedImageThumb}
+                imageEngravingMode={imageEngravingMode}
+                setImageEngravingMode={setImageEngravingMode}
                 imageMode={imageMode}
                 setImageMode={setImageMode}
                 imageExtras={imageExtras}
@@ -1495,6 +1578,7 @@ export function HomePage({
           connectionForm={connectionForm}
           connectionStatus={connectionStatus}
           activeJobs={activeJobs}
+          controllerOverride={controllerOverride}
           motionPayload={motionPayload}
           addLog={addLog}
           adoptDerivedWorkflow={adoptDerivedWorkflow}

@@ -25,11 +25,10 @@ test("小智雕刻同步：激光工具名映射为中文，非激光工具不�
   assert.equal(laserToolLabel("check_laser_connection_tool"), "检查机器连接");
   assert.equal(laserToolLabel("laser_safe_action_tool"), "停止 / 调速");
   assert.equal(laserToolLabel("material_params_tool"), "查材料参数");
-  assert.equal(laserToolLabel("generate_text_image_tool"), "生成预览");
+  assert.equal(laserToolLabel("generate_text_laser_task_tool"), "生成雕刻预览");
   assert.equal(laserToolLabel("run_calibration_grid_tool"), "测试矩阵");
   assert.equal(laserToolLabel(" laser_workflow_tool "), "雕刻任务");
   assert.equal(laserToolLabel("open_app_tool"), "");
-  assert.equal(laserToolLabel("shortcut_key_execution_tool"), "");
   assert.equal(laserToolLabel("toString"), "", "原型链上的名字不能被当成工具");
   assert.equal(laserToolLabel(null), "");
   assert.equal(laserToolLabel(42), "");

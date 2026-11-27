@@ -95,8 +95,17 @@ pub(crate) fn safe_action_digest_facts(object: &Map<String, Value>) -> Map<Strin
         .trim()
         .to_owned();
     facts.insert("action".into(), Value::String(action));
-    // job_id（2026-11-18）：继续走边框绑定到具体作业，批准的就是执行的那一次
-    for key in ["x", "y", "z", "feed_rate", "power", "job_id"] {
+    // job_id（2026-11-18）：继续走边框绑定到具体作业，批准的就是执行的那一次；
+    // override_job_id（2026-11-27）：实时倍率提高绑定到原加工任务，任务结束后批准不再作用于后续任务
+    for key in [
+        "x",
+        "y",
+        "z",
+        "feed_rate",
+        "power",
+        "job_id",
+        "override_job_id",
+    ] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
             facts.insert(key.into(), value.clone());
         }
@@ -329,7 +338,17 @@ impl crate::ApiService {
                 .unwrap_or_else(|| format!("执行失败 (HTTP {status})"));
             let error_code = response
                 .get("detail")
-                .and_then(|detail| detail.get("error_code"))
+                .and_then(|detail| {
+                    detail.get("error_code").or_else(|| {
+                        detail
+                            .as_str()
+                            .filter(|s| {
+                                !s.is_empty()
+                                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            })
+                            .map(|_| detail)
+                    })
+                })
                 .cloned()
                 .unwrap_or(Value::Null);
             let status = if status < 400 { 500 } else { status };

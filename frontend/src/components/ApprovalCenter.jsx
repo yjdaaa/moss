@@ -23,6 +23,7 @@ import {
   newPendingIds,
   orderPending,
   rejectApprovalRequest,
+  resolveApprovalWarnings,
   secondsLeft,
   shortDigest,
   sourceLabel,
@@ -30,6 +31,7 @@ import {
   workflowDetails,
 } from "../approvalState.js";
 import { createPollRunner } from "../pollGuard.js";
+import { resolveSoftLimitSendWarning } from "../deviceConnection.js";
 import { SendOverlay } from "./SendOverlay.jsx";
 import { voiceApi } from "../voiceApi.js";
 import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } from "../approvalJobMonitor.js";
@@ -205,9 +207,17 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
     removeShown(approval.approval_id);
     onOpenChange?.(false);
     const result = res.data.result?.result;
+    const sendWarnings = result?.send_result?.warnings;
     if (approval.kind === "workflow_confirm_send") {
       const info = extractWorkflowInfo(result);
-      setJob({ kind: "workflow", id: approval.target_record, status: info.status || "sending", progress: null, target: result?.send_result?.target });
+      setJob({
+        kind: "workflow",
+        id: approval.target_record,
+        status: info.status || "sending",
+        progress: null,
+        target: result?.send_result?.target,
+        ...(Array.isArray(sendWarnings) && sendWarnings.length > 0 ? { warnings: sendWarnings } : {}),
+      });
       try {
         window.dispatchEvent(
           new CustomEvent("moss:approval-executed", {
@@ -218,7 +228,14 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
         // 非浏览器环境忽略事件广播
       }
     } else if (approval.kind === "calibration_send") {
-      setJob({ kind: "calibration", id: approval.target_record, status: "sending", progress: null, target: result?.send_result?.target });
+      setJob({
+        kind: "calibration",
+        id: approval.target_record,
+        status: "sending",
+        progress: null,
+        target: result?.send_result?.target,
+        ...(Array.isArray(sendWarnings) && sendWarnings.length > 0 ? { warnings: sendWarnings } : {}),
+      });
     } else {
       const message = typeof result === "string" ? result : approval.summary;
       void showAlert(message || "已执行", { title: `已批准：${kindLabel(approval.kind)}`, tone: "success" });
@@ -332,6 +349,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
 
   const percent = shown && ttl > 0 ? Math.max(0, Math.min(100, (remaining / ttl) * 100)) : 0;
   const isWorkflow = shown?.kind === "workflow_confirm_send";
+  const approvalWarnings = resolveApprovalWarnings(shown, details, resolveSoftLimitSendWarning);
   const privateOnly = approvedInPrivateWindow(shown?.kind);
   // n67：独立安全窗口已取消，改为跳到语音中心“隐私与家居 → 家居 → 家居审批”
   const openPrivateApproval = () => {
@@ -435,6 +453,11 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPen
                 ) : null;
               })()}
               <p className="approval-summary">{shown.summary}</p>
+              {approvalWarnings.length > 0 && (
+                <div className="voice-hint" id="approval-risk-warnings" role="note">
+                  {`⚠️ 风险提示：${approvalWarnings.join("；")}`}
+                </div>
+              )}
               {!failure && (
                 <div className="approval-timer" aria-live="polite">
                   <span className="mono">{remaining} s</span>

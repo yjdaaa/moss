@@ -13,7 +13,7 @@
 - `laser_safe_action_tool` 把自然动作映射到受控命令：`status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset` 必须 `confirmed=true`。移动动作固定先 `M5` 关光。
 - `check_laser_connection_tool` 只做连接检查：打开串口或 Telnet，发 `$$` 读到终止 `ok` 并要求 `$32=1`；`include_detail=true` 时附带固件设置行。没有 HTTP `[ESP800]` 路径。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_file` 与 `send_command` 已被拒绝，只保留 `status` / `check` / `probe` 与按 `job_id` 的 `cancel`。
-- 文字工具（`generate_text_laser_task_tool`、`generate_text_image_gcode_tool`）只接受 `text`，都生成 workflow 预览；图片素材只能从网页或桌面端上传。
+- 文字工具（`generate_text_laser_task_tool`）只接受 `text`，生成 workflow 预览；图片素材只能从网页或桌面端上传。
 
 ## 路由建议
 
@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | "检查激光机开没开、连没连上" | `check_laser_connection_tool` | 只读握手；排障时再用 `include_detail=true` |
 | "查状态、解锁、回零、设原点、关激光、移动、急停、软复位" | `laser_safe_action_tool` | `status` 可直接执行；其他状态改变动作必须确认 |
-| "快点 / 慢点 / 亮一点 / 暗一点 / 恢复正常" | `laser_safe_action_tool` 的 `feed_plus_10`、`feed_minus_10`、`power_plus_10`、`power_minus_10`、`feed_reset`、`power_reset` | 实时倍率字节，即时生效，不需确认 |
+| "快点 / 慢点 / 亮一点 / 暗一点 / 恢复正常" | `laser_safe_action_tool` 的 `feed_plus_10`、`feed_minus_10`、`power_plus_10`、`power_minus_10`、`feed_reset`、`power_reset` | 实时倍率字节，仅在加工运行中经原任务通道生效（无运行任务或目标不匹配拒绝、不新开连接；严格模式下提高倍率需桌面审批并在批准执行当刻复核原任务仍在运行） |
 | "帮我刻 xxx、刻名字、刻一段文字" | `laser_workflow_tool` `action="preview"` 带 `text`、`material`、`thickness_mm` | `xxx` 是文字内容；缺材料或厚度先问；默认不发送 |
 | "文字效果太焦/太浅/切不透/毛边/断线" | `refine_laser_params_from_feedback_tool`，必要时 `regenerate_text_laser_task_tool` | 先给建议或重新生成文件，不控制硬件 |
 | "先调参、打测试矩阵、找参数" | `run_calibration_grid_tool`，再 `select_calibration_cell_tool` | 生成不发送；`calibration_id + confirmed=true` 才发送 |

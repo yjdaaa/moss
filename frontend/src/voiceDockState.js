@@ -27,8 +27,6 @@ const LASER_TOOL_LABELS = {
   material_params_tool: "查材料参数",
   recommend_laser_params_tool: "推荐加工参数",
   refine_laser_params_from_feedback_tool: "按效果调参数",
-  generate_text_image_tool: "生成预览",
-  generate_text_image_gcode_tool: "生成刀路",
   generate_text_laser_task_tool: "生成雕刻预览",
   regenerate_text_laser_task_tool: "重新生成预览",
   run_calibration_grid_tool: "测试矩阵",

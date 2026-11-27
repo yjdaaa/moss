@@ -27,14 +27,12 @@ impl FakeHttps {
         self.seen.lock().unwrap().clone()
     }
 }
-fn fake_ha_https(
-    cert_name: &str,
-    status: &str,
-    mime: &str,
-    body: Vec<u8>,
-    wait: Duration,
-    location: Option<&str>,
-) -> FakeHttps {
+fn shared_ha_tls() -> &'static (Vec<u8>, Arc<ServerConfig>) {
+    static FIXTURE: std::sync::OnceLock<(Vec<u8>, Arc<ServerConfig>)> = std::sync::OnceLock::new();
+    FIXTURE.get_or_init(|| build_tls_fixture("ha.example.test"))
+}
+
+fn build_tls_fixture(cert_name: &str) -> (Vec<u8>, Arc<ServerConfig>) {
     let cert = rcgen::generate_simple_self_signed(vec![cert_name.to_owned()]).unwrap();
     let cert_der = cert.cert.der().to_vec();
     let key_der = cert.key_pair.serialize_der();
@@ -48,6 +46,57 @@ fn fake_ha_https(
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
         )
         .unwrap();
+    (cert_der, Arc::new(tls_config))
+}
+
+fn read_one_http_request(
+    stream: &mut StreamOwned<ServerConnection, std::net::TcpStream>,
+) -> Vec<u8> {
+    let mut raw = Vec::new();
+    let mut packet = [0u8; 2048];
+    for _ in 0..12 {
+        match stream.read(&mut packet) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                raw.extend_from_slice(&packet[..count]);
+                if let Some(offset) = raw.windows(4).position(|p| p == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&raw[..offset]);
+                    let declared = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            if key.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    if raw.len() >= offset + 4 + declared {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    raw
+}
+
+fn fake_ha_https(
+    cert_name: &str,
+    status: &str,
+    mime: &str,
+    body: Vec<u8>,
+    wait: Duration,
+    location: Option<&str>,
+) -> FakeHttps {
+    let warmup = cert_name == "ha.example.test";
+    let (cert_der, tls_config) = if warmup {
+        let (der, cfg) = shared_ha_tls();
+        (der.clone(), cfg.clone())
+    } else {
+        build_tls_fixture(cert_name)
+    };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -55,43 +104,29 @@ fn fake_ha_https(
     let status = status.to_owned();
     let mime = mime.to_owned();
     let location = location.map(str::to_owned);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
     let worker = thread::spawn(move || {
+        let _ = ready_tx.send(());
         let (socket, _) = listener.accept().unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         socket
-            .set_write_timeout(Some(Duration::from_secs(2)))
+            .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let conn = ServerConnection::new(Arc::new(tls_config)).unwrap();
+        let conn = ServerConnection::new(tls_config).unwrap();
         let mut stream = StreamOwned::new(conn, socket);
-        let mut raw = Vec::new();
-        let mut packet = [0u8; 2048];
-        for _ in 0..12 {
-            match stream.read(&mut packet) {
-                Ok(0) | Err(_) => break,
-                Ok(count) => {
-                    raw.extend_from_slice(&packet[..count]);
-                    if let Some(offset) = raw.windows(4).position(|p| p == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&raw[..offset]);
-                        let declared = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (key, value) = line.split_once(':')?;
-                                if key.eq_ignore_ascii_case("content-length") {
-                                    value.trim().parse::<usize>().ok()
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(0);
-                        if raw.len() >= offset + 4 + declared {
-                            break;
-                        }
-                    }
-                }
-            }
+        if warmup {
+            let warm = read_one_http_request(&mut stream);
+            assert!(warm.starts_with(b"HEAD /warmup HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
         }
+        let raw = read_one_http_request(&mut stream);
         *recorded.lock().unwrap() = raw;
         if recorded.lock().unwrap().is_empty() {
             return;
@@ -109,17 +144,28 @@ fn fake_ha_https(
         let _ = stream.write_all(&body);
         let _ = stream.flush();
     });
+    ready_rx.recv().unwrap();
     let client = Client::builder()
         .https_only(true)
         .no_proxy()
         .redirect(Policy::none())
         .resolve("ha.example.test", addr)
         .add_root_certificate(reqwest::Certificate::from_der(&cert_der).unwrap())
-        .connect_timeout(Duration::from_millis(900))
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(7))
         .build()
         .unwrap();
     let origin = Url::parse(&format!("https://ha.example.test:{}/", addr.port())).unwrap();
+    if warmup {
+        let warm_url = origin.join("/warmup").unwrap();
+        let warm_resp = client
+            .head(warm_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .unwrap();
+        assert_eq!(warm_resp.status(), StatusCode::OK);
+        let _ = warm_resp.bytes().unwrap();
+    }
     FakeHttps {
         transport: HttpsHomeTransport {
             origin,

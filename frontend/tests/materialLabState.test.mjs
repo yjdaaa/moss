@@ -440,4 +440,47 @@ test("校准矩阵生成前按当前连接目标有效行程估算宽高并拦�
   const interval8 = estimateMatrixDimensionsMm({ testType: "interval", intervalCount: 8, labels: true });
   assert.equal(interval8.widthMm, 92);
   assert.equal(checkMatrixFitsWorkspace(interval8, { x_travel_mm: 100, y_travel_mm: 100 }).ok, true);
+
+  const warnPrompt = buildMatrixConfirmPrompt({
+    preview: {
+      material: "椴木",
+      thickness_mm: 3,
+      width_mm: 60,
+      height_mm: 60,
+      cell_count: 16,
+      power_min: 100,
+      power_max: 600,
+      speed_min: 500,
+      speed_max: 4500,
+      warnings: ["雕刻速度 4500 mm/min 超过固件最大速度 3000 mm/min，固件会自动降速，工时与出光效果会偏离设定"],
+    },
+    mode: "raster",
+    targetLabel: "192.168.1.88:23",
+    safetyWarning: "固件未报告行程且软限位未开启，越界不会被拦截",
+  });
+  assert.equal(warnPrompt.warnings.length, 2);
+  assert.match(warnPrompt.message, /⚠️ 风险提示：雕刻速度 4500 mm\/min 超过固件最大速度 3000 mm\/min/);
+  assert.match(warnPrompt.message, /⚠️ 风险提示：固件未报告行程且软限位未开启/);
+
+  const built = buildMatrixSendRequest({ calibrationId: "cal-9", connectionMode: "serial", serialPort: "COM3", baudrate: "115200" });
+  const sendingWithWarn = matrixSendOutcome(
+    {
+      ok: true,
+      status: 200,
+      data: {
+        success: true,
+        result: {
+          send_result: {
+            running: true,
+            total_lines: 40,
+            target: "COM3@115200",
+            warnings: ["按当前机械坐标估算，X 轴预计走到 -110.0 ~ -20.0 mm（机械坐标范围 -100 ~ 0 mm），可能撞到行程尽头，请核对起点位置"],
+          },
+        },
+      },
+    },
+    built,
+  );
+  assert.equal(sendingWithWarn.sendState.warnings.length, 1);
+  assert.match(sendingWithWarn.status, /⚠️ 按当前机械坐标估算/);
 });

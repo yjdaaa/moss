@@ -9,6 +9,8 @@ impl ApiService {
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
+        let generation_input = self.with_remembered_work_area(object);
+        let object = generation_input.as_ref();
         let material = object
             .get("material")
             .and_then(serde_json::Value::as_str)
@@ -101,7 +103,7 @@ impl ApiService {
                 failure("表面通用条目只能存雕刻参数，切割标定必须按真实厚度", None),
             ));
         }
-        let (rem_w, rem_h) = self.remembered_work_area();
+        let (rem_w, rem_h) = self.remembered_work_area(object);
         let max_work_area_w = crate::generation::parse_work_area_mm_or(
             object.get("work_area_width_mm"),
             "work_area_width_mm",

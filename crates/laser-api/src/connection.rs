@@ -1,8 +1,16 @@
 use super::*;
 
+const SAVED_MOTION_KEYS: &[&str] = &[
+    "x_max_rate_mm_per_min",
+    "y_max_rate_mm_per_min",
+    "x_accel_mm_s2",
+    "y_accel_mm_s2",
+    "junction_deviation_mm",
+];
+
 /// n73 握手成功的连接 → 记录：`fields` 同时带两套别名（串口 `port`/`baudrate`，网络 `host`/`network_host`、
 /// `telnet_port`/`network_telnet_port`），各工具按自己认的字段名取用；
-/// r66 同时持久化当次握手的固件 X/Y 行程（`machine_limits`），供省略 `work_area_*` 的 AI/语音/MCP 生成路由取用。
+/// r66 同时持久化当次握手的固件 X/Y 行程与运动参数（`machine_limits`），供省略 `work_area_*` / `machine_motion` 的 AI/语音/MCP 生成路由取用。
 fn verified_connection_value(
     spec: &laser_device::ConnectionSpec,
     at: u64,
@@ -10,14 +18,30 @@ fn verified_connection_value(
 ) -> serde_json::Value {
     let saved_limits = machine_limits
         .and_then(|lim| {
-            let x = lim.get("x_travel_mm").and_then(serde_json::Value::as_f64);
-            let y = lim.get("y_travel_mm").and_then(serde_json::Value::as_f64);
-            (x.is_some() || y.is_some()).then(|| {
-                serde_json::json!({
-                    "x_travel_mm": x,
-                    "y_travel_mm": y,
-                })
-            })
+            let pos = |key: &str| {
+                lim.get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            };
+            let x = pos("x_travel_mm");
+            let y = pos("y_travel_mm");
+            let mut map = serde_json::Map::new();
+            if x.is_some() || y.is_some() {
+                map.insert(
+                    "x_travel_mm".into(),
+                    x.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+                );
+                map.insert(
+                    "y_travel_mm".into(),
+                    y.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+                );
+            }
+            for key in SAVED_MOTION_KEYS {
+                if let Some(val) = pos(key) {
+                    map.insert((*key).into(), serde_json::json!(val));
+                }
+            }
+            (!map.is_empty()).then_some(serde_json::Value::Object(map))
         })
         .unwrap_or(serde_json::Value::Null);
     match spec {
@@ -137,9 +161,55 @@ impl ApiService {
         });
     }
 
-    /// r66 读取最近一次工作台握手记下的固件 X/Y 行程（无记录或某轴未报时返回 `None`）。
-    pub(crate) fn remembered_work_area(&self) -> (Option<f64>, Option<f64>) {
-        let Some(record) = self.verified_connection() else {
+    /// 判断请求中显式携带的连接目标是否与 `verified_connection` 一致；请求未显式带连接目标时视为匹配。
+    fn request_matches_verified_connection(
+        &self,
+        request: &serde_json::Map<String, serde_json::Value>,
+        record: &serde_json::Value,
+    ) -> bool {
+        let has = |keys: &[&str]| {
+            keys.iter().any(|key| {
+                request
+                    .get(*key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty())
+            })
+        };
+        let mode = request
+            .get("connection_mode")
+            .or_else(|| request.get("preferred_mode"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let explicit = match mode {
+            Some(m) if m.eq_ignore_ascii_case("serial") => has(&["port", "serial_port"]),
+            Some(_) => has(&["network_host", "host"]),
+            None => has(&["port", "serial_port", "network_host", "host"]),
+        };
+        if !explicit {
+            return mode.is_none();
+        }
+        let Ok(req_spec) = self.connection_spec_from_request(request) else {
+            return false;
+        };
+        let Some(fields) = record.get("fields").and_then(|f| f.as_object()) else {
+            return false;
+        };
+        let Ok(ver_spec) = self.connection_spec_from_request(fields) else {
+            return false;
+        };
+        req_spec.describe() == ver_spec.describe()
+    }
+
+    /// r66 读取最近一次工作台握手记下的固件 X/Y 行程（请求指向其他连接目标、无记录或某轴未报时返回 `None`）。
+    pub(crate) fn remembered_work_area(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> (Option<f64>, Option<f64>) {
+        let Some(record) = self
+            .verified_connection()
+            .filter(|rec| self.request_matches_verified_connection(object, rec))
+        else {
             return (None, None);
         };
         let lim = &record["machine_limits"];
@@ -149,16 +219,40 @@ impl ApiService {
         )
     }
 
-    /// r66 生成请求未显式传 `work_area_*` 时，补入最近一次握手记下的固件行程（仍交由 `parse_work_area_mm` 做上限校验）。
+    /// r66 生成请求未显式传 `work_area_*` 或 `machine_motion`（且未指向其他连接目标）时，
+    /// 补入最近一次握手记下的固件行程与运动参数（仍交由 `parse_work_area_mm` 与 `parse_machine_motion` 校验）。
     pub(crate) fn with_remembered_work_area<'a>(
         &self,
         object: &'a serde_json::Map<String, serde_json::Value>,
     ) -> std::borrow::Cow<'a, serde_json::Map<String, serde_json::Value>> {
-        let (rem_w, rem_h) = self.remembered_work_area();
+        let Some(record) = self
+            .verified_connection()
+            .filter(|rec| self.request_matches_verified_connection(object, rec))
+        else {
+            return std::borrow::Cow::Borrowed(object);
+        };
+        let lim = &record["machine_limits"];
+        let rem_w = lim.get("x_travel_mm").and_then(serde_json::Value::as_f64);
+        let rem_h = lim.get("y_travel_mm").and_then(serde_json::Value::as_f64);
         let missing = |key: &str| matches!(object.get(key), None | Some(serde_json::Value::Null));
         let fill_w = missing("work_area_width_mm").then_some(rem_w).flatten();
         let fill_h = missing("work_area_height_mm").then_some(rem_h).flatten();
-        if fill_w.is_none() && fill_h.is_none() {
+        let fill_motion = missing("machine_motion")
+            .then(|| {
+                let mut motion = serde_json::Map::new();
+                for key in SAVED_MOTION_KEYS {
+                    if let Some(val) = lim
+                        .get(*key)
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                    {
+                        motion.insert((*key).into(), serde_json::json!(val));
+                    }
+                }
+                (!motion.is_empty()).then_some(serde_json::Value::Object(motion))
+            })
+            .flatten();
+        if fill_w.is_none() && fill_h.is_none() && fill_motion.is_none() {
             return std::borrow::Cow::Borrowed(object);
         }
         let mut cloned = object.clone();
@@ -167,6 +261,9 @@ impl ApiService {
         }
         if let Some(h) = fill_h {
             cloned.insert("work_area_height_mm".into(), serde_json::json!(h));
+        }
+        if let Some(motion) = fill_motion {
+            cloned.insert("machine_motion".into(), motion);
         }
         std::borrow::Cow::Owned(cloned)
     }

@@ -288,8 +288,8 @@ test("页面接线：工作台文字不带 engrave_route（跟随全局开关）
   assert.doesNotMatch(draw, /form\.mode\b/, "画板表单不再有生成策略字段");
 });
 
-test("r47 精简：画板发送卡、设备卡与工作台监视舱去掉重复与调试项", async () => {
-  const { readFileSync } = await import("node:fs");
+test("r47 / r72 精简：画板发送卡、连接条与工作台监视舱去掉重复与调试项", async () => {
+  const { existsSync, readFileSync } = await import("node:fs");
   const read = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
   const send = read("components/draw/DrawSendCard.jsx");
   for (const removed of ["刷新状态", "素材预览", "下载场景 JSON", "诊断输出", "workflow-chip", "弱光指示"]) {
@@ -301,11 +301,17 @@ test("r47 精简：画板发送卡、设备卡与工作台监视舱去掉重复�
   const css = readFileSync(new URL("../src/styles/15-addenda-2026-11.css", import.meta.url), "utf8");
   assert.match(css, /\.preview-box--dark img \{ background: transparent; max-height: 320px; filter: none; \}/);
   assert.match(send, /下载 G-code/, "保留下载 G-code");
-  assert.doesNotMatch(read("components/draw/DrawDeviceCard.jsx"), /onClick=\{saveConfiguration\}|>\s*保存配置\s*</, "设备卡没有保存配置按钮（自动保存）");
+  assert.equal(
+    existsSync(new URL("../src/components/draw/DrawDeviceCard.jsx", import.meta.url)),
+    false,
+    "独立 DrawDeviceCard 已合入画布底部连接条并删除",
+  );
   const monitor = read("components/workbench/WorkbenchMonitorCard.jsx");
   assert.doesNotMatch(monitor, />\s*(物理 SHA-256|刀路总行数)\s*</, "监视舱不再显示 SHA-256 与总行数");
   assert.match(monitor, /预估耗时/);
   const page = read("pages/DrawPage.jsx");
+  assert.match(page, /id="draw-dock-connection"/, "画板连接入口收口在画布底部常驻连接条");
+  assert.doesNotMatch(page, /DrawDeviceCard|onClick=\{saveConfiguration\}|>\s*保存配置\s*</, "画板不再渲染独立设备卡或保存配置按钮");
   assert.doesNotMatch(page, /\blightOn\b|弱光/, "画板走边框一律不出光");
   assert.match(page, /正在走边框（激光关闭，只移动激光头）/);
   assert.doesNotMatch(page, /\blastScene\b/, "导出场景不再读缓存的 lastScene");

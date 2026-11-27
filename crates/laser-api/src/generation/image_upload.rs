@@ -305,12 +305,21 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             .unwrap_or("raster");
         let is_cut =
             laser_mode.eq_ignore_ascii_case("cut") || engraving_mode.eq_ignore_ascii_case("cut");
+        let is_outline = is_cut || engraving_mode.eq_ignore_ascii_case("outline");
         let recommendation = laser_core::material::recommend_in_library(
             library,
             material,
             thickness,
             if is_cut { "cut" } else { laser_mode },
-            if is_cut { None } else { Some(engraving_mode) },
+            if is_cut {
+                None
+            } else {
+                Some(if is_outline {
+                    "outline"
+                } else {
+                    engraving_mode
+                })
+            },
             1000.0,
         );
         let power = recommendation
@@ -334,9 +343,13 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             feedback::generation_params(object, power as f64, feed_rate as f64, rec_passes)?;
         let power = params.power as i32;
         let feed_rate = params.feed as i32;
-        // 过扫描按速度自动、双向扫描偏移（r45）
+        // 过扫描按速度自动、双向扫描偏移（r45）；矢量轮廓提取不使用光栅过扫描
         let scan = raster_scan_options(object, feed_rate as f64, &motion, recommendation.as_ref())?;
-        let overscan_mm = scan.options.overscan_mm;
+        let overscan_mm = if is_outline {
+            0.0
+        } else {
+            scan.options.overscan_mm
+        };
 
         // 成品尺寸、机器幅面、材料像素间距与灰度处理（laser_core::image_job）
         let optional_number = |key: &str| crate::http::parse_optional_float(object.get(key), key);
@@ -390,31 +403,93 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             pass_through: extras.pass_through,
         };
         let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
-        let (gcode_str, gray_power) = write_prepared_raster(
-            &prepared,
-            &extras,
-            &scan,
-            material,
-            power,
-            feed_rate,
-            (
-                raster_options.work_area_width_mm,
-                raster_options.work_area_height_mm,
-            ),
-        )?;
-
         let id = format!("img-{}-{}-{}", unix_seconds(), nanos, std::process::id());
+        let preview_path = root.join(format!("{id}.png"));
+        let (gcode_str, gray_power) = if is_outline {
+            let img_w = luma_img.width();
+            let img_h = luma_img.height();
+            let gray: Vec<Vec<u8>> = (0..img_h)
+                .map(|y| {
+                    (0..img_w)
+                        .map(|x| {
+                            let p = luma_img.get_pixel(x, y).0[0];
+                            if extras.negative { 255 - p } else { p }
+                        })
+                        .collect()
+                })
+                .collect();
+            let traced = laser_core::trace::trace_grayscale(
+                &gray,
+                &laser_core::trace::TraceOptions {
+                    size_mm: prepared.width_mm.max(prepared.height_mm),
+                    width_mm: Some(prepared.width_mm),
+                    height_mm: Some(prepared.height_mm),
+                    lock_aspect_ratio: true,
+                    work_area_width_mm,
+                    work_area_height_mm,
+                    simplify_factor: 3.0,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            if traced.paths.is_empty() {
+                return Err("图片里没有可提取的深色轮廓，请改用位图逐行扫描或加深线条".into());
+            }
+            let optimized = laser_core::path_opt::optimize_with_threshold(
+                &traced.paths,
+                prepared.width_mm.max(prepared.height_mm),
+            )
+            .map_err(|e| e.to_string())?;
+            let preview_scale = (1024.0 / prepared.width_mm.max(prepared.height_mm)).max(1.0);
+            laser_core::gcode::preview_outline_rgba(
+                &optimized.paths,
+                (prepared.width_mm * preview_scale).ceil() as u32,
+                (prepared.height_mm * preview_scale).ceil() as u32,
+                prepared.width_mm,
+                prepared.height_mm,
+            )
+            .map_err(|e| e.to_string())?
+            .save(&preview_path)
+            .map_err(|e| e.to_string())?;
+            let gcode = laser_core::gcode::write_outline(
+                &optimized.paths,
+                &laser_core::gcode::WriterOptions {
+                    width_mm: prepared.width_mm,
+                    height_mm: prepared.height_mm,
+                    power,
+                    feed_rate,
+                    auto_close: true,
+                    laser_mode: "M4",
+                    power_scale: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            (gcode, None)
+        } else {
+            let (gcode, gray) = write_prepared_raster(
+                &prepared,
+                &extras,
+                &scan,
+                material,
+                power,
+                feed_rate,
+                (
+                    raster_options.work_area_width_mm,
+                    raster_options.work_area_height_mm,
+                ),
+            )?;
+            // 预览图就是实际要雕刻的黑白网格（黑 = 出光），而不是原图
+            prepared
+                .preview()
+                .save(&preview_path)
+                .map_err(|e| e.to_string())?;
+            (gcode, gray)
+        };
+
         let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
         let gcode_path = root.join(format!("{id}.gcode"));
         std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|e| e.to_string())?;
 
-        // 预览图就是实际要雕刻的黑白网格（黑 = 出光），而不是原图；原图（透明已按白色合成）另存一份，
-        // 供“采用反馈建议重新生成”从原图重新处理，避免对已抖动的图再抖动一次
-        let preview_path = root.join(format!("{id}.png"));
-        prepared
-            .preview()
-            .save(&preview_path)
-            .map_err(|e| e.to_string())?;
+        // 原图（透明已按白色合成）另存一份，供“采用反馈建议重新生成”从原图重新处理，避免对已抖动的图再抖动一次
         let source_name = format!("{id}-source.png");
         luma_img
             .save(root.join(&source_name))
@@ -430,6 +505,16 @@ pub(crate) fn generate_image_or_gcode_artifacts(
 
         let mut res = serde_json::Map::new();
         res.insert("actual_params".into(), params.json());
+        res.insert(
+            "engraving_mode".into(),
+            serde_json::json!(if is_cut {
+                "cut"
+            } else if is_outline {
+                "outline"
+            } else {
+                "raster"
+            }),
+        );
         res.insert("image_file".into(), serde_json::Value::String(img_name));
         res.insert("gcode_file".into(), serde_json::Value::String(gcode_name));
         res.insert("gcode_sha256".into(), serde_json::Value::String(gcode_sha));
@@ -444,10 +529,14 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             "source_image_file".into(),
             serde_json::Value::String(source_name),
         );
-        if let Some(scale) = interval_scale {
-            res.insert("line_interval_scale".into(), serde_json::json!(scale));
+        if !is_outline {
+            if let Some(scale) = interval_scale {
+                res.insert("line_interval_scale".into(), serde_json::json!(scale));
+            }
+            insert_raster_fields(&mut res, &prepared, &extras, &scan, gray_power);
+        } else {
+            res.insert("negative".into(), serde_json::json!(extras.negative));
         }
-        insert_raster_fields(&mut res, &prepared, &extras, &scan, gray_power);
         res.insert(
             "auto_fitted".into(),
             serde_json::json!(prepared.auto_fitted),

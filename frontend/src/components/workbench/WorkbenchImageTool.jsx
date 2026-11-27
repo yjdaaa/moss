@@ -3,12 +3,17 @@ import { Upload, X } from "lucide-react";
 import { postJson } from "../../api/client.js";
 import { showAlert } from "../../appDialog.js";
 import { IMAGE_PRESET_HINTS, detectImagePreset } from "../../qualityPresets.js";
-import { IMAGE_INTERVAL_SCALE_LIMITS, IMAGE_MODE_OPTIONS, imageAdvancedSummary } from "../../workbenchParams.js";
+import {
+  IMAGE_ENGRAVING_MODE_OPTIONS,
+  IMAGE_INTERVAL_SCALE_LIMITS,
+  IMAGE_MODE_OPTIONS,
+  imageAdvancedSummary,
+} from "../../workbenchParams.js";
 import QualityPresetBar from "../QualityPresetBar.jsx";
 import FillOptionsPanel from "../FillOptionsPanel.jsx";
 import { OriginBadge } from "../OriginBadge.jsx";
 
-/** 雕刻工作台 ② 加工内容 · 图片处理：上传原图、质量预设、成品尺寸与图片高级设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
+/** 雕刻工作台 ② 加工内容 · 图片处理：上传原图、雕刻方式（位图扫描 / 矢量轮廓描边）、质量预设、成品尺寸与图片高级设置。原样搬自 pages/HomePage.jsx（2026-11-16 按职责拆分） */
 export function WorkbenchImageTool({
   addLog,
   uploadedImagePath,
@@ -17,6 +22,8 @@ export function WorkbenchImageTool({
   setUploadedImageName,
   uploadedImageThumb,
   setUploadedImageThumb,
+  imageEngravingMode = "raster",
+  setImageEngravingMode,
   imageMode,
   setImageMode,
   imageExtras,
@@ -34,6 +41,7 @@ export function WorkbenchImageTool({
 }) {
   const limitW = Number(maxWidthMm) > 0 ? Number(maxWidthMm) : 1000;
   const limitH = Number(maxHeightMm) > 0 ? Number(maxHeightMm) : 1000;
+  const isOutline = imageEngravingMode === "outline";
   return (
     <div className="tool-body wb-spacer">
       <div className="wb-spacer-2">
@@ -118,7 +126,20 @@ export function WorkbenchImageTool({
           </div>
         )}
       </div>
-      {!imageExtras.passThrough && (
+      <label className="wb-spacer-2">
+        <span className="wb-label-2">雕刻方式</span>
+        <select
+          id="wb-image-engraving-mode"
+          value={imageEngravingMode}
+          onChange={(e) => setImageEngravingMode?.(e.target.value)}
+          className="select-input wb-compact-select"
+        >
+          {IMAGE_ENGRAVING_MODE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </label>
+      {!isOutline && !imageExtras.passThrough && (
         <QualityPresetBar
           id="wb-image-preset"
           value={detectImagePreset(imageMode, imageExtras.intervalScale)}

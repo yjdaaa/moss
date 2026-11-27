@@ -636,16 +636,7 @@ try {
   await page.locator("#voice-tools-full-switch input").click();
   for (let i = 0; i < 50 && last("voice_save_settings")?.args.settings.mcp_full_tool_list !== true; i += 1) await page.waitForTimeout(50);
   assert.deepEqual(last("voice_save_settings").args.settings, { mcp_full_tool_list: true });
-  assert.equal(await page.locator("#voice-tool-prompt-copy-add").count(), 1);
-  assert.equal(await page.locator("#voice-tool-prompt-copy-remove").count(), 1);
-  await page.locator("#voice-tool-prompts > summary").click();
-  assert.match(await page.locator("#voice-tool-prompt-add pre").textContent(), /crates\/laser-tools\/src\/lib\.rs/, "新增模板给出真实改代码路径");
-  assert.match(await page.locator("#voice-tool-prompt-remove pre").textContent(), /laser_safe_action_tool/, "删除模板保护急停工具");
-  await page.locator("#voice-tool-prompt-copy-add").click();
-  await page.waitForFunction(() => {
-    const box = document.querySelector("#voice-group-tools");
-    return Boolean(box && (/已复制/.test(box.textContent) || /剪贴板/.test(box.textContent)));
-  }, null, { timeout: 5_000 });
+  assert.equal(await page.locator("#voice-tool-prompts").count(), 0, "不再显示面向开发者的施工提示词折叠块");
   assert.match(await page.locator("#voice-group-mcp > .voice-group-h").innerText(), /第三方 MCP 工具/, "外部工具仍叫第三方 MCP 工具，和内置工具区分开");
   await openGroup("mcp");
   assert.ok(await page.locator("#voice-mcp-card").getByText(/MOSS 内置工具/).isVisible(), "MCP 卡说明与内置工具的区别");

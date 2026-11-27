@@ -1709,7 +1709,7 @@ fn connection_check_reports_soft_limits_homing_identity_and_remembers_firmware_w
                     "$$" => {
                         let _ = write!(
                             writer,
-                            "$20=0\r\n$22=1\r\n$23=0\r\n$32=1\r\n$130=320.0\r\n$131=220.0\r\nok\r\n"
+                            "$20=0\r\n$22=1\r\n$23=0\r\n$32=1\r\n$110=5000.0\r\n$111=3000.0\r\n$120=900.0\r\n$121=800.0\r\n$130=320.0\r\n$131=220.0\r\nok\r\n"
                         );
                     }
                     "$CD" => {
@@ -1791,6 +1791,99 @@ fn connection_check_reports_soft_limits_homing_identity_and_remembers_firmware_w
     assert_eq!(
         smaller_resp["success"], false,
         "显式传 work_area 时不得被记忆的固件行程覆盖: {smaller_resp}"
+    );
+
+    // 4) 省略 machine_motion 的 AI/MCP 生成请求自动沿用握手记忆的固件最大速度与加速度，触发超速提示
+    let ai_fast_text = serde_json::json!({
+        "text": "MOSS",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "manual_params": {"power_percent": 40, "feed_rate": 4500, "passes": 1}
+    })
+    .to_string();
+    let ai_fast_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                ai_fast_text.len(),
+                ai_fast_text
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(ai_fast_resp["success"], true, "{ai_fast_resp}");
+    assert_eq!(
+        ai_fast_resp["result"]["artifacts"]["warnings"][0].as_str(),
+        Some(
+            "雕刻速度 4500 mm/min 超过固件最大速度 3000 mm/min，固件会自动降速，工时与出光效果会偏离设定"
+        ),
+        "省略 machine_motion 时应沿用握手记下的固件最大速度告警: {ai_fast_resp}"
+    );
+
+    // 5) 请求显式带了另一台未握手的连接目标时，不得套用旧机器记忆的 320×220 mm 行程
+    let mut other_target_req = serde_json::json!({
+        "material": "椴木",
+        "thickness_mm": 3,
+        "rows": 8,
+        "columns": 8,
+        "connection_mode": "network",
+        "network_host": "192.0.2.99",
+        "network_telnet_port": 23
+    });
+    let other_body = other_target_req.to_string();
+    let other_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                other_body.len(),
+                other_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        other_resp["success"], false,
+        "请求指定了不同于 verified_connection 的设备目标时应回退 100×100 mm: {other_resp}"
+    );
+    let unconfigured_serial_req = serde_json::json!({
+        "material": "椴木",
+        "thickness_mm": 3,
+        "rows": 8,
+        "columns": 8,
+        "connection_mode": "serial",
+        "port": ""
+    })
+    .to_string();
+    let unconfigured_serial_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                unconfigured_serial_req.len(),
+                unconfigured_serial_req
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        unconfigured_serial_resp["success"], false,
+        "显式切到未选串口模式时不得沿用旧网络机器记忆行程: {unconfigured_serial_resp}"
+    );
+    other_target_req["network_host"] = serde_json::json!("127.0.0.1");
+    other_target_req["network_telnet_port"] = serde_json::json!(port);
+    let same_target_body = other_target_req.to_string();
+    let same_target_resp = parse_json_response(
+        &reloaded.handle_http(
+            format!(
+                "POST /api/material-lab/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                same_target_body.len(),
+                same_target_body
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        same_target_resp["success"], true,
+        "请求目标与 verified_connection 一致时沿用 320×220 mm 行程: {same_target_resp}"
     );
 }
 

@@ -102,7 +102,7 @@ fn backend_result(
                 .get("result")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let summary = if success {
+            let mut summary = if success {
                 result
                     .get("speech")
                     .and_then(|v| v.as_str())
@@ -114,6 +114,13 @@ fn backend_result(
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("{tool} 失败 (HTTP {status})"))
             };
+            if success {
+                for warn in extract_record_warnings(&result) {
+                    if !summary.contains(&warn) {
+                        summary.push_str(&format!("；⚠️ {warn}"));
+                    }
+                }
+            }
             let detail = serde_json::to_string_pretty(&body).unwrap_or_default();
             laser_contracts::ToolCallResult::with_detail(success, summary, detail)
         }
@@ -152,6 +159,31 @@ fn with_desktop_preview_hint(
     }
 }
 
+fn extract_record_warnings(record: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for arr in [
+        record.get("warnings").and_then(|v| v.as_array()),
+        record
+            .pointer("/artifacts/warnings")
+            .and_then(|v| v.as_array()),
+        record
+            .pointer("/send_result/warnings")
+            .and_then(|v| v.as_array()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for item in arr {
+            if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty())
+                && !out.iter().any(|existing| existing == s)
+            {
+                out.push(s.to_owned());
+            }
+        }
+    }
+    out
+}
+
 /// n73 预览实际用的功率 / 速度 / 遍数，告诉模型以便如实复述给用户（手动指定的注明）。
 fn preview_params_sentence(record: &serde_json::Value) -> String {
     let params = &record["artifacts"]["actual_params"];
@@ -171,8 +203,14 @@ fn preview_params_sentence(record: &serde_json::Value) -> String {
     } else {
         "（材料库推荐）"
     };
+    let warnings = extract_record_warnings(record);
+    let warn_sentence = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("注意：{}。", warnings.join("；"))
+    };
     format!(
-        "这次参数：功率 {:.0}%，速度 {feed:.0} mm/min，{passes} 遍{source}。",
+        "这次参数：功率 {:.0}%，速度 {feed:.0} mm/min，{passes} 遍{source}。{warn_sentence}",
         power / scale * 100.0
     )
 }
@@ -568,14 +606,6 @@ fn dispatch_allowed(
             Ok(args) => laser_tools::execute_open_app(&args),
             Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
         },
-        "shortcut_key_execution_tool" => match serde_json::from_value(arguments.clone()) {
-            Ok(args) => laser_tools::execute_shortcut_key(&args),
-            Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
-        },
-        "generate_text_image_tool" => match serde_json::from_value(arguments.clone()) {
-            Ok(args) => laser_tools::execute_generate_text_image(&args),
-            Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
-        },
         "refine_laser_params_from_feedback_tool" => {
             if let Some(backend) = backend {
                 return backend_result(name, backend.request("POST", "/api/feedback", arguments));
@@ -750,7 +780,7 @@ fn dispatch_allowed(
                 other => ToolCallResult::err(format!("material_params 不支持的 action: {other}")),
             }
         }
-        "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" => {
+        "generate_text_laser_task_tool" => {
             if arg_str(arguments, "text").is_none() {
                 return ToolCallResult::err(format!(
                     "{name} 当前仅支持 text 素材；图片素材请通过网页/桌面端上传后使用 laser_workflow_tool"

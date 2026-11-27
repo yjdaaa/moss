@@ -2209,3 +2209,158 @@ fn draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big() {
         "{res}"
     );
 }
+
+#[test]
+fn text_border_cut_engraves_inner_text_before_cutting_outer_border_with_single_g92() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let res = post_json(
+        &service,
+        "/api/text-task/generate",
+        &serde_json::json!({
+            "text": "AB",
+            "font_path": font,
+            "material": "椴木",
+            "thickness_mm": 3,
+            "font_size_mm": 10,
+            "width_mm": 60,
+            "height_mm": 30,
+            "border": {"shape": "rounded", "style": "double"},
+            "border_cut": true
+        }),
+    );
+    assert_eq!(res["success"], true, "{res}");
+    let artifacts = &res["result"]["artifacts"];
+    assert_eq!(artifacts["border_cut"], true);
+    assert_eq!(artifacts["border"]["cut"], true);
+    assert!(
+        artifacts["border_cut_params"]["laser_max_power"]
+            .as_f64()
+            .unwrap_or(0.0)
+            > artifacts["actual_params"]["laser_max_power"]
+                .as_f64()
+                .unwrap_or(0.0),
+        "外框切割功率应取切割档参数：{artifacts}"
+    );
+    let gcode =
+        std::fs::read_to_string(temp.path().join(artifacts["gcode_file"].as_str().unwrap()))
+            .unwrap();
+    assert_eq!(
+        gcode
+            .lines()
+            .filter(|line| line.trim().starts_with("G92 "))
+            .count(),
+        1,
+        "整份先雕后切 G-code 必须共用唯一一个 G92 原点"
+    );
+    assert!(
+        gcode.contains("; --- Stage 2: outer border cut ---"),
+        "应包含第二阶段外框切割分界注释"
+    );
+
+    // N3：按 `; --- Stage 2` 分段提取所有出光段（S > 0 的 G1），验证内文范围完全落在外框范围内，且功率分档正确
+    let (stage1_gcode, stage2_gcode) = gcode
+        .split_once("; --- Stage 2")
+        .expect("先雕后切 G-code 必须包含 `; --- Stage 2` 分界注释");
+    let parse_coord = |line: &str, axis: char| -> Option<f64> {
+        line.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
+    };
+    let mut cur_x = 0.0_f64;
+    let mut cur_y = 0.0_f64;
+    let mut modal_s = 0.0_f64;
+    let mut collect_burns = |chunk: &str| -> Vec<((f64, f64), (f64, f64), f64)> {
+        let mut burns = Vec::new();
+        for raw in chunk.lines() {
+            let code = raw.split(';').next().unwrap_or("").trim();
+            if code.is_empty() {
+                continue;
+            }
+            let cmd = code.split_whitespace().next().unwrap_or("");
+            if cmd == "M5" {
+                modal_s = 0.0;
+            }
+            if let Some(s) = parse_coord(code, 'S') {
+                modal_s = s;
+            }
+            if cmd == "G92" {
+                if let Some(x) = parse_coord(code, 'X') {
+                    cur_x = x;
+                }
+                if let Some(y) = parse_coord(code, 'Y') {
+                    cur_y = y;
+                }
+                continue;
+            }
+            if matches!(cmd, "G0" | "G00" | "G1" | "G01") {
+                let next_x = parse_coord(code, 'X').unwrap_or(cur_x);
+                let next_y = parse_coord(code, 'Y').unwrap_or(cur_y);
+                let line_s = parse_coord(code, 'S').unwrap_or(modal_s);
+                if matches!(cmd, "G1" | "G01") && line_s > 0.0 {
+                    burns.push(((cur_x, cur_y), (next_x, next_y), line_s));
+                }
+                cur_x = next_x;
+                cur_y = next_y;
+            }
+        }
+        burns
+    };
+    let stage1_burns = collect_burns(stage1_gcode);
+    let stage2_burns = collect_burns(stage2_gcode);
+    assert!(!stage1_burns.is_empty(), "第一阶段内文应包含出光段");
+    assert!(!stage2_burns.is_empty(), "第二阶段外框应包含出光段");
+
+    let bbox = |segs: &[((f64, f64), (f64, f64), f64)]| -> (f64, f64, f64, f64) {
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for &(a, b, _) in segs {
+            for p in [a, b] {
+                min_x = min_x.min(p.0);
+                min_y = min_y.min(p.1);
+                max_x = max_x.max(p.0);
+                max_y = max_y.max(p.1);
+            }
+        }
+        (min_x, min_y, max_x, max_y)
+    };
+    let s1_box = bbox(&stage1_burns);
+    let s2_box = bbox(&stage2_burns);
+    assert!(
+        s1_box.0 >= s2_box.0 - 1e-6
+            && s1_box.1 >= s2_box.1 - 1e-6
+            && s1_box.2 <= s2_box.2 + 1e-6
+            && s1_box.3 <= s2_box.3 + 1e-6,
+        "第一阶段内文出光范围 {s1_box:?} 必须完全落在第二阶段外框范围 {s2_box:?} 以内"
+    );
+
+    let engrave_power = artifacts["actual_params"]["laser_max_power"]
+        .as_f64()
+        .expect("actual_params.laser_max_power");
+    let cut_power = artifacts["border_cut_params"]["laser_max_power"]
+        .as_f64()
+        .expect("border_cut_params.laser_max_power");
+    assert!(
+        stage1_burns
+            .iter()
+            .all(|&(_, _, s)| s <= engrave_power + 1e-6),
+        "第一阶段所有出光行 S 值不得超过雕刻档功率 {engrave_power}"
+    );
+    assert!(
+        stage2_burns
+            .iter()
+            .all(|&(_, _, s)| (s - cut_power).abs() <= 1e-6),
+        "第二阶段所有出光行必须使用切割档功率 {cut_power}"
+    );
+}

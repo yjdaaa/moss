@@ -5,7 +5,9 @@
 // 2026-11-17（技术书 r45）：雕刻路线（矢量 / 转图片）进文字签名，图片扫描设置进图片签名。
 
 import { normalizeEngraveRoute } from "./engraveRoute.js";
+import { estopTargetArgs, estopTargetFromDescription } from "./globalEstop.js";
 import { intervalScaleValue } from "./qualityPresets.js";
+import { parseGrblStatusReport } from "./twinState.js";
 
 export const MANUAL_LIMITS = {
   power: { min: 1, max: 100 },
@@ -25,6 +27,11 @@ export const TEXT_STYLE_OPTIONS = [
 export const TEXT_ORIGIN_OPTIONS = [
   { value: "center", label: "木牌中心" },
   { value: "lower_left", label: "左下角" },
+];
+
+export const IMAGE_ENGRAVING_MODE_OPTIONS = [
+  { value: "raster", label: "位图逐行扫描（照片 / 灰度）" },
+  { value: "outline", label: "矢量轮廓描边（黑白 Logo / 线稿）" },
 ];
 
 // 2026-11-16（技术书 r38）对齐 LightBurn Image Mode；值与后端 `laser_core::image_job::TONE_MODES` 一致。
@@ -145,9 +152,12 @@ export function resolveTextStyle(rawStyle) {
 }
 
 /** 根据当前左侧选中的加工内容，计算查询 `/api/ui/material-recommendation` 所需的模式参数。 */
-export function materialRecommendationModes({ activeTool, textStyle }) {
+export function materialRecommendationModes({ activeTool, textStyle, imageEngravingMode = "raster" }) {
   if (activeTool === "image") {
-    return { laserMode: "engrave", engravingMode: "raster" };
+    return {
+      laserMode: "engrave",
+      engravingMode: imageEngravingMode === "outline" ? "outline" : "raster",
+    };
   }
   const spec = resolveTextStyle(textStyle);
   return {
@@ -225,7 +235,17 @@ export function actualParamsText(workflow) {
   const percent = Number((power * 100 / scale).toFixed(3));
   const base = `功率 ${percent}% · ${Math.round(feed)} mm/min · ${passes} 遍（${source}）`;
   const fillLabel = TEXT_FILL_LABELS[workflow?.artifacts?.text_fill];
-  return fillLabel ? `${fillLabel} · ${base}` : base;
+  const withFill = fillLabel ? `${fillLabel} · ${base}` : base;
+  const cutParams = workflow?.artifacts?.border_cut_params;
+  const cutPower = Number(cutParams?.laser_max_power);
+  const cutFeed = Number(cutParams?.feed_rate);
+  if (Number.isFinite(cutPower) && Number.isFinite(cutFeed)) {
+    const cutScale = Number(cutParams?.power_scale) > 0 ? Number(cutParams.power_scale) : 1000;
+    const cutPct = Number((cutPower * 100 / cutScale).toFixed(3));
+    const cutPasses = Number(cutParams?.passes) || 1;
+    return `${withFill} · 外框切割 ${cutPct}% / ${Math.round(cutFeed)} mm/min × ${cutPasses} 遍`;
+  }
+  return withFill;
 }
 
 /**
@@ -245,6 +265,7 @@ export function workbenchInputSignature({
   imageWidthMm = "",
   imageHeightMm = "",
   imageMode = "auto",
+  imageEngravingMode = "raster",
   imageExtras = DEFAULT_IMAGE_EXTRAS,
   scanSignature = "",
   uploadedGcodePath = "",
@@ -280,7 +301,7 @@ export function workbenchInputSignature({
         ? {
             border: `${textBorder.shape}/${textBorder.double ? "double" : "single"}/${String(textBorder.boardWidthMm ?? "").trim()}/${
               textBorder.shape === "circle" ? "" : String(textBorder.boardHeightMm ?? "").trim()
-            }`,
+            }${textBorder.cutBorder ? "/cut" : ""}`,
           }
         : {}),
       textStyle: resolveTextStyle(textStyle).style,
@@ -298,6 +319,7 @@ export function workbenchInputSignature({
       widthMm: String(imageWidthMm || "").trim(),
       heightMm: String(imageHeightMm || "").trim(),
       imageMode: normalizeImageMode(imageMode),
+      ...(imageEngravingMode === "outline" ? { engravingMode: "outline" } : {}),
       // 反相、直通、点宽补偿与当前模式的专属项（隐藏的其他模式输入不影响签名）
       extras: imageExtrasSignature(normalizeImageMode(imageMode), imageExtras),
       // 过扫描、双向扫描、扫描偏移与机器加速度（随请求发 fill_options 扫描子集）
@@ -416,7 +438,119 @@ export function workbenchSendWarnings(sendProgress, workflow = null) {
   return normalizeWarningList(workflow?.send_result?.warnings);
 }
 
-/** 构造点击「开始雕刻」时的二次确认弹窗内容；相同物理 SHA-256 再次下发时追加防重刻烧穿提醒，并透出超速与软限位风险提示（不新增拦截）。 */
+// 2026-11-27（N2）：复用 `twinState.js::parseGrblStatusReport` 解析控制器实时状态报告中的 `Ov:` 倍率，
+// 按规范设备目标在内存里保留最近一次观测值（GRBL 并非每条状态报告都带 `Ov:`），用于监视区展示与开刻确认框风险提示。
+const controllerOverridesByTarget = new Map();
+
+function overrideTargetKey(targetOrForm) {
+  if (!targetOrForm) return "";
+  let target = null;
+  if (typeof targetOrForm === "string") {
+    target = estopTargetFromDescription(targetOrForm);
+  } else if (typeof targetOrForm === "object") {
+    if (targetOrForm.connection_mode === "serial" && targetOrForm.port) {
+      target = estopTargetArgs(targetOrForm);
+    } else if (targetOrForm.connection_mode === "network" && (targetOrForm.host || targetOrForm.network_host)) {
+      target = estopTargetArgs({
+        connection_mode: "network",
+        network_host: targetOrForm.network_host ?? targetOrForm.host,
+        network_telnet_port: targetOrForm.network_telnet_port ?? targetOrForm.telnet_port,
+      });
+    } else {
+      target = estopTargetArgs({
+        connection_mode: targetOrForm.connection_mode ?? targetOrForm.mode,
+        port: targetOrForm.port ?? targetOrForm.serialPort,
+        baudrate: targetOrForm.baudrate,
+        network_host: targetOrForm.network_host ?? targetOrForm.host ?? targetOrForm.networkHost,
+        network_telnet_port: targetOrForm.network_telnet_port ?? targetOrForm.telnet_port ?? targetOrForm.telnetPort,
+      });
+    }
+  }
+  if (!target) return "";
+  if (target.connection_mode === "serial") {
+    const port = /^com\d+$/i.test(target.port) ? target.port.toLowerCase() : target.port;
+    return `serial:${port}@${target.baudrate}`;
+  }
+  const host = target.host.toLowerCase().replace(/^\[|\]$/g, "");
+  return `tcp:${host}:${target.telnet_port}`;
+}
+
+function normalizeControllerOverride(ov) {
+  if (!ov || typeof ov !== "object") return null;
+  const feed = Number(ov.feed);
+  const rapid = Number(ov.rapid);
+  const spindle = Number(ov.spindle);
+  if (![feed, rapid, spindle].every(Number.isFinite)) return null;
+  return {
+    feed: Math.round(feed),
+    rapid: Math.round(rapid),
+    spindle: Math.round(spindle),
+  };
+}
+
+/** 从 GRBL / FluidNC 状态报告或已解析对象中提取 `{ feed, rapid, spindle }` 实时倍率；缺失返回 null。 */
+export function parseControllerOverride(reportOrOv) {
+  if (!reportOrOv) return null;
+  if (typeof reportOrOv === "string") {
+    const parsed = parseGrblStatusReport(reportOrOv);
+    return normalizeControllerOverride(parsed.ov);
+  }
+  if (typeof reportOrOv === "object") {
+    if ("ov" in reportOrOv) return normalizeControllerOverride(reportOrOv.ov);
+    return normalizeControllerOverride(reportOrOv);
+  }
+  return null;
+}
+
+export function isControllerOverrideModified(ov) {
+  const norm = parseControllerOverride(ov);
+  if (!norm) return false;
+  return norm.feed !== 100 || norm.rapid !== 100 || norm.spindle !== 100;
+}
+
+export function formatControllerOverrideText(ov) {
+  const norm = parseControllerOverride(ov);
+  if (!norm) return "";
+  return `进给 ${norm.feed}% · 快移 ${norm.rapid}% · 主轴 ${norm.spindle}%`;
+}
+
+/** 控制器当前倍率非 100% 时的非阻断提示文案；全 100% 或未知时返回空串。 */
+export function controllerOverrideWarning(ov) {
+  const norm = parseControllerOverride(ov);
+  if (!norm || !isControllerOverrideModified(norm)) return "";
+  const rapidSuffix = norm.rapid !== 100 ? `（快移 ${norm.rapid}%）` : "";
+  if (norm.spindle !== 100 && norm.feed !== 100) {
+    return `控制器当前功率倍率为 ${norm.spindle}%、速度倍率为 ${norm.feed}%${rapidSuffix}，本次加工将按该倍率执行（如需恢复请点 100% 或软复位）`;
+  }
+  if (norm.spindle !== 100) {
+    return `控制器当前功率倍率为 ${norm.spindle}%${rapidSuffix}，本次加工将按该倍率出光（如需恢复请复位倍率）`;
+  }
+  if (norm.feed !== 100) {
+    return `控制器当前速度倍率为 ${norm.feed}%${rapidSuffix}，本次加工将按该倍率进给（如需恢复请复位倍率）`;
+  }
+  return `控制器当前快移倍率为 ${norm.rapid}%，空移速度将偏离默认（如需恢复请复位倍率）`;
+}
+
+/** 记录某台设备最近一次状态报告中的 `Ov:` 倍率；若报告不含 `Ov:` 则保持既有记录不变。 */
+export function recordControllerOverride(targetOrForm, reportOrOv) {
+  const key = overrideTargetKey(targetOrForm);
+  const norm = parseControllerOverride(reportOrOv);
+  if (!key || !norm) return null;
+  controllerOverridesByTarget.set(key, norm);
+  return norm;
+}
+
+export function readControllerOverride(targetOrForm) {
+  const key = overrideTargetKey(targetOrForm);
+  if (!key) return null;
+  return controllerOverridesByTarget.get(key) || null;
+}
+
+export function clearControllerOverridesForTest() {
+  controllerOverridesByTarget.clear();
+}
+
+/** 构造点击「开始雕刻」时的二次确认弹窗内容；相同物理 SHA-256 再次下发时追加防重刻烧穿提醒，并透出超速、倍率非 100% 与软限位风险提示（不新增拦截）。 */
 export function workbenchConfirmSendPrompt({
   workflow,
   material,
@@ -426,6 +560,7 @@ export function workbenchConfirmSendPrompt({
   lastSentSha256 = "",
   safetyWarning = "",
   sendWarnings = [],
+  controllerOverride = null,
 } = {}) {
   const sha256 = String(
     workflow?.confirmation_snapshot?.gcode_sha256 || workflow?.artifacts?.gcode_sha256 || "",
@@ -451,6 +586,7 @@ export function workbenchConfirmSendPrompt({
   const riskWarnings = normalizeWarningList([
     ...workbenchPreviewWarnings(workflow),
     ...(Array.isArray(sendWarnings) ? sendWarnings : []),
+    controllerOverrideWarning(controllerOverride),
     safetyWarning,
   ]);
   const lines = [
@@ -519,6 +655,7 @@ export function workbenchResumeSendPrompt({
   totalLines = 0,
   safetyWarning = "",
   sendWarnings = [],
+  controllerOverride = null,
 } = {}) {
   const safeStart = Math.max(1, Number(startLine) || 1);
   const safeTotal = Number(totalLines) || 0;
@@ -526,6 +663,7 @@ export function workbenchResumeSendPrompt({
   const riskWarnings = normalizeWarningList([
     ...workbenchPreviewWarnings(workflow),
     ...(Array.isArray(sendWarnings) ? sendWarnings : workbenchSendWarnings(null, workflow)),
+    controllerOverrideWarning(controllerOverride),
     safetyWarning,
   ]);
   const lines = [
@@ -582,11 +720,25 @@ export const TEXT_BORDER_OPTIONS = [
   { value: "ellipse", label: "椭圆牌" },
 ];
 
+/** 工作台“切下外框”勾选框的显示与提交共用条件（N3）：仅在非切割刻法且非表面通用材质时允许提交 `border_cut`。 */
+export function textBorderCutAllowed({ textIsCut = false, surfaceOnly = false } = {}) {
+  return !textIsCut && !surfaceOnly;
+}
+
 /**
  * 外框 / 铭牌请求字段：无外框返回 `{}`；有外框时要木牌尺寸（圆牌只要直径），
  * 返回 `{ border: { shape, style }, width_mm, height_mm }` 或 `{ error }`。
  */
-export function textBorderPayload({ shape, double = false, boardWidthMm, boardHeightMm, maxWidthMm = 2000, maxHeightMm = 2000 }) {
+export function textBorderPayload({
+  shape,
+  double = false,
+  cutBorder = false,
+  allowCutBorder = true,
+  boardWidthMm,
+  boardHeightMm,
+  maxWidthMm = 2000,
+  maxHeightMm = 2000,
+}) {
   if (!shape || shape === "none") return {};
   if (!TEXT_BORDER_OPTIONS.some((opt) => opt.value === shape)) return { error: `不认识的外框样式：${shape}` };
   const num = (value) => {
@@ -604,7 +756,12 @@ export function textBorderPayload({ shape, double = false, boardWidthMm, boardHe
   if (w > maxWidthMm || h > maxHeightMm) {
     return { error: `木牌 ${w} × ${h} mm 超出机器行程 ${maxWidthMm} × ${maxHeightMm} mm` };
   }
-  return { border: { shape, style: double ? "double" : "single" }, width_mm: w, height_mm: h };
+  return {
+    border: { shape, style: double ? "double" : "single" },
+    ...(cutBorder && allowCutBorder ? { border_cut: true } : {}),
+    width_mm: w,
+    height_mm: h,
+  };
 }
 
 // 2026-11-26 工作台「最近任务」：把历史任务的参数回填到左侧表单（不重发旧刀路，回填后要重新计算轨迹，开刻门禁照常）
@@ -635,7 +792,18 @@ export function recentTaskLabel(workflow, now = Date.now()) {
       : `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
   const text = typeof input.text === "string" ? input.text.replace(/\s*\n\s*/g, " / ").trim() : "";
-  const content = text ? `“${Array.from(text).slice(0, 16).join("")}${Array.from(text).length > 16 ? "…" : ""}”` : "";
+  const rawFile = typeof input.image_file === "string" && input.image_file.trim()
+    ? input.image_file.trim()
+    : typeof input.image_path === "string" && input.image_path.trim()
+      ? input.image_path.trim()
+      : typeof input.gcode_file === "string" && input.gcode_file.trim()
+        ? input.gcode_file.trim()
+        : typeof input.gcode_path === "string" && input.gcode_path.trim()
+          ? input.gcode_path.trim()
+          : "";
+  const fileName = rawFile ? rawFile.split(/[\\/]/).pop() || rawFile : "";
+  const snippet = text || fileName;
+  const content = snippet ? `“${Array.from(snippet).slice(0, 16).join("")}${Array.from(snippet).length > 16 ? "…" : ""}”` : "";
   const material = input.material || workflow?.material || workflow?.confirmation_snapshot?.material || "";
   const thickness = Number(input.thickness_mm ?? workflow?.thickness_mm);
   const materialText = material ? `${material}${Number.isFinite(thickness) && thickness > 0 ? ` ${thickness}mm` : ""}` : "";
@@ -644,7 +812,8 @@ export function recentTaskLabel(workflow, now = Date.now()) {
 
 /**
  * 历史任务可回填的字段；拿不出任何可用参数时返回 null。
- * 文字任务回填文字、字高、刻法、对刀起点与外框；所有任务回填材料、厚度，
+ * 文字任务回填文字、字高、刻法、对刀起点与外框；图片任务回填原图路径、尺寸、转换模式与高级项；
+ * G-code 任务回填刀路文件路径；所有任务回填材料、厚度，
  * 记录里有实际功率 / 速度 / 遍数时改成“自定义参数”并填上（这次实际用的值）。
  */
 export function recentTaskRecall(workflow) {
@@ -667,10 +836,48 @@ export function recentTaskRecall(workflow) {
       ? {
           shape,
           double: input.border?.style === "double",
+          ...(input.border_cut || input.border?.cut ? { cutBorder: true } : {}),
           boardWidthMm: input.border && Number(input.width_mm) > 0 ? String(input.width_mm) : "",
           boardHeightMm: input.border && Number(input.height_mm) > 0 ? String(input.height_mm) : "",
         }
       : { shape: "none", double: false, boardWidthMm: "", boardHeightMm: "" };
+  } else if (workflow.source_type === "image") {
+    const imageFile = typeof input.image_file === "string" && input.image_file.trim()
+      ? input.image_file.trim()
+      : typeof input.image_path === "string" && input.image_path.trim()
+        ? input.image_path.trim()
+        : "";
+    if (imageFile) {
+      out.tool = "image";
+      out.imagePath = imageFile;
+      out.imageName = imageFile.split(/[\\/]/).pop() || imageFile;
+      out.imageWidthMm = Number(input.width_mm) > 0 ? String(input.width_mm) : "";
+      out.imageHeightMm = Number(input.height_mm) > 0 ? String(input.height_mm) : "";
+      out.imageMode = normalizeImageMode(input.image_mode);
+      out.imageEngravingMode = input.engraving_mode === "outline" ? "outline" : "raster";
+      const optNumText = (val) => (val != null && val !== "" && Number.isFinite(Number(val)) ? String(Number(val)) : "");
+      out.imageExtras = {
+        ...DEFAULT_IMAGE_EXTRAS,
+        negative: Boolean(input.negative),
+        passThrough: Boolean(input.pass_through),
+        dotWidthMm: Number(input.dot_width_mm) > 0 ? String(input.dot_width_mm) : "",
+        halftoneCellMm: Number(input.halftone_cell_mm) > 0 ? String(input.halftone_cell_mm) : "",
+        halftoneAngleDeg: optNumText(input.halftone_angle_deg),
+        grayMinPowerPercent: optNumText(input.gray_min_power_percent),
+        intervalScale: Number(input.line_interval_scale) > 0 ? String(input.line_interval_scale) : "",
+      };
+    }
+  } else if (workflow.source_type === "gcode") {
+    const gcodeFile = typeof input.gcode_file === "string" && input.gcode_file.trim()
+      ? input.gcode_file.trim()
+      : typeof input.gcode_path === "string" && input.gcode_path.trim()
+        ? input.gcode_path.trim()
+        : "";
+    if (gcodeFile) {
+      out.tool = "gcode";
+      out.gcodePath = gcodeFile;
+      out.gcodeName = gcodeFile.split(/[\\/]/).pop() || gcodeFile;
+    }
   }
   const actual = workflow.artifacts?.actual_params;
   const scale = Number(actual?.power_scale) > 0 ? Number(actual.power_scale) : 1000;
