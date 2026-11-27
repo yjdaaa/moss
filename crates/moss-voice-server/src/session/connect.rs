@@ -398,16 +398,22 @@ pub(crate) async fn serve_session(
                 }
             }
             let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
-            if let Ok(mut map) = shared.device_requests.lock() {
+            let replaced_sid = shared.device_requests.lock().ok().and_then(|mut map| {
                 map.insert(
                     device_id.clone(),
                     crate::DeviceRequestHandle {
                         session_id: session_id.clone(),
                         supports_mcp: session.device_mcp.is_some(),
+                        permission: lease.allowed.clone(),
                         sender: requests_tx,
                         turn: 0,
                     },
-                );
+                )
+                .filter(|prev| prev.session_id != session_id)
+                .map(|prev| prev.session_id)
+            });
+            if let Some(prev_sid) = replaced_sid {
+                shared.close_bench_window_for_session(&device_id, &prev_sid, "设备重连");
             }
             shared.state.open(SessionView {
                 session_id: session_id.clone(),

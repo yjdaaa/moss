@@ -2600,16 +2600,19 @@ test("VB2/VB4 识别语料面板：默认关闭、仅开关开启时可用、标
     toggleAsrCorpusTag,
   } = await import("../src/voiceState.js");
 
-  // 1. 开关默认关闭，关闭态 panelUsable 必须为 false 且不暴露条目
+  // 1. 开关默认关闭，关闭态 panelUsable 必须为 false 且不暴露正文条目，仅保留最小删除索引
   const offView = asrCorpusView({
     enabled: false,
     total_count: 3,
     labeled_count: 1,
     items: [{ date: "2026-11-27", turn_id: "s-t1", raw_text: "不应该显示" }],
+    retained_items: [{ date: "2026-11-27", turn_id: "s-t1", captured_at_ms: 1000, duration_ms: 1200, labeled: true }],
   });
   assert.equal(offView.enabled, false);
   assert.equal(offView.panelUsable, false);
   assert.deepEqual(offView.items, []);
+  assert.equal(offView.retainedItems.length, 1);
+  assert.equal(offView.retainedItems[0].turn_id, "s-t1");
   assert.match(offView.summary, /采集已关/);
 
   // 2. 开启后 panelUsable 为 true
@@ -2668,25 +2671,33 @@ test("VB2/VB4 识别语料面板：默认关闭、仅开关开启时可用、标
   assert.match(cardSrc, /showConfirm\(\s*ASR_CORPUS_CLEAR_ALL_CONFIRM_TEXT/);
   assert.match(cardSrc, /voiceApi\.asrCorpusManage\(/);
   assert.match(cardSrc, /✓ 正确/);
+  assert.match(cardSrc, /id="voice-asr-corpus-retained-list"/);
+  assert.match(cardSrc, /builtin\?\.refresh\?\.\(\)/);
 
-  // VD6：VoiceAsrCorpusCard 作为子块内嵌在 AiBenchAssistantCard（记录与诊断 › AI 联调与测试），不再单独成组
+  const statusHookSrc = readFileSync(
+    new URL("../src/components/voice-builtin/useBuiltinStatus.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(statusHookSrc, /return\s*\{\s*status,\s*setStatus,\s*busy,\s*setBusy,\s*act,\s*refresh\s*\}/);
+
+  // 识别语料已合并进完整过程记录与 LiveDebugTraces（记录与诊断 › 对话记录与排障），不再在 AI 联调与测试中渲染独立子块
   const aiHubForAsr = readFileSync(
     new URL("../src/components/voice-builtin/AiBenchAssistantCard.jsx", import.meta.url),
     "utf8",
   );
-  assert.match(aiHubForAsr, /<VoiceAsrCorpusCard[\s\S]*embedded/);
+  assert.doesNotMatch(aiHubForAsr, /<VoiceAsrCorpusCard/);
   const pageSrc = readFileSync(new URL("../src/pages/VoicePage.jsx", import.meta.url), "utf8");
   assert.match(pageSrc, /key:\s*"ai-bench-hub"/);
 });
 
 test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词脱敏与测试时间窗界面标记", async () => {
   const { readFileSync } = await import("node:fs");
-  const { aiBenchChecklistView, buildAiBenchPrompt } = await import("../src/voiceState.js");
+  const { aiBenchChecklistView, buildAiBenchPrompt, voiceInputSourceView } = await import("../src/voiceState.js");
 
   const fakeSecret = ["sk", "LeakTestKey0123456789ABCDEF"].join("-");
   const fakeToken = "debugtoken0123456789abcdef0123456789abcdef";
 
-  // 1. 未就绪态：5 项清单逐项给出打叉与修复指引（第 3 项为真人测试语料录音，不再出现合成 TTS 项）
+  // 1. 未就绪态：4 项清单逐项给出打叉与修复指引（识别语料标注已并入完整过程记录与对话记录）
   const coldStatus = {
     debug_inject: { enabled: false, active: false, token: fakeToken },
     sessions: [],
@@ -2694,13 +2705,13 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
     asr_corpus: { enabled: false, total_count: 0, labeled_count: 0 },
   };
   const coldView = aiBenchChecklistView(coldStatus);
-  assert.equal(coldView.items.length, 5);
+  assert.equal(coldView.items.length, 4);
   assert.equal(coldView.items.find((i) => i.key === "debug_inject").ok, false);
   assert.equal(coldView.items.find((i) => i.key === "online_device").ok, false);
   assert.equal(coldView.items.find((i) => i.key === "bench_recordings").ok, false);
-  assert.equal(coldView.items.find((i) => i.key === "asr_corpus").ok, false);
   assert.equal(coldView.items.find((i) => i.key === "bench_window").active, false);
   assert.equal(coldView.items.some((i) => i.key === "local_tts"), false);
+  assert.equal(coldView.items.some((i) => i.key === "asr_corpus"), false);
 
   // 2. 全就绪 + 测试时间窗打开态
   const readyStatus = {
@@ -2717,11 +2728,20 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
     asr_corpus: { enabled: true, total_count: 12, labeled_count: 8 },
   };
   const readyView = aiBenchChecklistView(readyStatus);
-  assert.equal(readyView.readyCount, 5);
+  assert.equal(readyView.readyCount, 4);
   assert.equal(readyView.activeBenchWindows.length, 1);
   assert.match(readyView.items.find((i) => i.key === "bench_recordings").statusText, /2 位说话人已录齐/);
-  assert.match(readyView.items.find((i) => i.key === "asr_corpus").statusText, /8\/12/);
   assert.match(readyView.items.find((i) => i.key === "bench_window").statusText, /整体测试中（物理动作已锁定/);
+
+  // 2b. 4 种音源分类视图
+  assert.equal(voiceInputSourceView({ simulated: false, bench_window: false }).key, "live_mic");
+  assert.equal(voiceInputSourceView({ simulated: false, bench_window: false }).text, "小智实时说话");
+  assert.equal(voiceInputSourceView({ simulated: true, bench_window: true }).key, "e2e_playback");
+  assert.equal(voiceInputSourceView({ simulated: true, bench_window: true }).text, "整体测试外放录音");
+  assert.equal(voiceInputSourceView({ input_source: "digital_inject" }).key, "digital_inject");
+  assert.equal(voiceInputSourceView({ input_source: "digital_inject" }).text, "数字录音直通");
+  assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).key, "text_inject");
+  assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).text, "文字直通（无音频）");
 
   // 3. VD4 提示词包含真人录音前提、30–50 cm、关键命令与红线要求，且绝不含合成音回退或令牌/密钥/本机绝对路径
   const e2ePromptCold = buildAiBenchPrompt(coldStatus, "e2e");
@@ -2741,6 +2761,15 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
   assert.ok(!e2ePrompt.includes(fakeSecret), "提示词绝不能包含密钥");
   assert.ok(!/\/Users\/|\/home\/|[A-Z]:\\Users\\/i.test(e2ePrompt), "提示词绝不能包含本机绝对路径");
+
+  const e2ePromptWithOpts = buildAiBenchPrompt(readyStatus, "e2e", {
+    compareDigital: true,
+    noise: "fan",
+    speaker: "家人 A",
+  });
+  assert.match(e2ePromptWithOpts, /--speaker "家人 A"/);
+  assert.match(e2ePromptWithOpts, /--compare-digital/);
+  assert.match(e2ePromptWithOpts, /--noise fan --noise-gain 0\.22/);
 
   const textPrompt = buildAiBenchPrompt(readyStatus, "text");
   assert.match(textPrompt, /live-xiaozhi-debug\.mjs/);
@@ -2773,11 +2802,11 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   const idxCopy = assistantSrc.indexOf('id="voice-ai-bench-prompt-actions"');
   const idxRecorder = assistantSrc.indexOf("<BenchRecordingsSection");
   const idxSwitch = assistantSrc.indexOf('id="voice-debug-inject-switch"');
-  const idxCorpus = assistantSrc.indexOf("<VoiceAsrCorpusCard");
   assert.ok(
-    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch && idxSwitch < idxCorpus,
-    "VD6：AI 联调与测试分组内必须严格按 状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关 → 识别语料 排列",
+    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch,
+    "VD6：AI 联调与测试分组内必须严格按 状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关 排列",
   );
+  assert.doesNotMatch(assistantSrc, /<VoiceAsrCorpusCard/, "识别语料已合并进完整过程记录与对话记录与排障");
 
   const tracesSrc = readFileSync(
     new URL("../src/components/voice-builtin/LiveDebugTraces.jsx", import.meta.url),
@@ -2796,8 +2825,13 @@ test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/
     BENCH_RECORDINGS_CLEAR_ALL_CONFIRM_TEXT,
     BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_TEXT,
     analyzeRecordingQuality,
+    asrCorpusItemSourceView,
+    asrCorpusTextDiffView,
     benchRecordingGuideState,
+    findNextUnrecordedIndex,
+    formatCorpusExpectBadges,
     formatCorpusPromptSegments,
+    liveMicLevelView,
     micPermissionErrorHint,
     resampleFloatTo16k,
     validateSpeakerLabel,
@@ -2901,6 +2935,55 @@ test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/
   assert.match(recSrc, /showConfirm\(\s*BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_TEXT/);
   assert.match(recSrc, /voiceApi\.benchRecordingsManage\(/);
   assert.match(recSrc, /不用于声纹/);
+  assert.match(recSrc, /if\s*\(!active\)/);
+  assert.match(recSrc, /stopPreviewAudio/);
+
+  // 8. 预期考核点胶囊、自动跳下一未录句、实时麦克风电平视图与识别语料来源/错字对比视图
+  const badges = formatCorpusExpectBadges({
+    id: "homophone_basswood",
+    key_terms: ["椴木", "切割", "功率"],
+    expect_route: "fast_read",
+    expect_tool: "generate_text_laser_task_tool",
+    expect_simulation_gate: true,
+    require_idle_laser: true,
+  });
+  assert.equal(badges.some((b) => b.key === "terms" && b.text.includes("椴木 · 切割 · 功率")), true);
+  assert.equal(badges.some((b) => b.key === "route" && b.text.includes("状态快查")), true);
+  assert.equal(badges.some((b) => b.key === "tool" && b.text.includes("生成文字雕刻预览")), true);
+  assert.equal(badges.some((b) => b.key === "gate" && b.text.includes("安全门禁")), true);
+  assert.equal(badges.some((b) => b.key === "idle" && b.text.includes("仅激光空闲时运行")), true);
+
+  const items3 = [{ id: "c1" }, { id: "c2" }, { id: "c3" }];
+  assert.equal(findNextUnrecordedIndex(items3, new Map([["c1", true]]), 0), 1, "从第 1 句跳到未录的第 2 句");
+  assert.equal(findNextUnrecordedIndex(items3, new Map([["c2", true]]), 0), 2, "跳过已录的第 2 句直达第 3 句");
+  assert.equal(findNextUnrecordedIndex(items3, new Map([["c2", true], ["c3", true]]), 1), 0, "末尾已录时回绕到开头未录句");
+
+  assert.equal(liveMicLevelView(1).tone, "low");
+  assert.equal(liveMicLevelView(42).tone, "ok");
+  assert.equal(liveMicLevelView(92).tone, "high");
+
+  const srcUnlabeled = asrCorpusItemSourceView({ raw_text: "测试" });
+  assert.equal(srcUnlabeled.kind, "unlabeled");
+  const srcPlayback = asrCorpusItemSourceView({
+    raw_text: "测试",
+    label: { reference_text: "测试", label_source: "e2e-playback", voice_profile: { speaker: "我" } },
+  });
+  assert.equal(srcPlayback.kind, "playback");
+  assert.equal(srcPlayback.badgeText, "外放回采 · 我");
+  const srcManual = asrCorpusItemSourceView({
+    raw_text: "测试",
+    label: { reference_text: "测试", label_source: "manual" },
+  });
+  assert.equal(srcManual.kind, "manual");
+
+  const diffRescued = asrCorpusTextDiffView({
+    raw_text: "三毫米段木",
+    corrected_text: "三毫米椴木",
+    label: { reference_text: "三毫米椴木" },
+  });
+  assert.equal(diffRescued.wasCorrected, true);
+  assert.equal(diffRescued.correctedRescued, true);
+  assert.equal(diffRescued.matchesReference, true);
 });
 
 

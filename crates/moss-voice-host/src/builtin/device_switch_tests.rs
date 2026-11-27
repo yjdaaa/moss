@@ -887,6 +887,7 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
         tools_dropped: 0,
         simulated: false,
         bench_window: false,
+        ..Default::default()
     });
 
     // 模拟重启 BuiltinVoice 实例：历史记录仍在
@@ -940,6 +941,7 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
         tools_dropped: 0,
         simulated: false,
         bench_window: false,
+        ..Default::default()
     };
     restarted_registry.record_chat_turn(&secret_turn());
     assert_eq!(
@@ -2050,6 +2052,12 @@ fn asr_corpus_capture_defaults_off_excludes_diagnostics_and_allows_delete_after_
     assert_eq!(disabled_keep["enabled"], false);
     assert_eq!(disabled_keep["total_count"], 1);
     assert_eq!(disabled_keep["items"].as_array().unwrap().len(), 0);
+    let retained = disabled_keep["retained_items"].as_array().unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0]["turn_id"], saved_meta.turn_id);
+    assert!(retained[0].get("raw_text").is_none());
+    assert!(retained[0].get("corrected_text").is_none());
+    assert!(retained[0].get("label").is_none());
 
     let blocked_audio = builtin
         .asr_corpus_manage(&serde_json::json!({
@@ -2270,4 +2278,228 @@ fn bench_recordings_validates_quality_stores_per_speaker_excludes_diagnostics_an
     assert_eq!(cleared["deleted_count"], 1);
     assert_eq!(cleared["total_recordings"], 0);
     assert!(!wav_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn bench_recordings_rejects_symlinked_parent_dir_on_read_and_delete() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_speaker = outside.path().join("我");
+    std::fs::create_dir_all(&outside_speaker).unwrap();
+    let outside_wav = outside_speaker.join("status_fast_read.wav");
+    std::fs::write(&outside_wav, b"outside-secret-wav").unwrap();
+
+    let vb_dir = temp.path().join("voice-bench");
+    std::fs::create_dir_all(&vb_dir).unwrap();
+    std::os::unix::fs::symlink(outside.path(), vb_dir.join("recordings")).unwrap();
+
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host)).0.unwrap();
+
+    for req in [
+        serde_json::json!({"action": "list"}),
+        serde_json::json!({"action": "audio", "speaker": "我", "corpus_id": "status_fast_read"}),
+        serde_json::json!({"action": "delete", "speaker": "我", "corpus_id": "status_fast_read"}),
+        serde_json::json!({"action": "clear", "confirmed": true}),
+    ] {
+        let err = builtin
+            .bench_recordings_manage(&req)
+            .expect_err("软链录音目录必须在读写删前全部拒绝");
+        assert_eq!(err.status, 500);
+    }
+    assert!(outside_wav.is_file(), "绝不能穿透软链删除外部目录文件");
+}
+
+#[test]
+fn process_trace_prefixed_wav_pairs_with_trace_audio_label_and_respects_disabled_asr_corpus_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host.clone())).0.unwrap();
+
+    // 1. 构造一条开启时采集、随后关闭开关并保留在磁盘的独立 asr-corpus 条目
+    builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": true,
+            "confirmed": true
+        }))
+        .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let disabled_meta = builtin
+        .asr_corpus
+        .record(moss_voice_server::CapturedUtterance {
+            session_id: "sess-disabled".into(),
+            device_id: "aa:bb:cc:11:22:33".into(),
+            turn: 9,
+            captured_at_ms: now_ms,
+            simulated: false,
+            bench_window: false,
+            pcm: vec![700; 3_200],
+            sample_rate: 16_000,
+            raw_text: "停用后绝不能暴露".into(),
+            corrected_text: "停用后绝不能暴露".into(),
+            interims: Vec::new(),
+            asr_model: "本地 sense_voice".into(),
+            vad_engine: "能量判停".into(),
+            endpoint: Default::default(),
+            outcome: "done".into(),
+        })
+        .unwrap()
+        .unwrap();
+    builtin
+        .asr_corpus
+        .save_label(
+            &disabled_meta.date,
+            &disabled_meta.turn_id,
+            "停用语料隐私真值CANARY",
+            true,
+            vec!["材料名".into()],
+        )
+        .unwrap();
+    builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": false,
+            "delete_existing": false
+        }))
+        .unwrap();
+
+    // 2. 写入两条对话日志：一条只有禁用 asr-corpus 录音，一条有 ProcessTrace 带前缀的真实 WAV
+    let date = &disabled_meta.date;
+    let voice_files_dir = temp
+        .path()
+        .join(laser_runtime::process_trace::TRACE_DIR)
+        .join(date)
+        .join("voice-files");
+    std::fs::create_dir_all(&voice_files_dir).unwrap();
+    let prefixed_stem = "2233-t1-user";
+    let prefixed_name = format!("154730123-000001-{prefixed_stem}.wav");
+    let wav_bytes = moss_voice_providers::wav::encode_wav(&vec![500; 3_200], 16_000);
+    std::fs::write(voice_files_dir.join(&prefixed_name), &wav_bytes).unwrap();
+    {
+        let db = host.db.lock().unwrap();
+        db.append_voice_chat_log(&laser_runtime::db::VoiceChatLogRecord {
+            id: 0,
+            at_ms: now_ms as i64,
+            device_id: "aa:bb:cc:11:22:33".into(),
+            session_id: "sess-disabled".into(),
+            turn: 9,
+            raw_asr: "停用后绝不能暴露".into(),
+            corrected_asr: "停用后绝不能暴露".into(),
+            tools_json: "[]".into(),
+            reply: "收到".into(),
+            spoken: "收到".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+            simulated: false,
+            bench_window: false,
+        })
+        .unwrap();
+        db.append_voice_chat_log(&laser_runtime::db::VoiceChatLogRecord {
+            id: 0,
+            at_ms: (now_ms + 1_000) as i64,
+            device_id: "aa:bb:cc:11:22:33".into(),
+            session_id: "sess-pt".into(),
+            turn: 1,
+            raw_asr: "三毫米段木".into(),
+            corrected_asr: "三毫米椴木".into(),
+            tools_json: "[]".into(),
+            reply: "已查参数".into(),
+            spoken: "已查参数".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+            simulated: false,
+            bench_window: false,
+        })
+        .unwrap();
+    }
+
+    // 3. 禁用态的 asr-corpus 录音与标注绝不能经 trace_audio / trace_label / voice_builtin_status 泄漏
+    let blocked = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "trace_audio",
+            "date": date,
+            "device_id": "aa:bb:cc:11:22:33",
+            "session_id": "sess-disabled",
+            "turn": 9
+        }))
+        .unwrap_err();
+    assert_eq!(blocked.status, 403);
+    assert_eq!(blocked.code, "asr_corpus_disabled");
+
+    // 4. ProcessTrace 带时间戳序号前缀的 WAV 必须被 trace_audio / trace_label 与 status 精准配对
+    let pt_audio = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "trace_audio",
+            "date": date,
+            "device_id": "aa:bb:cc:11:22:33",
+            "session_id": "sess-pt",
+            "turn": 1,
+            "at_ms": now_ms + 1_000
+        }))
+        .unwrap();
+    assert_eq!(
+        pt_audio["trace_audio_file"],
+        format!("{date}/voice-files/{prefixed_name}")
+    );
+    assert!(
+        pt_audio["audio_data_url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("data:audio/wav;base64,"))
+    );
+
+    builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "trace_label",
+            "date": date,
+            "device_id": "aa:bb:cc:11:22:33",
+            "session_id": "sess-pt",
+            "turn": 1,
+            "at_ms": now_ms + 1_000,
+            "raw_text": "三毫米段木",
+            "reference_text": "三毫米椴木",
+            "input_source": "live_mic",
+            "verified_correct": false
+        }))
+        .unwrap();
+    let expected_label =
+        voice_files_dir.join(format!("154730123-000001-{prefixed_stem}.label.json"));
+    assert!(
+        expected_label.is_file(),
+        "trace_label 必须与带前缀的过程记录 WAV 同名配对写出"
+    );
+
+    let st = builtin.status();
+    let traces = st["debug_traces"].as_array().unwrap();
+    let disabled_trace = traces
+        .iter()
+        .find(|t| t["session_id"] == "sess-disabled")
+        .unwrap();
+    assert_eq!(disabled_trace["has_audio"], false);
+    assert!(disabled_trace["reference_text"].is_null());
+
+    let pt_trace = traces
+        .iter()
+        .find(|t| t["session_id"] == "sess-pt")
+        .unwrap();
+    assert_eq!(pt_trace["has_audio"], true);
+    assert_eq!(pt_trace["reference_text"], "三毫米椴木");
+    assert_eq!(
+        pt_trace["trace_audio_file"],
+        format!("{date}/voice-files/{prefixed_name}")
+    );
+
+    let bundle_json = serde_json::to_string(&builtin.diagnostics_bundle()).unwrap();
+    assert!(!bundle_json.contains("停用语料隐私真值CANARY"));
+    assert!(!bundle_json.contains(&prefixed_name));
 }

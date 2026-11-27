@@ -24,6 +24,7 @@ import {
   percentile,
   redactText,
   redactValue,
+  registerSignalCleanup,
   resolveDebugConnection,
   resolveProcessTraceDir,
   sleep,
@@ -180,7 +181,8 @@ export function buildReportMarkdown(summary, turns) {
 
 function isDeviceReadyForInject(dev) {
   if (!dev) return false;
-  return dev.state === "idle" || (dev.state === "listening" && (Number(dev.level) || 0) === 0);
+  // 普通房间底噪下 listening 的 level 可能非 0；服务端会在真实说话中返回 409 device_busy
+  return dev.state === "idle" || dev.state === "listening";
 }
 
 function evaluateTurnExpectations(turnSpec, detail) {
@@ -222,15 +224,25 @@ export async function runLiveDebugBench(opts = {}) {
   const corpusRaw = JSON.parse(readFileSync(corpusPath, "utf8"));
   const corpusName = String(corpusRaw?.name || "custom");
   const corpusTurns = Array.isArray(corpusRaw) ? corpusRaw : Array.isArray(corpusRaw?.turns) ? corpusRaw.turns : [];
-  if (corpusTurns.length === 0) {
-    throw new Error(`语料文件不含有效轮次：${corpusPath}`);
-  }
-
   const { runtimeDir, token, baseUrl } = resolveDebugConnection(opts);
+  const runId = opts.runId || formatRunId();
+  const traceDir = opts.traceDir ? resolve(opts.traceDir) : resolveProcessTraceDir(runtimeDir);
+  const archiveDir = opts.outDir ? resolve(opts.outDir) : join(runtimeDir, "voice-bench", runId);
   const redactOpts = {
     secrets: [token],
-    paths: [runtimeDir, homedir(), process.cwd(), dirname(corpusPath)],
+    paths: [
+      runtimeDir,
+      homedir(),
+      process.cwd(),
+      dirname(corpusPath),
+      traceDir,
+      archiveDir,
+      opts.tokenFile ? dirname(resolve(opts.tokenFile)) : "",
+    ].filter(Boolean),
   };
+  if (corpusTurns.length === 0) {
+    throw new Error(`语料文件不含有效轮次：${redactText(corpusPath, redactOpts)}`);
+  }
 
   // 1. 启动前检查在线设备
   const devicesRes = await debugFetch(baseUrl, token, "/debug/v1/devices");
@@ -262,10 +274,23 @@ export async function runLiveDebugBench(opts = {}) {
   }
   const deviceId = targetDevice.device_id;
 
-  // 2. 开启完整过程记录（并记住原始状态，结束必恢复）
-  const runId = opts.runId || formatRunId();
+  // 2. 开启完整过程记录（并记住原始状态，结束与信号中断必恢复）
   const startedAtMs = Date.now();
   let previousTraceEnabled = null;
+  let traceRestored = false;
+  const restoreTrace = async () => {
+    if (traceRestored || previousTraceEnabled === null) return;
+    traceRestored = true;
+    try {
+      await debugFetch(baseUrl, token, "/debug/v1/process-trace", {
+        method: "POST",
+        body: { enabled: previousTraceEnabled, flush: true },
+      });
+    } catch {
+      // 尽力恢复，不掩盖主流程结果
+    }
+  };
+  const unregisterSignals = registerSignalCleanup(restoreTrace);
   const enableTraceRes = await debugFetch(baseUrl, token, "/debug/v1/process-trace", {
     method: "POST",
     body: { enabled: true, flush: false },
@@ -365,7 +390,7 @@ export async function runLiveDebugBench(opts = {}) {
           const idleNow =
             !finalDetail.device_online ||
             finalDetail.device_state === "idle" ||
-            (finalDetail.device_state === "listening" && (Number(finalDetail.device_level) || 0) === 0) ||
+            finalDetail.device_state === "listening" ||
             finalDetail.route === "fast_exit";
           if (terminal && idleNow) {
             timedOut = false;
@@ -405,17 +430,9 @@ export async function runLiveDebugBench(opts = {}) {
       });
     }
   } finally {
+    unregisterSignals();
     // 无论成败，刷新并恢复过程记录开关原状态
-    if (previousTraceEnabled !== null) {
-      try {
-        await debugFetch(baseUrl, token, "/debug/v1/process-trace", {
-          method: "POST",
-          body: { enabled: previousTraceEnabled, flush: true },
-        });
-      } catch {
-        // 尽力恢复，不掩盖主流程结果
-      }
-    }
+    await restoreTrace();
   }
 
   const finishedAtMs = Date.now();
@@ -432,10 +449,8 @@ export async function runLiveDebugBench(opts = {}) {
     redactOpts,
   );
   const reportMd = redactText(buildReportMarkdown(summary, redactedTurns), redactOpts);
-  const traceDir = opts.traceDir || resolveProcessTraceDir(runtimeDir);
   const { jsonlLines, txtLines } = sliceProcessTrace(traceDir, startedAtMs, finishedAtMs, redactOpts);
 
-  const archiveDir = opts.outDir ? resolve(opts.outDir) : join(runtimeDir, "voice-bench", runId);
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(
     join(archiveDir, "turns.jsonl"),
@@ -495,7 +510,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     }
     const result = await runLiveDebugBench(opts);
     if (result.errorMessage) {
-      console.error(result.errorMessage);
+      console.error(redactText(result.errorMessage, { paths: [homedir(), process.cwd()] }));
       process.exit(result.exitCode || 1);
     }
     console.log(result.archiveDir);
@@ -506,7 +521,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
       process.exit(result.exitCode);
     }
   } catch (error) {
-    console.error(error?.message || String(error));
+    console.error(redactText(error?.message || String(error), { paths: [homedir(), process.cwd()] }));
     process.exit(1);
   }
 }

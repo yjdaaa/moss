@@ -10,9 +10,10 @@
 // - 若开启了 `asr-corpus` 录音采集，自动回写 `<turn-id>.label.json`（带 `label_source: "e2e-playback"` 与说话人标签）；
 // - 无论正常结束还是异常/校准失败，均在 `finally` 中关闭测试时间窗、停掉背景噪声并恢复过程记录设置；有失败或未达标轮次时返回非 0 状态码。
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -30,6 +31,7 @@ import {
   percentile,
   redactText,
   redactValue,
+  registerSignalCleanup,
   resolveDebugConnection,
   resolveProcessTraceDir,
   setProcessTrace,
@@ -111,7 +113,15 @@ export function buildTurnAttribution({
     typeof playback?.ended_at_ms === "number" &&
     speechEndAtMs < playback.ended_at_ms - EARLY_CUTOFF_TOLERANCE_MS;
   const headClipped = detectHeadClipping(spec.text, rawAsr);
-  const capturePassed = Boolean(detail) && rawAsr.length > 0 && !earlyCutoff && !headClipped && !overlapDetected;
+  const firstAudioFrameAtMs =
+    typeof detail?.first_audio_frame_at_ms === "number" ? detail.first_audio_frame_at_ms : null;
+  // 服务端首帧播报早于外放结束即判定外放与播报重叠（避免 playWav 返回后轮询永假漏检）
+  const serverOverlap =
+    firstAudioFrameAtMs !== null &&
+    typeof playback?.ended_at_ms === "number" &&
+    firstAudioFrameAtMs < playback.ended_at_ms - EARLY_CUTOFF_TOLERANCE_MS;
+  const effectiveOverlap = Boolean(overlapDetected || serverOverlap);
+  const capturePassed = Boolean(detail) && rawAsr.length > 0 && !earlyCutoff && !headClipped && !effectiveOverlap;
 
   // 2. 识别纠偏（及可选数字注入对照）
   const keyTerms = Array.isArray(spec.key_terms) ? spec.key_terms : [];
@@ -170,8 +180,6 @@ export function buildTurnAttribution({
 
   // 4. 合成播放
   const stagesMs = detail?.stages_ms || {};
-  const firstAudioFrameAtMs =
-    typeof detail?.first_audio_frame_at_ms === "number" ? detail.first_audio_frame_at_ms : null;
   const endToFirstAudioMs =
     firstAudioFrameAtMs !== null && typeof playback?.ended_at_ms === "number"
       ? Math.max(0, firstAudioFrameAtMs - playback.ended_at_ms)
@@ -200,7 +208,7 @@ export function buildTurnAttribution({
       peak_uplink_level: detail?.peak_uplink_level ?? null,
       head_clipped: headClipped,
       early_cutoff: earlyCutoff,
-      overlap_detected: overlapDetected,
+      overlap_detected: effectiveOverlap,
       observed_phases: observedPhases,
       passed: capturePassed,
     },
@@ -841,11 +849,23 @@ export function buildE2eReportMarkdown(summary, turns) {
   return lines.join("\n");
 }
 
-function isQuietListening(dev, allowIdle = false) {
+const AMBIENT_QUIET_LEVEL_MAX = 59;
+
+function isQuietListening(dev, allowIdle = false, ignoreLevel = false) {
   if (!dev) return false;
-  if (dev.state === "listening" && (Number(dev.level) || 0) === 0) return true;
-  if (allowIdle && dev.state === "idle" && (Number(dev.level) || 0) === 0) return true;
+  const levelOk = ignoreLevel || (Number(dev.level) || 0) <= AMBIENT_QUIET_LEVEL_MAX;
+  if (dev.state === "listening" && levelOk) return true;
+  if (allowIdle && dev.state === "idle" && levelOk) return true;
   return false;
+}
+
+function hasActiveBenchWindowForSession(dev, expectedSessionId) {
+  if (!dev || dev.bench_window?.active !== true) return false;
+  if (expectedSessionId && dev.session_id && dev.session_id !== expectedSessionId) return false;
+  if (expectedSessionId && dev.bench_window?.session_id && dev.bench_window.session_id !== expectedSessionId) {
+    return false;
+  }
+  return true;
 }
 
 /** 严格等待设备进入 `listening` 且连续安静 `quietMs`（默认 1000 ms），绝不与播报重叠。 */
@@ -857,6 +877,7 @@ async function waitForQuietListening({
   timeoutMs,
   pollIntervalMs,
   allowIdle = false,
+  ignoreLevel = false,
 }) {
   const deadline = Date.now() + timeoutMs;
   let quietSince = null;
@@ -871,7 +892,7 @@ async function waitForQuietListening({
       if (!latestDevice) {
         return { ready: false, offline: true, device: null, payload: latestPayload };
       }
-      if (isQuietListening(latestDevice, allowIdle)) {
+      if (isQuietListening(latestDevice, allowIdle, ignoreLevel)) {
         if (quietSince === null) quietSince = Date.now();
         if (Date.now() - quietSince >= quietMs) {
           return { ready: true, offline: false, device: latestDevice, payload: latestPayload };
@@ -897,6 +918,7 @@ async function waitForAcousticTurnCompletion({
   timeoutMs,
   pollIntervalMs,
   expectExit = false,
+  ignoreLevel = false,
 }) {
   const deadline = Date.now() + timeoutMs;
   const observedPhases = [];
@@ -905,6 +927,7 @@ async function waitForAcousticTurnCompletion({
   let quietSince = null;
   let maxObservedLevel = 0;
   let speakingStartedBeforePlaybackEnd = false;
+  let extraTurnsCount = 0;
 
   const pushPhase = (st) => {
     if (st && observedPhases[observedPhases.length - 1] !== st) observedPhases.push(st);
@@ -923,23 +946,27 @@ async function waitForAcousticTurnCompletion({
       if (dev.state === "speaking" && Date.now() < playbackEndedAtMs) {
         speakingStartedBeforePlaybackEnd = true;
       }
-      if (!matchedTurnId && Number(dev.latest_turn || 0) > prevTurnNumber) {
-        matchedTurnId = dev.latest_turn_id || `${dev.session_id || sessionId}:${dev.latest_turn}`;
-      }
     }
 
     if (!matchedTurnId) {
-      const turnsRes = await listDeviceTurns(baseUrl, token, deviceId, 5);
+      // 优先查设备轮次列表并按 turn 升序取最早产生的新轮次（避免 700 ms 停顿拆成 N+1/N+2 时锁错 N+2 掩盖抢话）
+      const turnsRes = await listDeviceTurns(baseUrl, token, deviceId, 10);
       if (turnsRes.ok && Array.isArray(turnsRes.data?.turns)) {
-        const newer = turnsRes.data.turns.find(
-          (t) =>
-            Number(t.turn || 0) > prevTurnNumber &&
-            (!sessionId || t.session_id === sessionId || !dev),
-        );
-        if (newer?.turn_id) {
-          matchedTurnId = newer.turn_id;
-          detail = newer;
+        const newerTurns = turnsRes.data.turns
+          .filter(
+            (t) =>
+              Number(t.turn || 0) > prevTurnNumber &&
+              (!sessionId || t.session_id === sessionId || !dev),
+          )
+          .sort((a, b) => Number(a.turn || 0) - Number(b.turn || 0));
+        if (newerTurns.length > 0 && newerTurns[0]?.turn_id) {
+          matchedTurnId = newerTurns[0].turn_id;
+          detail = newerTurns[0];
+          extraTurnsCount = Math.max(0, newerTurns.length - 1);
         }
+      }
+      if (!matchedTurnId && dev && Number(dev.latest_turn || 0) > prevTurnNumber) {
+        matchedTurnId = dev.latest_turn_id || `${dev.session_id || sessionId}:${dev.latest_turn}`;
       }
     }
 
@@ -964,9 +991,10 @@ async function waitForAcousticTurnCompletion({
           observedPhases,
           maxObservedLevel,
           overlapDetected: speakingStartedBeforePlaybackEnd,
+          extraTurnsCount,
         };
       }
-      if (dev && isQuietListening(dev, detail.route === "fast_exit")) {
+      if (dev && isQuietListening(dev, detail.route === "fast_exit", ignoreLevel)) {
         if (quietSince === null) quietSince = Date.now();
         if (Date.now() - quietSince >= quietMs) {
           return {
@@ -976,6 +1004,7 @@ async function waitForAcousticTurnCompletion({
             observedPhases,
             maxObservedLevel,
             overlapDetected: speakingStartedBeforePlaybackEnd,
+            extraTurnsCount,
           };
         }
       } else {
@@ -989,6 +1018,7 @@ async function waitForAcousticTurnCompletion({
         observedPhases,
         maxObservedLevel,
         overlapDetected: speakingStartedBeforePlaybackEnd,
+        extraTurnsCount,
       };
     }
 
@@ -1002,21 +1032,50 @@ async function waitForAcousticTurnCompletion({
     observedPhases,
     maxObservedLevel,
     overlapDetected: speakingStartedBeforePlaybackEnd,
+    extraTurnsCount,
   };
 }
 
-/** VC3 #7：外放轮次若已落盘到 `<runtime>/asr-corpus/<date>/<turn-id>.wav`，自动写出 `.label.json`。 */
-async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePreset }) {
-  if (!detail?.corpus_date || !detail?.corpus_turn_id) return false;
-  const dayDir = join(runtimeDir, "asr-corpus", detail.corpus_date);
-  const wavPath = join(dayDir, `${detail.corpus_turn_id}.wav`);
-  const metaPath = join(dayDir, `${detail.corpus_turn_id}.json`);
-  const deadline = Date.now() + 1_500;
-  while (Date.now() <= deadline && (!existsSync(wavPath) || !existsSync(metaPath))) {
-    await sleep(50);
+function assertNotSymlinkIfExists(p) {
+  if (!existsSync(p)) return;
+  const st = lstatSync(p);
+  if (st.isSymbolicLink()) {
+    throw new Error("拒绝访问符号链接路径");
   }
-  if (!existsSync(wavPath) || !existsSync(metaPath)) return false;
+}
 
+function deviceShortForTrace(deviceId) {
+  const alnum = String(deviceId || "").replace(/[^A-Za-z0-9]/g, "");
+  return alnum.length > 0 ? alnum.slice(-4) : "设备";
+}
+
+function localDateStrFromMs(ms) {
+  const d = new Date(Number(ms) || Date.now());
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function writeLabelAtomically(dayDir, baseName, label) {
+  const labelPath = resolve(dayDir, `${baseName}.label.json`);
+  if (existsSync(labelPath)) return false;
+  const tmpPath = join(dayDir, `.${baseName}.label.tmp.${process.pid}.${randomBytes(6).toString("hex")}`);
+  try {
+    writeFileSync(tmpPath, `${JSON.stringify(label, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameSync(tmpPath, labelPath);
+    return true;
+  } catch {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+}
+
+/** VC3 #7：外放轮次自动写出 `.label.json`（含 `input_source: "e2e_playback"`）到完整过程记录及 `<runtime>/asr-corpus/<date>/`（不覆盖已有人工标注，0600 原子写）。 */
+async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePreset }) {
+  if (!detail) return false;
   const rawAsr = String(detail.injected_text || "").trim();
   const cerRes = computeCer(spec.text, rawAsr);
   const validTags = new Set(["命令词", "数字", "材料名", "有噪声"]);
@@ -1024,28 +1083,162 @@ async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePre
     ...(Array.isArray(spec.tags) ? spec.tags : []),
     ...(noisePreset ? ["有噪声"] : []),
   ].filter((t, idx, arr) => validTags.has(t) && arr.indexOf(t) === idx);
+  const voiceProfile = {
+    ...(asset?.voice_profile || { source: asset?.source_type || "human-recording" }),
+    ...(asset?.speaker ? { speaker: asset.speaker } : {}),
+    ...(asset?.secondary_recording ? { secondary_recording: true } : {}),
+    ...(noisePreset ? { noise: noisePreset } : {}),
+  };
+
+  let wroteAny = false;
+
+  // 1. 写入完整过程记录目录 logs/process-trace/<date>/voice-files/<wav-stem>.label.json
+  // ProcessTrace::save_file 生成带时间戳与序号前缀的 `{HHMMSSmmm}-{seq:06}-{dev_short}-t{turn}-user.wav`，
+  // 优先使用服务端返回的 `detail.trace_audio_file`，确保 `.label.json` 与 `.wav` 一一配对供 asr-bench 扫描。
+  const traceDate = String(detail.corpus_date || localDateStrFromMs(detail.finished_at_ms || Date.now())).trim();
+  const turnNo = Number(detail.turn) || 0;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(traceDate) && turnNo > 0) {
+    try {
+      const traceRoot = resolve(resolveProcessTraceDir(runtimeDir));
+      const devShort = deviceShortForTrace(detail.device_id);
+      const bareStem = `${devShort}-t${turnNo}-user`;
+      const staysInTrace = (p) => {
+        const rel = relative(traceRoot, p);
+        return Boolean(rel) && !rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel);
+      };
+      const assertNoSymlinkChain = (baseDir, targetPath) => {
+        assertNotSymlinkIfExists(baseDir);
+        const rel = relative(baseDir, targetPath);
+        const parts = rel.split(/[\\/]+/).filter(Boolean);
+        let cur = baseDir;
+        for (const part of parts) {
+          cur = join(cur, part);
+          assertNotSymlinkIfExists(cur);
+        }
+      };
+
+      let matchedWavPath = null;
+      const rawRel = typeof detail.trace_audio_file === "string" ? detail.trace_audio_file.trim() : "";
+      if (rawRel && rawRel.endsWith(".wav") && !rawRel.includes("..")) {
+        const cand = resolve(traceRoot, rawRel);
+        if (staysInTrace(cand)) {
+          // ProcessTrace 写盘走后台线程，若刚落盘可短暂重试 3 次（共 150 ms）
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            assertNoSymlinkChain(traceRoot, cand);
+            if (existsSync(cand)) {
+              matchedWavPath = cand;
+              break;
+            }
+            if (attempt < 3) await sleep(50);
+          }
+        }
+      }
+      if (!matchedWavPath) {
+        const voiceFilesDir = resolve(traceRoot, traceDate, "voice-files");
+        if (staysInTrace(voiceFilesDir) && existsSync(voiceFilesDir)) {
+          assertNoSymlinkChain(traceRoot, voiceFilesDir);
+          const suffix = `-${bareStem}.wav`;
+          const exactName = `${bareStem}.wav`;
+          const targetMs = Number(detail.started_at_ms || detail.finished_at_ms || 0);
+          let best = null;
+          for (const entry of readdirSync(voiceFilesDir, { withFileTypes: true })) {
+            if (!entry.isFile()) continue;
+            if (entry.name !== exactName && !entry.name.endsWith(suffix)) continue;
+            const full = resolve(voiceFilesDir, entry.name);
+            if (!staysInTrace(full)) continue;
+            assertNotSymlinkIfExists(full);
+            const mtimeMs = lstatSync(full).mtimeMs || 0;
+            const diff = targetMs > 0 ? Math.abs(mtimeMs - targetMs) : -mtimeMs;
+            if (!best || diff < best.diff) {
+              best = { full, diff };
+            }
+          }
+          if (best) matchedWavPath = best.full;
+        }
+      }
+      if (matchedWavPath && staysInTrace(matchedWavPath)) {
+        assertNoSymlinkChain(traceRoot, matchedWavPath);
+        const targetDir = dirname(matchedWavPath);
+        const wavStem = basename(matchedWavPath, ".wav");
+        const turnId = String(detail.corpus_turn_id || `${detail.session_id || devShort}_t${turnNo}`).replace(
+          /[^A-Za-z0-9_-]/g,
+          "_",
+        );
+        const traceLabel = {
+          turn_id: turnId,
+          turn: turnNo,
+          device_id: detail.device_id || "",
+          session_id: detail.session_id || "",
+          date: traceDate,
+          input_source: "e2e_playback",
+          raw_text: rawAsr,
+          corrected_text: String(detail.corrected_text || rawAsr).trim(),
+          reference_text: spec.text,
+          verified_correct: cerRes.edits === 0,
+          tags,
+          updated_at_ms: Date.now(),
+          label_source: "e2e-playback",
+          voice_profile: voiceProfile,
+        };
+        if (writeLabelAtomically(targetDir, wavStem, traceLabel)) {
+          wroteAny = true;
+        }
+      }
+    } catch {
+      // 忽略过程记录目录未落盘或符号链接拒绝
+    }
+  }
+
+  // 2. 兼容写入 <runtime>/asr-corpus/<date>/<turn-id>.label.json
+  if (!detail?.corpus_date || !detail?.corpus_turn_id) return wroteAny;
+  const dateStr = String(detail.corpus_date).trim();
+  const turnIdStr = String(detail.corpus_turn_id).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !/^[A-Za-z0-9_-]{1,128}$/.test(turnIdStr)) {
+    return wroteAny;
+  }
+  const corpusRoot = resolve(runtimeDir, "asr-corpus");
+  const dayDir = resolve(corpusRoot, dateStr);
+  const wavPath = resolve(dayDir, `${turnIdStr}.wav`);
+  const metaPath = resolve(dayDir, `${turnIdStr}.json`);
+  const labelPath = resolve(dayDir, `${turnIdStr}.label.json`);
+  const staysInside = (p) => {
+    const rel = relative(corpusRoot, p);
+    return Boolean(rel) && !rel.startsWith("..") && !rel.startsWith("/") && !/^[A-Za-z]:/.test(rel);
+  };
+  if (!staysInside(dayDir) || !staysInside(wavPath) || !staysInside(metaPath) || !staysInside(labelPath)) {
+    return wroteAny;
+  }
+  const deadline = Date.now() + 1_500;
+  while (Date.now() <= deadline && (!existsSync(wavPath) || !existsSync(metaPath))) {
+    await sleep(50);
+  }
+  if (!existsSync(wavPath) || !existsSync(metaPath)) return wroteAny;
+  try {
+    assertNotSymlinkIfExists(corpusRoot);
+    assertNotSymlinkIfExists(dayDir);
+    assertNotSymlinkIfExists(wavPath);
+    assertNotSymlinkIfExists(metaPath);
+    assertNotSymlinkIfExists(labelPath);
+  } catch {
+    return wroteAny;
+  }
+  if (existsSync(labelPath)) return wroteAny;
 
   const label = {
-    turn_id: detail.corpus_turn_id,
-    date: detail.corpus_date,
+    turn_id: turnIdStr,
+    date: dateStr,
+    input_source: "e2e_playback",
     reference_text: spec.text,
     verified_correct: cerRes.edits === 0,
     tags,
     updated_at_ms: Date.now(),
     label_source: "e2e-playback",
-    voice_profile: {
-      ...(asset?.voice_profile || { source: asset?.source_type || "human-recording" }),
-      ...(asset?.speaker ? { speaker: asset.speaker } : {}),
-      ...(asset?.secondary_recording ? { secondary_recording: true } : {}),
-      ...(noisePreset ? { noise: noisePreset } : {}),
-    },
+    voice_profile: voiceProfile,
   };
-  writeFileSync(
-    join(dayDir, `${detail.corpus_turn_id}.label.json`),
-    `${JSON.stringify(label, null, 2)}\n`,
-    "utf8",
-  );
-  return true;
+  if (writeLabelAtomically(dayDir, turnIdStr, label)) {
+    wroteAny = true;
+  }
+  return wroteAny;
 }
 
 /** VC2 可选服务端数字音频对照：读取同一 WAV 的 16 kHz PCM 经 `/debug/v1/devices/{id}/inject-audio` 注入并等待完成。 */
@@ -1057,6 +1250,7 @@ async function runDigitalControlTurn({
   turnTimeoutMs,
   pollIntervalMs,
   quietMs,
+  ignoreLevel = false,
 }) {
   const ready = await waitForQuietListening({
     baseUrl,
@@ -1066,11 +1260,24 @@ async function runDigitalControlTurn({
     timeoutMs: Math.min(30_000, turnTimeoutMs),
     pollIntervalMs,
     allowIdle: true,
+    ignoreLevel,
   });
   if (!ready.ready) {
-    return { error: "数字注入前等待设备空闲超时" };
+    return { error: "数字注入前等待设备空闲超时", code: "idle_timeout", status: 0 };
   }
-  const { pcm, sampleRate } = readWavPcm16(wavPath);
+  let wav;
+  try {
+    wav = readWavPcm16(wavPath);
+  } catch (err) {
+    return { error: err?.message || "读取 WAV 失败", code: "invalid_audio", status: 0 };
+  }
+  if (wav.sampleRate !== 16_000 && wav.sampleRate !== 24_000) {
+    return {
+      error: `数字音频注入仅支持 16000 或 24000 Hz 单声道 WAV（当前 ${wav.sampleRate} Hz）`,
+      code: "invalid_sample_rate",
+      status: 0,
+    };
+  }
   const injectRes = await debugFetch(
     baseUrl,
     token,
@@ -1078,15 +1285,19 @@ async function runDigitalControlTurn({
     {
       method: "POST",
       body: {
-        pcm_base64: pcm.toString("base64"),
-        sample_rate: sampleRate,
+        pcm_base64: wav.pcm.toString("base64"),
+        sample_rate: wav.sampleRate,
         frame_ms: 60,
       },
       timeoutMs: 45_000,
     },
   );
   if (!injectRes.ok || !injectRes.data?.turn_id) {
-    return { error: injectRes.data?.message || `数字音频注入失败（HTTP ${injectRes.status}）` };
+    return {
+      error: injectRes.data?.message || `数字音频注入失败（HTTP ${injectRes.status}）`,
+      code: injectRes.data?.error || `http_${injectRes.status}`,
+      status: injectRes.status,
+    };
   }
   const turnId = injectRes.data.turn_id;
   const deadline = Date.now() + turnTimeoutMs;
@@ -1099,13 +1310,13 @@ async function runDigitalControlTurn({
         const devIdle =
           !detail.device_online ||
           detail.device_state === "idle" ||
-          (detail.device_state === "listening" && (Number(detail.device_level) || 0) === 0);
+          (detail.device_state === "listening" && (ignoreLevel || (Number(detail.device_level) || 0) <= AMBIENT_QUIET_LEVEL_MAX));
         if (devIdle) return { detail };
       }
     }
     await sleep(pollIntervalMs);
   }
-  return { detail, error: "数字对照轮次超时" };
+  return { detail, error: "数字对照轮次超时", code: "turn_timeout", status: 0 };
 }
 
 /** 评估外放校准结果；电平过低/过高或识别失败时返回中文摆放/音量指引。 */
@@ -1193,16 +1404,32 @@ export async function runXiaozhiE2e(opts = {}) {
     : Array.isArray(corpusRaw?.turns)
       ? corpusRaw.turns
       : [];
-  if (corpusTurns.length === 0) {
-    throw new Error(`语料文件不含有效轮次：${corpusPath}`);
-  }
-
   // 1. 预检：读取令牌、查在线设备、检查播放器
   const { runtimeDir, token, baseUrl } = resolveDebugConnection(opts);
+  const runId = opts.runId || formatRunId("e2e");
+  const resolvedRecordingsDir = opts.recordingsDir
+    ? resolve(opts.recordingsDir)
+    : join(runtimeDir, BENCH_RECORDINGS_DIR_REL);
+  const resolvedCorpusDir = opts.corpusDir ? resolve(opts.corpusDir) : join(runtimeDir, "asr-corpus");
+  const traceDir = opts.traceDir ? resolve(opts.traceDir) : resolveProcessTraceDir(runtimeDir);
+  const archiveDir = opts.outDir ? resolve(opts.outDir) : join(runtimeDir, "voice-bench", runId);
   const redactOpts = {
     secrets: [token],
-    paths: [runtimeDir, homedir(), process.cwd(), dirname(corpusPath)],
+    paths: [
+      runtimeDir,
+      homedir(),
+      process.cwd(),
+      dirname(corpusPath),
+      resolvedRecordingsDir,
+      resolvedCorpusDir,
+      traceDir,
+      archiveDir,
+      opts.tokenFile ? dirname(resolve(opts.tokenFile)) : "",
+    ].filter(Boolean),
   };
+  if (corpusTurns.length === 0) {
+    throw new Error(`语料文件不含有效轮次：${redactText(corpusPath, redactOpts)}`);
+  }
 
   const devicesRes = await listDebugDevices(baseUrl, token);
   if (!devicesRes.ok) {
@@ -1254,8 +1481,8 @@ export async function runXiaozhiE2e(opts = {}) {
     turns: corpusTurns,
     calibrationText: opts.skipCalibration ? "" : calibrationText,
     runtimeDir,
-    recordingsDir: opts.recordingsDir || join(runtimeDir, BENCH_RECORDINGS_DIR_REL),
-    corpusDir: opts.corpusDir || join(runtimeDir, "asr-corpus"),
+    recordingsDir: resolvedRecordingsDir,
+    corpusDir: resolvedCorpusDir,
     speaker: speakerFilter,
     includeDeviceCorpus,
   });
@@ -1287,15 +1514,55 @@ export async function runXiaozhiE2e(opts = {}) {
   }
   const effectiveCalibrationText = assets.calibrationEffectiveText || calibrationText;
 
-  // 2. 打开测试时间窗 + 打开过程记录（全程包裹在 try/finally，任何异常都必关窗与恢复）
-  const runId = opts.runId || formatRunId("e2e");
+  // 2. 打开测试时间窗 + 打开过程记录（全程包裹在 try/finally 与 SIGINT/SIGTERM 钩子，任何异常或中断都必关窗与恢复）
   const startedAtMs = Date.now();
+  const ignoreLevel = Boolean(noisePreset);
   let benchWindowOpened = false;
+  let boundSessionId = sessionId;
   let previousTraceEnabled = null;
   let noiseHandle = null;
+  let noiseInfo = null;
+  let activePlayChild = null;
   let calibrationReport = null;
   let autoLabeledCount = 0;
+  let cleanedUp = false;
   const results = [];
+
+  const cleanup = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    if (activePlayChild) {
+      try {
+        activePlayChild.kill("SIGTERM");
+      } catch {
+        // 忽略播放子进程停止异常
+      }
+      activePlayChild = null;
+    }
+    if (noiseHandle) {
+      try {
+        noiseHandle.stop();
+      } catch {
+        // 忽略噪声进程停止异常
+      }
+      noiseHandle = null;
+    }
+    if (benchWindowOpened) {
+      try {
+        await controlBenchWindow(baseUrl, token, { deviceId, action: "close" });
+      } catch {
+        // 尽力关闭测试时间窗
+      }
+    }
+    if (previousTraceEnabled !== null) {
+      try {
+        await setProcessTrace(baseUrl, token, previousTraceEnabled, true);
+      } catch {
+        // 尽力恢复过程记录开关
+      }
+    }
+  };
+  const unregisterSignals = registerSignalCleanup(cleanup);
 
   try {
     const winRes = await controlBenchWindow(baseUrl, token, {
@@ -1313,13 +1580,16 @@ export async function runXiaozhiE2e(opts = {}) {
       };
     }
     benchWindowOpened = true;
+    if (winRes.data?.bench_window?.session_id) {
+      boundSessionId = winRes.data.bench_window.session_id;
+    }
 
     const traceRes = await setProcessTrace(baseUrl, token, true, false);
     if (traceRes.ok && typeof traceRes.data?.previous_enabled === "boolean") {
       previousTraceEnabled = traceRes.data.previous_enabled;
     }
 
-    // 3. 校准（在已锁定的测试时间窗内执行）
+    // 3. 校准（仅在 listening 安静且测试时间窗确认开启时执行）
     if (!opts.skipCalibration && assets.calibrationAsset) {
       const calReady = await waitForQuietListening({
         baseUrl,
@@ -1328,7 +1598,8 @@ export async function runXiaozhiE2e(opts = {}) {
         quietMs,
         timeoutMs: idleWaitMs,
         pollIntervalMs,
-        allowIdle: true,
+        allowIdle: false,
+        ignoreLevel: false,
       });
       if (!calReady.ready) {
         return {
@@ -1341,22 +1612,35 @@ export async function runXiaozhiE2e(opts = {}) {
             : "校准前等待设备进入安静聆听超时，请确认小智已唤醒并处于聆听状态",
         };
       }
+      if (!hasActiveBenchWindowForSession(calReady.device, boundSessionId)) {
+        return {
+          exitCode: 1,
+          archiveDir: null,
+          summary: null,
+          turns: [],
+          errorMessage: "校准前检测到测试时间窗已关闭或设备会话已变更，为防止物理动作绕过安全锁，已中止外放",
+        };
+      }
       const prevTurn = Number(calReady.device?.latest_turn || 0);
       const calPlay = await playWav(assets.calibrationAsset.wavPath, {
         player,
         playWavFn: opts.playWavFn,
+        onSpawn: (c) => {
+          activePlayChild = c;
+        },
         spec: { id: "calibration", text: effectiveCalibrationText },
       });
       const calWait = await waitForAcousticTurnCompletion({
         baseUrl,
         token,
         deviceId,
-        sessionId: calReady.device?.session_id || sessionId,
+        sessionId: calReady.device?.session_id || boundSessionId,
         prevTurnNumber: prevTurn,
         playbackEndedAtMs: calPlay.ended_at_ms,
         quietMs,
         timeoutMs: Math.min(30_000, turnTimeoutMs),
         pollIntervalMs,
+        ignoreLevel: false,
       });
       calibrationReport = evaluateCalibrationResult({
         calibrationText: effectiveCalibrationText,
@@ -1385,9 +1669,16 @@ export async function runXiaozhiE2e(opts = {}) {
         platform: opts.platform || process.platform,
         player,
       });
+      if (noiseHandle) {
+        noiseInfo = {
+          filename: noiseHandle.filename,
+          preset: noiseHandle.preset,
+          gain: noiseHandle.gain,
+        };
+      }
     }
 
-    // 5. 严格串行逐句执行
+    // 5. 严格串行逐句执行（每句外放前必须复核测试时间窗仍在打开状态，绝不在无锁状态下外放）
     for (let i = 0; i < assets.preparedTurns.length; i += 1) {
       const { spec, asset } = assets.preparedTurns[i];
       const turnIndex = i + 1;
@@ -1402,6 +1693,7 @@ export async function runXiaozhiE2e(opts = {}) {
         timeoutMs: Math.min(idleWaitMs, 100_000),
         pollIntervalMs,
         allowIdle: false,
+        ignoreLevel,
       });
 
       const turnSpeaker = asset.speaker || asset.voice_profile?.speaker || "未标注说话人";
@@ -1453,10 +1745,31 @@ export async function runXiaozhiE2e(opts = {}) {
         continue;
       }
 
+      if (!hasActiveBenchWindowForSession(waitQuiet.device, boundSessionId)) {
+        results.push({
+          index: turnIndex,
+          id: turnIdLabel,
+          label: spec.label || turnIdLabel,
+          text: spec.text,
+          speaker: turnSpeaker,
+          secondary_recording: turnSecondary,
+          verdict: "failed",
+          failure_reason: "测试时间窗已关闭、过期或设备会话已变更，已中止后续外放以防物理动作绕过安全锁",
+          wall_ms: Date.now() - turnStartedAt,
+          audio_source: audioSourceMeta,
+          attribution: null,
+          detail: null,
+        });
+        break;
+      }
+
       const prevTurn = Number(waitQuiet.device?.latest_turn || 0);
       const playback = await playWav(asset.wavPath, {
         player,
         playWavFn: opts.playWavFn,
+        onSpawn: (c) => {
+          activePlayChild = c;
+        },
         spec,
         asset,
         index: turnIndex,
@@ -1466,13 +1779,14 @@ export async function runXiaozhiE2e(opts = {}) {
         baseUrl,
         token,
         deviceId,
-        sessionId: waitQuiet.device?.session_id || sessionId,
+        sessionId: waitQuiet.device?.session_id || boundSessionId,
         prevTurnNumber: prevTurn,
         playbackEndedAtMs: playback.ended_at_ms,
         quietMs,
         timeoutMs: turnTimeoutMs,
         pollIntervalMs,
         expectExit: spec.expect_route === "fast_exit",
+        ignoreLevel,
       });
 
       const wallMs = Date.now() - turnStartedAt;
@@ -1515,6 +1829,8 @@ export async function runXiaozhiE2e(opts = {}) {
 
       // VC2 可选数字注入对照（退出词跳过，否则会话已关闭）
       let digitalDetail = null;
+      let digitalError = null;
+      let benchWindowLostDuringDigital = false;
       if (compareDigital && spec.expect_route !== "fast_exit" && waitDone.detail?.route !== "fast_exit") {
         const digitalRes = await runDigitalControlTurn({
           baseUrl,
@@ -1524,8 +1840,15 @@ export async function runXiaozhiE2e(opts = {}) {
           turnTimeoutMs,
           pollIntervalMs,
           quietMs,
+          ignoreLevel,
         });
         if (digitalRes.detail) digitalDetail = digitalRes.detail;
+        if (digitalRes.error) {
+          digitalError = digitalRes.error;
+          if (digitalRes.code === "bench_window_required" || digitalRes.status === 403) {
+            benchWindowLostDuringDigital = true;
+          }
+        }
       }
 
       const attribution = buildTurnAttribution({
@@ -1536,7 +1859,16 @@ export async function runXiaozhiE2e(opts = {}) {
         observedPhases: waitDone.observedPhases,
         overlapDetected: waitDone.overlapDetected,
       });
+      if (digitalError) {
+        attribution.asr_correction.digital_control_error = digitalError;
+      }
+      if (waitDone.extraTurnsCount > 0) {
+        attribution.capture_endpoint.extra_turns_triggered = waitDone.extraTurnsCount;
+      }
       const stageFailures = [];
+      if (benchWindowLostDuringDigital) {
+        stageFailures.push(`数字对照检测到测试时间窗已关闭（${digitalError}），已中止后续外放`);
+      }
       if (!attribution.capture_endpoint.passed) {
         const flags = [];
         if (attribution.capture_endpoint.overlap_detected) flags.push("外放与播报重叠");
@@ -1588,29 +1920,13 @@ export async function runXiaozhiE2e(opts = {}) {
         attribution,
         detail: waitDone.detail,
       });
+      if (benchWindowLostDuringDigital) {
+        break;
+      }
     }
   } finally {
-    if (noiseHandle) {
-      try {
-        noiseHandle.stop();
-      } catch {
-        // 忽略噪声进程停止异常
-      }
-    }
-    if (benchWindowOpened) {
-      try {
-        await controlBenchWindow(baseUrl, token, { deviceId, action: "close" });
-      } catch {
-        // 尽力关闭测试时间窗
-      }
-    }
-    if (previousTraceEnabled !== null) {
-      try {
-        await setProcessTrace(baseUrl, token, previousTraceEnabled, true);
-      } catch {
-        // 尽力恢复过程记录开关
-      }
-    }
+    unregisterSignals();
+    await cleanup();
   }
 
   // 6. 归档到 `<runtime>/voice-bench/e2e-<run-id>/`（全量脱敏，不复制用户录音）
@@ -1639,9 +1955,7 @@ export async function runXiaozhiE2e(opts = {}) {
   const audioManifest = redactValue(
     {
       note: "仅记录外放真人录音的文件名、说话人标签与来源类型，绝不复制用户原始录音文件。",
-      noise: noiseHandle
-        ? { filename: noiseHandle.filename, preset: noiseHandle.preset, gain: noiseHandle.gain }
-        : null,
+      noise: noiseInfo,
       calibration: assets.calibrationAsset
         ? {
             filename: assets.calibrationAsset.filename,
@@ -1667,9 +1981,7 @@ export async function runXiaozhiE2e(opts = {}) {
     redactOpts,
   );
 
-  const traceDir = opts.traceDir || resolveProcessTraceDir(runtimeDir);
   const { jsonlLines, txtLines } = sliceProcessTrace(traceDir, startedAtMs, finishedAtMs, redactOpts);
-  const archiveDir = opts.outDir ? resolve(opts.outDir) : join(runtimeDir, "voice-bench", runId);
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(
     join(archiveDir, "turns.jsonl"),
@@ -1759,7 +2071,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     }
     const result = await runXiaozhiE2e(opts);
     if (result.errorMessage) {
-      console.error(result.errorMessage);
+      console.error(redactText(result.errorMessage, { paths: [homedir(), process.cwd()] }));
       process.exit(result.exitCode || 1);
     }
     console.log(result.archiveDir);
@@ -1770,7 +2082,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
       process.exit(result.exitCode);
     }
   } catch (error) {
-    console.error(redactText(error?.message || String(error)));
+    console.error(redactText(error?.message || String(error), { paths: [homedir(), process.cwd()] }));
     process.exit(1);
   }
 }

@@ -20,7 +20,29 @@ function stripSecretsAndPaths(text) {
     .replace(/\b[A-Za-z]:\\(?:Users|Documents and Settings|ProgramData|Temp|Windows)[^\s"'<>`,;)\]]*/gi, "<path>");
 }
 
-/** 汇总本机 5 项联调就绪状态清单（每项含打勾/打叉与一句修复指引）。 */
+/** 4 种对话/过程记录音源标签（供对话记录与排障、过程记录及离线识别测评统一展示）。 */
+export const VOICE_INPUT_SOURCE_LABELS = {
+  live_mic: { text: "小智实时说话", tone: "ok" },
+  e2e_playback: { text: "整体测试外放录音", tone: "warn" },
+  digital_inject: { text: "数字录音直通", tone: "info" },
+  text_inject: { text: "文字直通（无音频）", tone: "off" },
+};
+
+export function voiceInputSourceView(trace) {
+  const raw = String(trace?.input_source || "").trim();
+  if (raw && Object.hasOwn(VOICE_INPUT_SOURCE_LABELS, raw)) {
+    return { key: raw, ...VOICE_INPUT_SOURCE_LABELS[raw] };
+  }
+  if (trace?.bench_window) {
+    return { key: "e2e_playback", ...VOICE_INPUT_SOURCE_LABELS.e2e_playback };
+  }
+  if (trace?.simulated) {
+    return { key: "text_inject", ...VOICE_INPUT_SOURCE_LABELS.text_inject };
+  }
+  return { key: "live_mic", ...VOICE_INPUT_SOURCE_LABELS.live_mic };
+}
+
+/** 汇总本机 4 项联调就绪状态清单（每项含打勾/打叉与一句修复指引；识别录音标注已并入完整过程记录与对话记录）。 */
 export function aiBenchChecklistView(status) {
   const debugInject = debugInjectStateView(status);
   const sessions = Array.isArray(status?.sessions) ? status.sessions : [];
@@ -37,9 +59,11 @@ export function aiBenchChecklistView(status) {
     .filter((w) => w.device_id);
 
   const asrCorpus = status?.asr_corpus && typeof status.asr_corpus === "object" ? status.asr_corpus : {};
-  const corpusEnabled = asrCorpus.enabled === true;
-  const totalCorpusCount = Number(asrCorpus.total_count) || 0;
-  const labeledCount = Number(asrCorpus.labeled_count) || 0;
+  const corpusEnabled = asrCorpus.enabled === true || status?.process_trace_enabled === true;
+  const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
+  const traceLabeledCount = traces.filter((t) => Boolean(t?.reference_text)).length;
+  const totalCorpusCount = (Number(asrCorpus.total_count) || 0) + traces.filter((t) => Boolean(t?.has_audio)).length;
+  const labeledCount = Math.max(Number(asrCorpus.labeled_count) || 0, traceLabeledCount);
 
   const benchRec =
     status?.bench_recordings && typeof status.bench_recordings === "object"
@@ -93,18 +117,6 @@ export function aiBenchChecklistView(status) {
       goto: { tab: "records", group: "ai-bench-hub", target: "voice-bench-recordings-box" },
     },
     {
-      key: "asr_corpus",
-      label: "识别录音采集与标注",
-      ok: corpusEnabled && labeledCount > 0,
-      statusText: `${corpusEnabled ? "采集已开" : "采集未开"} · 已标注 ${labeledCount}/${totalCorpusCount} 条`,
-      fixHint: !corpusEnabled
-        ? "在下方“识别语料”开启采集（开启后整体测试会自动回写外放标注 `e2e-playback`）。"
-        : labeledCount === 0
-          ? "已开启采集；先说几句话标注，或跑整体测试自动积累外放标注语料。"
-          : "已具备标注语料，可运行离线识别测评并按手工标注与外放回采分组对比。",
-      goto: { tab: "records", group: "ai-bench-hub", target: "voice-asr-corpus-switch" },
-    },
-    {
       key: "bench_window",
       label: "测试时间窗状态",
       ok: true,
@@ -116,7 +128,7 @@ export function aiBenchChecklistView(status) {
       fixHint:
         activeBenchWindows.length > 0
           ? "当前测试窗已锁定该设备所有物理动作；如需提前结束请点“立即结束测试”。"
-          : "脚本启动时会自动打开测试窗、结束时自动关闭，无需手动操作。",
+          : "脚本启动时会自动打开测试窗与完整过程记录、结束时自动关闭并恢复，无需手动操作。",
       goto: { tab: "devices", group: "builtin-devices" },
     },
   ];
@@ -143,11 +155,23 @@ export function aiBenchChecklistView(status) {
 /**
  * 根据本机实时状态生成可直接粘贴给 Claude / Codex / agy 的联调提示词。
  * `kind`: `"e2e"`（整体测试，主推） | `"text"`（VA 文字直通） | `"asr"`（VB 离线识别测评）。
+ * `options`: `{ compareDigital?: boolean, noise?: "" | "fan" | "pump" | "burst", speaker?: string }`
  * 严禁包含任何令牌原文、API 密钥、设备 token 或本机绝对路径。
  */
-export function buildAiBenchPrompt(status, kind = "e2e") {
+export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
   const view = aiBenchChecklistView(status);
   const targetArg = view.onlineDevices.length === 1 ? ` --device ${view.onlineDevices[0]}` : "";
+  const compareDigital = Boolean(options?.compareDigital);
+  const rawNoise = String(options?.noise || "").trim();
+  const noiseArg = ["fan", "pump", "burst"].includes(rawNoise) ? ` --noise ${rawNoise} --noise-gain 0.22` : "";
+  const digitalArg = compareDigital ? " --compare-digital" : "";
+  const rawSpeaker = String(options?.speaker || "").trim();
+  const safeSpeaker =
+    rawSpeaker && rawSpeaker.length <= 32 && !/["'`\\/\r\n]/.test(rawSpeaker) && !rawSpeaker.includes("..")
+      ? /\s/.test(rawSpeaker)
+        ? ` --speaker "${rawSpeaker}"`
+        : ` --speaker ${rawSpeaker}`
+      : "";
 
   const debugPrereq = !view.debugEnabled
     ? "在桌面主窗口「语音中心 › 记录与诊断 › AI 联调与测试」开启“允许本机 AI 调试注入”开关（自动生成 24 小时有效的本机 0600 令牌文件）。"
@@ -190,15 +214,15 @@ export function buildAiBenchPrompt(status, kind = "e2e") {
   if (kind === "asr") {
     const corpusLine =
       view.labeledCount > 0
-        ? `当前已有 ${view.labeledCount} 条已标注语料（总计 ${view.totalCorpusCount} 条）。`
-        : "当前还没有已标注识别语料：请先在桌面端「语音中心 › 记录与诊断 › AI 联调与测试 › 识别语料」开启采集、完成若干句标注（或先跑一次整体测试自动产生外放标注）。";
+        ? `当前已有 ${view.labeledCount} 条已标注真值的过程记录/识别语料。`
+        : "当前尚未检测到已标真值的录音：可先跑一次整体测试（自动在完整过程记录中写入 `e2e_playback` 外放标准真值），或在「记录与诊断 › 对话记录与排障」开启完整过程记录后点“纠偏此句 / ✓ 识别正确”顺手打标。";
     const prompt = [
       "# 任务：运行识别（ASR）离线测评（VB）并审核候选词",
       "",
       "## 规则约束",
       "- 严格遵守仓库 `AGENTS.md` 与 `docs/developer/safety.md` §4.7；",
       "- 不执行 `git push`，不打印任何云端密钥、令牌或本机绝对路径；",
-      "- 识别语料仅用于离线测评，严禁进入诊断包、过程记录附件或声纹识别。",
+      "- 识别录音与标注仅用于离线测评，严禁进入诊断包或声纹识别。",
       "",
       "## 前提检查",
       `1. ${corpusLine}`,
@@ -208,10 +232,11 @@ export function buildAiBenchPrompt(status, kind = "e2e") {
       "```bash",
       "node scripts/voice-bench/asr-bench.mjs --noise-levels clean,fan,pump",
       "```",
+      "- 脚本自动扫描 `<runtime>/logs/process-trace/`（完整过程记录中带真值标记的 `voice-files/*-user.wav`）与 `<runtime>/asr-corpus/`，并按音源（`live_mic` 小智实时说话 vs `e2e_playback` 整体测试外放录音）分组统计。",
       "",
       "## 归档位置与回传内容",
       "- 归档输出目录：运行目录相对路径 `<runtime>/voice-bench/asr-<run-id>/`；",
-      "- 请读取并回传：`report.md`（含人工标注真实录音 vs 整体测试外放录音分组字错率、命令词召回与误报、最差 30 条）与 `suggestions.json`。",
+      "- 请读取并回传：`report.md`（含小智实时说话 vs 整体测试外放录音分组字错率、命令词召回与误报、最差 30 条）与 `suggestions.json`。",
       "",
       "## 修改原则",
       "- `suggestions.json` 里的热词、同音纠错和数字规范化候选不要自动应用，须逐条人工/AI 复核并确认不触碰停止/退出命令词后再改代码并补测试；",
@@ -230,12 +255,8 @@ export function buildAiBenchPrompt(status, kind = "e2e") {
     "把小智放在离电脑喇叭 30–50 cm 处，调至合适电脑音量并避免麦克风被遮挡。",
     debugPrereq,
     devicePrereq,
+    "脚本运行期间会自动开启完整过程记录（`logs/process-trace/<日期>/`），在记录中显式区分 4 种音源（`live_mic` 小智实时说话 / `e2e_playback` 整体测试外放录音 / `digital_inject` 数字录音直通 / `text_inject` 文字直通），并自动把外放原句写入过程记录供后续离线 ASR 测评直接复用。",
   ];
-  if (!view.corpusEnabled) {
-    manualPrereqs.push("（可选推荐）在同一分组开启“识别语料”录音采集，整体测试会自动把每句外放录音标注为 `e2e-playback`（带说话人标签）供后续离线 ASR 测评。");
-  } else {
-    manualPrereqs.push(`识别录音采集已开启（当前已标注 ${view.labeledCount}/${view.totalCorpusCount} 条），本轮外放录音会自动回写标注。`);
-  }
 
   const prompt = [
     "# 任务：执行真小智整体测试（真人录音外放 → 真麦克风 → 全链路 → 4 环节归因）并定位调优",
@@ -254,12 +275,12 @@ export function buildAiBenchPrompt(status, kind = "e2e") {
     "",
     "## 运行命令",
     "```bash",
-    `node scripts/voice-bench/xiaozhi-e2e.mjs${targetArg} --max-minutes 30`,
+    `node scripts/voice-bench/xiaozhi-e2e.mjs${targetArg}${safeSpeaker} --max-minutes 30${digitalArg}${noiseArg}`,
     "```",
     "- 声音素材默认从 `<runtime>/voice-bench/recordings/` 读取（全部说话人轮流；加 `--speaker <标签>` 可指定一位说话人）；",
     "- 如需量化麦克风与房间声学损耗，可追加 `--compare-digital`（使用同一份真人录音做服务端数字注入对照）；",
     "- 如需模拟排风扇/气泵背景噪声，可追加 `--noise fan --noise-gain 0.22`（可选 `fan` / `pump` / `burst`）；",
-    "- 默认不把 `asr-corpus`（小智麦克风录音）当作外放素材；仅在确需补充时显式加 `--include-device-corpus`（报告会标明“二次录制”）。",
+    "- 默认不把小智麦克风历史录音当作外放素材；仅在确需补充时显式加 `--include-device-corpus`（报告会标明“二次录制”）。",
     "",
     "## 归档位置与要回传的文件",
     "- 归档输出目录：运行目录相对路径 `<runtime>/voice-bench/e2e-<run-id>/`；",

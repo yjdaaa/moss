@@ -267,3 +267,119 @@ test("VB3/VB4 无已标注语料时提示先采集并标注，返回非 0 状态
     rmSync(emptyDir, { recursive: true, force: true });
   }
 });
+
+test("审查回归：命令词全量退出词/子串前缀拦截、非单声道 WAV 校验与全错分桶不误报 0.0% CER", async () => {
+  // 1. 补齐 conversation.rs 全部退出词及前缀/后缀规则
+  assert.equal(classifyCommand("休息"), "exit");
+  assert.equal(classifyCommand("没事了"), "exit");
+  assert.equal(classifyCommand("好的结束对话吧"), "exit");
+  assert.equal(isSafeHomophoneCandidate("修息", "休息").allowed, false);
+  assert.equal(isSafeHomophoneCandidate("梅事了", "没事了").allowed, false);
+  assert.equal(isSafeHomophoneCandidate("听一", "停一").allowed, false, "不得允许拼出“停一下”的候选");
+  assert.equal(isSafeHomophoneCandidate("推一", "退一").allowed, false, "不得允许拼出“退一下”的候选");
+  assert.equal(isSafeHomophoneCandidate("关掉鸡", "关掉激").allowed, false);
+  assert.equal(isSafeHomophoneCandidate("段木=坏", "椴木").allowed, false, "拒绝含 = 分隔符");
+
+  // 2. 非单声道 WAV 必须被 readWavPcm16 拒绝
+  const tmp = mkdtempSync(join(tmpdir(), "moss-vb3-reg-"));
+  try {
+    const stereoWav = join(tmp, "stereo.wav");
+    const stereoBuf = Buffer.alloc(44 + 64);
+    stereoBuf.write("RIFF", 0, "ascii");
+    stereoBuf.writeUInt32LE(36 + 64, 4);
+    stereoBuf.write("WAVE", 8, "ascii");
+    stereoBuf.write("fmt ", 12, "ascii");
+    stereoBuf.writeUInt32LE(16, 16);
+    stereoBuf.writeUInt16LE(1, 20);
+    stereoBuf.writeUInt16LE(2, 22); // stereo!
+    stereoBuf.writeUInt32LE(16_000, 24);
+    stereoBuf.writeUInt32LE(16_000 * 4, 28);
+    stereoBuf.writeUInt16LE(4, 32);
+    stereoBuf.writeUInt16LE(16, 34);
+    stereoBuf.write("data", 36, "ascii");
+    stereoBuf.writeUInt32LE(64, 40);
+    writeFileSync(stereoWav, stereoBuf);
+    const { readWavPcm16 } = await import("../voice-bench/asr-bench.mjs");
+    assert.throws(() => readWavPcm16(stereoWav), /单声道 16-bit PCM/);
+
+    // 3. 全错识别器分桶 cer 须为 null、报告显示 — 而非 0.0%，且返回非 0 退出码
+    const dayDir = join(tmp, "asr-corpus", "2026-11-27");
+    mkdirSync(dayDir, { recursive: true });
+    writeSyntheticWav16k(join(dayDir, "c1.wav"));
+    writeFileSync(join(dayDir, "c1.json"), JSON.stringify({ turn_id: "c1", date: "2026-11-27", simulated: false, raw_text: "椴木" }), "utf8");
+    writeFileSync(join(dayDir, "c1.label.json"), JSON.stringify({ turn_id: "c1", date: "2026-11-27", reference_text: "椴木", verified_correct: true, tags: [] }), "utf8");
+    const res = await runAsrBench({
+      runtimeDir: tmp,
+      noiseLevels: [0],
+      mixNoiseFn: async () => new Map(),
+      recognizers: [
+        {
+          id: "always_fail",
+          label: "全错模型",
+          async transcribe() {
+            throw new Error("HTTP 401 unauthorized");
+          },
+        },
+      ],
+    });
+    assert.equal(res.exitCode, 1, "全部样本报错必须返回非 0 退出码");
+    assert.equal(res.analysis.summaryRows[0].cer, null, "全错分桶 CER 必须为 null");
+    const report = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+    assert.match(report, /\| 全错模型 \| 安静 \(0\) \| 1 \| 1 \| — \|/);
+
+    // 4. 自定义 process_trace_dir + 带时间戳序号前缀的 ProcessTrace 文件 + 按 input_source 分组（不把 digital_inject 混进 live_mic）
+    const customTraceDir = join(tmp, "custom-trace-dir");
+    const ptVoiceDir = join(customTraceDir, "2026-11-27", "voice-files");
+    mkdirSync(ptVoiceDir, { recursive: true });
+    writeFileSync(
+      join(tmp, "settings.json"),
+      JSON.stringify({ process_trace_dir: customTraceDir }),
+      "utf8",
+    );
+    const ptStem = "154730123-000001-2233-t1-user";
+    writeSyntheticWav16k(join(ptVoiceDir, `${ptStem}.wav`));
+    writeFileSync(
+      join(ptVoiceDir, `${ptStem}.label.json`),
+      JSON.stringify({
+        turn_id: "sess-dig_t1",
+        date: "2026-11-27",
+        input_source: "digital_inject",
+        label_source: "manual",
+        reference_text: "三毫米椴木",
+      }),
+      "utf8",
+    );
+    const groupedRes = await runAsrBench({
+      runtimeDir: tmp,
+      noiseLevels: [0],
+      mixNoiseFn: async () => new Map(),
+      recognizers: [
+        {
+          id: "fake_ok",
+          label: "假模型",
+          async transcribe() {
+            return { text: "三毫米椴木", firstInterimMs: 50, finalMs: 120 };
+          },
+        },
+      ],
+    });
+    assert.equal(groupedRes.exitCode, 0);
+    assert.ok(groupedRes.rows.some((r) => r.input_source === "digital_inject"), "须扫描自定义过程记录目录并保留 input_source");
+    assert.ok(groupedRes.analysis.byInputSource.digital_inject, "digital_inject 须独立分桶");
+    assert.ok(groupedRes.analysis.byInputSource.live_mic, "live_mic 须独立分桶");
+    const groupedReport = readFileSync(join(groupedRes.archiveDir, "report.md"), "utf8");
+    assert.ok(groupedReport.includes("数字录音直通（digital_inject）"));
+    assert.ok(!groupedReport.includes(customTraceDir), "自定义过程记录目录绝不能泄漏到报告");
+
+    // 5. LocalHelperClient 子进程提前退出后不得触发未捕获 EPIPE 或 60 秒卡死，必须立即拒绝
+    const { LocalHelperClient } = await import("../voice-bench/asr-bench.mjs");
+    const badClient = new LocalHelperClient(process.execPath);
+    badClient.closedError = new Error("moss-voice-local 提前退出（code=1）");
+    await assert.rejects(
+      () => badClient.transcribeWav(join(ptVoiceDir, `${ptStem}.wav`)),
+      /提前退出/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

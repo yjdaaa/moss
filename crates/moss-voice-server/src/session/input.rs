@@ -28,8 +28,8 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         data: &[u8],
     ) -> Result<(), String> {
-        // VC2 数字音频对照注入期间忽略真实麦克风帧，避免环境声混入对照音频
-        if self.digital_feed.is_some() {
+        // VC2 数字音频对照注入（含 VAD 排空期）忽略真实麦克风帧，避免环境声混入对照音频
+        if self.digital_feed.is_some() || self.next_turn_is_digital {
             return Ok(());
         }
         let listening = matches!(self.phase, Phase::Listening(_));
@@ -89,15 +89,20 @@ impl<'a> Session<'a> {
         if stop_watch {
             let quiet_needed = self.samples_for(STOP_RECHECK_QUIET);
             let start_rms = self.shared.config.vad.start_rms;
+            let active_bench = self
+                .shared
+                .is_bench_window_active_for_session(self.device_id, self.session_id)
+                || self.turn.as_ref().is_some_and(|t| t.bench_window);
             if let Some((probe, remaining)) = self.listen.stop_watch.as_mut() {
                 probe.head.extend_from_slice(&pcm);
+                probe.bench_window |= active_bench;
                 *remaining = remaining.saturating_sub(pcm.len());
                 let early = track_quiet(probe, &pcm, start_rms, quiet_needed).is_some();
                 if (early || *remaining == 0)
                     && let Some((probe, _)) = self.listen.stop_watch.take()
                 {
                     self.listen.follow.reset();
-                    self.check_for_stop_word(probe.head);
+                    self.check_for_stop_word(probe.head, probe.bench_window);
                 }
             } else if let Some(head) = self.listen.follow.accept(&pcm, false) {
                 self.event("工具执行中听到人声：听听是不是“停”".to_owned());
@@ -106,6 +111,7 @@ impl<'a> Session<'a> {
                     until: Instant::now(),
                     quiet: 0,
                     checking: false,
+                    bench_window: active_bench,
                 };
                 self.listen.stop_watch = Some((probe, self.samples_for(FOLLOW_CONFIRM)));
             }
@@ -123,9 +129,15 @@ impl<'a> Session<'a> {
                 }
                 let quiet_needed = self.samples_for(STOP_RECHECK_QUIET);
                 let start_rms = self.shared.config.vad.start_rms;
+                let active_bench = self
+                    .shared
+                    .is_bench_window_active_for_session(self.device_id, self.session_id)
+                    || self.turn.as_ref().is_some_and(|t| t.bench_window);
                 if let Some(probe) = self.listen.follow_probe.as_mut() {
                     // 确认中：后续帧接着交给判停模型，结果在 on_vad_result 里看
                     probe.head.extend_from_slice(&pcm);
+                    probe.bench_window |= active_bench;
+                    let probe_bench = probe.bench_window;
                     let early = track_quiet(probe, &pcm, start_rms, quiet_needed);
                     let expired = Instant::now() >= probe.until;
                     if let Some(worker) = self.vad_worker.as_mut() {
@@ -133,7 +145,7 @@ impl<'a> Session<'a> {
                     }
                     if let Some(head) = early {
                         // 这阵声音说完了：不等确认窗口到点，先复核是不是“停”（n115）
-                        self.check_for_stop_word(head);
+                        self.check_for_stop_word(head, probe_bench);
                     }
                     if expired && let Some(probe) = self.listen.follow_probe.take() {
                         self.listen.follow.reset();
@@ -143,7 +155,7 @@ impl<'a> Session<'a> {
                         );
                         self.event("思考中听到的声响，判停模型认为不是人声：照常回答".to_owned());
                         if !probe.checking {
-                            self.check_for_stop_word(probe.head);
+                            self.check_for_stop_word(probe.head, probe.bench_window);
                         }
                     }
                     return Ok(());
@@ -160,6 +172,7 @@ impl<'a> Session<'a> {
                         until: Instant::now() + FOLLOW_CONFIRM,
                         quiet: 0,
                         checking: false,
+                        bench_window: active_bench,
                     });
                     self.trace_record(
                         "follow_probe",
@@ -178,7 +191,7 @@ impl<'a> Session<'a> {
             let Some(head) = detected else {
                 return Ok(());
             };
-            return self.take_over(socket, head, may_follow_up).await;
+            return self.take_over(socket, head, may_follow_up, false).await;
         }
         self.record_uplink_level(crate::audio::pcm_rms_level(&pcm));
         if !self.listen.listen_manual
@@ -217,21 +230,28 @@ impl<'a> Session<'a> {
             })
     }
 
-    fn check_for_stop_word(&mut self, head: Vec<i16>) {
+    fn check_for_stop_word(&mut self, head: Vec<i16>, extra_bench: bool) {
         let Some(conversation) = self.conversation.clone() else {
             return;
         };
         if let Some(task) = self.listen.stop_check.take() {
             task.abort();
         }
+        let latched_bench = extra_bench
+            || self
+                .shared
+                .is_bench_window_active_for_session(self.device_id, self.session_id)
+            || self.turn.as_ref().is_some_and(|t| t.bench_window);
         let rate = self.uplink_rate;
         self.listen.stop_check = Some(tokio::spawn(async move {
-            let text = conversation.asr.transcribe(&head, rate).await.ok()?;
+            let Some(text) = conversation.asr.transcribe(&head, rate).await.ok() else {
+                return (None, latched_bench);
+            };
             let text = crate::conversation::apply_asr_corrections(
                 &text,
                 &conversation.settings.asr_corrections,
             );
-            crate::fast::is_stop(&text).then_some(text)
+            (crate::fast::is_stop(&text).then_some(text), latched_bench)
         }));
     }
 
@@ -241,7 +261,14 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         stop: Option<String>,
         source: crate::conversation::FastStopSource,
+        latched_bench: bool,
     ) -> Result<(), String> {
+        let stop_in_bench = latched_bench
+            || self.turn.as_ref().is_some_and(|t| t.bench_window)
+            || self.listen.paused.as_ref().is_some_and(|t| t.bench_window)
+            || self
+                .shared
+                .is_bench_window_active_for_session(self.device_id, self.session_id);
         let Some(text) = stop else {
             return Ok(());
         };
@@ -254,6 +281,7 @@ impl<'a> Session<'a> {
         if self.turn.is_some() || self.listen.paused.is_some() {
             self.interrupt(socket, "用户说停").await?;
         }
+        self.pending_bench_window = stop_in_bench;
         self.start_turn(TurnInput::FastStop { text, source }, TurnKind::Answer);
         Ok(())
     }
@@ -316,6 +344,7 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         head: Vec<i16>,
         may_follow_up: bool,
+        probe_bench: bool,
     ) -> Result<(), String> {
         let elapsed = self
             .listen
@@ -335,15 +364,26 @@ impl<'a> Session<'a> {
         if may_follow_up && !abandoned {
             return Ok(());
         }
-        let earlier = if abandoned {
+        let (earlier, earlier_bench) = if abandoned {
             if let Some(turn) = self.turn.as_mut() {
                 turn.user = None;
             }
-            self.listen.last_utterance.take()
+            (
+                self.listen.last_utterance.take(),
+                std::mem::take(&mut self.listen.last_utterance_bench_window),
+            )
         } else {
-            None
+            (None, false)
         };
         let follow_up = earlier.is_some();
+        // 在 pause / interrupt().await 之前先锁存测试时间窗，防止等待打断期间关窗导致已采集音频脱锁
+        let latched_bench = probe_bench
+            || earlier_bench
+            || self.turn.as_ref().is_some_and(|t| t.bench_window)
+            || self.listen.paused.as_ref().is_some_and(|t| t.bench_window)
+            || self
+                .shared
+                .is_bench_window_active_for_session(self.device_id, self.session_id);
         // 回答正在播：先暂停，等插话识别出来再定——真有话才打断，一声“嗯”或噪声就接着说
         let pause = !follow_up
             && matches!(self.phase, Phase::Speaking { .. })
@@ -402,6 +442,7 @@ impl<'a> Session<'a> {
         let head_level = crate::audio::pcm_rms_level(&head);
         if let Phase::Listening(recording) = &mut self.phase {
             recording.speaking = true;
+            recording.bench_window |= latched_bench;
             recording.speech_began_at = Some(self.recording_started);
             recording.speech_began_at_ms = Some(crate::unix_now_ms().saturating_sub(head_ms));
             recording.peak_uplink_level = head_level;
@@ -455,6 +496,12 @@ impl<'a> Session<'a> {
                 mode,
                 ..
             }) => {
+                if self.digital_feed.is_some()
+                    || self.next_turn_is_digital
+                    || self.pending_digital_ack.is_some()
+                {
+                    return Ok(());
+                }
                 if self.mqtt && !socket.audio_open() {
                     // 常连模式：这一轮已结束（goodbye 已发）。设备在收到 goodbye 前按固件逻辑
                     // 发出的 listen start 迟到了——不能再进聆听，更不能把“聆听”画面推回已待命的屏幕
@@ -503,6 +550,12 @@ impl<'a> Session<'a> {
                 state: ListenState::Stop,
                 ..
             }) => {
+                if self.digital_feed.is_some()
+                    || self.next_turn_is_digital
+                    || self.pending_digital_ack.is_some()
+                {
+                    return Ok(());
+                }
                 self.trace_record("listen_stop", serde_json::json!({}));
                 self.finish_listen_stop(socket).await?;
             }
@@ -512,6 +565,12 @@ impl<'a> Session<'a> {
                 ..
             }) => {
                 self.event(format!("唤醒：{}", text.unwrap_or_default()));
+                if self.digital_feed.is_some()
+                    || self.next_turn_is_digital
+                    || self.pending_digital_ack.is_some()
+                {
+                    return Ok(());
+                }
                 let reply = self
                     .conversation
                     .as_ref()

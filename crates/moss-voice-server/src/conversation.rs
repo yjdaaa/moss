@@ -1305,6 +1305,8 @@ struct Turn {
     tool_descriptions: Mutex<HashMap<String, String>>,
     /// VA1/VA2 模拟联调轮次标记：开启时强制在工具执行入口拦截所有物理/外部/重启控制并跳过记忆提取
     simulated: bool,
+    /// VC1 工具/急停执行当刻的实时测试时间窗检查（防止真实轮次思考期间中段开窗后绕过门禁）
+    live_bench_window: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// 命令词类别的中文名（完整过程记录用）。
@@ -1553,7 +1555,9 @@ impl Turn {
         self.timing("fast_route");
         if stop {
             self.send(TurnEvent::Route("fast_stop"));
-            if self.simulated {
+            let effective_simulated =
+                self.simulated || self.live_bench_window.as_ref().is_some_and(|check| check());
+            if effective_simulated {
                 let active_job = self
                     .conversation
                     .tools
@@ -2258,6 +2262,7 @@ impl Turn {
             let events = self.events.clone();
             let turn_trace = self.turn_trace.clone();
             let simulated = self.simulated;
+            let live_bench_window = self.live_bench_window.clone();
             set.spawn(async move {
                 let began = Instant::now();
                 let device_target = device
@@ -2268,7 +2273,9 @@ impl Turn {
                             .original(&call.function.name)
                             .map(|name| (device, name))
                     });
-                let blocked_reason = if simulated {
+                let effective_simulated =
+                    simulated || live_bench_window.as_ref().is_some_and(|check| check());
+                let blocked_reason = if effective_simulated {
                     let trusted_ro = tools.trusted_read_only(&call.function.name);
                     crate::sim_guard::check_simulated_tool(
                         &call.function.name,
@@ -3350,6 +3357,7 @@ pub fn spawn_turn_gated(
         gate,
         None,
         simulated,
+        None,
     )
 }
 
@@ -3364,6 +3372,7 @@ pub(crate) fn spawn_turn_traced(
     gate: Option<TurnGate>,
     turn_trace: Option<TurnTrace>,
     simulated: bool,
+    live_bench_window: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> (
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
@@ -3391,6 +3400,7 @@ pub(crate) fn spawn_turn_traced(
         tts_sentences: Default::default(),
         tool_descriptions: Mutex::default(),
         simulated,
+        live_bench_window,
     };
     let handle = tokio::spawn(async move {
         match input {

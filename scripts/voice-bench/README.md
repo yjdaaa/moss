@@ -5,7 +5,7 @@
 ## 前提条件
 
 1. 在 MOSS 桌面端主窗口打开 **语音中心 → 服务 → 内置语音服务**，确认内置语音服务正在运行且处于 **对话模式**。
-2. 勾选 **“允许本机 AI 调试注入”** 并完成二次确认。开启后：
+2. 打开 **语音中心 → 记录与诊断 → AI 联调与测试**，勾选 **“允许本机 AI 调试注入”** 并完成二次确认。开启后：
    - MOSS 仅在 `127.0.0.1` 开放受限调试入口（默认端口 `18009`，被占用时自动顺延并记录在 `<runtime>/debug/voice-debug.json`）；
    - 在运行目录生成 `<runtime>/debug/voice-debug.token`（权限 `0600`），关闭开关或开启满 24 小时自动作废；
    - 所有模拟轮次强制带模拟标记，工具执行入口硬拦截发送雕刻、移动、回零、解锁、倍率、家居控制、本机 Agent 与固件/唤醒词推送，且绝不写入长期记忆或人物资料。
@@ -63,9 +63,9 @@ node scripts/voice-bench/live-xiaozhi-debug.mjs
 
 ## 前提条件
 
-1. 在 MOSS 桌面端主窗口打开 **语音中心 → 记录与诊断 → 识别语料**。
-2. 勾选 **“保存最近的识别录音用于测评”** 并完成二次确认（默认关闭，仅存本机 `<runtime>/asr-corpus/<日期>/`，不进诊断包与过程记录，不用于声纹识别；模拟轮次不保存）。
-3. 对着真实小智说测试语料，随后在 **“识别语料”** 面板逐条试听并点 **“✓ 正确”** 或修改“正确文字”保存标注（可附加标签：`命令词`、`数字`、`材料名`、`有噪声`），生成 `<turn-id>.label.json`。
+1. 在 MOSS 桌面端主窗口打开 **语音中心 → 记录与诊断 → 对话记录与排障**。
+2. 勾选 **“同时保存完整过程记录与原始录音（按音源打标，供离线识别测评复用）”**（录音按日期落盘 `<runtime>/logs/process-trace/<日期>/voice-files/`，并在时间线与 `.label.json` 显式区分 `live_mic` / `e2e_playback` / `digital_inject` / `text_inject` 4 种音源；兼容独立语料目录 `<runtime>/asr-corpus/<日期>/`）。
+3. 对着真实小智说测试语料，随后在 **“对话记录与排障”** 逐条点击 **“▶ 听录音”**、**“✓ 识别正确”** 或 **“纠偏此句 → 加入同音纠偏”** 保存真值标注，生成与对应录音同名的 `<录音前缀>.label.json`。
 
 ## 运行方式
 
@@ -77,7 +77,7 @@ node scripts/voice-bench/asr-bench.mjs
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `--corpus-dir <path>` | 已标注语料目录 | `<runtime>/asr-corpus` |
+| `--corpus-dir <path>` | 显式指定单一已标注语料目录（传入时仅扫描该目录） | 同时扫描 `<runtime>/asr-corpus` 与 `<runtime>/logs/process-trace`（自动读取自定义过程记录目录） |
 | `--runtime-dir <path>` | MOSS 运行目录（用于发现已安装本地模型、云端配置与写出归档） | 系统默认运行目录 |
 | `--noise-levels <list>` | 噪声档位（复用 `chain_clips.py`，经 `python3 -I` 混噪）：`0`/`clean` 安静、`888`/`fan`/`machine` 排风扇气泵持续噪声、`999`/`pump`/`burst` 气泵咔嗒敲击突发噪声 | `0,888,999` |
 | `--models <list>` | 指定要测的模型 ID（逗号分隔），如 `sense_voice,qwen3_asr_0_6b,cloud` | 自动测试全部已安装本地 ASR 模型及已配置的云端 ASR |
@@ -95,7 +95,7 @@ node scripts/voice-bench/asr-bench.mjs
 **安全规则**：
 - 同音纠错候选严禁把任何内容映射成停止/退出等命令词，也不允许改写命令词本身；违规候选直接丢弃并在报告里注明。
 - 所有候选只写入 `suggestions.json`，脚本绝不自动修改代码或 `settings.json`；是否采纳由人或 AI 复核并补测试决定。
-- 若语料中同时包含手工标注（`manual`）与整体测试自动回采（`e2e-playback`）条目，报告会按 `label_source` 分组展示指标，避免外放回采与真人原声混淆。
+- 若语料中包含不同音源（`live_mic` 小智实时说话、`e2e_playback` 整体测试外放录音、`digital_inject` 数字录音直通），报告会按 `input_source` 分组展示指标，避免外放回采、数字直通与现场真人原声混淆。
 - 脚本退出前打印归档目录路径；未找到任何已标注语料时提示先开采集与标注，并返回非 `0` 状态码。
 
 ---
@@ -109,7 +109,7 @@ node scripts/voice-bench/asr-bench.mjs
 1. 在 MOSS 桌面端主窗口打开 **语音中心 → 记录与诊断 → AI 联调与测试**：
    - 在 **“录制测试语料”** 中至少录完一位说话人的全部语料（使用电脑麦克风录制 16 kHz 单声道 WAV，存放在本机 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}`，支持多位说话人标签，不进诊断包、不用于声纹）；
    - 勾选 **“允许本机 AI 调试注入”** 并完成二次确认；
-   - （可选推荐）在同一分组开启 **“识别语料”** 采集，整体测试会自动为外放录音回写 `label_source: "e2e-playback"`（带说话人标签）。
+   - （可选推荐）在下方 **“对话记录与排障”** 勾选 **“同时保存完整过程记录与原始录音”**，整体测试会自动为外放录音回写 `input_source: "e2e_playback"` 与 `label_source: "e2e-playback"`（带说话人标签）。
 2. 唤醒真小智（喊“你好小智”或按对话键），或开启常连模式让设备保持在线。
 3. 将小智摆放在距离电脑喇叭 **30–50 cm** 处，调至适中音量（避免过小拾不到音或过大爆音）。
 4. 确认本机播放器可用：macOS 用 `afplay`、Windows 用 PowerShell `System.Media.SoundPlayer`、Linux 用 `paplay` 或 `aplay`。
@@ -166,7 +166,7 @@ node scripts/voice-bench/xiaozhi-e2e.mjs
 - `summary.json`：各环节通过率、按说话人指标 `by_speaker`、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
 - `audio-manifest.json`：外放音频清单（仅文件名、说话人标签、来源类型与时长，绝不复制用户原始录音）。
 
-若桌面端开启了 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会自动生成 `<turn-id>.label.json`（正确文字 = 外放原句，`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
+若开启了完整过程记录（默认开跑期间自动打开）或独立的 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会按对应录音文件名自动生成 `<录音前缀>.label.json`（不覆盖已有标注，正确文字 = 外放原句，`input_source: "e2e_playback"`、`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
 
 ## 语料编写规范
 

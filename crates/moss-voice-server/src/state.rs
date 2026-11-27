@@ -68,6 +68,12 @@ pub struct TurnDetail {
     pub simulated_label: Option<String>,
     #[serde(default)]
     pub digital_audio: bool,
+    #[serde(default)]
+    pub input_source: String,
+    #[serde(default)]
+    pub input_source_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_audio_file: Option<String>,
     pub status: String,
     pub outcome: String,
     pub route: String,
@@ -132,6 +138,12 @@ pub struct TurnDebugTrace {
     /// VC1 整体测试时间窗标记：窗口内真实音频轮次按模拟处理，前端对话记录显示“模拟（整体测试）”。
     #[serde(default)]
     pub bench_window: bool,
+    /// 本轮音源标识（`live_mic` / `e2e_playback` / `digital_inject` / `text_inject`）。
+    #[serde(default)]
+    pub input_source: String,
+    /// 完整过程记录开启时落盘的用户录音相对路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_audio_file: Option<String>,
 }
 
 pub fn scrub_debug_text(raw: &str) -> String {
@@ -1156,6 +1168,7 @@ mod tests {
             tools_dropped: 0,
             simulated: false,
             bench_window: false,
+            ..TurnDebugTrace::default()
         };
         assert!(state.finish_debug_trace(sample(1)).is_none());
         assert!(
@@ -1257,6 +1270,7 @@ mod tests {
                 tools_dropped: 0,
                 simulated: false,
                 bench_window: false,
+                ..TurnDebugTrace::default()
             })
             .unwrap();
         let serialized = serde_json::to_string(&trace).unwrap();

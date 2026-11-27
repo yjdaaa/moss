@@ -824,3 +824,109 @@ test("VC2 背景噪声生成脚本（python3 -I asr_noise_mix.py --generate-nois
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("审查回归：时间窗中途关闭立即中止不外放、服务端时间戳检出重叠、自动标注不覆盖人工标注、Windows 路径全脱敏", async () => {
+  const { redactText, redactValue } = await import("../voice-bench/bench-common.mjs");
+  const { buildTurnAttribution } = await import("../voice-bench/xiaozhi-e2e.mjs");
+
+  // 1. Windows 双反斜杠/正斜杠路径、转义引号凭据与驼峰/连字符键全脱敏
+  const rawWin = String.raw`{"path":"C:\\Users\\alice\\AppData\\Roaming\\moss\\a.gcode","alt":"C:/Users/alice/test.wav","log":"{\"token\":\"supersecret123456\"}"}`;
+  const redWin = redactText(rawWin, { paths: ["C:\\Users\\alice\\AppData\\Roaming\\moss"] });
+  assert.ok(!redWin.includes("alice"), `Windows 用户名不得残留：${redWin}`);
+  assert.ok(!redWin.includes("supersecret123456"), `转义引号令牌不得残留：${redWin}`);
+  const redObj = redactValue({ apiKey: "k12345678", accessToken: "t12345678", "x-api-key": "x12345678", token_file: "debug/voice-debug.token" });
+  assert.equal(redObj.apiKey, "[REDACTED]");
+  assert.equal(redObj.accessToken, "[REDACTED]");
+  assert.equal(redObj["x-api-key"], "[REDACTED]");
+  assert.equal(redObj.token_file, "debug/voice-debug.token", "非密钥的相对路径字段不应被误杀");
+
+  // 2. 服务端首帧早于外放结束必须检出 overlap_detected = true
+  const attr = buildTurnAttribution({
+    spec: { text: "帮我做一个木牌预览" },
+    playback: { started_at_ms: 1000, ended_at_ms: 3000, duration_ms: 2000 },
+    detail: {
+      injected_text: "帮我做一个木牌预览",
+      corrected_text: "帮我做一个木牌预览",
+      first_audio_frame_at_ms: 2500,
+      route: "llm",
+      outcome: "ok",
+      reply: "好的",
+      playback: { frames: 10, underruns: 0, stall_ms: 0 },
+    },
+    overlapDetected: false,
+  });
+  assert.equal(attr.capture_endpoint.overlap_detected, true);
+  assert.equal(attr.capture_endpoint.passed, false);
+
+  // 3. 中途测试时间窗关闭时，第二句绝不得调用 playWav
+  const token = "reg-toctou-token-0123456789abcdef0123456789abcd";
+  const runtimeDir = setupRuntimeWithToken("moss-reg-toctou-", token);
+  const corpusPath = join(runtimeDir, "two-turns.json");
+  writeHumanRecording(runtimeDir, "我", "t1", "激光机状态", 440);
+  writeHumanRecording(runtimeDir, "我", "t2", "直接开始雕刻吧", 520);
+  writeFileSync(
+    corpusPath,
+    JSON.stringify({
+      name: "toctou-check",
+      turns: [
+        { id: "t1", label: "第1句", text: "激光机状态" },
+        { id: "t2", label: "第2句高危", text: "直接开始雕刻吧", expect_simulation_gate: true },
+      ],
+    }),
+    "utf8",
+  );
+  // 预先在 asr-corpus 放置已有人工标注，验证自动标注不会覆盖它
+  const corpusDay = join(runtimeDir, "asr-corpus", "2026-11-27");
+  mkdirSync(corpusDay, { recursive: true });
+  makeSyntheticWav(join(corpusDay, "manual-turn-1.wav"), 0.5, 440);
+  writeFileSync(join(corpusDay, "manual-turn-1.json"), JSON.stringify({ turn_id: "manual-turn-1", date: "2026-11-27" }), "utf8");
+  writeFileSync(
+    join(corpusDay, "manual-turn-1.label.json"),
+    JSON.stringify({ turn_id: "manual-turn-1", date: "2026-11-27", reference_text: "人工精校原文", label_source: "manual" }),
+    "utf8",
+  );
+
+  let playCount = 0;
+  const fakeServer = await startFakeE2eServer({
+    token,
+    runtimeDir,
+    onAcousticTurn: () => ({
+      raw_asr: "激光机状态",
+      route: "fast_read",
+      peak_uplink_level: 50,
+      corpus_date: "2026-11-27",
+      corpus_turn_id: "manual-turn-1",
+    }),
+  });
+  try {
+    const res = await runXiaozhiE2e({
+      runtimeDir,
+      url: fakeServer.url,
+      corpus: corpusPath,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      playWavFn: async (_wavPath, { spec }) => {
+        playCount += 1;
+        const started = Date.now();
+        const ended = started + 60;
+        fakeServer.simulateAcousticPlayback({ spec, playbackStartedAtMs: started, playbackEndedAtMs: ended });
+        // 第 1 句刚播完就模拟用户点“立即结束测试”关闭时间窗
+        await fetch(`${fakeServer.url}/debug/v1/bench-window`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ device_id: "aa:bb:cc:dd:ee:01", action: "close" }),
+        });
+        return { started_at_ms: started, ended_at_ms: ended, duration_ms: 60 };
+      },
+    });
+    assert.equal(playCount, 1, "时间窗关闭后绝不得再外放第 2 句高危语料");
+    assert.equal(res.exitCode, 1);
+    const preservedLabel = JSON.parse(readFileSync(join(corpusDay, "manual-turn-1.label.json"), "utf8"));
+    assert.equal(preservedLabel.label_source, "manual", "自动标注绝不得覆盖已有人工标注");
+    assert.equal(preservedLabel.reference_text, "人工精校原文");
+  } finally {
+    await fakeServer.close();
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});

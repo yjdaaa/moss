@@ -19,6 +19,32 @@ impl<'a> Session<'a> {
         self.listen.last_loud = None;
         self.listen.playback_started = None;
         self.listen.barge_resumed = false;
+        let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
+        let is_text_inject = matches!(&input, TurnInput::Text { .. });
+        let latched_bench_window = std::mem::take(&mut self.pending_bench_window);
+        let in_bench_window = kind == TurnKind::Answer
+            && (latched_bench_window
+                || self
+                    .shared
+                    .is_bench_window_active_for_session(self.device_id, self.session_id));
+        let digital_audio =
+            kind == TurnKind::Answer && std::mem::take(&mut self.next_turn_is_digital);
+        let simulated = in_bench_window
+            || digital_audio
+            || matches!(
+                &input,
+                TurnInput::Text {
+                    simulated: true,
+                    ..
+                }
+            );
+        let simulated_label = if in_bench_window {
+            Some("模拟（整体测试）".to_owned())
+        } else if simulated {
+            Some("模拟".to_owned())
+        } else {
+            None
+        };
         // 对暂停中的回答的插话：先只做识别，确认不是附和后才请求大模型
         let hold_llm = self.listen.paused.is_some();
         let silence_ended = std::mem::take(&mut self.listen.gate_next_turn);
@@ -44,8 +70,8 @@ impl<'a> Session<'a> {
                     fresh_history: fresh_history.clone(),
                     allow_silent: !self.listen.listen_manual
                         && conversation.settings.ignore_bystanders,
-                    // 声纹按人记忆开启时历史按人提交，后台结果不知道该记给谁：不转后台
-                    allow_background: conversation.personal_context.is_none(),
+                    // 模拟轮次与声纹按人记忆开启时不转后台查询，避免时间窗关闭后播报泄漏进长期记忆
+                    allow_background: !simulated && conversation.personal_context.is_none(),
                     command_hint: command_hint.clone(),
                     command_hint_until: self.listen.kws_tail_until.map(Instant::into_std),
                 }),
@@ -58,6 +84,8 @@ impl<'a> Session<'a> {
             TurnInput::Utterance { pcm, .. } if silence_ended => Some(pcm.clone()),
             _ => None,
         };
+        self.listen.last_utterance_bench_window =
+            self.listen.last_utterance.is_some() && in_bench_window;
         // 上一轮还没收尾就被这一轮接上：先把它已合成的语音与结果记下
         self.trace_turn_end("replaced");
         self.turn_number += 1;
@@ -66,7 +94,15 @@ impl<'a> Session<'a> {
             .as_ref()
             .filter(|t| t.enabled())
             .map(laser_runtime::ProcessTrace::scoped);
-        self.trace_turn_input(&input, kind, turn_trace.as_ref());
+        let (input_source, input_source_label) =
+            trace::classify_turn_input_source(is_text_inject, digital_audio, in_bench_window);
+        let trace_audio_file = self.trace_turn_input(
+            &input,
+            kind,
+            in_bench_window,
+            digital_audio,
+            turn_trace.as_ref(),
+        );
         let trace_tts = turn_trace.as_ref().map(|_| Vec::new());
         let recording_offset =
             if kind == TurnKind::Answer && !matches!(&input, TurnInput::Text { .. }) {
@@ -74,28 +110,6 @@ impl<'a> Session<'a> {
             } else {
                 0
             };
-        let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
-        let is_text_inject = matches!(&input, TurnInput::Text { .. });
-        let in_bench_window =
-            kind == TurnKind::Answer && self.shared.is_bench_window_active(self.device_id);
-        let digital_audio =
-            kind == TurnKind::Answer && std::mem::take(&mut self.next_turn_is_digital);
-        let simulated = in_bench_window
-            || digital_audio
-            || matches!(
-                &input,
-                TurnInput::Text {
-                    simulated: true,
-                    ..
-                }
-            );
-        let simulated_label = if in_bench_window {
-            Some("模拟（整体测试）".to_owned())
-        } else if simulated {
-            Some("模拟".to_owned())
-        } else {
-            None
-        };
         let injected_text = match &input {
             TurnInput::Text { text, .. } => Some(text.clone()),
             _ => None,
@@ -248,6 +262,9 @@ impl<'a> Session<'a> {
                 bench_window: in_bench_window,
                 simulated_label,
                 digital_audio,
+                input_source: input_source.into(),
+                input_source_label: input_source_label.into(),
+                trace_audio_file: trace_audio_file.clone(),
                 status: "running".into(),
                 outcome: "running".into(),
                 route: "running".into(),
@@ -290,6 +307,18 @@ impl<'a> Session<'a> {
             flow: turn_flow(self.device_id, self.turn_number),
             turn: self.turn_number,
         };
+        let live_bench_window: Option<Arc<dyn Fn() -> bool + Send + Sync>> =
+            if kind == TurnKind::Answer {
+                let gate = self.shared.debug_gate.clone();
+                let windows = self.shared.bench_windows.clone();
+                let dev_id = self.device_id.to_owned();
+                let sid = self.session_id.to_owned();
+                Some(Arc::new(move || {
+                    gate.is_enabled_valid() && windows.active_for_session(&dev_id, &sid).is_some()
+                }))
+            } else {
+                None
+            };
         let (handle, events) = crate::conversation::spawn_turn_traced(
             conversation,
             context,
@@ -300,6 +329,7 @@ impl<'a> Session<'a> {
             gate,
             Some(direct_trace),
             simulated,
+            live_bench_window,
         );
         if let Some(mut replaced) = self.turn.replace(ActiveTurn {
             turn_number: self.turn_number,
@@ -347,6 +377,9 @@ impl<'a> Session<'a> {
             simulated,
             bench_window: in_bench_window,
             digital_audio,
+            input_source,
+            input_source_label,
+            trace_audio_file,
             started_at_ms,
             speech_began_at_ms,
             speech_end_at_ms,

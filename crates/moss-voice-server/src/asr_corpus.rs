@@ -150,10 +150,15 @@ impl AsrCorpusStore {
         initial: AsrCorpusConfig,
         now_ms_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> Self {
+        let clamped = AsrCorpusConfig {
+            enabled: initial.enabled,
+            max_items: initial.max_items.clamp(1, 5000),
+            max_days: initial.max_days.clamp(1, 90),
+        };
         Self {
             root,
-            enabled: AtomicBool::new(initial.enabled),
-            config: RwLock::new(initial),
+            enabled: AtomicBool::new(clamped.enabled),
+            config: RwLock::new(clamped),
             io_lock: Mutex::new(()),
             now_ms_fn,
         }
@@ -181,10 +186,14 @@ impl AsrCorpusStore {
             max_items: next.max_items.clamp(1, 5000),
             max_days: next.max_days.clamp(1, 90),
         };
-        if let Ok(mut guard) = self.config.write() {
+        {
+            let mut guard = self
+                .config
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *guard = clamped;
+            self.enabled.store(clamped.enabled, Ordering::Release);
         }
-        self.enabled.store(clamped.enabled, Ordering::Release);
         let _io = self
             .io_lock
             .lock()
@@ -303,18 +312,23 @@ impl AsrCorpusStore {
             return Err("识别录音文件无效或超出大小上限".into());
         }
         let bytes = fs::read(&wav_path).map_err(|e| format!("读取识别录音失败：{e}"))?;
-        let duration_ms = fs::read_to_string(day_dir.join(format!("{turn_id}.json")))
-            .ok()
-            .and_then(|s| serde_json::from_str::<AsrCorpusMeta>(&s).ok())
-            .map(|m| m.duration_ms)
-            .unwrap_or_else(|| {
-                bytes
-                    .len()
-                    .saturating_sub(44)
-                    .saturating_div(2)
-                    .saturating_mul(1000) as u64
-                    / u64::from(ASR_CORPUS_SAMPLE_RATE)
-            });
+        let meta_path = day_dir.join(format!("{turn_id}.json"));
+        let duration_ms = if is_symlink(&meta_path) {
+            None
+        } else {
+            fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<AsrCorpusMeta>(&s).ok())
+                .map(|m| m.duration_ms)
+        }
+        .unwrap_or_else(|| {
+            bytes
+                .len()
+                .saturating_sub(44)
+                .saturating_div(2)
+                .saturating_mul(1000) as u64
+                / u64::from(ASR_CORPUS_SAMPLE_RATE)
+        });
         Ok((bytes, duration_ms))
     }
 
@@ -340,6 +354,8 @@ impl AsrCorpusStore {
         reject_symlink(&day_dir)?;
         let meta_path = day_dir.join(format!("{turn_id}.json"));
         let wav_path = day_dir.join(format!("{turn_id}.wav"));
+        reject_symlink(&meta_path)?;
+        reject_symlink(&wav_path)?;
         if !meta_path.is_file() || !wav_path.is_file() {
             return Err("该识别语料不存在或已被清理".into());
         }
@@ -670,7 +686,7 @@ fn normalize_tags(tags: &[String]) -> Result<Vec<String>, String> {
 
 fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
+        .map(|m| crate::safe_fs::is_link_or_reparse(&m))
         .unwrap_or(false)
 }
 
@@ -683,41 +699,69 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 
 fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     reject_symlink(dir)?;
+    if let Some(parent) = dir.parent() {
+        reject_symlink(parent)?;
+    }
     fs::create_dir_all(dir).map_err(|e| format!("创建识别语料目录失败：{e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("设置识别语料目录权限失败：{e}"))?;
     }
     Ok(())
 }
 
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let mut rnd = [0u8; 8];
+    let _ = getrandom::fill(&mut rnd);
+    let suffix = u64::from_le_bytes(rnd);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("corpus");
+    path.with_file_name(format!(
+        ".{file_name}.tmp.{}.{suffix:016x}",
+        std::process::id()
+    ))
+}
+
 fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     reject_symlink(path)?;
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_tmp_path(path);
     reject_symlink(&tmp)?;
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
+    let write_res: Result<(), String> = (|| {
+        let mut opts = fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts
             .open(&tmp)
-            .map_err(|e| format!("写入语料临时文件失败：{e}"))?;
+            .map_err(|e| format!("创建语料临时文件失败：{e}"))?;
         file.write_all(bytes)
             .map_err(|e| format!("写入语料内容失败：{e}"))?;
         file.sync_all()
             .map_err(|e| format!("落盘语料文件失败：{e}"))?;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("设置语料文件权限失败：{e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
-    #[cfg(not(unix))]
-    {
-        fs::write(&tmp, bytes).map_err(|e| format!("写入语料临时文件失败：{e}"))?;
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("替换语料文件失败：{err}"));
     }
-    fs::rename(&tmp, path).map_err(|e| format!("替换语料文件失败：{e}"))?;
     Ok(())
 }
 
@@ -933,5 +977,32 @@ mod tests {
         let listed_after_days = store.list().unwrap();
         assert_eq!(listed_after_days.len(), 1);
         assert_eq!(listed_after_days[0].meta.turn, 6);
+    }
+
+    #[test]
+    fn initial_zero_limits_are_clamped_and_never_wipe_fresh_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(1_760_000_000_000));
+        let clock = now.clone();
+        let store = AsrCorpusStore::with_clock(
+            dir.path().join("asr-corpus"),
+            AsrCorpusConfig {
+                enabled: true,
+                max_items: 0,
+                max_days: 0,
+            },
+            Arc::new(move || clock.load(Ordering::Acquire)),
+        );
+        assert_eq!(store.config().max_items, 1);
+        assert_eq!(store.config().max_days, 1);
+        store
+            .record(sample_utterance(
+                1,
+                now.load(Ordering::Acquire),
+                false,
+                16_000,
+            ))
+            .unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
     }
 }

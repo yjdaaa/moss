@@ -158,6 +158,22 @@ fn default_asr_corpus_max_days() -> u32 {
     DEFAULT_ASR_CORPUS_MAX_DAYS
 }
 
+fn deserialize_asr_corpus_max_items<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u32::deserialize(deserializer)?;
+    Ok(raw.clamp(1, 5000))
+}
+
+fn deserialize_asr_corpus_max_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u32::deserialize(deserializer)?;
+    Ok(raw.clamp(1, 90))
+}
+
 pub fn validate_asr_corpus_max_items(count: u64) -> Result<u32, String> {
     if (1..=5000).contains(&count) {
         Ok(count as u32)
@@ -785,10 +801,16 @@ pub struct BuiltinLocal {
     #[serde(default)]
     pub asr_corpus_capture_enabled: bool,
     /// 识别语料最多保留条数（默认 500，与天数上限先到者先清理）
-    #[serde(default = "default_asr_corpus_max_items")]
+    #[serde(
+        default = "default_asr_corpus_max_items",
+        deserialize_with = "deserialize_asr_corpus_max_items"
+    )]
     pub asr_corpus_max_items: u32,
     /// 识别语料最多保留天数（默认 7 天，与条数上限先到者先清理）
-    #[serde(default = "default_asr_corpus_max_days")]
+    #[serde(
+        default = "default_asr_corpus_max_days",
+        deserialize_with = "deserialize_asr_corpus_max_days"
+    )]
     pub asr_corpus_max_days: u32,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,

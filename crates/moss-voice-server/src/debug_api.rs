@@ -16,8 +16,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -73,8 +74,9 @@ impl BenchWindowEntry {
 }
 
 /// VC1 按设备维度管理的测试时间窗状态存储。
+#[derive(Clone)]
 pub struct BenchWindowStore {
-    entries: Mutex<BTreeMap<String, BenchWindowEntry>>,
+    entries: Arc<Mutex<BTreeMap<String, BenchWindowEntry>>>,
     now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
@@ -87,7 +89,7 @@ impl Default for BenchWindowStore {
 impl BenchWindowStore {
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(BTreeMap::new()),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
             now_fn: Arc::new(crate::unix_now),
         }
     }
@@ -95,7 +97,7 @@ impl BenchWindowStore {
     #[cfg(test)]
     pub fn with_clock(now_fn: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         Self {
-            entries: Mutex::new(BTreeMap::new()),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
             now_fn,
         }
     }
@@ -203,8 +205,41 @@ impl BenchWindowStore {
         (now < entry.expires_at && now_inst < entry.deadline).then(|| entry.to_view(true))
     }
 
-    pub fn next_deadline_for(&self, device_id: &str) -> Option<Instant> {
-        self.entries.lock().ok()?.get(device_id).map(|e| e.deadline)
+    pub fn active_for_session(&self, device_id: &str, session_id: &str) -> Option<BenchWindowView> {
+        let now = (self.now_fn)();
+        let now_inst = Instant::now();
+        let guard = self.entries.lock().ok()?;
+        let entry = guard.get(device_id)?;
+        (entry.session_id == session_id && now < entry.expires_at && now_inst < entry.deadline)
+            .then(|| entry.to_view(true))
+    }
+
+    pub fn next_deadline_for_session(&self, device_id: &str, session_id: &str) -> Option<Instant> {
+        let guard = self.entries.lock().ok()?;
+        let entry = guard.get(device_id)?;
+        (entry.session_id == session_id).then_some(entry.deadline)
+    }
+
+    pub fn prune_inactive<F>(&self, mut is_session_active: F) -> Vec<BenchWindowView>
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        let Ok(mut guard) = self.entries.lock() else {
+            return Vec::new();
+        };
+        let stale_keys: Vec<String> = guard
+            .iter()
+            .filter_map(|(dev, entry)| {
+                (!is_session_active(dev, &entry.session_id)).then_some(dev.clone())
+            })
+            .collect();
+        let mut out = Vec::with_capacity(stale_keys.len());
+        for key in stale_keys {
+            if let Some(entry) = guard.remove(&key) {
+                out.push(entry.to_view(false));
+            }
+        }
+        out
     }
 
     pub fn list_active(&self) -> Vec<BenchWindowView> {
@@ -377,6 +412,18 @@ impl DebugApiGate {
                 }),
             ));
         }
+        if let Some(raw_host) = headers.get(axum::http::header::HOST) {
+            let valid_host = raw_host.to_str().ok().is_some_and(is_allowed_loopback_host);
+            if !valid_host {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": "host_not_allowed",
+                        "message": "调试入口仅接受回环 Host 请求"
+                    }),
+                ));
+            }
+        }
         if headers.contains_key(axum::http::header::ORIGIN) {
             return Err((
                 StatusCode::FORBIDDEN,
@@ -470,6 +517,53 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn is_allowed_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let (name, port) = if trimmed.starts_with('[') {
+        let Some(end) = trimmed.find(']') else {
+            return false;
+        };
+        let rest = &trimmed[end + 1..];
+        let port = match rest {
+            "" => None,
+            _ => match rest.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return false,
+            },
+        };
+        (&trimmed[..=end], port)
+    } else {
+        match trimmed.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (trimmed, None),
+        }
+    };
+    if let Some(port) = port
+        && (port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(v4) = name.parse::<Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    if let Some(inner) = name.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        && let Ok(v6) = inner.parse::<std::net::Ipv6Addr>()
+    {
+        return v6.is_loopback();
+    }
+    false
+}
+
+const DEBUG_JSON_BODY_LIMIT: usize = 64 * 1024;
+const DEBUG_AUDIO_BODY_LIMIT: usize = 2_400_000;
+const DEBUG_MAX_CONCURRENT_REQUESTS: usize = 16;
+
 #[derive(Clone)]
 pub(crate) struct DebugApiState {
     pub shared: Arc<Shared>,
@@ -478,8 +572,39 @@ pub(crate) struct DebugApiState {
     pub active_laser_job: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
+async fn debug_auth_and_limit_middleware(
+    State((gate, limit)): State<(Arc<DebugApiGate>, Arc<tokio::sync::Semaphore>)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Err((status, body)) = gate.verify(req.headers(), peer) {
+        return json_error(status, body);
+    }
+    let Ok(_permit) = limit.try_acquire_owned() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "error": "too_many_requests",
+                "message": "调试入口并发请求过多，请稍后重试"
+            }),
+        );
+    };
+    next.run(req).await
+}
+
 /// 构建本机调试入口 axum 路由（VA2 #5 + VC1 测试时间窗 + VC2 时间窗内数字音频对照）。
 pub(crate) fn router(state: DebugApiState) -> Router {
+    let mw_state = (
+        state.gate.clone(),
+        Arc::new(tokio::sync::Semaphore::new(DEBUG_MAX_CONCURRENT_REQUESTS)),
+    );
+    let audio_route = Router::new()
+        .route(
+            "/debug/v1/devices/{device_id}/inject-audio",
+            post(inject_audio),
+        )
+        .layer(DefaultBodyLimit::max(DEBUG_AUDIO_BODY_LIMIT));
     Router::new()
         .route("/debug/v1/devices", get(list_devices))
         .route(
@@ -487,14 +612,16 @@ pub(crate) fn router(state: DebugApiState) -> Router {
             get(list_device_turns),
         )
         .route("/debug/v1/devices/{device_id}/inject", post(inject_text))
-        .route(
-            "/debug/v1/devices/{device_id}/inject-audio",
-            post(inject_audio),
-        )
         .route("/debug/v1/bench-window", post(control_bench_window))
         .route("/debug/v1/turns/{turn_id}", get(get_turn_detail))
         .route("/debug/v1/process-trace", post(toggle_process_trace))
+        .layer(DefaultBodyLimit::max(DEBUG_JSON_BODY_LIMIT))
+        .merge(audio_route)
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            mw_state,
+            debug_auth_and_limit_middleware,
+        ))
 }
 
 /// 严格绑定 `127.0.0.1`，绝不监听 `0.0.0.0` 或局域网地址。
@@ -521,20 +648,13 @@ fn json_error(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-async fn list_devices(
-    State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err((status, body)) = state.gate.verify(&headers, peer) {
-        return json_error(status, body);
-    }
+async fn list_devices(State(state): State<DebugApiState>) -> Response {
     let sessions = state.shared.active_device_sessions();
     let bench_windows = state.shared.bench_windows.list_active();
     let active_laser_job = match state.active_laser_job.clone() {
         Some(probe) => tokio::task::spawn_blocking(move || probe())
             .await
-            .unwrap_or(false),
+            .unwrap_or(true),
         None => false,
     };
     let devices: Vec<Value> = sessions
@@ -580,14 +700,9 @@ struct DeviceTurnsQuery {
 
 async fn list_device_turns(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
     Query(query): Query<DeviceTurnsQuery>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     state.shared.sync_bench_windows();
     let limit = query.limit.unwrap_or(20).clamp(1, 50);
     let turns = state
@@ -617,13 +732,8 @@ struct BenchWindowBody {
 
 async fn control_bench_window(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Json(body): Json<BenchWindowBody>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     let device_id = body.device_id.trim();
     if device_id.is_empty() || device_id.len() > 128 {
         return json_error(
@@ -711,14 +821,9 @@ struct InjectAudioBody {
 
 async fn inject_audio(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
     Json(body): Json<InjectAudioBody>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     if !state.shared.is_bench_window_active(&device_id) {
         return json_error(
             StatusCode::FORBIDDEN,
@@ -866,14 +971,9 @@ struct InjectBody {
 
 async fn inject_text(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
     Json(body): Json<InjectBody>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     // 本机调试入口注入的轮次强制 simulated = true，调用方无法绕过模拟门禁。
     match state
         .shared
@@ -897,13 +997,8 @@ async fn inject_text(
 
 async fn get_turn_detail(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Path(turn_id): Path<String>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     let Some(detail) = state.shared.state.turn_detail(&turn_id) else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -941,13 +1036,8 @@ struct ProcessTraceBody {
 
 async fn toggle_process_trace(
     State(state): State<DebugApiState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Json(body): Json<ProcessTraceBody>,
 ) -> Response {
-    if let Err((status, err)) = state.gate.verify(&headers, peer) {
-        return json_error(status, err);
-    }
     let Some(control) = state.trace_control.clone() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1056,6 +1146,25 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 
+        // 正确令牌 + 回环 Host 放行；非回环 Host（DNS 重绑定）拒绝
+        let mut bad_host = dummy_headers(Some("secret-token-123"), None);
+        bad_host.insert(
+            axum::http::header::HOST,
+            "evil.example:18009".parse().unwrap(),
+        );
+        let err = gate.verify(&bad_host, loopback).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1["error"], "host_not_allowed");
+
+        for ok_host in ["127.0.0.1:18009", "localhost:18009", "[::1]:18009"] {
+            let mut h = dummy_headers(Some("secret-token-123"), None);
+            h.insert(axum::http::header::HOST, ok_host.parse().unwrap());
+            assert!(
+                gate.verify(&h, loopback).is_ok(),
+                "应放行回环 Host {ok_host}"
+            );
+        }
+
         // 正确令牌 + 回环放行
         assert!(
             gate.verify(&dummy_headers(Some("secret-token-123"), None), loopback)
@@ -1084,9 +1193,11 @@ mod tests {
         assert_eq!(view.expires_at, 10_000 + 30 * 60);
         assert!(store.active_for("dev-1").is_some());
 
-        // 不同 session_id 不能误关当前会话的窗口
+        // 不同 session_id 不能误关当前会话的窗口，且 active_for_session 严格隔离会话
         assert!(store.close_if_session("dev-1", "sess-other").is_none());
         assert!(store.active_for("dev-1").is_some());
+        assert!(store.active_for_session("dev-1", "sess-1").is_some());
+        assert!(store.active_for_session("dev-1", "sess-other").is_none());
 
         // 到达最长时长后自动到期清理
         clock.store(10_000 + 30 * 60, Ordering::Release);

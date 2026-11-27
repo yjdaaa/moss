@@ -579,6 +579,9 @@ impl<'a> Session<'a> {
         }
         if self.busy()
             || self.actively_speaking_user()
+            || self.digital_feed.is_some()
+            || self.next_turn_is_digital
+            || self.pending_digital_ack.is_some()
             || self.music.as_ref().is_some_and(|m| m.active())
         {
             let _ = reply.send(Err(crate::InjectTurnError::busy(self.phase.label())));
@@ -637,7 +640,10 @@ impl<'a> Session<'a> {
             )));
             return Ok(());
         }
-        if !self.shared.is_bench_window_active(self.device_id) {
+        if !self
+            .shared
+            .is_bench_window_active_for_session(self.device_id, self.session_id)
+        {
             let _ = reply.send(Err(crate::InjectTurnError {
                 code: "bench_window_required".into(),
                 http_status: 403,
@@ -655,6 +661,8 @@ impl<'a> Session<'a> {
         if self.busy()
             || self.actively_speaking_user()
             || self.digital_feed.is_some()
+            || self.next_turn_is_digital
+            || self.pending_digital_ack.is_some()
             || self.music.as_ref().is_some_and(|m| m.active())
         {
             let _ = reply.send(Err(crate::InjectTurnError::busy(self.phase.label())));
@@ -701,12 +709,15 @@ impl<'a> Session<'a> {
         &mut self,
         socket: &mut crate::link::Link,
     ) -> Result<(), String> {
-        if !self.shared.is_bench_window_active(self.device_id) {
+        if !self
+            .shared
+            .is_bench_window_active_for_session(self.device_id, self.session_id)
+        {
             self.cancel_digital_feed("测试时间窗已关闭，数字音频注入中止");
             return Ok(());
         }
         if !matches!(self.phase, Phase::Listening(_)) {
-            self.digital_feed = None;
+            self.cancel_digital_feed("数字音频注入期间聆听状态已中断");
             return Ok(());
         }
         let (chunk, finished) = {

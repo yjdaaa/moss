@@ -734,51 +734,53 @@ pub fn voice_recent_workflows(
 
 /// 只读检查当前是否有活跃的激光加工 / 走边框 / 未决停机目标（供语音模拟轮次 VA2 #2 判断是否跳过急停）。
 /// 不经工具分发，不写审计，也不依赖 `laser_workflow_tool` 是否在语音工具面板启用。
-pub fn voice_has_active_laser_job(api: &Arc<ApiService>) -> bool {
+/// 返回 `Some(true)` 表示有活跃或未决任务，`Some(false)` 表示确认空闲，`None` 表示探测不可用（调用方须保守跳过急停）。
+pub fn voice_has_active_laser_job(api: &Arc<ApiService>) -> Option<bool> {
+    if api.device_work_in_progress() {
+        return Some(true);
+    }
     let caller = laser_contracts::CallerContext::Desktop;
-    if let Ok((200, targets_res)) = in_process_request(
+    let Ok((200, targets_res)) = in_process_request(
         api,
         "GET",
         "/api/jobs/stop-targets",
         &serde_json::Value::Null,
         caller.clone(),
         None,
-    ) {
-        let has_active_job = targets_res["result"]["jobs"]
-            .as_array()
-            .is_some_and(|jobs| {
-                jobs.iter().any(|job| {
-                    matches!(
-                        job["state"].as_str(),
-                        Some("running" | "paused" | "pausing" | "stopping" | "uncertain")
-                    )
-                })
-            });
-        let has_uncertain = targets_res["result"]["uncertain_jobs"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty());
-        if has_active_job || has_uncertain {
-            return true;
-        }
+    ) else {
+        return None;
+    };
+    let jobs = targets_res["result"]["jobs"].as_array()?;
+    let has_active_job = jobs.iter().any(|job| {
+        matches!(
+            job["state"].as_str(),
+            Some("running" | "paused" | "pausing" | "stopping" | "uncertain" | "unknown")
+        )
+    });
+    let has_uncertain = targets_res["result"]["uncertain_jobs"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty());
+    if has_active_job || has_uncertain {
+        return Some(true);
     }
-    if let Ok((200, wf_res)) = in_process_request(
+    let Ok((200, wf_res)) = in_process_request(
         api,
         "POST",
         "/api/workflow",
         &serde_json::json!({"action": "recent"}),
         caller,
         None,
-    ) && wf_res["result"]["workflows"]
-        .as_array()
-        .is_some_and(|items| {
-            items
-                .iter()
-                .any(|w| w["status"].as_str() == Some("sending"))
-        })
+    ) else {
+        return None;
+    };
+    let workflows = wf_res["result"]["workflows"].as_array()?;
+    if workflows
+        .iter()
+        .any(|w| w["status"].as_str() == Some("sending"))
     {
-        return true;
+        return Some(true);
     }
-    false
+    Some(false)
 }
 
 pub struct HostApplication {

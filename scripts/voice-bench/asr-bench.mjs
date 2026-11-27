@@ -8,19 +8,36 @@
 // - 候选只落盘，绝不自动修改代码或 settings.json；无已标注语料时提示先采集标注并返回非 0 状态码。
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { defaultRuntimeDir, percentile, redactText, redactValue } from "./bench-common.mjs";
+import {
+  defaultRuntimeDir,
+  percentile,
+  redactText,
+  redactValue,
+  registerSignalCleanup,
+  resolveProcessTraceDir,
+} from "./bench-common.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const NOISE_MIX_SCRIPT = join(SCRIPT_DIR, "asr_noise_mix.py");
 const LOCAL_PROTO_VERSION = 9;
 
 export const NO_LABELED_CORPUS_MESSAGE =
-  "未找到已标注的识别语料：请先在 MOSS 语音中心开启“保存最近的识别录音用于测评”，对着小智说几句话并在“识别语料”面板完成标注后再运行测评。";
+  "未找到已标注的识别语料：请先在 MOSS 语音中心「记录与诊断 › 对话记录与排障」开启“同时保存完整过程记录与原始录音”，对着小智说几句话并点“✓ 识别正确”或“纠偏此句”完成真值标注后再运行测评。";
 
 /** 本地 ASR 模型清单（对齐 crates/moss-voice/src/local_models.rs CATALOG）。 */
 export const LOCAL_ASR_CATALOG = [
@@ -77,10 +94,41 @@ export function noiseLabel(level) {
   return `白噪 (${level})`;
 }
 
-/** 对齐 moss-voice-server/src/fast.rs 与 moss-voice/src/settings.rs 的停止/退出与安全保护词。 */
+/** 对齐 moss-voice-server/src/fast.rs、conversation.rs 与 moss-voice/src/settings.rs 的停止/退出与安全保护词。 */
 const STOP_CORE_WORDS = ["停", "停止", "停下", "停机", "急停", "快停", "别打了", "关掉激光"];
 const STOP_SUFFIXES = ["吧", "啊", "了", "一下", "快"];
-const EXIT_CORE_WORDS = ["退下", "退一下", "再见", "拜拜", "退出", "关闭对话"];
+const EXIT_CORE_WORDS = [
+  "退出",
+  "再见",
+  "拜拜",
+  "退下",
+  "退一下",
+  "休息",
+  "去休息",
+  "没事了",
+  "不聊了",
+  "关闭对话",
+  "结束对话",
+];
+const EXIT_PREFIXES = [
+  "你好小智",
+  "小智同学",
+  "小智",
+  "好了",
+  "好的",
+  "好吧",
+  "行了",
+  "可以了",
+  "那就",
+  "那你",
+  "那",
+  "你可以",
+  "你先",
+  "你就",
+  "你",
+  "先",
+];
+const EXIT_SUFFIXES = ["去吧", "吧", "了", "啊", "啦", "呀", "哦", "咯"];
 export const PROTECTED_COMMAND_WORDS = new Set([
   "停",
   "急停",
@@ -100,10 +148,26 @@ export const PROTECTED_COMMAND_WORDS = new Set([
   "拜拜",
   "退下",
   "退一下",
+  "休息",
+  "去休息",
+  "没事了",
+  "不聊了",
   "关闭对话",
+  "结束对话",
   "确认",
   "开始",
 ]);
+
+/** 完整命令复合短语集合（含核心词与常用尾缀），用于拦截可拼成停止/退出命令的子串/前缀候选（如 `听一 -> 停一`、`推一 -> 退一`、`关掉鸡 -> 关掉激`）。 */
+const COMMAND_COMPOUND_PHRASES = [
+  ...STOP_CORE_WORDS,
+  ...STOP_CORE_WORDS.flatMap((w) => STOP_SUFFIXES.map((s) => `${w}${s}`)),
+  ...EXIT_CORE_WORDS,
+  ...EXIT_CORE_WORDS.flatMap((w) => EXIT_SUFFIXES.map((s) => `${w}${s}`)),
+  "立刻停",
+  "马上停",
+  "停止加工",
+];
 
 const MOTION_GCODE_RE = /(?:^|[^A-Za-z0-9])(?:G00?|G0?1|G0?2|G0?3|G28|M0?3|M0?4|M0?5)(?=$|[^0-9])|\$\d+=/i;
 
@@ -202,7 +266,7 @@ function matchesRepeatedWord(candidate, words) {
 
 /** 判断一句话是否会被 MOSS 当作停止或退出快路径命令（对齐 fast::is_stop 与 Conversation::is_exit）。 */
 export function classifyCommand(text) {
-  const core = normalizeForCer(text).join("");
+  let core = normalizeForCer(text).join("");
   if (!core) return null;
   if (
     matchesRepeatedWord(core, STOP_CORE_WORDS) ||
@@ -210,20 +274,43 @@ export function classifyCommand(text) {
   ) {
     return "stop";
   }
-  if (
-    matchesRepeatedWord(core, EXIT_CORE_WORDS) ||
-    ["吧", "啊", "了"].some((end) => core.endsWith(end) && matchesRepeatedWord(core.slice(0, -end.length), EXIT_CORE_WORDS))
-  ) {
+  if (matchesRepeatedWord(core, EXIT_CORE_WORDS)) {
     return "exit";
+  }
+  for (let step = 0; step < 3; step += 1) {
+    const matchedPrefix = EXIT_PREFIXES.find((p) => core.startsWith(p));
+    if (!matchedPrefix) break;
+    core = core.slice(matchedPrefix.length);
+    if (matchesRepeatedWord(core, EXIT_CORE_WORDS)) return "exit";
+  }
+  for (let step = 0; step < 2; step += 1) {
+    const matchedSuffix = EXIT_SUFFIXES.find((s) => core.endsWith(s));
+    if (!matchedSuffix) break;
+    core = core.slice(0, -matchedSuffix.length);
+    if (matchesRepeatedWord(core, EXIT_CORE_WORDS)) return "exit";
   }
   return null;
 }
 
+function touchesProtectedCommandFragment(norm) {
+  if (!norm) return false;
+  if (PROTECTED_COMMAND_WORDS.has(norm)) return true;
+  if (norm.includes("停")) return true;
+  if ([...PROTECTED_COMMAND_WORDS].some((cmd) => cmd.length >= 2 && norm.includes(cmd))) {
+    return true;
+  }
+  // 拦截长度 >= 2 且为任一停止/退出复合命令前缀或子串的候选（如 `停一`、`退一`、`关掉激`）
+  if ([...norm].length >= 2 && COMMAND_COMPOUND_PHRASES.some((phrase) => phrase.includes(norm))) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * VB3 命令词保护安全规则（对齐 settings.rs PROTECTED_STOP_WORDS 与 conversation.rs 急停原样保护）：
- * - 严禁把任何内容映射成停止、退出、确认或开始等命令词；
+ * - 严禁把任何内容映射成停止、退出、确认或开始等命令词（含可拼成复合命令词的片段）；
  * - 严禁改写命令词本身；
- * - 严禁包含危险 G-code / GRBL `$n=` 指令。
+ * - 严禁包含 `=`、控制字符、危险 G-code / GRBL `$n=` 指令。
  */
 export function isSafeHomophoneCandidate(wrongRaw, rightRaw) {
   const wrong = String(wrongRaw ?? "").trim();
@@ -234,20 +321,15 @@ export function isSafeHomophoneCandidate(wrongRaw, rightRaw) {
   if ([...wrong].length > 24 || [...right].length > 24) {
     return { allowed: false, reason: "超出单侧 24 字符上限" };
   }
+  if (/[\p{Cc}=]/u.test(wrong) || /[\p{Cc}=]/u.test(right)) {
+    return { allowed: false, reason: "候选词包含非法分隔符或控制字符" };
+  }
   const wrongNorm = normalizeForCer(wrong).join("");
   const rightNorm = normalizeForCer(right).join("");
-  if (
-    PROTECTED_COMMAND_WORDS.has(wrongNorm) ||
-    classifyCommand(wrong) !== null ||
-    [...PROTECTED_COMMAND_WORDS].some((cmd) => cmd.length >= 2 && wrongNorm.includes(cmd))
-  ) {
+  if (classifyCommand(wrong) !== null || touchesProtectedCommandFragment(wrongNorm)) {
     return { allowed: false, reason: `禁止改写安全保护命令词（原词「${wrong}」）` };
   }
-  if (
-    PROTECTED_COMMAND_WORDS.has(rightNorm) ||
-    classifyCommand(right) !== null ||
-    [...PROTECTED_COMMAND_WORDS].some((cmd) => cmd.length >= 2 && rightNorm.includes(cmd))
-  ) {
+  if (classifyCommand(right) !== null || touchesProtectedCommandFragment(rightNorm)) {
     return { allowed: false, reason: `禁止将任何词映射为停止/退出等命令词（目标「${right}」）` };
   }
   if (MOTION_GCODE_RE.test(right)) {
@@ -465,39 +547,57 @@ function formatRunId(date = new Date()) {
   return `asr-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
-/** 扫描 `<corpus-dir>` 下全部已标注语料（含 `<turn-id>.label.json` 与 `<turn-id>.wav`）。 */
-export function loadLabeledCorpus(corpusDir) {
-  if (!existsSync(corpusDir)) return [];
+/** 扫描 `<corpus-dir>` 及可选的完整过程记录目录 `<trace-dir>` 下全部已标注语料（含 `<turn-id>.label.json` 与 `<turn-id>.wav`）。 */
+export function loadLabeledCorpus(corpusDir, traceDir = null) {
   const samples = [];
+  const seenKeys = new Set();
   const walk = (dir, relDate = "") => {
+    if (!dir || !existsSync(dir)) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        walk(full, relDate || entry.name);
+        const nextDate = /^\d{4}-\d{2}-\d{2}$/.test(entry.name) ? entry.name : relDate;
+        walk(full, nextDate || entry.name);
         continue;
       }
       if (!entry.isFile() || !entry.name.endsWith(".label.json")) continue;
-      const turnId = entry.name.slice(0, -".label.json".length);
-      const wavPath = join(dir, `${turnId}.wav`);
+      const stem = entry.name.slice(0, -".label.json".length);
+      const wavPath = join(dir, `${stem}.wav`);
       if (!existsSync(wavPath)) continue;
       try {
+        if (lstatSync(wavPath).isSymbolicLink()) continue;
         const label = JSON.parse(readFileSync(full, "utf8"));
         const referenceText = String(label?.reference_text ?? "").trim();
         if (!referenceText) continue;
-        const metaPath = join(dir, `${turnId}.json`);
-        const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) : {};
+        const metaPath = join(dir, `${stem}.json`);
+        const meta =
+          existsSync(metaPath) && !lstatSync(metaPath).isSymbolicLink()
+            ? JSON.parse(readFileSync(metaPath, "utf8"))
+            : {};
         if (meta?.simulated === true) continue;
+        const turnId = String(label?.turn_id || stem);
+        const date = String(relDate || label?.date || "");
+        const dedupKey = `${date}/${turnId}`;
+        if (seenKeys.has(dedupKey)) continue;
+        seenKeys.add(dedupKey);
+        const labelSource = String(
+          label?.label_source || (label?.input_source === "e2e_playback" ? "e2e-playback" : "manual"),
+        );
+        const inputSource = String(
+          label?.input_source || (labelSource === "e2e-playback" || meta?.bench_window ? "e2e_playback" : "live_mic"),
+        );
         samples.push({
-          id: `${relDate || label.date || "corpus"}/${turnId}`,
-          date: relDate || label.date || "",
+          id: `${date || "corpus"}/${turnId}`,
+          date,
           turn_id: turnId,
           wav_path: wavPath,
           reference_text: referenceText,
           tags: Array.isArray(label?.tags) ? label.tags.map(String) : [],
-          label_source: String(label?.label_source || "manual"),
+          label_source: labelSource,
+          input_source: inputSource,
           voice_profile: label?.voice_profile ?? null,
-          bench_window: Boolean(meta?.bench_window),
-          original_raw_text: String(meta?.raw_text ?? ""),
+          bench_window: Boolean(meta?.bench_window || inputSource === "e2e_playback"),
+          original_raw_text: String(meta?.raw_text ?? label?.raw_text ?? ""),
           original_model: String(meta?.asr_model ?? ""),
         });
       } catch {
@@ -506,6 +606,7 @@ export function loadLabeledCorpus(corpusDir) {
     }
   };
   walk(corpusDir);
+  if (traceDir) walk(traceDir);
   samples.sort((a, b) => a.id.localeCompare(b.id));
   return samples;
 }
@@ -521,7 +622,8 @@ export function mixNoiseBatchWithPython(samples, noiseLevels, tempDir, pythonBin
         map.set(key, sample.wav_path);
         return;
       }
-      const outWav = join(tempDir, `n${level}_${index}_${sample.turn_id}.wav`);
+      const safeTurnId = String(sample.turn_id || "sample").replace(/[^A-Za-z0-9_-]/g, "_");
+      const outWav = join(tempDir, `n${level}_${index}_${safeTurnId}.wav`);
       map.set(key, outWav);
       jobs.push({
         input: sample.wav_path,
@@ -542,13 +644,17 @@ export function mixNoiseBatchWithPython(samples, noiseLevels, tempDir, pythonBin
   return map;
 }
 
-/** 读取 16 kHz 单声道 16-bit PCM WAV 负载（去掉 WAV 头，提取 `data` chunk）。 */
+/** 读取单声道 16-bit PCM WAV 负载（严格校验 `fmt ` 与 `data` 块，拒绝非 PCM / 多声道 / 非 16-bit 音频）。 */
 export function readWavPcm16(wavPath) {
   const buf = readFileSync(wavPath);
   if (buf.length < 44 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") {
     throw new Error(`无效 WAV 文件：${wavPath}`);
   }
-  let sampleRate = 16_000;
+  let hasFmt = false;
+  let audioFormat = 0;
+  let numChannels = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
   let offset = 12;
   let pcm = null;
   while (offset + 8 <= buf.length) {
@@ -556,16 +662,28 @@ export function readWavPcm16(wavPath) {
     const size = buf.readUInt32LE(offset + 4);
     const bodyStart = offset + 8;
     const bodyEnd = Math.min(buf.length, bodyStart + size);
-    if (id === "fmt " && size >= 16) {
+    if (id === "fmt " && size >= 16 && bodyStart + 16 <= buf.length) {
+      hasFmt = true;
+      audioFormat = buf.readUInt16LE(bodyStart);
+      numChannels = buf.readUInt16LE(bodyStart + 2);
       sampleRate = buf.readUInt32LE(bodyStart + 4);
-    } else if (id === "data") {
+      bitsPerSample = buf.readUInt16LE(bodyStart + 14);
+    } else if (id === "data" && !pcm) {
       pcm = buf.subarray(bodyStart, bodyEnd);
-      break;
     }
+    if (hasFmt && pcm) break;
     offset = bodyStart + size + (size % 2);
   }
-  if (!pcm) throw new Error(`WAV 缺少 data 块：${wavPath}`);
-  return { pcm, sampleRate };
+  if (!hasFmt) throw new Error(`WAV 缺少 fmt 块：${wavPath}`);
+  if (audioFormat !== 1 || numChannels !== 1 || bitsPerSample !== 16 || sampleRate <= 0) {
+    throw new Error(
+      `WAV 格式不受支持（仅接受单声道 16-bit PCM，实际 format=${audioFormat} ch=${numChannels} bits=${bitsPerSample} rate=${sampleRate}）`,
+    );
+  }
+  if (!pcm || pcm.length === 0 || pcm.length % 2 !== 0) {
+    throw new Error(`WAV data 块为空或字节数非法：${wavPath}`);
+  }
+  return { pcm, sampleRate, numChannels, bitsPerSample };
 }
 
 /** 将单声道 16-bit 小端 PCM Buffer 封装为标准 RIFF/WAVE Buffer。 */
@@ -625,19 +743,35 @@ export class LocalHelperClient {
   constructor(exePath) {
     this.exePath = exePath;
     this.child = null;
+    this.closedError = null;
     this.buf = Buffer.alloc(0);
     this.nextId = 1;
     this.nextStream = 1;
     this.pending = new Map();
   }
 
+  #failAll(err) {
+    if (!this.closedError) {
+      this.closedError = err;
+    }
+    const targetErr = this.closedError;
+    for (const [, waiter] of this.pending) waiter.reject(targetErr);
+    this.pending.clear();
+  }
+
   async start() {
-    this.child = spawn(this.exePath, [], { stdio: ["pipe", "pipe", "pipe"] });
+    this.closedError = null;
+    // 忽略 stderr 防止 ONNX/sherpa-onnx 写满 64 KiB 管道死锁（对齐 crates/moss-voice-providers/src/local.rs）
+    this.child = spawn(this.exePath, [], { stdio: ["pipe", "pipe", "ignore"] });
     this.child.stdout.on("data", (chunk) => this.#onData(chunk));
-    this.child.on("exit", (code) => {
-      const err = new Error(`moss-voice-local 提前退出（code=${code}）`);
-      for (const [, waiter] of this.pending) waiter.reject(err);
-      this.pending.clear();
+    this.child.stdin.on("error", (err) => {
+      this.#failAll(new Error(`写入 moss-voice-local 管道失败：${err?.message || err}`));
+    });
+    this.child.on("error", (err) => {
+      this.#failAll(new Error(`启动 moss-voice-local 失败：${err?.message || err}`));
+    });
+    this.child.on("exit", (code, signal) => {
+      this.#failAll(new Error(`moss-voice-local 提前退出（code=${code ?? "null"}${signal ? `, signal=${signal}` : ""}）`));
     });
     const hello = await this.request({ op: "hello" });
     if (hello.kind !== "hello" || hello.protocol !== LOCAL_PROTO_VERSION) {
@@ -668,6 +802,9 @@ export class LocalHelperClient {
   }
 
   request(opPayload, payload = Buffer.alloc(0), timeoutMs = 60_000) {
+    if (!this.child || this.closedError || this.child.stdin?.destroyed || this.child.stdin?.writableEnded) {
+      return Promise.reject(this.closedError || new Error("moss-voice-local 未启动或已退出"));
+    }
     const id = this.nextId++;
     const headerBuf = Buffer.from(JSON.stringify({ id, ...opPayload }), "utf8");
     const lenBuf = Buffer.alloc(8);
@@ -688,7 +825,15 @@ export class LocalHelperClient {
           rejectPromise(err);
         },
       });
-      this.child.stdin.write(Buffer.concat([lenBuf, headerBuf, payload]));
+      try {
+        this.child.stdin.write(Buffer.concat([lenBuf, headerBuf, payload]), (err) => {
+          if (err) {
+            this.#failAll(new Error(`写入 moss-voice-local 管道失败：${err?.message || err}`));
+          }
+        });
+      } catch (err) {
+        this.#failAll(new Error(`写入 moss-voice-local 管道失败：${err?.message || err}`));
+      }
     });
   }
 
@@ -703,6 +848,13 @@ export class LocalHelperClient {
 
   async transcribeWav(wavPath) {
     const { pcm, sampleRate } = readWavPcm16(wavPath);
+    if (sampleRate !== 16_000) {
+      // 流式 asr_open/asr_feed 仅接受 16 kHz 单声道 PCM，非 16 kHz 直接走整段 transcribe
+      const t0 = performance.now();
+      const fin = await this.request({ op: "transcribe", sample_rate: sampleRate }, pcm);
+      const finalMs = Math.round(performance.now() - t0);
+      return { text: String(fin.text ?? "").trim(), firstInterimMs: null, finalMs };
+    }
     const stream = this.nextStream++;
     const startedAt = performance.now();
     let firstInterimMs = null;
@@ -721,7 +873,10 @@ export class LocalHelperClient {
       const finalMs = Math.round(performance.now() - startedAt);
       const text = String(fin.text ?? "").trim();
       return { text, firstInterimMs: firstInterimMs ?? finalMs, finalMs };
-    } catch {
+    } catch (err) {
+      if (this.closedError || !this.child) {
+        throw this.closedError || err;
+      }
       const t0 = performance.now();
       const fin = await this.request({ op: "transcribe", sample_rate: sampleRate }, pcm);
       const finalMs = Math.round(performance.now() - t0);
@@ -730,6 +885,7 @@ export class LocalHelperClient {
   }
 
   close() {
+    this.#failAll(new Error("moss-voice-local 已关闭"));
     if (this.child) {
       try {
         this.child.stdin.end();
@@ -975,7 +1131,13 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
         discardedMap.set(dk, dEntry);
         continue;
       }
-      if (classifyCommand(String(row.hypothesis || "").replaceAll(span.wrong, span.right)) !== null) {
+      const rawReplaced = String(row.hypothesis || "").replaceAll(span.wrong, span.right);
+      const normWrong = normalizeForCer(span.wrong).join("");
+      const normRight = normalizeForCer(span.right).join("");
+      const normReplaced = normWrong
+        ? normalizeForCer(row.hypothesis).join("").replaceAll(normWrong, normRight)
+        : "";
+      if (classifyCommand(rawReplaced) !== null || (normReplaced && classifyCommand(normReplaced) !== null)) {
         const dk = `${span.wrong}=>${span.right}`;
         const dEntry = discardedMap.get(dk) || {
           wrong: span.wrong,
@@ -1007,10 +1169,10 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     }
   }
 
-  // 计算按模型 × 噪声汇总行，并附安静档到噪声档的 CER 退化增量
+  // 计算按模型 × 噪声汇总行，并附安静档到噪声档的 CER 退化增量（全错分桶 cer 为 null，绝不误报 0.0%）
   const summaryRows = [...modelMap.values()].map((b) => ({
     ...b,
-    cer: b.ref_chars > 0 ? Number((b.edits / b.ref_chars).toFixed(4)) : 0,
+    cer: b.ref_chars > 0 ? Number((b.edits / b.ref_chars).toFixed(4)) : null,
     first_interim_p50_ms: percentile(b.first_interims, 50),
     first_interim_p90_ms: percentile(b.first_interims, 90),
     final_p50_ms: percentile(b.finals, 50),
@@ -1020,12 +1182,12 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
   }));
   const cleanCerByModel = new Map();
   for (const row of summaryRows) {
-    if (row.noise_level === 0) cleanCerByModel.set(row.model_id, row.cer);
+    if (row.noise_level === 0 && typeof row.cer === "number") cleanCerByModel.set(row.model_id, row.cer);
   }
   for (const row of summaryRows) {
     const cleanCer = cleanCerByModel.get(row.model_id);
     row.noise_degradation =
-      row.noise_level !== 0 && typeof cleanCer === "number"
+      row.noise_level !== 0 && typeof row.cer === "number" && typeof cleanCer === "number"
         ? Number((row.cer - cleanCer).toFixed(4))
         : null;
   }
@@ -1052,80 +1214,89 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     ),
   };
 
-  const byLabelSource = {};
-  const sourceGroups = new Map();
-  for (const row of rows) {
-    const src = String(row.label_source || "manual");
-    if (!sourceGroups.has(src)) sourceGroups.set(src, []);
-    sourceGroups.get(src).push(row);
-  }
-  for (const [src, groupRows] of sourceGroups.entries()) {
-    const gBuckets = new Map();
-    let gNumTotal = 0;
-    let gNumMatched = 0;
-    let gTermTotal = 0;
-    let gTermMatched = 0;
-    const clipIds = new Set();
-    for (const row of groupRows) {
-      clipIds.add(row.clip_id);
-      const bk = `${row.model_id}@@${row.noise_level}`;
-      if (!gBuckets.has(bk)) {
-        gBuckets.set(bk, {
-          model_id: row.model_id,
-          model_label: row.model_label,
-          noise_level: row.noise_level,
-          count: 0,
-          errors: 0,
-          edits: 0,
-          ref_chars: 0,
-          finals: [],
-        });
-      }
-      const b = gBuckets.get(bk);
-      b.count += 1;
-      if (row.error) {
-        b.errors += 1;
-        continue;
-      }
-      b.edits += row.edits;
-      b.ref_chars += row.ref_len;
-      if (typeof row.final_ms === "number") b.finals.push(row.final_ms);
-      const ne = evaluateNumberAndUnitAccuracy(row.reference_text, row.hypothesis);
-      gNumTotal += ne.total;
-      gNumMatched += ne.matched;
-      const rNorm = normalizeForCer(row.reference_text).join("");
-      const hNorm = normalizeForCer(row.hypothesis).join("");
-      for (const term of terms) {
-        const tNorm = normalizeForCer(term).join("");
-        if (!tNorm || !rNorm.includes(tNorm)) continue;
-        gTermTotal += 1;
-        if (hNorm.includes(tNorm)) gTermMatched += 1;
-      }
+  const summarizeGroups = (keyFn, fieldName) => {
+    const grouped = {};
+    const groups = new Map();
+    for (const row of rows) {
+      const key = keyFn(row);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
     }
-    const gSummaryRows = [...gBuckets.values()].map((b) => ({
-      model_id: b.model_id,
-      model_label: b.model_label,
-      noise_level: b.noise_level,
-      count: b.count,
-      errors: b.errors,
-      cer: b.ref_chars > 0 ? Number((b.edits / b.ref_chars).toFixed(4)) : 0,
-      final_p50_ms: percentile(b.finals, 50),
-      final_p90_ms: percentile(b.finals, 90),
-    }));
-    byLabelSource[src] = {
-      label_source: src,
-      sample_count: clipIds.size,
-      row_count: groupRows.length,
-      overall_cer: (() => {
-        const edits = groupRows.reduce((s, r) => s + (r.error ? 0 : r.edits), 0);
-        const chars = groupRows.reduce((s, r) => s + (r.error ? 0 : r.ref_len), 0);
-        return chars > 0 ? Number((edits / chars).toFixed(4)) : 0;
-      })(),
-      number_unit: { total: gNumTotal, matched: gNumMatched },
-      terms: { total: gTermTotal, matched: gTermMatched },
-      summaryRows: gSummaryRows,
-    };
-  }
+    for (const [src, groupRows] of groups.entries()) {
+      const gBuckets = new Map();
+      let gNumTotal = 0;
+      let gNumMatched = 0;
+      let gTermTotal = 0;
+      let gTermMatched = 0;
+      const clipIds = new Set();
+      for (const row of groupRows) {
+        clipIds.add(row.clip_id);
+        const bk = `${row.model_id}@@${row.noise_level}`;
+        if (!gBuckets.has(bk)) {
+          gBuckets.set(bk, {
+            model_id: row.model_id,
+            model_label: row.model_label,
+            noise_level: row.noise_level,
+            count: 0,
+            errors: 0,
+            edits: 0,
+            ref_chars: 0,
+            finals: [],
+          });
+        }
+        const b = gBuckets.get(bk);
+        b.count += 1;
+        if (row.error) {
+          b.errors += 1;
+          continue;
+        }
+        b.edits += row.edits;
+        b.ref_chars += row.ref_len;
+        if (typeof row.final_ms === "number") b.finals.push(row.final_ms);
+        const ne = evaluateNumberAndUnitAccuracy(row.reference_text, row.hypothesis);
+        gNumTotal += ne.total;
+        gNumMatched += ne.matched;
+        const rNorm = normalizeForCer(row.reference_text).join("");
+        const hNorm = normalizeForCer(row.hypothesis).join("");
+        for (const term of terms) {
+          const tNorm = normalizeForCer(term).join("");
+          if (!tNorm || !rNorm.includes(tNorm)) continue;
+          gTermTotal += 1;
+          if (hNorm.includes(tNorm)) gTermMatched += 1;
+        }
+      }
+      const gSummaryRows = [...gBuckets.values()].map((b) => ({
+        model_id: b.model_id,
+        model_label: b.model_label,
+        noise_level: b.noise_level,
+        count: b.count,
+        errors: b.errors,
+        cer: b.ref_chars > 0 ? Number((b.edits / b.ref_chars).toFixed(4)) : null,
+        final_p50_ms: percentile(b.finals, 50),
+        final_p90_ms: percentile(b.finals, 90),
+      }));
+      grouped[src] = {
+        [fieldName]: src,
+        sample_count: clipIds.size,
+        row_count: groupRows.length,
+        overall_cer: (() => {
+          const edits = groupRows.reduce((s, r) => s + (r.error ? 0 : r.edits), 0);
+          const chars = groupRows.reduce((s, r) => s + (r.error ? 0 : r.ref_len), 0);
+          return chars > 0 ? Number((edits / chars).toFixed(4)) : null;
+        })(),
+        number_unit: { total: gNumTotal, matched: gNumMatched },
+        terms: { total: gTermTotal, matched: gTermMatched },
+        summaryRows: gSummaryRows,
+      };
+    }
+    return grouped;
+  };
+
+  const byLabelSource = summarizeGroups((row) => String(row.label_source || "manual"), "label_source");
+  const byInputSource = summarizeGroups(
+    (row) => String(row.input_source || (row.label_source === "e2e-playback" ? "e2e_playback" : "live_mic")),
+    "input_source",
+  );
 
   return {
     summaryRows,
@@ -1135,6 +1306,7 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     worstClips,
     suggestions,
     byLabelSource,
+    byInputSource,
   };
 }
 
@@ -1162,13 +1334,13 @@ function renderMarkdownReport(runId, sampleCount, analysis) {
     "",
     "## 1. 按模型与噪声档位汇总（字错率 / 退化 / 延迟）",
     "",
-    "| 模型 | 噪声档位 | 样本数 | 字错率 (CER) | 相对安静退化 | 数字单位准确率 | 术语准确率 | 首中间延迟 P50 / P90 | 最终延迟 P50 / P90 |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| 模型 | 噪声档位 | 样本数 | 失败数 | 字错率 (CER) | 相对安静退化 | 数字单位准确率 | 术语准确率 | 首中间延迟 P50 / P90 | 最终延迟 P50 / P90 |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const r of analysis.summaryRows) {
     const deg = r.noise_degradation === null ? "—" : `${r.noise_degradation >= 0 ? "+" : ""}${(r.noise_degradation * 100).toFixed(1)}pp`;
     lines.push(
-      `| ${r.model_label} | ${noiseLabel(r.noise_level)} | ${r.count} | ${pctText(r.cer)} | ${deg} | ${pctText(
+      `| ${r.model_label} | ${noiseLabel(r.noise_level)} | ${r.count} | ${r.errors || 0} | ${pctText(r.cer)} | ${deg} | ${pctText(
         r.num_accuracy,
       )} | ${pctText(r.term_accuracy)} | ${msText(r.first_interim_p50_ms)} / ${msText(
         r.first_interim_p90_ms,
@@ -1185,15 +1357,43 @@ function renderMarkdownReport(runId, sampleCount, analysis) {
       "",
       "## 1.5 按语料来源分组统计（人工标注真实录音 vs 整体测试外放录音）",
       "",
-      "| 来源分组 | 样本数 | 模型 | 噪声档位 | 字错率 (CER) | 最终延迟 P50 / P90 |",
-      "| --- | ---: | --- | --- | ---: | ---: |",
+      "| 来源分组 | 样本数 | 模型 | 噪声档位 | 失败数 | 字错率 (CER) | 最终延迟 P50 / P90 |",
+      "| --- | ---: | --- | --- | ---: | ---: | ---: |",
     );
     for (const group of sourceEntries.sort((a, b) => a.label_source.localeCompare(b.label_source))) {
       for (const r of group.summaryRows) {
         lines.push(
           `| ${labelSourceTitle(group.label_source)} | ${group.sample_count} | ${r.model_label} | ${noiseLabel(
             r.noise_level,
-          )} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
+          )} | ${r.errors || 0} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
+        );
+      }
+    }
+  }
+
+  const inputSourceEntries = Object.values(analysis.byInputSource || {});
+  const hasNonLiveInput = inputSourceEntries.some((g) => g.input_source !== "live_mic");
+  if (hasNonLiveInput || inputSourceEntries.length > 1) {
+    const inputSourceTitle = (src) =>
+      ({
+        live_mic: "小智实时说话（live_mic）",
+        e2e_playback: "整体测试外放录音（e2e_playback）",
+        digital_inject: "数字录音直通（digital_inject）",
+        text_inject: "文字直通（text_inject）",
+      })[src] || src;
+    lines.push(
+      "",
+      "## 1.6 按音源分类统计（小智实时说话 / 整体测试外放录音 / 数字录音直通）",
+      "",
+      "| 音源分组 | 样本数 | 模型 | 噪声档位 | 失败数 | 字错率 (CER) | 最终延迟 P50 / P90 |",
+      "| --- | ---: | --- | --- | ---: | ---: | ---: |",
+    );
+    for (const group of inputSourceEntries.sort((a, b) => a.input_source.localeCompare(b.input_source))) {
+      for (const r of group.summaryRows) {
+        lines.push(
+          `| ${inputSourceTitle(group.input_source)} | ${group.sample_count} | ${r.model_label} | ${noiseLabel(
+            r.noise_level,
+          )} | ${r.errors || 0} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
         );
       }
     }
@@ -1271,8 +1471,13 @@ function parseNoiseLevels(raw) {
 export async function runAsrBench(options = {}) {
   const runtimeDir = resolve(options.runtimeDir || defaultRuntimeDir());
   const corpusDir = resolve(options.corpusDir || join(runtimeDir, "asr-corpus"));
+  const traceDir = options.traceDir
+    ? resolve(options.traceDir)
+    : !options.corpusDir
+      ? resolve(resolveProcessTraceDir(runtimeDir))
+      : null;
   const noiseLevels = Array.isArray(options.noiseLevels) ? options.noiseLevels : parseNoiseLevels(options.noiseLevelsRaw);
-  const samples = loadLabeledCorpus(corpusDir);
+  const samples = loadLabeledCorpus(corpusDir, traceDir);
   if (samples.length === 0) {
     return { exitCode: 1, errorMessage: NO_LABELED_CORPUS_MESSAGE };
   }
@@ -1283,6 +1488,7 @@ export async function runAsrBench(options = {}) {
 
   const secretsToRedact = [];
   const closers = [];
+  let resolvedHelperExe = null;
   let recognizers = Array.isArray(options.recognizers) ? [...options.recognizers] : null;
   let existingHotwords = [];
   let existingCorrections = [];
@@ -1297,66 +1503,85 @@ export async function runAsrBench(options = {}) {
     }
   }
 
-  if (!recognizers) {
-    recognizers = [];
-    const requestedModels = options.models
-      ? String(options.models)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : null;
-
-    // 1. 已安装的本地模型（经 moss-voice-local）
-    const installedLocal = discoverInstalledLocalModels(runtimeDir);
-    const selectedLocal = requestedModels
-      ? installedLocal.filter((m) => requestedModels.includes(m.id))
-      : installedLocal;
-    if (selectedLocal.length > 0) {
-      const helperExe = resolveHelperExe(options.helperExe);
-      if (!helperExe) {
-        return {
-          exitCode: 1,
-          errorMessage: "检测到已安装的本地识别模型，但找不到 moss-voice-local 可执行文件（可用 --helper 指定）",
-        };
-      }
-      for (const spec of selectedLocal) {
-        const client = new LocalHelperClient(helperExe);
-        await client.start();
-        await client.loadAsr(spec.modelDir, spec.engine, existingHotwords);
-        closers.push(() => client.close());
-        recognizers.push({
-          id: spec.id,
-          label: spec.label,
-          transcribe: (wavPath) => client.transcribeWav(wavPath),
-        });
-      }
-    }
-
-    // 2. 已配置的云端识别模型（读取 settings.json + app_secrets，绝不打印密钥）
-    const cloud = loadConfiguredCloudAsr(runtimeDir, options.pythonBin || "python3");
-    if (cloud && (!requestedModels || requestedModels.includes(cloud.id) || requestedModels.includes("cloud"))) {
-      if (cloud.kind === "openai") {
-        const rec = createOpenAiCloudRecognizer(cloud);
-        secretsToRedact.push(cloud.apiKey);
-        recognizers.push(rec);
-      }
-    }
-
-    if (recognizers.length === 0) {
-      return {
-        exitCode: 1,
-        errorMessage: "未找到可用的本地或云端识别模型（请先安装本地 ASR 模型或配置云端 OpenAI 兼容 ASR）",
-      };
-    }
-  }
-
-  for (const rec of recognizers) {
-    if (rec?.secret) secretsToRedact.push(rec.secret);
-  }
-
   const tempDir = mkdtempSync(join(tmpdir(), "moss-asr-bench-"));
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    for (const closeFn of closers) {
+      try {
+        closeFn();
+      } catch {
+        // 忽略关闭异常
+      }
+    }
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // 忽略临时目录清理异常
+    }
+  };
+  const unregisterSignals = registerSignalCleanup(cleanup);
   const rows = [];
   try {
+    if (!recognizers) {
+      recognizers = [];
+      const requestedModels = options.models
+        ? String(options.models)
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : null;
+
+      // 1. 已安装的本地模型（经 moss-voice-local；启动即登记 closer，加载失败亦确保回收子进程）
+      const installedLocal = discoverInstalledLocalModels(runtimeDir);
+      const selectedLocal = requestedModels
+        ? installedLocal.filter((m) => requestedModels.includes(m.id))
+        : installedLocal;
+      if (selectedLocal.length > 0) {
+        const helperExe = resolveHelperExe(options.helperExe);
+        if (!helperExe) {
+          return {
+            exitCode: 1,
+            errorMessage: "检测到已安装的本地识别模型，但找不到 moss-voice-local 可执行文件（可用 --helper 指定）",
+          };
+        }
+        resolvedHelperExe = helperExe;
+        for (const spec of selectedLocal) {
+          const client = new LocalHelperClient(helperExe);
+          closers.push(() => client.close());
+          await client.start();
+          await client.loadAsr(spec.modelDir, spec.engine, existingHotwords);
+          recognizers.push({
+            id: spec.id,
+            label: spec.label,
+            transcribe: (wavPath) => client.transcribeWav(wavPath),
+          });
+        }
+      }
+
+      // 2. 已配置的云端识别模型（读取 settings.json + app_secrets，绝不打印密钥）
+      const cloud = loadConfiguredCloudAsr(runtimeDir, options.pythonBin || "python3");
+      if (cloud && (!requestedModels || requestedModels.includes(cloud.id) || requestedModels.includes("cloud"))) {
+        if (cloud.kind === "openai") {
+          const rec = createOpenAiCloudRecognizer(cloud);
+          secretsToRedact.push(cloud.apiKey);
+          recognizers.push(rec);
+        }
+      }
+
+      if (recognizers.length === 0) {
+        return {
+          exitCode: 1,
+          errorMessage: "未找到可用的本地或云端识别模型（请先安装本地 ASR 模型或配置云端 OpenAI 兼容 ASR）",
+        };
+      }
+    }
+
+    for (const rec of recognizers) {
+      if (rec?.secret) secretsToRedact.push(rec.secret);
+    }
+
     const mixer = options.mixNoiseFn || mixNoiseBatchWithPython;
     const wavMap = await mixer(samples, noiseLevels, tempDir, options.pythonBin || "python3");
 
@@ -1375,6 +1600,7 @@ export async function runAsrBench(options = {}) {
               turn_id: sample.turn_id,
               tags: sample.tags,
               label_source: sample.label_source || "manual",
+              input_source: sample.input_source || (sample.label_source === "e2e-playback" ? "e2e_playback" : "live_mic"),
               voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,
@@ -1396,6 +1622,7 @@ export async function runAsrBench(options = {}) {
               turn_id: sample.turn_id,
               tags: sample.tags,
               label_source: sample.label_source || "manual",
+              input_source: sample.input_source || (sample.label_source === "e2e-playback" ? "e2e_playback" : "live_mic"),
               voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,
@@ -1415,8 +1642,8 @@ export async function runAsrBench(options = {}) {
       }
     }
   } finally {
-    for (const closeFn of closers) closeFn();
-    rmSync(tempDir, { recursive: true, force: true });
+    unregisterSignals();
+    cleanup();
   }
 
   const analysis = analyzeResultsAndSuggestions(rows, {
@@ -1426,7 +1653,17 @@ export async function runAsrBench(options = {}) {
 
   const redactOpts = {
     secrets: secretsToRedact,
-    paths: [runtimeDir, corpusDir, outDir, homedir()],
+    paths: [
+      runtimeDir,
+      corpusDir,
+      traceDir || "",
+      outDir,
+      tempDir,
+      homedir(),
+      process.cwd(),
+      resolvedHelperExe ? dirname(resolvedHelperExe) : "",
+      resolvedHelperExe || "",
+    ].filter(Boolean),
   };
 
   const resultsJsonl = rows
@@ -1442,8 +1679,24 @@ export async function runAsrBench(options = {}) {
   writeFileSync(join(outDir, "report.md"), reportMd, "utf8");
   writeFileSync(join(outDir, "suggestions.json"), `${suggestionsJson}\n`, "utf8");
 
+  const modelSuccessCounts = new Map();
+  for (const r of rows) {
+    const prev = modelSuccessCounts.get(r.model_id) || 0;
+    modelSuccessCounts.set(r.model_id, prev + (r.error ? 0 : 1));
+  }
+  const failedModels = [...modelSuccessCounts.entries()]
+    .filter(([, okCount]) => okCount === 0)
+    .map(([id]) => id);
+  const allFailed = rows.length === 0 || rows.every((r) => Boolean(r.error));
+  const exitCode = allFailed || failedModels.length > 0 ? 1 : 0;
+  const errorMessage =
+    exitCode !== 0
+      ? `识别测评存在全部失败的模型（${failedModels.join("、") || "全部样本"}），详见报告`
+      : null;
+
   return {
-    exitCode: 0,
+    exitCode,
+    errorMessage,
     archiveDir: outDir,
     runId,
     rows,
@@ -1480,14 +1733,14 @@ if (isMain) {
   runAsrBench(opts)
     .then((res) => {
       if (res.exitCode !== 0) {
-        console.error(res.errorMessage || "识别测评失败");
+        console.error(redactText(res.errorMessage || "识别测评失败", { paths: [homedir(), process.cwd()] }));
         process.exit(res.exitCode);
       }
       console.log(res.archiveDir);
       process.exit(0);
     })
     .catch((err) => {
-      console.error(redactText(err?.message || String(err)));
+      console.error(redactText(err?.message || String(err), { paths: [homedir(), process.cwd()] }));
       process.exit(1);
     });
 }

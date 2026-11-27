@@ -198,7 +198,11 @@ test("VD2/VD6：测试录音主窗口 ACL、macOS 麦克风权限说明与 AI �
   assert.match(aiHub, /voice-debug-inject-switch/, "VD6：调试注入开关挪入 AI 联调与测试分组并保留原 id");
   assert.match(aiHub, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/, "VD6：挪动后保留原确认弹窗");
   assert.match(aiHub, /<BenchRecordingsSection/);
-  assert.match(aiHub, /<VoiceAsrCorpusCard[\s\S]*embedded/);
+  assert.doesNotMatch(aiHub, /<VoiceAsrCorpusCard/, "识别语料已合并进完整过程记录与对话记录与排障，不在 AI 联调与测试单独展示");
+
+  const liveTraces = frontend("src/components/voice-builtin/LiveDebugTraces.jsx");
+  assert.match(liveTraces, /voiceApi\.asrCorpusManage\(/, "对话记录与排障复用主窗口受控命令读写过程记录真值与录音");
+  assert.match(liveTraces, /data-input-source=/);
 
   const page = frontend("src/pages/VoicePage.jsx");
   const serviceTab = page.split('<VoiceTabPanel tab="service"')[1].split("</VoiceTabPanel>")[0];

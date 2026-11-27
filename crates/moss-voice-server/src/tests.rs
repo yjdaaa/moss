@@ -1158,6 +1158,7 @@ fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
         DeviceRequestHandle {
             session_id: "ffff_active".into(),
             supports_mcp: true,
+            permission: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             sender: tx,
             turn: 0,
         },

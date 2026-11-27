@@ -1801,3 +1801,313 @@ button.conn-pill:hover {
   font-size: 10.5px;
   font-weight: 600;
 }
+
+/* ============================================================
+   2026-11-27 语音中心「AI 联调与测试」双列紧凑清单、录音工作台与语料标注布局
+   ============================================================ */
+.ai-bench-banner-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  width: 100%;
+}
+.ai-bench-checklist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+.ai-bench-check-card {
+  padding: 9px 12px;
+  gap: 4px;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.ai-bench-check-card.is-actionable {
+  border-color: color-mix(in srgb, var(--ob-amber) 34%, var(--ob-line-2));
+  background: color-mix(in srgb, var(--ob-amber) 4%, var(--ob-well));
+}
+.ai-bench-check-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 8px;
+}
+.ai-bench-check-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ai-bench-check-hint {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ai-bench-check-card.is-compact .ai-bench-check-hint {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-bench-prompt-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ob-line);
+  background: var(--ob-well);
+}
+.ai-bench-prompt-btns,
+.ai-bench-prompt-opts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.ai-bench-prompt-opts {
+  font-size: 12.5px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--ob-line);
+}
+.ai-bench-flash {
+  animation: ai-bench-pulse 1.3s ease;
+}
+@keyframes ai-bench-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  30% { box-shadow: 0 0 0 2px var(--ob-accent-2); }
+}
+
+/* 录制测试语料工作台 */
+.ai-bench-speaker-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.ai-bench-speaker-list,
+.ai-bench-speaker-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ai-bench-speaker-add .text-input {
+  width: 148px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+.ai-bench-speaker-list .btn,
+.ai-bench-speaker-add .btn {
+  height: 32px;
+  box-sizing: border-box;
+}
+.ai-bench-recorder-card {
+  gap: 10px;
+  outline: none;
+}
+.ai-bench-recorder-card:focus-visible {
+  border-color: var(--ob-accent-2);
+  box-shadow: 0 0 0 2px var(--ob-accent-bg);
+}
+.ai-bench-sentence-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.ai-bench-step-btn.ai-bench-step-btn {
+  height: 28px;
+  min-width: 34px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-family: var(--ob-mono);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.ai-bench-step-btn.is-recorded:not(.is-cur) {
+  border-color: color-mix(in srgb, var(--ob-green) 48%, var(--ob-line-2));
+  background: color-mix(in srgb, var(--ob-green) 11%, transparent);
+  color: var(--ob-green);
+}
+.ai-bench-step-btn.is-unrecorded:not(.is-cur) {
+  border-style: dashed;
+  color: var(--ob-ink-3);
+}
+.ai-bench-rec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-bench-rec-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ai-bench-rec-prompt {
+  padding: 11px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--ob-line-2);
+  background: var(--ob-raise);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--ob-ink);
+}
+.ai-bench-pause-pill {
+  margin: 0 6px;
+  vertical-align: middle;
+}
+.ai-bench-expect-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 12px;
+}
+.ai-bench-vu-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ob-line);
+  background: var(--ob-well);
+}
+.ai-bench-vu-track {
+  flex: 1 1 160px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ob-line-2);
+  overflow: hidden;
+}
+.ai-bench-vu-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.09s linear, background-color 0.15s ease;
+  background: var(--ob-green);
+}
+.ai-bench-vu-fill.is-low {
+  background: var(--ob-amber);
+}
+.ai-bench-vu-fill.is-high {
+  background: var(--ob-red);
+}
+.ai-bench-rec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ai-bench-key-hint {
+  margin-left: auto;
+  font-size: 11.5px;
+}
+.ai-bench-audio-player {
+  width: 100%;
+  height: 32px;
+}
+
+/* 识别语料标注列表 */
+.ai-bench-corpus-toolbar,
+.ai-bench-corpus-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.ai-bench-corpus-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ai-bench-limit-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+.ai-bench-limit-field .text-input {
+  width: 72px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+}
+.ai-bench-corpus-limits .btn {
+  height: 32px;
+  box-sizing: border-box;
+}
+.ai-bench-corpus-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--ob-line);
+  background: var(--ob-well);
+}
+.ai-bench-corpus-row.is-compact {
+  padding: 8px 12px;
+  gap: 4px;
+}
+.ai-bench-corpus-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+.ai-bench-corpus-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+}
+.ai-bench-corpus-diff {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ai-bench-corpus-diff strong {
+  color: var(--ob-ink);
+}
+.ai-bench-corpus-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--ob-line);
+}
+.ai-bench-corpus-input-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ai-bench-corpus-input-row .text-input {
+  flex: 1 1 240px;
+  height: 34px;
+  box-sizing: border-box;
+}
+.ai-bench-corpus-input-row .btn {
+  height: 34px;
+  box-sizing: border-box;
+}
+.ai-bench-corpus-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}

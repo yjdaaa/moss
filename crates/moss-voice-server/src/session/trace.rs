@@ -131,7 +131,7 @@ pub(crate) fn write_voice_trace(
 }
 
 /// 设备短号：设备编号里最后 4 个字母或数字（时间线里区分多台小智）。
-fn device_short(device_id: &str) -> String {
+pub fn device_short(device_id: &str) -> String {
     let chars: Vec<char> = device_id
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -141,6 +141,27 @@ fn device_short(device_id: &str) -> String {
         "设备".to_owned()
     } else {
         tail
+    }
+}
+
+/// 区分一轮输入的 4 种音源类型：
+/// - `live_mic`：小智实时说话（现场真人直说）
+/// - `e2e_playback`：整体测试外放录音（电脑喇叭外放 → 小智麦克风拾音）
+/// - `digital_inject`：数字录音直通（未过小智麦克风）
+/// - `text_inject`：文字直通（无音频）
+pub fn classify_turn_input_source(
+    is_text_inject: bool,
+    digital_audio: bool,
+    bench_window: bool,
+) -> (&'static str, &'static str) {
+    if is_text_inject {
+        ("text_inject", "文字直通（无音频）")
+    } else if digital_audio {
+        ("digital_inject", "数字录音直通（未过小智麦克风）")
+    } else if bench_window {
+        ("e2e_playback", "整体测试外放录音")
+    } else {
+        ("live_mic", "小智实时说话")
     }
 }
 
@@ -440,9 +461,15 @@ pub(crate) fn voice_step_text(kind: &str, data: &Value) -> String {
         }
         "user_audio" => {
             let seconds = data["duration_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+            let src_tag = data["input_source_label"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("[音源：{s}]"))
+                .unwrap_or_default();
             match data["file"].as_str() {
-                Some(file) => format!("用户说完一句话（{seconds:.1} 秒），录音：{file}"),
-                None => format!("用户说完一句话（{seconds:.1} 秒），录音未保存"),
+                Some(file) => format!("用户说完一句话（{seconds:.1} 秒）{src_tag}，录音：{file}"),
+                None => format!("用户说完一句话（{seconds:.1} 秒）{src_tag}，录音未保存"),
             }
         }
         "asr" => {
@@ -956,21 +983,24 @@ impl<'a> Session<'a> {
         )
     }
 
-    /// 轮次开始：记下这一轮的输入（用户录音 / 快路径识别文字 / 固定话术 / 后台播报）。
+    /// 轮次开始：记下这一轮的输入（用户录音 / 快路径识别文字 / 固定话术 / 后台播报），并返回落盘的用户录音相对路径。
     /// `start_turn` 调用时 `self.turn` 尚未写入新轮次，这里显式使用本轮固定的 `trace` 与新的 `self.turn_number`。
     pub(super) fn trace_turn_input(
         &self,
         input: &TurnInput,
         kind: TurnKind,
+        in_bench_window: bool,
+        digital_audio: bool,
         trace: Option<&laser_runtime::ProcessTrace>,
-    ) {
-        let Some(trace) = trace else {
-            return;
-        };
+    ) -> Option<String> {
+        let trace = trace?;
         let turn_no = self.turn_number;
         let flow = turn_flow(self.device_id, turn_no);
         let kind = format!("{kind:?}");
         let kind_label = turn_kind_label(&kind).to_owned();
+        let is_text_inject = matches!(input, TurnInput::Text { .. });
+        let (input_source, input_source_label) =
+            classify_turn_input_source(is_text_inject, digital_audio, in_bench_window);
         match input {
             TurnInput::Utterance {
                 pcm, sample_rate, ..
@@ -984,50 +1014,71 @@ impl<'a> Session<'a> {
                     serde_json::json!({
                         "turn_kind": kind,
                         "turn_kind_label": kind_label,
+                        "input_source": input_source,
+                        "input_source_label": input_source_label,
+                        "bench_window": in_bench_window,
+                        "digital_audio": digital_audio,
                         "sample_rate": sample_rate,
                         "duration_ms": (pcm.len() as u64) * 1000 / u64::from((*sample_rate).max(1)),
                         "file": file,
                     }),
                 );
+                file
             }
-            TurnInput::FastStop { text, source } => self.trace_record_in(
-                trace,
-                &flow,
-                turn_no,
-                "fast_stop",
-                serde_json::json!({
-                    "turn_kind": kind,
-                    "turn_kind_label": kind_label,
-                    "text": text,
-                    "source": source.key(),
-                }),
-            ),
-            TurnInput::Text { text, simulated } => self.trace_record_in(
-                trace,
-                &flow,
-                turn_no,
-                "text_inject",
-                serde_json::json!({
-                    "turn_kind": kind,
-                    "turn_kind_label": kind_label,
-                    "text": text,
-                    "simulated": simulated,
-                }),
-            ),
-            TurnInput::Say { text, close } => self.trace_record_in(
-                trace,
-                &flow,
-                turn_no,
-                "say",
-                serde_json::json!({"turn_kind": kind, "turn_kind_label": kind_label, "text": text, "close": close}),
-            ),
-            TurnInput::Report { question, results } => self.trace_record_in(
-                trace,
-                &flow,
-                turn_no,
-                "report_input",
-                serde_json::json!({"turn_kind": kind, "turn_kind_label": kind_label, "question": question, "results": results}),
-            ),
+            TurnInput::FastStop { text, source } => {
+                self.trace_record_in(
+                    trace,
+                    &flow,
+                    turn_no,
+                    "fast_stop",
+                    serde_json::json!({
+                        "turn_kind": kind,
+                        "turn_kind_label": kind_label,
+                        "input_source": input_source,
+                        "input_source_label": input_source_label,
+                        "text": text,
+                        "source": source.key(),
+                    }),
+                );
+                None
+            }
+            TurnInput::Text { text, simulated } => {
+                self.trace_record_in(
+                    trace,
+                    &flow,
+                    turn_no,
+                    "text_inject",
+                    serde_json::json!({
+                        "turn_kind": kind,
+                        "turn_kind_label": kind_label,
+                        "input_source": "text_inject",
+                        "input_source_label": "文字直通（无音频）",
+                        "text": text,
+                        "simulated": simulated,
+                    }),
+                );
+                None
+            }
+            TurnInput::Say { text, close } => {
+                self.trace_record_in(
+                    trace,
+                    &flow,
+                    turn_no,
+                    "say",
+                    serde_json::json!({"turn_kind": kind, "turn_kind_label": kind_label, "text": text, "close": close}),
+                );
+                None
+            }
+            TurnInput::Report { question, results } => {
+                self.trace_record_in(
+                    trace,
+                    &flow,
+                    turn_no,
+                    "report_input",
+                    serde_json::json!({"turn_kind": kind, "turn_kind_label": kind_label, "question": question, "results": results}),
+                );
+                None
+            }
         }
     }
 
@@ -1058,8 +1109,16 @@ impl<'a> Session<'a> {
         let data = serde_json::json!({
             "turn_kind": format!("{:?}", turn.kind),
             "turn_kind_label": turn_kind_label(&format!("{:?}", turn.kind)),
+            "input_source": turn.input_source,
+            "input_source_label": turn.input_source_label,
+            "user_audio_file": turn.trace_audio_file,
+            "bench_window": turn.bench_window,
+            "digital_audio": turn.digital_audio,
+            "simulated": turn.simulated,
             "outcome": outcome,
             "user_text": turn.user,
+            "raw_asr": turn.debug_raw_asr,
+            "corrected_asr": turn.debug_corrected_asr,
             "spoken": turn.spoken,
             "reply": reply,
             "text_reply": turn.debug_text_reply,

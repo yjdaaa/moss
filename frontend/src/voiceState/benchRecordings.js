@@ -222,6 +222,85 @@ export function formatCorpusPromptSegments(item) {
   return out;
 }
 
+const EXPECT_ROUTE_LABELS = {
+  fast_read: "状态快查 (fast_read)",
+  fast_stop: "停止快路径 (fast_stop)",
+  fast_exit: "结束对话 (fast_exit)",
+  llm: "大模型对话 (llm)",
+};
+
+const EXPECT_TOOL_LABELS = {
+  generate_text_laser_task_tool: "生成文字雕刻预览",
+  "self.audio_speaker.set_volume": "调节小智音量",
+  "self.screen.set_brightness": "调节屏幕亮度",
+};
+
+/** 提炼单条测试语料的预期考核点胶囊（考核词、预期路由、预期工具、安全门禁、空闲约束）。 */
+export function formatCorpusExpectBadges(item) {
+  if (!item || typeof item !== "object") return [];
+  const badges = [];
+  const keyTerms = Array.isArray(item.key_terms)
+    ? item.key_terms.map((t) => String(t || "").trim()).filter(Boolean)
+    : [];
+  if (keyTerms.length > 0) {
+    badges.push({ key: "terms", tone: "info", text: `考核词：${keyTerms.join(" · ")}` });
+  }
+  const route = String(item.expect_route || "").trim();
+  if (route) {
+    badges.push({
+      key: "route",
+      tone: "off",
+      text: `预期路由：${EXPECT_ROUTE_LABELS[route] || route}`,
+    });
+  }
+  const tool = String(item.expect_tool || "").trim();
+  if (tool) {
+    badges.push({
+      key: "tool",
+      tone: "off",
+      text: `预期工具：${EXPECT_TOOL_LABELS[tool] || tool}`,
+    });
+  }
+  if (item.expect_simulation_gate) {
+    badges.push({ key: "gate", tone: "warn", text: "安全门禁：预期拦截物理雕刻" });
+  }
+  if (item.require_idle_laser) {
+    badges.push({ key: "idle", tone: "off", text: "仅激光空闲时运行" });
+  }
+  return badges;
+}
+
+/** 查找当前句之后的下一句未录语料索引（若后面已录完则从头回绕查找；若全部已录则顺延下一句）。 */
+export function findNextUnrecordedIndex(corpusItems = [], recordedMap = new Map(), fromIndex = 0) {
+  const items = Array.isArray(corpusItems) ? corpusItems : [];
+  const total = items.length;
+  if (total <= 1) return 0;
+  const start = Math.max(0, Math.min(total - 1, Number(fromIndex) || 0));
+  const hasId = (id) =>
+    recordedMap instanceof Map
+      ? recordedMap.has(id)
+      : Boolean(recordedMap && typeof recordedMap === "object" && recordedMap[id]);
+  for (let step = 1; step < total; step += 1) {
+    const idx = (start + step) % total;
+    if (items[idx]?.id && !hasId(items[idx].id)) {
+      return idx;
+    }
+  }
+  return Math.min(total - 1, start + 1);
+}
+
+/** 录音过程中的实时麦克风峰值电平视图（0~100%）。 */
+export function liveMicLevelView(peakPercent = 0) {
+  const pct = Math.max(0, Math.min(100, Math.round(Number(peakPercent) || 0)));
+  if (pct >= 88) {
+    return { percent: pct, tone: "high", hint: "电平偏高，请稍离麦克风防削顶" };
+  }
+  if (pct < 4) {
+    return { percent: pct, tone: "low", hint: "等待说话或声音偏小（请靠近麦克风）" };
+  }
+  return { percent: pct, tone: "ok", hint: "输入音量正常" };
+}
+
 /**
  * 录制引导状态视图（用于界面与单测）：
  * 计算当前说话人已录进度（如“已录 8 / 13”）、当前句状态及各按钮启用条件。
@@ -259,6 +338,8 @@ export function benchRecordingGuideState({
   const currentSaved = currentItem ? byCorpusId.get(currentItem.id) || null : null;
   const busy = recording || openingMic || saving;
   const draftOk = Boolean(draft && draft.wavDataUrl && draft.quality?.ok);
+  const nextUnrecordedIndex = findNextUnrecordedIndex(items, byCorpusId, safeIndex);
+  const expectBadges = formatCorpusExpectBadges(currentItem);
 
   return {
     speakerValid: speakerCheck.ok,
@@ -272,6 +353,8 @@ export function benchRecordingGuideState({
     currentItem,
     currentSaved,
     recordedMap: byCorpusId,
+    expectBadges,
+    nextUnrecordedIndex,
     canStart: speakerCheck.ok && Boolean(currentItem) && !busy,
     canStop: recording,
     canRetry: speakerCheck.ok && Boolean(currentItem) && !busy && Boolean(draft || currentSaved),

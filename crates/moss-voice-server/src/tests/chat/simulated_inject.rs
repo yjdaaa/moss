@@ -1380,3 +1380,133 @@ fn vc2_digital_audio_inject_requires_bench_window_enforces_auth_and_skips_asr_co
 
     server.stop();
 }
+
+/// 审查回归：Echo 模式（409）、撤销设备（403）、非回环 Host（DNS 重绑定 403）与同设备重连自动关闭旧会话时间窗。
+#[test]
+fn vc1_bench_window_enforces_chat_mode_revocation_host_and_session_binding_on_reconnect() {
+    // 1. Echo 模式拒绝打开测试时间窗（409 echo_mode）
+    let echo_registry = Arc::new(FakeRegistry::default());
+    let echo_server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Echo,
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        echo_registry.clone(),
+    )
+    .unwrap();
+    let _echo_dev = chat_device(&echo_server, &echo_registry, 1);
+    wait_until("Echo 设备上线", || {
+        !echo_server.active_device_sessions().is_empty()
+    });
+    let echo_err = echo_server.open_bench_window(DEVICE, 10).unwrap_err();
+    assert_eq!(echo_err.http_status, 409);
+    assert_eq!(echo_err.code, "echo_mode");
+    echo_server.stop();
+
+    // 2. Chat 模式下校验：DNS 重绑定 Host 403、设备重连关闭旧窗、撤销设备拒绝开窗（403）
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("查询状态".into())])),
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["重连后的普通轮次回复。"])])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(SimTestTools::default()),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let token = "vc1-sec-token-0123456789abcdef0123456789abcdef";
+    let now = crate::unix_now();
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    // 非回环 Host 头（DNS 重绑定防护）在解析请求体前返回 403 host_not_allowed
+    let bad_host_res = client
+        .post(format!("{base}/debug/v1/bench-window"))
+        .header("Host", "evil.example:18009")
+        .header("Authorization", format!("Bearer {token}"))
+        .body("not-even-valid-json")
+        .send()
+        .unwrap();
+    assert_eq!(bad_host_res.status(), 403);
+    let bad_host_body: Value = bad_host_res.json().unwrap();
+    assert_eq!(bad_host_body["error"], "host_not_allowed");
+
+    let _dev1 = chat_device(&server, &registry, 1);
+    wait_until("设备 1 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    let sess1 = server.active_device_sessions()[0].session_id.clone();
+    let win = server.open_bench_window(DEVICE, 10).unwrap();
+    assert_eq!(win.session_id, sess1);
+    assert_eq!(server.bench_windows().len(), 1);
+
+    // 同一 device_id 建立新连接（设备重连）：自动关闭旧会话时间窗，新会话不再处于时间窗内
+    let mut dev2 = chat_device(&server, &registry, 1);
+    wait_until("设备重连切换为新 session", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.session_id != sess1)
+    });
+    assert!(
+        server.bench_windows().is_empty(),
+        "同设备重连必须关闭旧会话时间窗，绝不延续到新会话"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（设备重连）")),
+        "重连关窗应写入事件"
+    );
+
+    // 新会话发起普通语音轮次：不应被旧窗口锁为 simulated
+    speak_manual(&mut dev2, 1, 500);
+    let _ = collect_items(&mut dev2);
+    wait_until("新会话第 1 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .first()
+            .is_some_and(|d| d.status == "done")
+    });
+    let latest = server.turn_details_for_device(DEVICE, 5).remove(0);
+    assert!(!latest.bench_window && !latest.simulated);
+
+    // 撤销设备权限后，不能打开测试时间窗（403 device_revoked）
+    registry.set(DEVICE, DeviceStatus::Revoked);
+    let revoked_err = server.open_bench_window(DEVICE, 10).unwrap_err();
+    assert_eq!(revoked_err.http_status, 403);
+    assert_eq!(revoked_err.code, "device_revoked");
+
+    server.stop();
+}

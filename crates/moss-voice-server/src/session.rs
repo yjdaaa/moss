@@ -56,11 +56,12 @@ mod lifecycle;
 mod listen;
 mod playback;
 mod screen;
-mod trace;
+pub(crate) mod trace;
 #[cfg(test)]
 pub(crate) use listen::still_speaking;
 #[cfg(test)]
 pub(crate) use trace::voice_step_text;
+pub use trace::{classify_turn_input_source, device_short};
 pub(crate) use trace::{
     device_flow, event_flow, event_step_text, scrub_trace_value, timing_step_text, turn_flow,
     write_voice_trace,
@@ -204,6 +205,8 @@ struct Listening {
     hold_deadline: Option<Instant>,
     /// 续听否定或到期时，等待此前已入队 VAD 帧排空的目标序号屏障
     finalize_after_vad_seq: Option<u64>,
+    /// VC1 拾音期间是否处于测试时间窗：锁存后即便在判停/Jev 续听/合并阶段窗关闭，本句仍强制按模拟处理
+    bench_window: bool,
 }
 
 impl Drop for Listening {
@@ -313,6 +316,8 @@ struct FollowProbe {
     quiet: usize,
     /// 已经按眼下的开头送去复核“停”了（之后又出声就作废，到点按完整开头重新复核）
     checking: bool,
+    /// 捕获该候选音频期间是否曾处于本会话的测试时间窗内（防止快路径/接管在窗口关闭边界放行真实急停）
+    bench_window: bool,
 }
 
 /// 确认窗口里这阵声音之后安静了这么久，就当它说完了，先送识别复核是不是“停”（n115）：
@@ -435,6 +440,11 @@ struct ActiveTurn {
     bench_window: bool,
     /// VC2 数字音频对照注入轮次标记（不写入 asr-corpus）
     digital_audio: bool,
+    /// 本轮音源类型（`live_mic` / `e2e_playback` / `digital_inject` / `text_inject`）与中文标签
+    input_source: &'static str,
+    input_source_label: &'static str,
+    /// 完整过程记录开启时落盘的用户录音相对路径（`<date>/voice-files/<dev>-t<turn>-user.wav`）
+    trace_audio_file: Option<String>,
     /// VA3 轮次开始的 Unix 毫秒时间戳
     started_at_ms: u64,
     /// VC3 拾音开始 / 判停 / 首帧下发的 Unix 毫秒时间戳与拾音峰值音量
@@ -729,15 +739,15 @@ async fn next_listening_interim(phase: &mut Phase) -> String {
 
 /// 等待非阻塞的半截话续听判定结果（不阻塞 socket/VAD/打断事件轮询）。
 /// 思考中那阵判停模型没认出人声的声音，识别一下是不是“停”（审查修正：短促的“停”可能短于模型判开口的最短语音）。
-/// 返回识别出的停止说法；不是停止说法或识别失败为 `None`。没有在查时永远等待。
+/// 返回识别出的停止说法与启动检测时锁存的测试时间窗标记；不是停止说法或识别失败为 `(None, false)`。没有在查时永远等待。
 async fn next_stop_check(
-    slot: &mut Option<tokio::task::JoinHandle<Option<String>>>,
-) -> Option<String> {
+    slot: &mut Option<tokio::task::JoinHandle<(Option<String>, bool)>>,
+) -> (Option<String>, bool) {
     match slot.as_mut() {
         Some(task) => {
-            let text = task.await.ok().flatten();
+            let result = task.await.ok().unwrap_or((None, false));
             *slot = None;
-            text
+            result
         }
         None => std::future::pending().await,
     }
@@ -894,8 +904,8 @@ struct ListenAndBargeState {
     utterance_keyword: Option<moss_voice_providers::local::CommandKeyword>,
     /// 一段话说完后继续把尾音送进判停流到这个时刻：命令词模型要在词说完后再听一小段才出结果（n101）
     kws_tail_until: Option<Instant>,
-    /// 思考中判停模型没认出人声的那阵声音正在识别是不是“停”
-    stop_check: Option<tokio::task::JoinHandle<Option<String>>>,
+    /// 思考中判停模型没认出人声的那阵声音正在识别是不是“停”（随任务携带启动时锁存的 `bench_window`）
+    stop_check: Option<tokio::task::JoinHandle<(Option<String>, bool)>>,
     /// 最近一次 `listen start` 是否为手动模式
     listen_manual: bool,
     listen_realtime: bool,
@@ -922,6 +932,8 @@ struct ListenAndBargeState {
     last_loud: Option<Instant>,
     /// 自动拾音时交给当前这一轮的那段录音：思考期间用户接着说话时，与后半句拼成完整的一段重新识别
     last_utterance: Option<Vec<i16>>,
+    /// `last_utterance` 捕获时是否处于测试时间窗（`take_over` 合并续话时继承）
+    last_utterance_bench_window: bool,
 }
 
 struct Session<'a> {
@@ -989,6 +1001,8 @@ struct Session<'a> {
     pending_digital_ack:
         Option<oneshot::Sender<Result<crate::InjectTurnAck, crate::InjectTurnError>>>,
     next_turn_is_digital: bool,
+    /// VC1 由拾音/停顿复核移交到 `start_turn` 的时间窗锁存标记
+    pending_bench_window: bool,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。

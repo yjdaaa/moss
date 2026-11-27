@@ -12,6 +12,8 @@ import {
   ASR_CORPUS_ENABLE_CONFIRM_OPTIONS,
   ASR_CORPUS_ENABLE_CONFIRM_TEXT,
   ASR_CORPUS_TAGS,
+  asrCorpusItemSourceView,
+  asrCorpusTextDiffView,
   asrCorpusView,
   buildAsrCorpusLabelPayload,
   toggleAsrCorpusTag,
@@ -37,9 +39,11 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
   const [maxItemsInput, setMaxItemsInput] = useState(String(initialSummary?.max_items || 500));
   const [maxDaysInput, setMaxDaysInput] = useState(String(initialSummary?.max_days || 7));
   const [drafts, setDrafts] = useState({});
+  const [editingMap, setEditingMap] = useState({});
   const [audioUrls, setAudioUrls] = useState({});
   const [feedback, setFeedback] = useState("");
 
+  const statusSummary = builtin?.status?.asr_corpus;
   const view = asrCorpusView(data);
 
   const applyPayload = useCallback((res) => {
@@ -64,6 +68,18 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
   useEffect(() => {
     if (active) refresh();
   }, [active, refresh]);
+
+  const statusTotalCount = Number(statusSummary?.total_count) || 0;
+  const statusLabeledCount = Number(statusSummary?.labeled_count) || 0;
+  const prevStatusCountsRef = React.useRef({ total: statusTotalCount, labeled: statusLabeledCount });
+  useEffect(() => {
+    const prev = prevStatusCountsRef.current;
+    prevStatusCountsRef.current = { total: statusTotalCount, labeled: statusLabeledCount };
+    if (!active) return;
+    if (statusTotalCount !== prev.total || statusLabeledCount !== prev.labeled) {
+      void refresh();
+    }
+  }, [active, statusTotalCount, statusLabeledCount, refresh]);
 
   const itemKey = (item) => `${item.date}/${item.turn_id}`;
 
@@ -101,6 +117,7 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
         });
         applyPayload(res);
         setFeedback("已开启识别录音语料采集（仅存本机，不进诊断包）");
+        await builtin?.refresh?.();
       } catch (error) {
         await showAlert(voiceErrorText(error), { title: "开启识别语料采集失败", tone: "error" });
       } finally {
@@ -109,8 +126,20 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       return;
     }
 
+    let latestCount = view.totalCount;
+    if (latestCount === 0) {
+      try {
+        const fresh = await voiceApi.asrCorpusManage({ action: "status" });
+        if (fresh && typeof fresh === "object") {
+          applyPayload(fresh);
+          latestCount = Number(fresh.total_count) || 0;
+        }
+      } catch {
+        // 状态探测失败时退回本地计数
+      }
+    }
     let deleteExisting = false;
-    if (view.totalCount > 0) {
+    if (latestCount > 0) {
       const choice = await showChoice(ASR_CORPUS_DISABLE_CHOICE_TEXT, ASR_CORPUS_DISABLE_CHOICE_OPTIONS);
       if (choice === "dismiss") return;
       deleteExisting = choice === "confirm";
@@ -125,11 +154,13 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       applyPayload(res);
       setAudioUrls({});
       setDrafts({});
+      setEditingMap({});
       setFeedback(
         deleteExisting
           ? `已关闭采集并删除 ${res?.deleted_count ?? 0} 条已采集语料`
           : "已关闭识别录音语料采集（已有语料暂保留在本机）",
       );
+      await builtin?.refresh?.();
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "关闭识别语料采集失败", tone: "error" });
     } finally {
@@ -159,6 +190,7 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       });
       applyPayload(res);
       setFeedback(`已更新保留上限：最多 ${maxItems} 条 / ${maxDays} 天`);
+      await builtin?.refresh?.();
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "保存上限失败", tone: "error" });
     } finally {
@@ -191,6 +223,7 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       await showAlert(built.error, { title: "无法保存标注", tone: "warning" });
       return;
     }
+    const key = itemKey(item);
     setBusy(true);
     setFeedback("");
     try {
@@ -206,7 +239,9 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
         ),
       }));
       updateDraft(item, { text: res.label.reference_text, tags: res.label.tags || [] });
+      setEditingMap((prev) => ({ ...prev, [key]: false }));
       setFeedback(`已保存标注：${item.turn_id}`);
+      await builtin?.refresh?.();
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "保存标注失败", tone: "error" });
     } finally {
@@ -227,6 +262,7 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       });
       applyPayload(res);
       setFeedback(`已删除语料：${item.turn_id}`);
+      await builtin?.refresh?.();
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "删除语料失败", tone: "error" });
     } finally {
@@ -244,7 +280,9 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       applyPayload(res);
       setAudioUrls({});
       setDrafts({});
+      setEditingMap({});
       setFeedback(`已清空 ${res?.cleared ?? 0} 条识别语料`);
+      await builtin?.refresh?.();
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "清空语料失败", tone: "error" });
     } finally {
@@ -252,15 +290,33 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
     }
   };
 
+  const unlabeledCount = view.items.filter((i) => !i.label).length;
+  const playbackCount = view.items.filter((i) => asrCorpusItemSourceView(i).isPlayback).length;
+  const manualCount = view.items.filter((i) => {
+    const s = asrCorpusItemSourceView(i);
+    return s.isLabeled && !s.isPlayback;
+  }).length;
+
   const filteredItems = view.items.filter((item) => {
-    if (filter === "labeled") return Boolean(item.label);
-    if (filter === "unlabeled") return !item.label;
+    const src = asrCorpusItemSourceView(item);
+    if (filter === "labeled") return src.isLabeled;
+    if (filter === "unlabeled") return !src.isLabeled;
+    if (filter === "manual") return src.kind === "manual";
+    if (filter === "playback") return src.kind === "playback";
     return true;
   });
 
+  const filterOptions = [
+    ["all", `全部 (${view.items.length})`],
+    ["unlabeled", `未标注 (${unlabeledCount})`],
+    ["labeled", `已标注 (${view.labeledCount})`],
+    ...(manualCount > 0 ? [["manual", `人工原声 (${manualCount})`]] : []),
+    ...(playbackCount > 0 ? [["playback", `外放回采 (${playbackCount})`]] : []),
+  ];
+
   const content = (
     <>
-      <div className="voice-inline-actions" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
+      <div className="ai-bench-corpus-toolbar">
         <label className="voice-check">
           <input
             type="checkbox"
@@ -269,10 +325,10 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
             disabled={busy}
             onChange={(e) => toggleCapture(e.target.checked)}
           />
-          <span>保存最近的识别录音用于测评</span>
+          <span>保存最近的识别录音用于测评（存 <code className="mono">{`<运行目录>/${view.corpusDirRel}/`}</code>，模拟轮次不保存）</span>
         </label>
-        <div className="voice-inline-actions" style={{ gap: "6px", flexWrap: "wrap" }}>
-          <label className="voice-muted" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+        <div className="ai-bench-corpus-limits">
+          <label className="voice-muted ai-bench-limit-field">
             <span>上限条数</span>
             <input
               type="number"
@@ -280,13 +336,12 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
               max={5000}
               id="voice-asr-corpus-max-items"
               className="text-input mono"
-              style={{ width: "76px" }}
               value={maxItemsInput}
               disabled={busy}
               onChange={(e) => setMaxItemsInput(e.target.value)}
             />
           </label>
-          <label className="voice-muted" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+          <label className="voice-muted ai-bench-limit-field">
             <span>天数</span>
             <input
               type="number"
@@ -294,7 +349,6 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
               max={90}
               id="voice-asr-corpus-max-days"
               className="text-input mono"
-              style={{ width: "64px" }}
               value={maxDaysInput}
               disabled={busy}
               onChange={(e) => setMaxDaysInput(e.target.value)}
@@ -311,10 +365,6 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
         </div>
       </div>
 
-      <p className="voice-muted" style={{ marginTop: "6px" }}>
-        仅存本机 <span className="mono">{`<运行目录>/${view.corpusDirRel}/<日期>/`}</span>（16 kHz 单声道 WAV，先达条数或天数上限即自动清理），不进诊断包与过程记录，不用于声纹识别或身份授权；模拟联调轮次不保存。
-      </p>
-
       {feedback && (
         <div className="voice-hint voice-hint--info" id="voice-asr-corpus-feedback">
           {feedback}
@@ -322,18 +372,51 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
       )}
 
       {!view.panelUsable ? (
-        <p className="voice-muted" id="voice-asr-corpus-disabled-note">
-          采集开关默认关闭。开启后可在此试听真实录音、校对“正确文字”并打标签，供离线测评脚本自动评估各识别模型。
-        </p>
+        <div>
+          <p className="voice-muted" id="voice-asr-corpus-disabled-note">
+            采集开关默认关闭。开启后可在此试听真实录音、校对“正确文字”并打标签，供离线测评脚本自动评估各识别模型。
+          </p>
+          {view.retainedItems.length > 0 && (
+            <div className="voice-stack" id="voice-asr-corpus-retained-list" style={{ marginTop: "8px" }}>
+              <p className="voice-muted">
+                当前采集已关闭，以下为本机暂存的历史语料（仅允许单独删除或点上方“清空全部”，开启采集后才可试听与标注）：
+              </p>
+              {view.retainedItems.map((item) => (
+                <div
+                  key={itemKey(item)}
+                  className="voice-debug-row ai-bench-corpus-row is-compact"
+                  id={`voice-asr-corpus-retained-${item.turn_id}`}
+                >
+                  <div className="ai-bench-corpus-row-head">
+                    <div className="ai-bench-corpus-meta">
+                      <span className="mono">{formatTime(Math.floor((item.captured_at_ms || 0) / 1000))}</span>
+                      {" · "}
+                      <span className="mono">{item.date}/{item.turn_id}</span>
+                      {" · "}
+                      <span className="mono">{((item.duration_ms || 0) / 1000).toFixed(1)}s</span>
+                      <span className={`ob-pill ${item.labeled ? "ob-pill--ok" : "ob-pill--off"}`}>
+                        {item.labeled ? "已标注" : "未标注"}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost voice-inline-btn"
+                      disabled={busy}
+                      onClick={() => deleteItem(item)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       ) : (
-        <div id="voice-asr-corpus-panel" style={{ marginTop: "10px" }}>
-          <div className="voice-inline-actions" style={{ justifyContent: "space-between", marginBottom: "8px", flexWrap: "wrap", gap: "6px" }}>
-            <div className="voice-inline-actions" style={{ gap: "6px" }}>
-              {[
-                ["all", `全部 (${view.items.length})`],
-                ["unlabeled", `未标注 (${view.items.filter((i) => !i.label).length})`],
-                ["labeled", `已标注 (${view.labeledCount})`],
-              ].map(([key, label]) => (
+        <div id="voice-asr-corpus-panel">
+          <div className="ai-bench-corpus-filterbar">
+            <div className="voice-inline-actions">
+              {filterOptions.map(([key, label]) => (
                 <button
                   key={key}
                   type="button"
@@ -352,43 +435,62 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
           {filteredItems.length === 0 ? (
             <p className="voice-muted">暂无匹配的识别录音语料。唤醒小智说几句话后点“刷新列表”。</p>
           ) : (
-            <div className="voice-stack" style={{ gap: "10px" }}>
+            <div className="voice-stack">
               {filteredItems.map((item) => {
                 const key = itemKey(item);
                 const draft = getDraft(item);
                 const audioSrc = audioUrls[key];
-                const isLabeled = Boolean(item.label);
+                const sourceView = asrCorpusItemSourceView(item);
+                const diff = asrCorpusTextDiffView(item);
+                const isEditing = !sourceView.isLabeled || Boolean(editingMap[key]);
                 return (
-                  <div key={key} className="voice-debug-row" id={`voice-asr-corpus-row-${item.turn_id}`}>
-                    <div className="voice-debug-head" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: "6px" }}>
-                      <div>
+                  <div
+                    key={key}
+                    className={`voice-debug-row ai-bench-corpus-row${sourceView.isLabeled && !isEditing ? " is-compact" : ""}`}
+                    id={`voice-asr-corpus-row-${item.turn_id}`}
+                  >
+                    <div className="ai-bench-corpus-row-head">
+                      <div className="ai-bench-corpus-meta">
                         <span className="mono">{formatTime(Math.floor((item.captured_at_ms || 0) / 1000))}</span>
                         {" · "}
                         <span>{item.asr_model || "未知模型"}</span>
                         {" · "}
                         <span className="mono">{((item.duration_ms || 0) / 1000).toFixed(1)}s</span>
-                        {isLabeled ? (
-                          <span className="ob-pill ob-pill--ok" style={{ marginLeft: "6px" }}>
-                            已标注
-                          </span>
-                        ) : (
-                          <span className="ob-pill ob-pill--off" style={{ marginLeft: "6px" }}>
-                            未标注
-                          </span>
+                        <span className={`ob-pill ob-pill--${sourceView.tone}`}>
+                          {sourceView.badgeText}
+                        </span>
+                        {diff.correctedRescued && (
+                          <span className="ob-pill ob-pill--ok">同音纠偏已命中</span>
                         )}
+                        {Array.isArray(item.label?.tags) &&
+                          item.label.tags.map((t) => (
+                            <span key={t} className="ob-pill ob-pill--off">
+                              {t}
+                            </span>
+                          ))}
                       </div>
-                      <div className="voice-inline-actions" style={{ gap: "6px" }}>
+                      <div className="voice-inline-actions">
                         <button
                           type="button"
-                          className="btn btn-ghost"
+                          className="btn btn-ghost voice-inline-btn"
                           disabled={busy}
                           onClick={() => playAudio(item)}
                         >
                           {audioSrc ? "重新加载录音" : "▶ 播放录音"}
                         </button>
+                        {sourceView.isLabeled && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost voice-inline-btn"
+                            disabled={busy}
+                            onClick={() => setEditingMap((prev) => ({ ...prev, [key]: !isEditing }))}
+                          >
+                            {isEditing ? "收起编辑" : "修改标注"}
+                          </button>
+                        )}
                         <button
                           type="button"
-                          className="btn btn-ghost"
+                          className="btn btn-ghost voice-inline-btn"
                           disabled={busy}
                           onClick={() => deleteItem(item)}
                         >
@@ -398,60 +500,78 @@ export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false })
                     </div>
 
                     {audioSrc && (
-                      <audio controls src={audioSrc} style={{ width: "100%", height: "32px", marginTop: "6px" }} />
+                      <audio controls src={audioSrc} className="ai-bench-audio-player" />
                     )}
 
-                    <div style={{ marginTop: "6px" }}>
-                      <div className="voice-muted">
-                        识别结果：<strong style={{ color: "var(--text)" }}>{item.raw_text || "（空）"}</strong>
-                        {item.corrected_text && item.corrected_text !== item.raw_text ? (
-                          <span>（纠偏后：{item.corrected_text}）</span>
+                    <div className="ai-bench-corpus-diff">
+                      <span className="voice-muted">
+                        识别结果：<strong>{diff.rawText || "（空）"}</strong>
+                        {diff.wasCorrected ? (
+                          <span> → 纠偏后：<strong>{diff.correctedText}</strong></span>
                         ) : null}
-                      </div>
+                      </span>
+                      {sourceView.isLabeled && (
+                        <span className="voice-muted">
+                          {" · "}正确文字：
+                          <strong className={diff.matchesReference ? "voice-ok" : "voice-warn"}>
+                            {diff.referenceText}
+                          </strong>
+                        </span>
+                      )}
                     </div>
 
-                    <div className="voice-inline-actions" style={{ marginTop: "6px", gap: "6px", flexWrap: "wrap" }}>
-                      <input
-                        type="text"
-                        className="text-input"
-                        style={{ flex: "1 1 240px" }}
-                        placeholder="输入或修改正确文字"
-                        aria-label="正确文字"
-                        value={draft.text}
-                        disabled={busy}
-                        onChange={(e) => updateDraft(item, { text: e.target.value })}
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        disabled={busy || !String(item.raw_text || "").trim()}
-                        onClick={() => saveLabel(item, item.raw_text, draft.tags, true)}
-                      >
-                        ✓ 正确
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        disabled={busy || !String(draft.text || "").trim()}
-                        onClick={() => saveLabel(item, draft.text, draft.tags, draft.text.trim() === String(item.raw_text || "").trim())}
-                      >
-                        保存标注
-                      </button>
-                    </div>
-
-                    <div className="voice-inline-actions" style={{ marginTop: "6px", gap: "10px", flexWrap: "wrap" }}>
-                      {ASR_CORPUS_TAGS.map((tag) => (
-                        <label key={tag} className="voice-check" style={{ fontSize: "12px" }}>
+                    {isEditing && (
+                      <div className="ai-bench-corpus-editor">
+                        <div className="ai-bench-corpus-input-row">
                           <input
-                            type="checkbox"
-                            checked={draft.tags.includes(tag)}
+                            type="text"
+                            className="text-input"
+                            placeholder="输入或修改正确文字"
+                            aria-label="正确文字"
+                            value={draft.text}
                             disabled={busy}
-                            onChange={() => updateDraft(item, { tags: toggleAsrCorpusTag(draft.tags, tag) })}
+                            onChange={(e) => updateDraft(item, { text: e.target.value })}
                           />
-                          <span>{tag}</span>
-                        </label>
-                      ))}
-                    </div>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            disabled={busy || !String(item.raw_text || "").trim()}
+                            onClick={() => saveLabel(item, item.raw_text, draft.tags, true)}
+                          >
+                            ✓ 正确
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={busy || !String(draft.text || "").trim()}
+                            onClick={() =>
+                              saveLabel(
+                                item,
+                                draft.text,
+                                draft.tags,
+                                draft.text.trim() === String(item.raw_text || "").trim(),
+                              )
+                            }
+                          >
+                            保存标注
+                          </button>
+                        </div>
+
+                        <div className="ai-bench-corpus-tags">
+                          {ASR_CORPUS_TAGS.map((tag) => (
+                            <label key={tag} className="voice-check">
+                              <input
+                                type="checkbox"
+                                checked={draft.tags.includes(tag)}
+                                disabled={busy}
+                                onChange={() => updateDraft(item, { tags: toggleAsrCorpusTag(draft.tags, tag) })}
+                              />
+                              <span>{tag}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

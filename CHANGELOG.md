@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 修复真小智模拟联调、测试时间窗、识别语料及测评脚本安全与契约审查问题（2026-11-27）
+
+- **现象**：模拟停止快路径活动任务探测遇 `unknown`/失败时误放行急停，`sim_guard` 漏拦材料库写库与数字型布尔参数；调试入口缺少 `Host` 白名单与请求体前鉴权，时间窗未严格绑定会话且跨插话/续话/快停边界可能脱锁；语料与录音存储存在软链/权限/锁竞态及过程记录带前缀文件名配对失效；评测脚本缺逐句时间窗复核、Windows 播放命令未走环境变量且异常管道可能悬空。
+- **根因与修复**：`laser-host` 活动任务探测改回传 `Option<bool>` 并在未知/报错时 fail-closed；`sim_guard` 补拦 `select_calibration_cell_tool`、带 `feedback_id` 重生成与数字布尔；`debug_api` 改为中间件先鉴权、`Host` 回环白名单、并发与分路由体量上限；`BenchWindowStore` 与会话状态机全程按 `(device_id, session_id)` 锁存并覆盖 `take_over` / `FollowProbe` / `FastStopSource::Keyword` 与工具执行期复核；`asr_corpus`/`bench_recordings`/`debug_inject` 统一拒软链与重解析点、唯一随机临时文件 `0600` 原子写、全锁序防到期竞态，并按过程记录带时间戳前缀 WAV 精确配对 `.label.json` 且守住禁用 `asr-corpus` 隔离；前端补齐切页释放麦克风、关闭态只删索引与状态刷新；`scripts/voice-bench` 补齐每句前窗校验、Windows 环境变量传参、脱敏、信号回收、命令词防护与 `input_source` 分组并同步文档。
+- **验证**：`node scripts/verify.mjs --finish` 通过（全工作区 clippy / 测试、前端 lint / 测试 / 构建、脚本单测 88 项、浏览器测试与回环 E2E，并自动快更 `/Applications/MOSS.app`）；新增 `sim_guard`、`debug_api`、`asr_corpus`、`simulated_inject`、`device_switch_tests`、`voiceState`、`asr-bench` 与 `xiaozhi-e2e` 回归单测；真小智硬件外放与实机激光急停未实测（`unverified`）。
+- **关联**：`crates/laser-host/src/lib.rs`、`crates/moss-voice/src/settings.rs`、`crates/moss-voice-server/src/{sim_guard,debug_api,lib,asr_corpus,conversation,session}.rs`、`crates/moss-voice-host/src/builtin/{tool_host,lifecycle,status,asr_corpus,bench_recordings,debug_inject}.rs`、`frontend/src/components/voice-builtin/{useBuiltinStatus.js,VoiceAsrCorpusCard.jsx,BenchRecordingsSection.jsx,LiveDebugTraces.jsx}`、`scripts/voice-bench/*.mjs`、`docs/developer/{api-contracts,safety,frontend-behavior}.md`。
+
+### 优化“AI 联调与测试”布局与录音工作台，将识别语料并入完整过程记录并区分 4 种音源（2026-11-27）
+
+- **现象**：「AI 联调与测试」中的“识别语料”子块与“完整过程记录 + 对话记录与排障”重复维护开关和列表，过程记录文件未区分小智实时说话、整体测试外放录音、数字录音直通与文字直通 4 种音源；同时状态清单单列占高大，录制测试语料缺少实时电平条、考核点提示与保存后自动跳句。
+- **根因与修复**：`moss-voice-server` 新增 `classify_turn_input_source` 在 `timeline.jsonl` / `timeline.txt`、`TurnDetail` 与 `TurnDebugTrace` 显式写入 `live_mic`、`e2e_playback`、`digital_inject`、`text_inject` 4 种音源；从 `AiBenchAssistantCard` 移除独立的“识别语料”子块（清单精简为 4 项双列紧凑网格，复制提示词新增 `--compare-digital` 与 `--noise fan` 勾选），合入 `LiveDebugTraces`（提供完整过程记录开关、音源胶囊、`▶ 听录音`、`✓ 识别正确` 与同音纠偏同步写入过程记录 `.label.json`，诊断包严格剥离标注字段）；`xiaozhi-e2e.mjs` 外放自动往过程记录写 `e2e_playback` 标准真值，`asr-bench.mjs` 直接扫过程记录与语料目录；`BenchRecordingsSection` 升级三态句号胶囊、考核点胶囊、实时麦克风电平条、保存后自动跳下一未录句与空格/回车快捷键（技术书 n140）。
+- **验证**：`node scripts/verify.mjs --finish` 通过（含 `moss-voice-server`、`moss-voice-host`、`voiceState.test.mjs`、`voicePrivacyAcl.test.mjs`、`voice-center.browser.mjs` 浏览器测试与回环 E2E，已快更 `/Applications/MOSS.app`）；真机麦克风实时电平与小智外放未实机验证（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{lib.rs,state.rs,session.rs,session/{trace.rs,turn.rs,lifecycle.rs}}`、`crates/moss-voice-host/src/builtin/{asr_corpus.rs,bench_recordings.rs,status.rs}`、`scripts/voice-bench/{xiaozhi-e2e.mjs,asr-bench.mjs}`、`frontend/src/{voiceState/{aiBench.js,benchRecordings.js},components/voice-builtin/{AiBenchAssistantCard.jsx,BenchRecordingsSection.jsx,LiveDebugTraces.jsx}}`。
+
 ### 新增真小智纯真人录音整体测试、测试时间窗安全锁与语音中心“AI 联调与测试”分组（2026-11-27）
 
 - **现象**：VA 文字直通跳过拾音判停，VB 离线测评不覆盖真机端到端对话，且外放整体测试需完全使用真人录音（不用合成声）并在应用内提供集中录制、开关与一键提示词入口。

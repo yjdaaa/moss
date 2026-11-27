@@ -623,7 +623,7 @@ impl BuiltinVoice {
                 debug_epoch: self.chat_log_epoch.clone(),
                 eager_device_mcp: true,
                 active_laser_job: Some(Arc::new(move || {
-                    laser_host::voice_has_active_laser_job(&active_job_api)
+                    laser_host::voice_has_active_laser_job(&active_job_api).unwrap_or(true)
                 })),
                 debug_process_trace: Some(debug_trace_control),
                 asr_corpus: Some(self.asr_corpus.clone()),

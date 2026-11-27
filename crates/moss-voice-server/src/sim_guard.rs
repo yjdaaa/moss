@@ -30,10 +30,13 @@ fn canonical_device_tool(name: &str) -> String {
 fn arg_bool(args: &Value, key: &str) -> bool {
     args.get(key)
         .and_then(|v| {
-            v.as_bool().or_else(|| {
-                v.as_str()
-                    .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
-            })
+            v.as_bool()
+                .or_else(|| {
+                    v.as_str().map(|s| {
+                        matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+                    })
+                })
+                .or_else(|| v.as_f64().map(|n| n != 0.0))
         })
         .unwrap_or(false)
 }
@@ -127,7 +130,9 @@ pub fn check_simulated_tool(
             }
         }
         "regenerate_text_laser_task_tool" => {
-            if arg_bool(&args, "confirmed") && arg_bool(&args, "send_after_generate") {
+            if arg_non_empty_str(&args, "feedback_id").is_some() {
+                Err("模拟轮次禁止采纳反馈建议修改任务参数".into())
+            } else if arg_bool(&args, "confirmed") && arg_bool(&args, "send_after_generate") {
                 Err("模拟轮次只允许重新生成雕刻预览，禁止发送任务".into())
             } else {
                 Ok(())
@@ -152,9 +157,9 @@ pub fn check_simulated_tool(
             None | Some("list" | "get" | "recommend" | "export") => Ok(()),
             _ => Err("模拟轮次禁止修改、导入或删除材料参数库".into()),
         },
+        "select_calibration_cell_tool" => Err("模拟轮次禁止将标定结果写入材料参数库".into()),
         "check_laser_connection_tool"
         | "recommend_laser_params_tool"
-        | "select_calibration_cell_tool"
         | "refine_laser_params_from_feedback_tool" => Ok(()),
         "hass_get_state" => Ok(()),
         "hass_set_state" | "hass_play_music" => Err("模拟轮次禁止执行智能家居控制动作".into()),
@@ -165,7 +170,7 @@ pub fn check_simulated_tool(
         "agent_run_list" | "agent_run_detail" => Ok(()),
         "get_weather" | "get_news" | "web_search" | "search_rag" | "play_music"
         | "end_conversation" | "stay_silent" => Ok(()),
-        "set_persona" => Err("模拟轮次不允许修改说话角色设置".into()),
+        "voice_persona_tool" => Err("模拟轮次不允许修改说话角色设置".into()),
         // 3. 第三方 MCP 工具：仅放行用户在设置中明确标为可信只读的工具，其余一律拒绝（绝不进入桌面审批）
         n if n.contains("__") => {
             if trusted_read_only {
@@ -381,6 +386,43 @@ mod tests {
                 false
             )
             .is_ok()
+        );
+
+        // 审查回归：数字型布尔值、标定落库写入材料库、R3 反馈采纳、修改角色均须拦截
+        assert!(
+            check_simulated_tool(
+                "generate_text_laser_task_tool",
+                None,
+                r#"{"text":"测试","confirmed":1,"send_after_generate":1}"#,
+                false
+            )
+            .is_err(),
+            "数字 1 等价于 true，不得绕过发送拦截"
+        );
+        assert!(
+            check_simulated_tool(
+                "select_calibration_cell_tool",
+                None,
+                r#"{"calibration_id":"cal-1","cell_number":2}"#,
+                false
+            )
+            .is_err(),
+            "标定选格会覆写材料库，模拟轮次必须拒绝"
+        );
+        assert!(
+            check_simulated_tool(
+                "regenerate_text_laser_task_tool",
+                None,
+                r#"{"task_id":"wf-1","feedback_id":"fb-1"}"#,
+                false
+            )
+            .is_err(),
+            "带 feedback_id 属于 R3 反馈采纳，模拟轮次必须拒绝"
+        );
+        assert!(
+            check_simulated_tool("voice_persona_tool", None, r#"{"persona":"moss"}"#, false)
+                .is_err(),
+            "修改说话角色须命中显式拒绝分支"
         );
     }
 }

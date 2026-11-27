@@ -49,6 +49,9 @@ impl<'a> Session<'a> {
         }
         // 手动模式按住即说：马上建立识别连接；自动模式等 VAD 确认开始说话（避免为环境声建连接）
         let stream = if manual { self.open_stream() } else { None };
+        let bench_window = self
+            .shared
+            .is_bench_window_active_for_session(self.device_id, self.session_id);
         self.phase = Phase::Listening(Listening {
             manual,
             speaking: false,
@@ -66,6 +69,7 @@ impl<'a> Session<'a> {
             hold_used: false,
             hold_deadline: None,
             finalize_after_vad_seq: None,
+            bench_window,
         });
         self.set_state("listening");
     }
@@ -79,9 +83,15 @@ impl<'a> Session<'a> {
         let max = self.samples(MAX_UTTERANCE_MS);
         let preroll_max = self.samples(PREROLL_MS);
         let min_speech_samples = self.samples(self.shared.config.vad.min_speech_ms as usize);
+        let bench_active_now = self
+            .shared
+            .is_bench_window_active_for_session(self.device_id, self.session_id);
         let Phase::Listening(listening) = &mut self.phase else {
             return None;
         };
+        if bench_active_now {
+            listening.bench_window = true;
+        }
         let mut ended = false;
         let mut began = false;
         let mut resumed = false;
@@ -298,12 +308,13 @@ impl<'a> Session<'a> {
                 .as_ref()
                 .is_some_and(|store| store.is_enabled())
                 && !self.next_turn_is_digital;
-            let (fast_stop_pcm, fast_stop_interims, began_ms, peak_lvl) =
+            let (fast_stop_pcm, fast_stop_interims, began_ms, peak_lvl, latched_bench) =
                 match std::mem::replace(&mut self.phase, Phase::Idle) {
                     Phase::Listening(mut listening) => {
                         let began = listening.speech_began_at_ms;
                         let peak = (listening.peak_uplink_level > 0)
                             .then_some(listening.peak_uplink_level);
+                        let latched = listening.bench_window;
                         if corpus_enabled {
                             let pcm = std::mem::take(&mut listening.utterance);
                             let interims = std::mem::take(&mut listening.interims);
@@ -312,18 +323,20 @@ impl<'a> Session<'a> {
                                 interims,
                                 began,
                                 peak,
+                                latched,
                             )
                         } else {
-                            (None, Vec::new(), began, peak)
+                            (None, Vec::new(), began, peak, latched)
                         }
                     }
-                    _ => (None, Vec::new(), None, None),
+                    _ => (None, Vec::new(), None, None, false),
                 };
             self.pending_fast_stop_pcm = fast_stop_pcm;
             self.pending_corpus_interims = fast_stop_interims;
             self.pending_speech_began_at_ms = began_ms;
             self.pending_speech_end_at_ms = Some(crate::unix_now_ms());
             self.pending_peak_uplink_level = peak_lvl;
+            self.pending_bench_window = latched_bench;
             self.event(format!(
                 "流式中间结果整句命中急停词（{}）：立即请求急停",
                 crate::fast::normalized(&corrected)
@@ -652,15 +665,16 @@ impl<'a> Session<'a> {
             self.digital_feed = None;
             self.next_turn_is_digital = true;
         }
-        let (stream, captured_interims, began_ms, peak_lvl) =
+        let (stream, captured_interims, began_ms, peak_lvl, latched_bench) =
             match std::mem::replace(&mut self.phase, Phase::Idle) {
                 Phase::Listening(mut listening) => (
                     listening.stream.take().map(|(stream, _)| stream),
                     std::mem::take(&mut listening.interims),
                     listening.speech_began_at_ms,
                     (listening.peak_uplink_level > 0).then_some(listening.peak_uplink_level),
+                    listening.bench_window,
                 ),
-                _ => (None, Vec::new(), None, None),
+                _ => (None, Vec::new(), None, None, false),
             };
         self.pending_corpus_interims = captured_interims;
         self.pending_fast_stop_pcm = None;
@@ -683,10 +697,15 @@ impl<'a> Session<'a> {
                 )));
             }
             self.next_turn_is_digital = false;
+            self.pending_bench_window = false;
             return Ok(());
         }
         let sample_rate = self.uplink_rate;
-        let in_bench_window = self.shared.is_bench_window_active(self.device_id);
+        let in_bench_window = latched_bench
+            || self
+                .shared
+                .is_bench_window_active_for_session(self.device_id, self.session_id);
+        self.pending_bench_window = in_bench_window;
         if !in_bench_window
             && !self.next_turn_is_digital
             && let Some(enrollment) = self
@@ -785,7 +804,14 @@ impl<'a> Session<'a> {
                 moss_voice_providers::local::CommandKeyword::Stop,
             ))
         {
-            self.listen.follow_probe = None;
+            if let Some(task) = self.listen.stop_check.take() {
+                task.abort();
+            }
+            let probe_bench = self
+                .listen
+                .follow_probe
+                .take()
+                .is_some_and(|probe| probe.bench_window);
             self.listen.follow.reset();
             self.event("思考中命令词模型听到“停”");
             return self
@@ -793,6 +819,7 @@ impl<'a> Session<'a> {
                     socket,
                     Some("停".into()),
                     crate::conversation::FastStopSource::Keyword,
+                    probe_bench,
                 )
                 .await;
         }
@@ -844,7 +871,9 @@ impl<'a> Session<'a> {
                     task.abort();
                 }
                 self.trace_record("follow_probe", serde_json::json!({"phase": "confirmed"}));
-                return self.take_over(socket, probe.head, true).await;
+                return self
+                    .take_over(socket, probe.head, true, probe.bench_window)
+                    .await;
             }
             return Ok(());
         }

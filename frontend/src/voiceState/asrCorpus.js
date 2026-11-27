@@ -61,6 +61,7 @@ export function asrCorpusView(data) {
   const totalCount = Number(data?.total_count) || 0;
   const labeledCount = Number(data?.labeled_count) || 0;
   const items = enabled && Array.isArray(data?.items) ? data.items : [];
+  const retainedItems = !enabled && Array.isArray(data?.retained_items) ? data.retained_items : [];
   const corpusDirRel = String(data?.corpus_dir_rel || "asr-corpus");
   const summary = enabled
     ? `采集已开 · ${totalCount} 条（已标注 ${labeledCount} 条，上限 ${maxItems} 条 / ${maxDays} 天）`
@@ -75,6 +76,7 @@ export function asrCorpusView(data) {
     totalCount,
     labeledCount,
     items,
+    retainedItems,
     corpusDirRel,
     summary,
   };
@@ -115,5 +117,61 @@ export function buildAsrCorpusLabelPayload(item, referenceText, tags = [], verif
       verified_correct: Boolean(verifiedCorrect),
       tags: cleanTags,
     },
+  };
+}
+
+/** 识别语料条目的来源视图：区分未标注、人工标注（日常原声）与整体测试外放回采（e2e-playback）。 */
+export function asrCorpusItemSourceView(item) {
+  const label = item?.label && typeof item.label === "object" ? item.label : null;
+  if (!label) {
+    return {
+      kind: "unlabeled",
+      badgeText: "未标注",
+      tone: "off",
+      isLabeled: false,
+      isPlayback: false,
+      speaker: "",
+    };
+  }
+  const source = String(label.label_source || "").trim();
+  const speaker = String(label.voice_profile?.speaker || label.speaker || "").trim();
+  if (source === "e2e-playback") {
+    return {
+      kind: "playback",
+      badgeText: speaker ? `外放回采 · ${speaker}` : "外放回采",
+      tone: "warn",
+      isLabeled: true,
+      isPlayback: true,
+      speaker,
+    };
+  }
+  return {
+    kind: "manual",
+    badgeText: "人工标注",
+    tone: "ok",
+    isLabeled: true,
+    isPlayback: false,
+    speaker,
+  };
+}
+
+/** 对比单条识别语料的原始识别、同音纠偏后与人工/回采标注文字。 */
+export function asrCorpusTextDiffView(item) {
+  const rawText = String(item?.raw_text || "").trim();
+  const correctedText = String(item?.corrected_text || "").trim();
+  const referenceText = String(item?.label?.reference_text || "").trim();
+  const effectiveAsr = correctedText || rawText;
+  const wasCorrected = Boolean(correctedText && correctedText !== rawText);
+  const hasReference = Boolean(referenceText);
+  const matchesReference = hasReference && effectiveAsr === referenceText;
+  const correctedRescued = hasReference && rawText !== referenceText && correctedText === referenceText;
+  return {
+    rawText,
+    correctedText,
+    referenceText,
+    wasCorrected,
+    hasReference,
+    matchesReference,
+    correctedRescued,
   };
 }

@@ -71,18 +71,20 @@ export function checkPlayerAvailable(platform = process.platform) {
   return player;
 }
 
-function spawnPlayerProcess(player, wavPath) {
+function spawnPlayerProcess(player, wavPath, { stderrMode = "pipe" } = {}) {
+  const stdio = ["ignore", "ignore", stderrMode];
   if (player.kind === "powershell") {
-    const script =
-      "param([string]$p) $s = New-Object System.Media.SoundPlayer $p; $s.PlaySync()";
-    return spawn(player.cmd, ["-NoProfile", "-NonInteractive", "-Command", script, wavPath], {
-      stdio: ["ignore", "ignore", "pipe"],
+    // 经环境变量传入路径，绝不把动态路径拼进 PowerShell -Command（防止命令注入及路径解析失败）
+    const script = "$s = New-Object System.Media.SoundPlayer $env:MOSS_PLAY_WAV; $s.PlaySync()";
+    return spawn(player.cmd, ["-NoProfile", "-NonInteractive", "-Command", script], {
+      stdio,
+      env: { ...process.env, MOSS_PLAY_WAV: wavPath },
     });
   }
   if (player.kind === "aplay") {
-    return spawn(player.cmd, ["-q", wavPath], { stdio: ["ignore", "ignore", "pipe"] });
+    return spawn(player.cmd, ["-q", wavPath], { stdio });
   }
-  return spawn(player.cmd, [wavPath], { stdio: ["ignore", "ignore", "pipe"] });
+  return spawn(player.cmd, [wavPath], { stdio });
 }
 
 /** 播放单个 WAV 文件并精确记录本机起止时间戳（与同机服务端时钟一致）。 */
@@ -93,13 +95,18 @@ export async function playWav(wavPath, opts = {}) {
   const player = opts.player || checkPlayerAvailable(opts.platform || process.platform);
   const startedAtMs = Date.now();
   await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawnPlayerProcess(player, wavPath);
+    const child = spawnPlayerProcess(player, wavPath, { stderrMode: "pipe" });
+    if (typeof opts.onSpawn === "function") opts.onSpawn(child);
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr += d.toString("utf8");
     });
-    child.on("error", (err) => rejectPromise(err));
+    child.on("error", (err) => {
+      if (typeof opts.onSpawn === "function") opts.onSpawn(null);
+      rejectPromise(err);
+    });
     child.on("close", (code) => {
+      if (typeof opts.onSpawn === "function") opts.onSpawn(null);
       if (code === 0) resolvePromise();
       else rejectPromise(new Error(`音频播放失败（${player.cmd} exit=${code}）：${stderr.trim()}`));
     });
@@ -149,13 +156,19 @@ export function startBackgroundNoise({
 
   const loopPlay = () => {
     if (stopped) return;
-    currentChild = spawnPlayerProcess(activePlayer, noiseWav);
-    currentChild.on("close", () => {
+    currentChild = spawnPlayerProcess(activePlayer, noiseWav, { stderrMode: "ignore" });
+    currentChild.on("close", (code) => {
       currentChild = null;
+      // 播放进程异常退出（非 0）时停止循环，防止无退避 fork-bomb
+      if (code !== 0) {
+        stopped = true;
+        return;
+      }
       if (!stopped) loopPlay();
     });
     currentChild.on("error", () => {
       currentChild = null;
+      stopped = true;
     });
   };
   loopPlay();

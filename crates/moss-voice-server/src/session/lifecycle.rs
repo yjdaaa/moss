@@ -161,6 +161,8 @@ impl<'a> Session<'a> {
                                 tools_dropped: 0,
                                 simulated: turn.simulated,
                                 bench_window: turn.bench_window,
+                                input_source: turn.input_source.into(),
+                                trace_audio_file: turn.trace_audio_file.clone(),
                             },
                             captured_epoch,
                         )
@@ -192,6 +194,9 @@ impl<'a> Session<'a> {
                     bench_window: turn.bench_window,
                     simulated_label,
                     digital_audio: turn.digital_audio,
+                    input_source: turn.input_source.into(),
+                    input_source_label: turn.input_source_label.into(),
+                    trace_audio_file: turn.trace_audio_file.clone(),
                     status: outcome.into(),
                     outcome: outcome.into(),
                     route: route.into(),
@@ -303,6 +308,7 @@ impl<'a> Session<'a> {
                 paused_waits_for_model: false,
                 last_loud: None,
                 last_utterance: None,
+                last_utterance_bench_window: false,
             },
             bg: BackgroundQueryState::default(),
             screen: SessionScreenState::default(),
@@ -335,6 +341,7 @@ impl<'a> Session<'a> {
             digital_feed: None,
             pending_digital_ack: None,
             next_turn_is_digital: false,
+            pending_bench_window: false,
         })
     }
 
@@ -366,6 +373,9 @@ impl<'a> Session<'a> {
     }
 
     pub(super) fn cancel_digital_feed(&mut self, reason: &str) {
+        let had_digital = self.digital_feed.is_some()
+            || self.next_turn_is_digital
+            || self.pending_digital_ack.is_some();
         self.digital_feed = None;
         self.next_turn_is_digital = false;
         if let Some(tx) = self.pending_digital_ack.take() {
@@ -373,6 +383,25 @@ impl<'a> Session<'a> {
                 "inject_audio_cancelled",
                 reason,
             )));
+        }
+        if had_digital {
+            // 完整拆除数字注入留下的聆听缓冲、流式 ASR 与 VAD 队列，防止残余数字音频在关窗后降级成无门禁真实轮次
+            self.pending_listen_stop = false;
+            self.listen.hold_check = None;
+            self.pending_corpus_interims.clear();
+            self.pending_fast_stop_pcm = None;
+            self.pending_speech_began_at_ms = None;
+            self.pending_speech_end_at_ms = None;
+            self.pending_peak_uplink_level = None;
+            self.pending_bench_window = false;
+            self.vad.reset();
+            if let Some(worker) = self.vad_worker.as_mut() {
+                worker.reset();
+            }
+            if matches!(self.phase, Phase::Listening(_)) {
+                self.phase = Phase::Idle;
+                self.set_state("idle");
+            }
         }
     }
 
@@ -594,6 +623,7 @@ impl<'a> Session<'a> {
         reason: &str,
         notify: bool,
     ) -> Result<(), String> {
+        self.cancel_digital_feed("会话结束，数字音频注入中止");
         if let Some(music) = self.music.as_mut() {
             music.cancel(&mut self.pump);
         }
@@ -675,7 +705,9 @@ impl<'a> Session<'a> {
             // 加工结束播报与副屏 HUD 用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
             let job_deadline = self.notices.next_job_poll;
             let report_deadline = self.background_report_deadline(socket);
-            let bench_window_deadline = self.shared.bench_window_deadline_for(self.device_id);
+            let bench_window_deadline = self
+                .shared
+                .bench_window_deadline_for_session(self.device_id, self.session_id);
             let digital_feed_deadline = self.digital_feed.as_ref().map(|f| f.next_at);
             // 按顺序检查（biased）：对话任务的事件先于它发出的设备工具调用处理，设备看到的顺序与任务一致
             // （先 stt 再 tools/call）；设备消息先于播放定时器，打断不被积压的播放拍延迟。
@@ -684,8 +716,12 @@ impl<'a> Session<'a> {
                 _ = shutdown.changed() => return "内置语音服务已停止".into(),
                 _ = self.shared.bench_window_changed.notified() => {
                     self.shared.sync_bench_windows();
-                    if self.digital_feed.is_some()
-                        && !self.shared.is_bench_window_active(self.device_id)
+                    if (self.digital_feed.is_some()
+                        || self.next_turn_is_digital
+                        || self.pending_digital_ack.is_some())
+                        && !self
+                            .shared
+                            .is_bench_window_active_for_session(self.device_id, self.session_id)
                     {
                         self.cancel_digital_feed("测试时间窗已关闭，数字音频注入中止");
                     }
@@ -698,8 +734,12 @@ impl<'a> Session<'a> {
                     }
                 } => {
                     self.shared.sync_bench_windows();
-                    if self.digital_feed.is_some()
-                        && !self.shared.is_bench_window_active(self.device_id)
+                    if (self.digital_feed.is_some()
+                        || self.next_turn_is_digital
+                        || self.pending_digital_ack.is_some())
+                        && !self
+                            .shared
+                            .is_bench_window_active_for_session(self.device_id, self.session_id)
                     {
                         self.cancel_digital_feed("测试时间窗已到期关闭，数字音频注入中止");
                     }
@@ -727,7 +767,7 @@ impl<'a> Session<'a> {
                     Some(Err(_)) => return "连接出错".into(),
                 },
                 (paused_at, outcome) = next_listening_hold_check(&mut self.listen.hold_check) => self.on_hold_check_done(socket, paused_at, outcome).await,
-                stop = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop, crate::conversation::FastStopSource::Recheck).await,
+                (stop, stop_bench) = next_stop_check(&mut self.listen.stop_check) => self.on_stop_check_done(socket, stop, crate::conversation::FastStopSource::Recheck, stop_bench).await,
                 call = next_device_call(&mut self.device_mcp) => self.forward_device_call(socket, call).await,
                 request = async {
                     if requests_closed {

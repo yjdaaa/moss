@@ -40,7 +40,13 @@ export function redactText(raw, opts = {}) {
     out = out.replace(new RegExp(escapeRegExp(secret), "g"), "[REDACTED]");
   }
   const extraPaths = Array.isArray(opts.paths)
-    ? opts.paths.filter((p) => typeof p === "string" && p.length >= 2).sort((a, b) => b.length - a.length)
+    ? [
+        ...new Set(
+          opts.paths
+            .filter((p) => typeof p === "string" && p.length >= 2)
+            .flatMap((p) => [p, p.replace(/\\/g, "/"), p.replace(/\\/g, "\\\\")]),
+        ),
+      ].sort((a, b) => b.length - a.length)
     : [];
   for (const pathVal of extraPaths) {
     out = out.replace(new RegExp(escapeRegExp(pathVal), "g"), "<path>");
@@ -54,9 +60,9 @@ export function redactText(raw, opts = {}) {
   );
   // Bearer / Basic 令牌
   out = out.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi, "$1 [REDACTED]");
-  // 常见键值对凭据（JSON / header / CLI 参数）
+  // 常见键值对凭据（JSON / 转义 JSON / header / CLI 参数）
   out = out.replace(
-    /((?:api[_-]?key|apikey|authorization|access_token|device_token|token|secret|password|passwd)["']?\s*[:=]\s*["']?)(?:bearer\s+|basic\s+)?[^\s"',;&}]+/gi,
+    /((?:x-api-key|api[_-]?key|apikey|authorization|access[_-]?token|device[_-]?token|token|secret(?:[_-]?key)?|password|passwd)\\?["']?\s*[:=]\s*\\?["']?)(?:bearer\s+|basic\s+)?[^\s"',;&}\\)]+/gi,
     "$1[REDACTED]",
   );
   out = out.replace(/(--(?:token|api-key|secret|password)\s+)[^\s"']+/gi, "$1[REDACTED]");
@@ -64,9 +70,12 @@ export function redactText(raw, opts = {}) {
   out = out.replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]");
   out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "[REDACTED]");
   out = out.replace(/\b(?:dpapi-user-v1|keychain-user-v1):[A-Za-z0-9+/=_-]+/g, "[REDACTED]");
-  // 本机绝对路径（macOS / Linux / Windows）
+  // 本机绝对路径（macOS / Linux / Windows，含 JSON 双反斜杠与正斜杠形式）
   out = out.replace(/(?:\/Users|\/home|\/var\/folders|\/private\/var|\/tmp)\/[^\s"'<>`,;)\]]+/g, "<path>");
-  out = out.replace(/\b[A-Za-z]:\\(?:Users|Documents and Settings|ProgramData|Temp|Windows)[^\s"'<>`,;)\]]*/gi, "<path>");
+  out = out.replace(
+    /\b[A-Za-z]:(?:\\\\|\\|\/)(?:Users|Documents and Settings|ProgramData|Temp|Windows)[^\s"'<>`,;)\]]*/gi,
+    "<path>",
+  );
   return out;
 }
 
@@ -78,7 +87,9 @@ export function redactValue(value, opts = {}) {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       if (
-        /(?:^|_)(?:token|secret|password|api_?key|authorization)$/i.test(k) &&
+        (/(?:^|[_-])(?:token|secret|password|passwd|api[_-]?key|authorization)$/i.test(k) ||
+          /(?:Token|Secret|Password|ApiKey|SecretKey)$/.test(k) ||
+          /^x-api-key$/i.test(k)) &&
         typeof v === "string" &&
         v.length > 0
       ) {
@@ -90,6 +101,34 @@ export function redactValue(value, opts = {}) {
     return out;
   }
   return value;
+}
+
+/**
+ * 为长跑测评脚本注册幂等的 SIGINT / SIGTERM 异步清理钩子（避免 Ctrl+C 跳过 finally 残留时间窗/开关/子进程）。
+ * 返回卸载函数，务必在 finally 中调用以防单测场景累积监听器。
+ */
+export function registerSignalCleanup(cleanupFn, timeoutMs = 5_000) {
+  let triggered = false;
+  const makeHandler = (code) => () => {
+    if (triggered) return;
+    triggered = true;
+    Promise.race([
+      Promise.resolve().then(() => cleanupFn()),
+      new Promise((r) => setTimeout(r, timeoutMs)),
+    ])
+      .catch(() => {})
+      .finally(() => {
+        process.exit(code);
+      });
+  };
+  const onSigInt = makeHandler(130);
+  const onSigTerm = makeHandler(143);
+  process.on("SIGINT", onSigInt);
+  process.on("SIGTERM", onSigTerm);
+  return () => {
+    process.off("SIGINT", onSigInt);
+    process.off("SIGTERM", onSigTerm);
+  };
 }
 
 export function percentile(values, p) {
@@ -236,7 +275,7 @@ export function resolveDebugConnection(opts = {}) {
   const metaFile = join(runtimeDir, "debug", "voice-debug.json");
   if (!existsSync(tokenFile)) {
     throw new Error(
-      `找不到调试令牌文件（${redactText(tokenFile, { paths: [runtimeDir, homedir()] })}）；请先在桌面端“语音中心 › 服务”开启“允许本机 AI 调试注入”`,
+      `找不到调试令牌文件（${redactText(tokenFile, { paths: [runtimeDir, homedir()] })}）；请先在桌面端“语音中心 › 记录与诊断 › AI 联调与测试”开启“允许本机 AI 调试注入”`,
     );
   }
   const token = readFileSync(tokenFile, "utf8").trim();

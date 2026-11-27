@@ -13,7 +13,9 @@ import {
   analyzeRecordingQuality,
   benchRecordingGuideState,
   encodeMonoWavDataUrl,
+  findNextUnrecordedIndex,
   formatCorpusPromptSegments,
+  liveMicLevelView,
   micPermissionErrorHint,
   resampleFloatTo16k,
   validateSpeakerLabel,
@@ -37,6 +39,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
   const [recording, setRecording] = useState(false);
   const [openingMic, setOpeningMic] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [livePeak, setLivePeak] = useState(0);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState(null); // { wavDataUrl, quality }
@@ -46,7 +49,17 @@ export function BenchRecordingsSection({ builtin, active = true }) {
   const mountedRef = useRef(true);
   const micSessionRef = useRef(null);
   const micEpochRef = useRef(0);
+  const previewEpochRef = useRef(0);
   const audioElRef = useRef(null);
+
+  const stopPreviewAudio = useCallback(() => {
+    previewEpochRef.current += 1;
+    try {
+      audioElRef.current?.pause?.();
+    } catch {
+      // 忽略暂停异常
+    }
+  }, []);
 
   const stopMicHardware = useCallback(() => {
     const sess = micSessionRef.current;
@@ -67,6 +80,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       // 忽略关闭异常
     }
     setRecording(false);
+    setLivePeak(0);
     return sess;
   }, []);
 
@@ -75,10 +89,22 @@ export function BenchRecordingsSection({ builtin, active = true }) {
     return () => {
       mountedRef.current = false;
       micEpochRef.current += 1;
+      stopPreviewAudio();
       const sess = stopMicHardware();
       if (sess) sess.aborted = true;
     };
-  }, [stopMicHardware]);
+  }, [stopMicHardware, stopPreviewAudio]);
+
+  useEffect(() => {
+    if (!active) {
+      // 语音中心切标签使用 hidden={!active} 不卸载组件，隐藏时立即释放麦克风并停止试听
+      micEpochRef.current += 1;
+      stopPreviewAudio();
+      const sess = stopMicHardware();
+      if (sess) sess.aborted = true;
+      setOpeningMic(false);
+    }
+  }, [active, stopMicHardware, stopPreviewAudio]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -123,6 +149,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
 
   const selectSentence = (nextIdx) => {
     if (recording || openingMic || saving) return;
+    stopPreviewAudio();
     setCurrentIndex(nextIdx);
     setDraft(null);
     setSavedAudioUrl("");
@@ -131,6 +158,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
 
   const selectSpeaker = (label) => {
     if (recording || openingMic || saving) return;
+    stopPreviewAudio();
     setSpeaker(label);
     setDraft(null);
     setSavedAudioUrl("");
@@ -143,6 +171,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       setFeedback({ tone: "warn", text: check.error });
       return;
     }
+    stopPreviewAudio();
     setSpeaker(check.speaker);
     setNewSpeakerInput("");
     setDraft(null);
@@ -159,10 +188,12 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       });
       return;
     }
+    stopPreviewAudio();
     setDraft(null);
     setSavedAudioUrl("");
     setFeedback(null);
     setElapsedMs(0);
+    setLivePeak(0);
 
     const epoch = ++micEpochRef.current;
     setOpeningMic(true);
@@ -204,12 +235,19 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       const chunks = [];
       let finished = false;
+      let latestChunkPeak = 0;
       const startedAt = Date.now();
 
       processor.onaudioprocess = (event) => {
         if (finished) return;
         const ch = event.inputBuffer.getChannelData(0);
         chunks.push(new Float32Array(ch));
+        let peak = 0;
+        for (let i = 0; i < ch.length; i += 4) {
+          const a = Math.abs(ch[i]);
+          if (a > peak) peak = a;
+        }
+        latestChunkPeak = Math.min(100, Math.round(peak * 100));
       };
       source.connect(processor);
       processor.connect(ctx.destination);
@@ -246,14 +284,17 @@ export function BenchRecordingsSection({ builtin, active = true }) {
         } else {
           setFeedback({
             tone: "ok",
-            text: `录制完成（${(quality.durationMs / 1000).toFixed(1)} 秒 · 峰值电平 ${quality.peakLevel}%），可点“试听”确认后“保存”。`,
+            text: `录制完成（${(quality.durationMs / 1000).toFixed(1)} 秒 · 峰值电平 ${quality.peakLevel}%），点“保存”（或按回车）即可保存并跳到下一句。`,
           });
         }
       };
 
       sessionObj.finish = finish;
       sessionObj.tickTimer = setInterval(() => {
-        if (mountedRef.current) setElapsedMs(Date.now() - startedAt);
+        if (mountedRef.current) {
+          setElapsedMs(Date.now() - startedAt);
+          setLivePeak(latestChunkPeak);
+        }
       }, 100);
       // 超过 15 秒上限自动停止
       sessionObj.maxTimer = setTimeout(() => {
@@ -297,6 +338,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
 
   const previewAudio = async () => {
     if (draft?.wavDataUrl) {
+      previewEpochRef.current += 1;
       if (audioElRef.current) {
         audioElRef.current.src = draft.wavDataUrl;
         void audioElRef.current.play?.().catch(() => {});
@@ -304,32 +346,39 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       return;
     }
     if (!guide.currentSaved || !guide.currentItem) return;
+    const reqEpoch = ++previewEpochRef.current;
     try {
       const res = await voiceApi.benchRecordingsManage({
         action: "audio",
         speaker: guide.speaker,
         corpus_id: guide.currentItem.id,
       });
+      if (!mountedRef.current || previewEpochRef.current !== reqEpoch) return;
       if (res?.audio_data_url) {
         setSavedAudioUrl(res.audio_data_url);
         setTimeout(() => {
+          if (!mountedRef.current || previewEpochRef.current !== reqEpoch) return;
           if (audioElRef.current) void audioElRef.current.play?.().catch(() => {});
         }, 30);
       }
     } catch (error) {
+      if (!mountedRef.current || previewEpochRef.current !== reqEpoch) return;
       await showAlert(voiceErrorText(error), { title: "读取测试录音失败", tone: "error" });
     }
   };
 
   const saveRecording = async () => {
     if (!guide.canSave || !guide.currentItem || !draft?.wavDataUrl) return;
+    stopPreviewAudio();
+    const savedIndex = guide.currentIndex;
+    const savedCorpusId = guide.currentItem.id;
     setSaving(true);
     setFeedback(null);
     try {
       const res = await voiceApi.benchRecordingsManage({
         action: "save",
         speaker: guide.speaker,
-        corpus_id: guide.currentItem.id,
+        corpus_id: savedCorpusId,
         text: guide.currentItem.text,
         audio_wav_base64: draft.wavDataUrl,
       });
@@ -337,12 +386,32 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       setData(res);
       setDraft(null);
       setSavedAudioUrl("");
-      setFeedback({
-        tone: "ok",
-        text: `已保存「${guide.speaker}」的第 ${guide.currentIndex + 1} 句录音（16 kHz 单声道 WAV，${(
-          (res?.saved?.duration_ms || 0) / 1000
-        ).toFixed(1)} 秒）。`,
-      });
+
+      const nextItems = Array.isArray(res?.corpus_items) ? res.corpus_items : data.corpus_items;
+      const nextRecs = Array.isArray(res?.recordings) ? res.recordings : data.recordings;
+      const recMap = new Map();
+      for (const r of nextRecs) {
+        if (r && r.speaker === guide.speaker && r.corpus_id) recMap.set(r.corpus_id, r);
+      }
+      recMap.set(savedCorpusId, true);
+      const allDone = nextItems.length > 0 && nextItems.every((item) => recMap.has(item.id));
+      const nextIdx = findNextUnrecordedIndex(nextItems, recMap, savedIndex);
+      const durSec = ((res?.saved?.duration_ms || 0) / 1000).toFixed(1);
+
+      if (!allDone && nextIdx !== savedIndex) {
+        setCurrentIndex(nextIdx);
+        setFeedback({
+          tone: "ok",
+          text: `已保存「${guide.speaker}」第 ${savedIndex + 1} 句（${durSec} 秒），已自动跳到第 ${nextIdx + 1} 句。`,
+        });
+      } else {
+        setFeedback({
+          tone: "ok",
+          text: allDone
+            ? `已保存「${guide.speaker}」第 ${savedIndex + 1} 句（${durSec} 秒）· 该说话人全部 ${nextItems.length} 句语料已录齐！`
+            : `已保存「${guide.speaker}」第 ${savedIndex + 1} 句录音（16 kHz 单声道 WAV，${durSec} 秒）。`,
+        });
+      }
       await builtin?.refresh?.();
     } catch (error) {
       if (mountedRef.current) {
@@ -360,6 +429,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_OPTIONS,
     );
     if (!ok) return;
+    stopPreviewAudio();
     setSaving(true);
     try {
       const res = await voiceApi.benchRecordingsManage({
@@ -385,6 +455,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       BENCH_RECORDINGS_CLEAR_ALL_CONFIRM_OPTIONS,
     );
     if (!ok) return;
+    stopPreviewAudio();
     setSaving(true);
     try {
       const res = await voiceApi.benchRecordingsManage({
@@ -404,8 +475,22 @@ export function BenchRecordingsSection({ builtin, active = true }) {
     }
   };
 
+  const handleRecorderKeyDown = (e) => {
+    const tag = String(e.target?.tagName || "").toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "AUDIO") return;
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (guide.canStop) stopRecording();
+      else if (guide.canStart) void startRecording();
+    } else if (e.key === "Enter" && guide.canSave) {
+      e.preventDefault();
+      void saveRecording();
+    }
+  };
+
   const promptParts = formatCorpusPromptSegments(guide.currentItem);
   const previewSrc = draft?.wavDataUrl || savedAudioUrl;
+  const vu = liveMicLevelView(livePeak);
 
   return (
     <div className="voice-block" id="voice-bench-recordings-box">
@@ -433,66 +518,71 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       <p className="voice-muted">
         整体测试只使用此处录制的真人声音（16 kHz 单声道 WAV，存本机{" "}
         <code className="mono">{`<运行目录>/${data.recordings_dir_rel || "voice-bench/recordings"}/`}</code>
-        ）。录音不进诊断包与过程记录，不上传，仅用于本机整体测试。
+        ；支持多说话人标签，不进诊断包与过程记录，不用于声纹）。
       </p>
 
-      {/* 说话人标签选择 / 新建（只存标签，不涉及声纹或身份识别） */}
-      <div className="voice-inline-actions" style={{ marginTop: 8, gap: 6, flexWrap: "wrap" }}>
-        <span className="voice-muted">说话人标签：</span>
-        {allSpeakerOptions.map((label) => {
-          const spInfo = (data.speakers || []).find((s) => s.speaker === label);
-          const activeSpeaker = label === speaker;
-          return (
-            <button
-              key={label}
-              type="button"
-              className={activeSpeaker ? "btn btn-primary" : "btn btn-ghost"}
-              disabled={recording || openingMic || saving}
-              onClick={() => selectSpeaker(label)}
-            >
-              {label}
-              {spInfo ? ` (${spInfo.recorded_count}/${spInfo.corpus_count})` : ""}
-            </button>
-          );
-        })}
-        <input
-          type="text"
-          id="voice-bench-new-speaker"
-          className="text-input"
-          style={{ width: 130 }}
-          placeholder="新建标签如 家人 B"
-          value={newSpeakerInput}
-          disabled={recording || openingMic || saving}
-          onChange={(e) => setNewSpeakerInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              addSpeaker();
-            }
-          }}
-        />
-        <button
-          type="button"
-          className="btn btn-ghost"
-          id="voice-bench-add-speaker"
-          disabled={recording || openingMic || saving || !newSpeakerInput.trim()}
-          onClick={addSpeaker}
-        >
-          添加说话人
-        </button>
-      </div>
-      <div className="voice-muted" style={{ marginTop: 4, fontSize: 12 }}>
-        支持多位说话人分别录制同一套语料；此处只保存说话人标签，不涉及身份识别，也不用于声纹。
+      {/* 说话人标签选择 / 新建（左选标签、右紧凑新建，统一等高对齐） */}
+      <div className="ai-bench-speaker-bar">
+        <div className="ai-bench-speaker-list">
+          <span className="voice-muted">说话人：</span>
+          {allSpeakerOptions.map((label) => {
+            const spInfo = (data.speakers || []).find((s) => s.speaker === label);
+            const activeSpeaker = label === speaker;
+            return (
+              <button
+                key={label}
+                type="button"
+                className={activeSpeaker ? "btn btn-primary" : "btn btn-ghost"}
+                disabled={recording || openingMic || saving}
+                onClick={() => selectSpeaker(label)}
+              >
+                {label}
+                {spInfo ? ` (${spInfo.recorded_count}/${spInfo.corpus_count})` : ""}
+              </button>
+            );
+          })}
+        </div>
+        <div className="ai-bench-speaker-add">
+          <input
+            type="text"
+            id="voice-bench-new-speaker"
+            className="text-input"
+            placeholder="新建标签如 家人 B"
+            value={newSpeakerInput}
+            disabled={recording || openingMic || saving}
+            onChange={(e) => setNewSpeakerInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addSpeaker();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost"
+            id="voice-bench-add-speaker"
+            disabled={recording || openingMic || saving || !newSpeakerInput.trim()}
+            onClick={addSpeaker}
+          >
+            添加说话人
+          </button>
+        </div>
       </div>
 
       {loading && guide.totalCount === 0 ? (
-        <p className="voice-muted" style={{ marginTop: 8 }}>正在加载测试语料列表…</p>
+        <p className="voice-muted">正在加载测试语料列表…</p>
       ) : !guide.currentItem ? (
-        <p className="voice-muted" style={{ marginTop: 8 }}>未读到测试语料列表。</p>
+        <p className="voice-muted">未读到测试语料列表。</p>
       ) : (
-        <div className="voice-debug-card" id="voice-bench-recorder-card" style={{ marginTop: 10 }}>
-          {/* 句序号快捷导航 */}
-          <div className="voice-inline-actions" style={{ gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        <div
+          className="voice-debug-card ai-bench-recorder-card"
+          id="voice-bench-recorder-card"
+          tabIndex={0}
+          onKeyDown={handleRecorderKeyDown}
+        >
+          {/* 句序号三态快捷导航（已录绿边 / 当前高亮 / 未录虚线） */}
+          <div className="ai-bench-sentence-nav" role="navigation" aria-label="测试语料句号导航">
             {data.corpus_items.map((item, idx) => {
               const recorded = guide.recordedMap.has(item.id);
               const isCur = idx === guide.currentIndex;
@@ -500,8 +590,9 @@ export function BenchRecordingsSection({ builtin, active = true }) {
                 <button
                   key={item.id}
                   type="button"
-                  className={isCur ? "btn btn-primary" : "btn btn-ghost"}
-                  style={{ padding: "2px 8px", fontSize: 12 }}
+                  className={`btn ${isCur ? "btn-primary is-cur" : "btn-ghost"} ai-bench-step-btn ${
+                    recorded ? "is-recorded" : "is-unrecorded"
+                  }`}
                   disabled={recording || openingMic || saving}
                   onClick={() => selectSentence(idx)}
                   title={`${idx + 1}. ${item.label}${recorded ? "（已录）" : "（未录）"}`}
@@ -512,23 +603,23 @@ export function BenchRecordingsSection({ builtin, active = true }) {
             })}
           </div>
 
-          <div className="voice-actions" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
-            <span>
+          <div className="ai-bench-rec-head">
+            <span className="ai-bench-rec-title">
               <b>
                 第 {guide.currentIndex + 1} / {guide.totalCount} 句 · {guide.currentItem.label}
               </b>
               {guide.currentSaved ? (
-                <span className="ob-pill ob-pill--ok" style={{ marginLeft: 8 }}>
+                <span className="ob-pill ob-pill--ok">
                   已录（{((guide.currentSaved.duration_ms || 0) / 1000).toFixed(1)}s · 电平 {guide.currentSaved.peak_level}%）
                 </span>
               ) : (
-                <span className="ob-pill ob-pill--off" style={{ marginLeft: 8 }}>未录</span>
+                <span className="ob-pill ob-pill--off">未录</span>
               )}
             </span>
             {guide.currentSaved && (
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost voice-inline-btn"
                 id="voice-bench-rec-delete-one"
                 disabled={recording || openingMic || saving}
                 onClick={() => void deleteCurrentRecording()}
@@ -539,24 +630,10 @@ export function BenchRecordingsSection({ builtin, active = true }) {
           </div>
 
           {/* 朗读正文 + 句中停顿醒目提示 */}
-          <div
-            id="voice-bench-rec-prompt"
-            style={{
-              marginTop: 8,
-              padding: "10px 12px",
-              borderRadius: 8,
-              background: "rgba(255,255,255,0.04)",
-              fontSize: 15,
-              lineHeight: 1.6,
-            }}
-          >
+          <div className="ai-bench-rec-prompt" id="voice-bench-rec-prompt">
             {promptParts.map((part, idx) =>
               part.type === "pause" ? (
-                <span
-                  key={`p-${idx}`}
-                  className="ob-pill ob-pill--warn"
-                  style={{ margin: "0 6px", verticalAlign: "middle" }}
-                >
+                <span key={`p-${idx}`} className="ob-pill ob-pill--warn ai-bench-pause-pill">
                   {part.label}
                 </span>
               ) : (
@@ -564,17 +641,41 @@ export function BenchRecordingsSection({ builtin, active = true }) {
               ),
             )}
           </div>
-          {guide.currentItem.pause_hint && (
-            <div className="voice-muted" style={{ marginTop: 4, fontSize: 12 }}>
-              停顿说明：{guide.currentItem.pause_hint}
+
+          {/* 停顿提示与该句考核重点胶囊 */}
+          {(guide.currentItem.pause_hint || guide.expectBadges.length > 0) && (
+            <div className="ai-bench-expect-row" id="voice-bench-rec-expects">
+              {guide.expectBadges.map((b) => (
+                <span key={b.key} className={`ob-pill ob-pill--${b.tone}`}>
+                  {b.text}
+                </span>
+              ))}
+              {guide.currentItem.pause_hint && (
+                <span className="voice-muted">停顿说明：{guide.currentItem.pause_hint}</span>
+              )}
             </div>
           )}
 
-          {/* 录制操作按钮：开始录 / 停止 / 重录 / 试听 / 保存 / 下一句 */}
-          <div className="voice-actions" style={{ marginTop: 10, flexWrap: "wrap" }}>
+          {/* 录音中实时麦克风音量电平条（VU Meter） */}
+          {recording && (
+            <div className="ai-bench-vu-box" id="voice-bench-rec-meter" role="status">
+              <div className="ai-bench-vu-track">
+                <div
+                  className={`ai-bench-vu-fill is-${vu.tone}`}
+                  style={{ width: `${Math.max(3, vu.percent)}%` }}
+                />
+              </div>
+              <span className="voice-muted mono">
+                实时电平 {vu.percent}% · {vu.hint}
+              </span>
+            </div>
+          )}
+
+          {/* 录制操作按钮：同一时刻只有一个主色/危险色焦点按钮 */}
+          <div className="ai-bench-rec-actions">
             <button
               type="button"
-              className="btn btn-primary"
+              className={guide.canStart && !guide.canSave ? "btn btn-primary" : "btn btn-ghost"}
               id="voice-bench-rec-start"
               disabled={!guide.canStart}
               onClick={() => void startRecording()}
@@ -583,7 +684,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
             </button>
             <button
               type="button"
-              className="btn btn-danger"
+              className={guide.canStop ? "btn btn-danger" : "btn btn-ghost"}
               id="voice-bench-rec-stop"
               disabled={!guide.canStop}
               onClick={stopRecording}
@@ -610,7 +711,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className={guide.canSave ? "btn btn-primary" : "btn btn-ghost"}
               id="voice-bench-rec-save"
               disabled={!guide.canSave}
               onClick={() => void saveRecording()}
@@ -626,6 +727,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
             >
               <SkipForward size={13} /> 下一句
             </button>
+            <span className="voice-muted ai-bench-key-hint">快捷键：空格 录/停 · 回车 保存并跳下一句</span>
           </div>
 
           {previewSrc && (
@@ -633,7 +735,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
               ref={audioElRef}
               controls
               src={previewSrc}
-              style={{ width: "100%", height: 32, marginTop: 8 }}
+              className="ai-bench-audio-player"
             />
           )}
 
@@ -641,7 +743,6 @@ export function BenchRecordingsSection({ builtin, active = true }) {
             <div
               className={`voice-hint voice-hint--${feedback.tone || "info"}`}
               id="voice-bench-rec-feedback"
-              style={{ marginTop: 8 }}
             >
               {feedback.text}
             </div>

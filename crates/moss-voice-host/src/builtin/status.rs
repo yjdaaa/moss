@@ -13,6 +13,8 @@ pub(super) struct StatusProbeCache {
     local_ip: Option<String>,
     local_ips: Vec<String>,
     helper_found: bool,
+    asr_corpus_summary: Value,
+    bench_recordings_summary: Value,
 }
 
 /// 诊断包里的审批记录条数（与 `/v1/approvals` 列表上限一致）。
@@ -56,6 +58,12 @@ pub(super) fn scrub_bundle(value: &mut Value) {
 }
 
 impl BuiltinVoice {
+    pub(super) fn invalidate_status_probe_cache(&self) {
+        if let Ok(mut slot) = self.status_probe_cache.lock() {
+            *slot = None;
+        }
+    }
+
     /// 判断给定语音设置在当前宿主（含历史模型回退目录、外置模型覆盖与 Colab 密钥）下是否满足对话模式条件。
     pub fn chat_ready(&self, settings: &moss_voice::VoiceSettings) -> bool {
         let colab_key_configured = self
@@ -163,6 +171,8 @@ impl BuiltinVoice {
             detected_ip,
             detected_ips,
             helper_found,
+            asr_corpus_summary,
+            bench_recordings_summary,
         ) = if let Some(entry) = cached_probes {
             (
                 entry.onejev_env,
@@ -172,6 +182,8 @@ impl BuiltinVoice {
                 entry.local_ip,
                 entry.local_ips,
                 entry.helper_found,
+                entry.asr_corpus_summary,
+                entry.bench_recordings_summary,
             )
         } else {
             let onejev_env = serde_json::to_value(moss_voice::onejev::detect_onejev_env(
@@ -196,6 +208,8 @@ impl BuiltinVoice {
                 detected_ips.insert(0, ip.clone());
             }
             let helper_found = helper_path().is_some_and(|path| path.is_file());
+            let asr_corpus_summary = self.asr_corpus_summary();
+            let bench_recordings_summary = self.bench_recordings_summary();
             if let Ok(mut slot) = self.status_probe_cache.lock() {
                 *slot = Some(StatusProbeCache {
                     captured_at: std::time::Instant::now(),
@@ -207,6 +221,8 @@ impl BuiltinVoice {
                     local_ip: detected_ip.clone(),
                     local_ips: detected_ips.clone(),
                     helper_found,
+                    asr_corpus_summary: asr_corpus_summary.clone(),
+                    bench_recordings_summary: bench_recordings_summary.clone(),
                 });
             }
             (
@@ -217,6 +233,8 @@ impl BuiltinVoice {
                 detected_ip,
                 detected_ips,
                 helper_found,
+                asr_corpus_summary,
+                bench_recordings_summary,
             )
         };
         let mut root = serde_json::json!({
@@ -291,10 +309,15 @@ impl BuiltinVoice {
             "timings": self.diagnostics.timings(),
             "warnings": self.warnings(&settings),
             "debug_enabled": settings.builtin_local.chat_log_enabled,
+            "process_trace_enabled": self
+                .host
+                .api_service
+                .process_trace()
+                .is_some_and(laser_runtime::ProcessTrace::enabled),
             "debug_traces": self.persisted_chat_traces(view.as_ref()),
             "debug_inject": self.debug_inject_status(),
-            "asr_corpus": self.asr_corpus_summary(),
-            "bench_recordings": self.bench_recordings_summary(),
+            "asr_corpus": asr_corpus_summary,
+            "bench_recordings": bench_recordings_summary,
             "device_prefs": settings.builtin_device_prefs,
             "memory_enabled": self.memory.enabled(),
             "devices": self.devices(),
@@ -316,22 +339,147 @@ impl BuiltinVoice {
 
     /// n81 读取持久化的语音对话记录（上限 200 条供界面查阅与搜索；数据库暂不可读时回退内存缓存）。
     fn persisted_chat_traces(&self, view: Option<&moss_voice_server::ServerStatusView>) -> Value {
+        let trace_root = self
+            .host
+            .api_service
+            .process_trace()
+            .map(|t| t.directory_status().dir)
+            .unwrap_or_else(|| {
+                self.host
+                    .runtime_root
+                    .path
+                    .join(laser_runtime::process_trace::TRACE_DIR)
+            });
+        let corpus_root = self.asr_corpus.root().to_path_buf();
+        let corpus_enabled = self.asr_corpus.is_enabled();
+        let runtime_root = &self.host.runtime_root.path;
         if let Ok(db) = self.host.db.lock()
             && let Ok(rows) = db.list_voice_chat_logs(200)
         {
+            let mut trace_index_by_date: std::collections::HashMap<
+                String,
+                Vec<super::asr_corpus::TraceVoiceEntry>,
+            > = std::collections::HashMap::new();
             let items: Vec<Value> = rows
                 .into_iter()
                 .map(|r| {
                     let tools: Vec<moss_voice_server::DebugToolTrace> =
                         serde_json::from_str(&r.tools_json).unwrap_or_default();
                     let at_ms = u64::try_from(r.at_ms.max(0)).unwrap_or(0);
+                    let turn_no = u64::try_from(r.turn.max(0)).unwrap_or(0);
+                    let date_str = moss_voice_server::asr_corpus::local_date_from_ms(at_ms);
+                    let dev_short = moss_voice_server::device_short(&r.device_id);
+                    let bare_stem = format!("{dev_short}-t{turn_no}-user");
+                    let turn_id =
+                        moss_voice_server::asr_corpus::sanitize_turn_id(&r.session_id, turn_no);
+                    let mem_trace = view.and_then(|v| {
+                        v.debug_traces
+                            .iter()
+                            .find(|t| t.session_id == r.session_id && t.turn == turn_no)
+                    });
+                    let mem_input_source = mem_trace
+                        .map(|t| t.input_source.as_str())
+                        .filter(|s| !s.is_empty());
+                    let mem_trace_audio_file = mem_trace
+                        .and_then(|t| t.trace_audio_file.as_deref())
+                        .filter(|s| !s.is_empty());
+                    let default_src = moss_voice_server::classify_turn_input_source(
+                        r.simulated && !r.bench_window,
+                        false,
+                        r.bench_window,
+                    )
+                    .0;
+                    let input_source = mem_input_source.unwrap_or(default_src);
+
+                    let day_entries =
+                        trace_index_by_date
+                            .entry(date_str.clone())
+                            .or_insert_with(|| {
+                                super::asr_corpus::index_trace_voice_wavs(
+                                    &trace_root,
+                                    runtime_root,
+                                    &date_str,
+                                )
+                                .unwrap_or_default()
+                            });
+                    let matched_trace = super::asr_corpus::match_trace_voice_wav(
+                        day_entries,
+                        &dev_short,
+                        turn_no,
+                        at_ms,
+                        mem_trace_audio_file,
+                    );
+                    let trace_audio_file = matched_trace.map(|e| e.rel_path.clone());
+                    let corpus_has_audio = if corpus_enabled {
+                        let corpus_wav = corpus_root.join(&date_str).join(format!("{turn_id}.wav"));
+                        super::bench_recordings::ensure_safe_existing_ancestry(
+                            runtime_root,
+                            &corpus_wav,
+                        )
+                        .is_ok()
+                            && std::fs::symlink_metadata(&corpus_wav).is_ok_and(|m| {
+                                !super::bench_recordings::is_link_or_reparse(&m) && m.is_file()
+                            })
+                    } else {
+                        false
+                    };
+                    let has_audio = matched_trace.is_some() || corpus_has_audio;
+
+                    let trace_label_stem = matched_trace
+                        .map(|e| e.stem.as_str())
+                        .unwrap_or(bare_stem.as_str());
+                    let trace_label_path = trace_root
+                        .join(&date_str)
+                        .join("voice-files")
+                        .join(format!("{trace_label_stem}.label.json"));
+                    let mut label_val = super::asr_corpus::read_label_json_safe(
+                        &trace_root,
+                        runtime_root,
+                        &trace_label_path,
+                    );
+                    if label_val.is_none()
+                        && matched_trace.is_some()
+                        && trace_label_stem != bare_stem
+                    {
+                        let fallback_trace_label = trace_root
+                            .join(&date_str)
+                            .join("voice-files")
+                            .join(format!("{bare_stem}.label.json"));
+                        label_val = super::asr_corpus::read_label_json_safe(
+                            &trace_root,
+                            runtime_root,
+                            &fallback_trace_label,
+                        );
+                    }
+                    if label_val.is_none() && corpus_enabled {
+                        let corpus_label_path = corpus_root
+                            .join(&date_str)
+                            .join(format!("{turn_id}.label.json"));
+                        label_val = super::asr_corpus::read_label_json_safe(
+                            &corpus_root,
+                            runtime_root,
+                            &corpus_label_path,
+                        );
+                    }
+                    let reference_text = label_val
+                        .as_ref()
+                        .and_then(|v| v.get("reference_text"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let label_source = label_val
+                        .as_ref()
+                        .and_then(|v| v.get("label_source"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+
                     serde_json::json!({
                         "id": r.id,
                         "at_ms": at_ms,
                         "at": at_ms / 1000,
+                        "date": date_str,
                         "device_id": r.device_id,
                         "session_id": r.session_id,
-                        "turn": u64::try_from(r.turn.max(0)).unwrap_or(0),
+                        "turn": turn_no,
                         "raw_asr": r.raw_asr,
                         "corrected_asr": r.corrected_asr,
                         "tools": tools,
@@ -342,6 +490,11 @@ impl BuiltinVoice {
                         "tools_dropped": usize::try_from(r.tools_dropped.max(0)).unwrap_or(0),
                         "simulated": r.simulated,
                         "bench_window": r.bench_window,
+                        "input_source": input_source,
+                        "has_audio": has_audio,
+                        "trace_audio_file": trace_audio_file,
+                        "reference_text": reference_text,
+                        "label_source": label_source,
                     })
                 })
                 .collect();
@@ -446,7 +599,24 @@ impl BuiltinVoice {
             "debug_traces": if status["debug_enabled"].as_bool() == Some(true) {
                 status["debug_traces"]
                     .as_array()
-                    .map(|items| Value::Array(items.iter().take(20).cloned().collect()))
+                    .map(|items| {
+                        Value::Array(
+                            items
+                                .iter()
+                                .take(20)
+                                .cloned()
+                                .map(|mut item| {
+                                    if let Some(obj) = item.as_object_mut() {
+                                        obj.remove("reference_text");
+                                        obj.remove("label_source");
+                                        obj.remove("has_audio");
+                                        obj.remove("trace_audio_file");
+                                    }
+                                    item
+                                })
+                                .collect(),
+                        )
+                    })
                     .unwrap_or_else(|| Value::Array(Vec::new()))
             } else {
                 Value::Array(Vec::new())

@@ -49,6 +49,8 @@ struct RawCorpusTurn {
     #[serde(default)]
     segments: Vec<CorpusSegment>,
     #[serde(default)]
+    key_terms: Vec<String>,
+    #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
     expect_route: Option<String>,
@@ -75,6 +77,7 @@ pub struct BenchCorpusItem {
     pub text: String,
     pub segments: Vec<CorpusSegment>,
     pub pause_hint: Option<String>,
+    pub key_terms: Vec<String>,
     pub tags: Vec<String>,
     pub expect_route: Option<String>,
     pub expect_tool: Option<String>,
@@ -108,39 +111,43 @@ struct SpeakerSummary {
     updated_at_ms: u64,
 }
 
-fn load_default_corpus() -> (String, Vec<BenchCorpusItem>) {
-    let parsed: RawCorpusFile =
-        serde_json::from_str(DEFAULT_E2E_CORPUS_JSON).unwrap_or_else(|_| RawCorpusFile {
-            name: "xiaozhi-e2e-default".into(),
-            turns: Vec::new(),
-        });
-    let items = parsed
-        .turns
-        .into_iter()
-        .map(|t| {
-            let pause_hint = t.segments.iter().find(|s| s.pause_ms_after > 0).map(|s| {
-                let secs = (s.pause_ms_after as f64) / 1000.0;
-                format!("在「{}」后停顿约 {secs:.1} 秒，再继续说后半句", s.text)
+fn load_default_corpus() -> &'static (String, Vec<BenchCorpusItem>) {
+    static CACHE: std::sync::OnceLock<(String, Vec<BenchCorpusItem>)> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let parsed: RawCorpusFile =
+            serde_json::from_str(DEFAULT_E2E_CORPUS_JSON).unwrap_or_else(|_| RawCorpusFile {
+                name: "xiaozhi-e2e-default".into(),
+                turns: Vec::new(),
             });
-            BenchCorpusItem {
-                label: if t.label.trim().is_empty() {
-                    t.id.clone()
-                } else {
-                    t.label
-                },
-                id: t.id,
-                text: t.text,
-                segments: t.segments,
-                pause_hint,
-                tags: t.tags,
-                expect_route: t.expect_route,
-                expect_tool: t.expect_tool,
-                expect_simulation_gate: t.expect_simulation_gate,
-                require_idle_laser: t.require_idle_laser,
-            }
-        })
-        .collect();
-    (parsed.name, items)
+        let items = parsed
+            .turns
+            .into_iter()
+            .map(|t| {
+                let pause_hint = t.segments.iter().find(|s| s.pause_ms_after > 0).map(|s| {
+                    let secs = (s.pause_ms_after as f64) / 1000.0;
+                    format!("在「{}」后停顿约 {secs:.1} 秒，再继续说后半句", s.text)
+                });
+                BenchCorpusItem {
+                    label: if t.label.trim().is_empty() {
+                        t.id.clone()
+                    } else {
+                        t.label
+                    },
+                    id: t.id,
+                    text: t.text,
+                    segments: t.segments,
+                    pause_hint,
+                    key_terms: t.key_terms,
+                    tags: t.tags,
+                    expect_route: t.expect_route,
+                    expect_tool: t.expect_tool,
+                    expect_simulation_gate: t.expect_simulation_gate,
+                    require_idle_laser: t.require_idle_laser,
+                }
+            })
+            .collect();
+        (parsed.name, items)
+    })
 }
 
 fn is_windows_reserved_name(name: &str) -> bool {
@@ -217,47 +224,137 @@ pub(crate) fn sanitize_corpus_id(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-fn ensure_safe_dir(path: &Path) -> Result<(), String> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err("测试录音目录不能是符号链接".into());
-        }
-        if !meta.is_dir() {
-            return Err("测试录音目录路径不是文件夹".into());
-        }
-        return Ok(());
+const MAX_META_JSON_BYTES: u64 = 256 * 1024;
+
+pub(super) fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
     }
-    fs::create_dir_all(path).map_err(|e| format!("创建测试录音目录失败：{e}"))?;
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 检查从 `base_root` 向下到 `target` 的每一级已有目录/文件均非符号链接或重解析点（只读检查，不创建目录）。
+pub(super) fn ensure_safe_existing_ancestry(base_root: &Path, target: &Path) -> Result<(), String> {
+    let rel = target
+        .strip_prefix(base_root)
+        .map_err(|_| "路径越界".to_owned())?;
+    let mut cur = base_root.to_path_buf();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::Normal(part) => cur.push(part),
+            _ => return Err("路径包含非法路径段".into()),
+        }
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if is_link_or_reparse(&meta) {
+                    return Err("路径不能包含符号链接".into());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("检查路径失败：{e}")),
+        }
     }
     Ok(())
 }
 
-fn ensure_not_symlink(path: &Path) -> Result<(), String> {
+/// 逐级校验并创建位于 `base_root` 之下的私有目录（Unix `0700`，拒软链与重解析点）。
+pub(super) fn ensure_safe_dir_under(base_root: &Path, target: &Path) -> Result<(), String> {
+    let rel = target
+        .strip_prefix(base_root)
+        .map_err(|_| "目录路径越界".to_owned())?;
+    let mut cur = base_root.to_path_buf();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::Normal(part) => cur.push(part),
+            _ => return Err("目录包含非法路径段".into()),
+        }
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if is_link_or_reparse(&meta) {
+                    return Err("目录不能是符号链接".into());
+                }
+                if !meta.is_dir() {
+                    return Err("目录路径不是文件夹".into());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&cur).map_err(|err| format!("创建目录失败：{err}"))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&cur, fs::Permissions::from_mode(0o700))
+                        .map_err(|err| format!("设置目录权限失败：{err}"))?;
+                }
+            }
+            Err(e) => return Err(format!("检查目录失败：{e}")),
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_not_symlink(path: &Path) -> Result<(), String> {
     if let Ok(meta) = fs::symlink_metadata(path)
-        && meta.file_type().is_symlink()
+        && is_link_or_reparse(&meta)
     {
         return Err("拒绝访问符号链接文件".into());
     }
     Ok(())
 }
 
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    ensure_not_symlink(path)?;
-    let tmp = path.with_extension(format!(
-        "{}.tmp.{}",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("bin"),
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut rnd = [0u8; 8];
+    let _ = getrandom::fill(&mut rnd);
+    let rand_u64 = u64::from_le_bytes(rnd);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("recording");
+    path.with_file_name(format!(
+        ".{file_name}.tmp.{}.{seq}.{rand_u64:016x}",
         std::process::id()
-    ));
+    ))
+}
+
+pub(super) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    ensure_not_symlink(path)?;
+    let tmp = unique_tmp_path(path);
     ensure_not_symlink(&tmp)?;
-    fs::write(&tmp, bytes).map_err(|e| format!("写入测试录音文件失败：{e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    let write_res: Result<(), String> = (|| {
+        let mut opts = fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts
+            .open(&tmp)
+            .map_err(|e| format!("创建测试录音临时文件失败：{e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("写入测试录音文件失败：{e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("落盘测试录音文件失败：{e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("设置测试录音文件权限失败：{e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -367,10 +464,16 @@ impl BuiltinVoice {
 
     fn scan_bench_recordings(&self) -> Result<Vec<BenchRecordingMeta>, String> {
         let root = self.bench_recordings_root();
-        if !root.exists() {
+        ensure_safe_existing_ancestry(&self.host.runtime_root.path, &root)?;
+        let Ok(root_meta) = fs::symlink_metadata(&root) else {
             return Ok(Vec::new());
+        };
+        if is_link_or_reparse(&root_meta) {
+            return Err("测试录音目录不能是符号链接".into());
         }
-        ensure_safe_dir(&root)?;
+        if !root_meta.is_dir() {
+            return Err("测试录音目录路径不是文件夹".into());
+        }
         let mut items = Vec::new();
         let entries = fs::read_dir(&root).map_err(|e| format!("读取测试录音目录失败：{e}"))?;
         for entry in entries.flatten() {
@@ -378,7 +481,7 @@ impl BuiltinVoice {
             let Ok(meta) = fs::symlink_metadata(&speaker_path) else {
                 continue;
             };
-            if meta.file_type().is_symlink() || !meta.is_dir() {
+            if is_link_or_reparse(&meta) || !meta.is_dir() {
                 continue;
             }
             let Some(speaker_dir_name) = speaker_path.file_name().and_then(|s| s.to_str()) else {
@@ -395,7 +498,7 @@ impl BuiltinVoice {
                 let Ok(fmeta) = fs::symlink_metadata(&path) else {
                     continue;
                 };
-                if fmeta.file_type().is_symlink() || !fmeta.is_file() {
+                if is_link_or_reparse(&fmeta) || !fmeta.is_file() {
                     continue;
                 }
                 if path.extension().and_then(|e| e.to_str()) != Some("wav") {
@@ -408,7 +511,11 @@ impl BuiltinVoice {
                     continue;
                 };
                 let json_path = speaker_path.join(format!("{corpus_id}.json"));
-                let record = if let Ok(raw) = fs::read_to_string(&json_path)
+                let json_safe_ok = fs::symlink_metadata(&json_path).ok().is_some_and(|m| {
+                    !is_link_or_reparse(&m) && m.is_file() && m.len() <= MAX_META_JSON_BYTES
+                });
+                let record = if json_safe_ok
+                    && let Ok(raw) = fs::read_to_string(&json_path)
                     && let Ok(mut parsed) = serde_json::from_str::<BenchRecordingMeta>(&raw)
                 {
                     parsed.corpus_id = corpus_id;
@@ -418,14 +525,19 @@ impl BuiltinVoice {
                     }
                     parsed
                 } else {
-                    // 兜底：存在裸 WAV 时按文件头推算基本信息
-                    let duration_ms = fs::read(&path)
-                        .ok()
-                        .and_then(|bytes| moss_voice_providers::wav::decode_wav(&bytes).ok())
-                        .map(|pcm| {
-                            ((pcm.samples.len() as u64) * 1000) / u64::from(pcm.sample_rate.max(1))
-                        })
-                        .unwrap_or(0);
+                    // 兜底：存在裸 WAV 时按文件头推算基本信息（限 4 MB 内读取）
+                    let duration_ms = if fmeta.len() <= MAX_UPLOAD_WAV_BYTES as u64 {
+                        fs::read(&path)
+                            .ok()
+                            .and_then(|bytes| moss_voice_providers::wav::decode_wav(&bytes).ok())
+                            .map(|pcm| {
+                                ((pcm.samples.len() as u64) * 1000)
+                                    / u64::from(pcm.sample_rate.max(1))
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
                     BenchRecordingMeta {
                         corpus_id,
                         text: String::new(),
@@ -491,7 +603,7 @@ impl BuiltinVoice {
         let (_name, corpus_items) = load_default_corpus();
         let corpus_count = corpus_items.len();
         let recordings = self.scan_bench_recordings().unwrap_or_default();
-        let speakers = Self::summarize_speakers(&corpus_items, &recordings);
+        let speakers = Self::summarize_speakers(corpus_items, &recordings);
         let complete_speaker_count = speakers.iter().filter(|s| s.complete).count();
         let speaker_briefs: Vec<Value> = speakers
             .iter()
@@ -520,7 +632,7 @@ impl BuiltinVoice {
     ) -> Result<Value, CenterError> {
         let (corpus_name, corpus_items) = load_default_corpus();
         let recordings = self.scan_bench_recordings().map_err(internal)?;
-        let speakers = Self::summarize_speakers(&corpus_items, &recordings);
+        let speakers = Self::summarize_speakers(corpus_items, &recordings);
         let complete_speakers: Vec<String> = speakers
             .iter()
             .filter(|s| s.complete)
@@ -621,9 +733,9 @@ impl BuiltinVoice {
                     .map_err(|msg| CenterError::new("bench_recording_quality_failed", 400, msg))?;
 
                 let root = self.bench_recordings_root();
-                ensure_safe_dir(&root).map_err(internal)?;
                 let speaker_dir = root.join(&speaker_dir_name);
-                ensure_safe_dir(&speaker_dir).map_err(internal)?;
+                ensure_safe_dir_under(&self.host.runtime_root.path, &speaker_dir)
+                    .map_err(internal)?;
 
                 let normalized_wav = moss_voice_providers::wav::encode_wav(
                     &samples_16k,
@@ -651,6 +763,7 @@ impl BuiltinVoice {
 
                 write_private_atomic(&wav_path, &normalized_wav).map_err(internal)?;
                 write_private_atomic(&json_path, &meta_bytes).map_err(internal)?;
+                self.invalidate_status_probe_cache();
 
                 self.bench_recordings_list_payload(Some((
                     "saved",
@@ -671,11 +784,19 @@ impl BuiltinVoice {
                 let corpus_id = sanitize_corpus_id(raw_corpus_id).map_err(|m| invalid(&m))?;
 
                 let root = self.bench_recordings_root();
-                ensure_safe_dir(&root).map_err(internal)?;
                 let speaker_dir = root.join(&speaker_dir_name);
-                ensure_not_symlink(&speaker_dir).map_err(|m| invalid(&m))?;
                 let wav_path = speaker_dir.join(format!("{corpus_id}.wav"));
-                ensure_not_symlink(&wav_path).map_err(|m| invalid(&m))?;
+                ensure_safe_existing_ancestry(&self.host.runtime_root.path, &wav_path)
+                    .map_err(internal)?;
+                let meta = fs::symlink_metadata(&wav_path).map_err(|_| {
+                    CenterError::new("bench_recording_not_found", 404, "未找到对应的测试录音文件")
+                })?;
+                if is_link_or_reparse(&meta)
+                    || !meta.is_file()
+                    || meta.len() > MAX_UPLOAD_WAV_BYTES as u64
+                {
+                    return Err(invalid("测试录音文件无效或超出大小上限"));
+                }
                 let bytes = fs::read(&wav_path).map_err(|_| {
                     CenterError::new("bench_recording_not_found", 404, "未找到对应的测试录音文件")
                 })?;
@@ -707,17 +828,24 @@ impl BuiltinVoice {
 
                 let root = self.bench_recordings_root();
                 let speaker_dir = root.join(&speaker_dir_name);
+                ensure_safe_existing_ancestry(&self.host.runtime_root.path, &speaker_dir)
+                    .map_err(internal)?;
                 let mut deleted = false;
-                if speaker_dir.exists() {
-                    ensure_safe_dir(&speaker_dir).map_err(internal)?;
+                if let Ok(meta) = fs::symlink_metadata(&speaker_dir)
+                    && meta.is_dir()
+                {
                     for ext in ["wav", "json"] {
                         let p = speaker_dir.join(format!("{corpus_id}.{ext}"));
-                        if p.exists() {
-                            ensure_not_symlink(&p).map_err(internal)?;
-                            fs::remove_file(&p)
-                                .map_err(|e| internal(format!("删除录音失败：{e}")))?;
-                            if ext == "wav" {
-                                deleted = true;
+                        if let Ok(fm) = fs::symlink_metadata(&p) {
+                            if is_link_or_reparse(&fm) {
+                                return Err(internal("拒绝删除符号链接文件"));
+                            }
+                            if fm.is_file() {
+                                fs::remove_file(&p)
+                                    .map_err(|e| internal(format!("删除录音失败：{e}")))?;
+                                if ext == "wav" {
+                                    deleted = true;
+                                }
                             }
                         }
                     }
@@ -728,6 +856,7 @@ impl BuiltinVoice {
                         let _ = fs::remove_dir(&speaker_dir);
                     }
                 }
+                self.invalidate_status_probe_cache();
                 self.bench_recordings_list_payload(Some(("deleted", Value::Bool(deleted))))
             }
             "delete_speaker" => {
@@ -750,14 +879,22 @@ impl BuiltinVoice {
                     sanitize_speaker_label(raw_speaker).map_err(|m| invalid(&m))?;
                 let root = self.bench_recordings_root();
                 let speaker_dir = root.join(&speaker_dir_name);
+                ensure_safe_existing_ancestry(&self.host.runtime_root.path, &speaker_dir)
+                    .map_err(internal)?;
                 let mut deleted_count = 0usize;
-                if speaker_dir.exists() {
-                    ensure_safe_dir(&speaker_dir).map_err(internal)?;
+                if let Ok(meta) = fs::symlink_metadata(&speaker_dir)
+                    && meta.is_dir()
+                {
                     if let Ok(files) = fs::read_dir(&speaker_dir) {
                         for entry in files.flatten() {
                             let p = entry.path();
-                            ensure_not_symlink(&p).map_err(internal)?;
-                            if p.is_file() {
+                            let Ok(fm) = fs::symlink_metadata(&p) else {
+                                continue;
+                            };
+                            if is_link_or_reparse(&fm) {
+                                return Err(internal("拒绝删除符号链接文件"));
+                            }
+                            if fm.is_file() {
                                 if p.extension().and_then(|e| e.to_str()) == Some("wav") {
                                     deleted_count += 1;
                                 }
@@ -768,6 +905,7 @@ impl BuiltinVoice {
                     }
                     let _ = fs::remove_dir(&speaker_dir);
                 }
+                self.invalidate_status_probe_cache();
                 self.bench_recordings_list_payload(Some((
                     "deleted_count",
                     Value::from(deleted_count),
@@ -786,9 +924,12 @@ impl BuiltinVoice {
                     ));
                 }
                 let root = self.bench_recordings_root();
+                ensure_safe_existing_ancestry(&self.host.runtime_root.path, &root)
+                    .map_err(internal)?;
                 let mut deleted_count = 0usize;
-                if root.exists() {
-                    ensure_safe_dir(&root).map_err(internal)?;
+                if let Ok(root_meta) = fs::symlink_metadata(&root)
+                    && root_meta.is_dir()
+                {
                     let entries = fs::read_dir(&root)
                         .map_err(|e| internal(format!("扫描测试录音失败：{e}")))?;
                     for entry in entries.flatten() {
@@ -796,7 +937,7 @@ impl BuiltinVoice {
                         let Ok(meta) = fs::symlink_metadata(&speaker_dir) else {
                             continue;
                         };
-                        if meta.file_type().is_symlink() {
+                        if is_link_or_reparse(&meta) {
                             continue;
                         }
                         if meta.is_dir() {
@@ -804,7 +945,7 @@ impl BuiltinVoice {
                                 for file in files.flatten() {
                                     let p = file.path();
                                     if let Ok(fm) = fs::symlink_metadata(&p)
-                                        && !fm.file_type().is_symlink()
+                                        && !is_link_or_reparse(&fm)
                                         && fm.is_file()
                                     {
                                         if p.extension().and_then(|e| e.to_str()) == Some("wav") {
@@ -818,6 +959,7 @@ impl BuiltinVoice {
                         }
                     }
                 }
+                self.invalidate_status_probe_cache();
                 self.bench_recordings_list_payload(Some((
                     "deleted_count",
                     Value::from(deleted_count),

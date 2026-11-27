@@ -74,6 +74,7 @@ pub use ota::{
     MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip,
 };
 pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
+pub use session::{classify_turn_input_source, device_short};
 pub use state::{
     DebugToolTrace, DiagCategory, DiagSource, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
     MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, PlaybackDetail, ServerEvent, SessionView,
@@ -447,6 +448,7 @@ pub enum DeviceRequest {
 pub(crate) struct DeviceRequestHandle {
     pub session_id: String,
     pub supports_mcp: bool,
+    pub permission: Arc<std::sync::atomic::AtomicBool>,
     pub sender: tokio::sync::mpsc::UnboundedSender<DeviceRequest>,
     /// 这个会话最近开始的对话轮次编号（0 为还没有；完整过程记录把看图等旁路请求归到这一轮，n110）
     pub turn: u64,
@@ -559,7 +561,7 @@ impl Shared {
         self.state.sessions_for_handles(&handles)
     }
 
-    /// VC1 同步检查调试令牌过期、调试开关状态与时间窗到期，到期立即恢复普通轮次并记录事件。
+    /// VC1 同步检查调试令牌过期、调试开关状态、失活会话与时间窗到期，到期立即恢复普通轮次并记录事件。
     pub(crate) fn sync_bench_windows(&self) {
         if self.debug_gate.check_expiry() {
             self.close_all_bench_windows("调试令牌已失效");
@@ -568,6 +570,31 @@ impl Shared {
         if !self.debug_gate.snapshot().enabled && !self.bench_windows.list_active().is_empty() {
             self.close_all_bench_windows("调试开关已关闭");
             return;
+        }
+        let stale = {
+            let active_handles = self.device_requests.lock().ok();
+            self.bench_windows.prune_inactive(|dev, sid| {
+                active_handles.as_ref().is_some_and(|map| {
+                    map.get(dev).is_some_and(|h| {
+                        h.session_id == sid
+                            && h.permission.load(std::sync::atomic::Ordering::Acquire)
+                    })
+                })
+            })
+        };
+        for closed in stale {
+            self.state.set_bench_window(&closed.device_id, None);
+            self.state.event_in_flow(
+                EventRecord::info(
+                    DiagCategory::Config,
+                    format!(
+                        "测试时间窗已关闭（设备断开）：设备 {} 已恢复普通轮次",
+                        closed.device_id
+                    ),
+                )
+                .source(DiagSource::Moss),
+                session::device_flow(&closed.device_id),
+            );
         }
         for expired in self.bench_windows.expire_due() {
             self.state.set_bench_window(&expired.device_id, None);
@@ -587,14 +614,38 @@ impl Shared {
 
     pub(crate) fn is_bench_window_active(&self, device_id: &str) -> bool {
         self.sync_bench_windows();
-        self.bench_windows.active_for(device_id).is_some()
+        let sid = self
+            .device_requests
+            .lock()
+            .ok()
+            .and_then(|map| map.get(device_id).map(|h| h.session_id.clone()));
+        let Some(sid) = sid else {
+            return false;
+        };
+        self.bench_windows
+            .active_for_session(device_id, &sid)
+            .is_some()
     }
 
-    pub(crate) fn bench_window_deadline_for(
+    pub(crate) fn is_bench_window_active_for_session(
         &self,
         device_id: &str,
+        session_id: &str,
+    ) -> bool {
+        self.sync_bench_windows();
+        self.bench_windows
+            .active_for_session(device_id, session_id)
+            .is_some()
+    }
+
+    pub(crate) fn bench_window_deadline_for_session(
+        &self,
+        device_id: &str,
+        session_id: &str,
     ) -> Option<tokio::time::Instant> {
-        let win_deadline = self.bench_windows.next_deadline_for(device_id)?;
+        let win_deadline = self
+            .bench_windows
+            .next_deadline_for_session(device_id, session_id)?;
         let token_deadline = self
             .debug_gate
             .remaining_until_expiry()
@@ -611,6 +662,12 @@ impl Shared {
         max_minutes: u32,
     ) -> Result<BenchWindowView, InjectTurnError> {
         self.sync_bench_windows();
+        if self.config.mode == ServerMode::Echo || self.config.conversation.is_none() {
+            return Err(InjectTurnError::conflict(
+                "echo_mode",
+                "内置语音当前处于回声模式（未配置识别/大模型/合成），无法打开测试时间窗",
+            ));
+        }
         if !self.debug_gate.is_enabled_valid() {
             return Err(InjectTurnError {
                 code: "debug_disabled".into(),
@@ -619,18 +676,44 @@ impl Shared {
             });
         }
         if max_minutes == 0 || max_minutes > MAX_BENCH_WINDOW_MINUTES {
-            return Err(InjectTurnError::invalid(format!(
-                "max_minutes 须为 1 ~ {MAX_BENCH_WINDOW_MINUTES} 分钟"
-            )));
+            return Err(InjectTurnError {
+                code: "invalid_max_minutes".into(),
+                http_status: 400,
+                message: format!("max_minutes 须为 1 ~ {MAX_BENCH_WINDOW_MINUTES} 分钟"),
+            });
         }
-        let Some(session) = self.active_session(device_id) else {
-            return Err(InjectTurnError::offline(format!(
-                "设备 {device_id} 当前不在线"
-            )));
+        let (session_id, allowed) = {
+            let map = self.device_requests.lock().map_err(|_| {
+                InjectTurnError::conflict("session_lock_failed", "设备会话表锁失败")
+            })?;
+            let Some(handle) = map.get(device_id) else {
+                return Err(InjectTurnError::offline(format!(
+                    "设备 {device_id} 当前不在线"
+                )));
+            };
+            (handle.session_id.clone(), handle.permission.clone())
         };
-        let view = self
-            .bench_windows
-            .open(device_id, &session.session_id, max_minutes);
+        if !allowed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(InjectTurnError::forbidden(
+                "设备授权已撤销，无法打开测试时间窗",
+            ));
+        }
+        let view = self.bench_windows.open(device_id, &session_id, max_minutes);
+        // 防开窗与断连/重连竞态：写表后复核会话仍为当前在线且已授权会话，否则立即回滚
+        let still_active = self.device_requests.lock().ok().is_some_and(|map| {
+            map.get(device_id).is_some_and(|h| {
+                h.session_id == session_id
+                    && h.permission.load(std::sync::atomic::Ordering::Acquire)
+            })
+        });
+        if !still_active {
+            let _ = self.bench_windows.close_if_session(device_id, &session_id);
+            return Err(if !allowed.load(std::sync::atomic::Ordering::Acquire) {
+                InjectTurnError::forbidden("设备授权已撤销，无法打开测试时间窗")
+            } else {
+                InjectTurnError::offline(format!("设备 {device_id} 当前不在线"))
+            });
+        }
         self.state.set_bench_window(device_id, Some(view.clone()));
         self.bench_window_changed.notify_waiters();
         self.state.event_in_flow(
@@ -753,17 +836,10 @@ impl Shared {
         lead_silence_ms: u32,
         tail_silence_ms: u32,
     ) -> Result<InjectTurnAck, InjectTurnError> {
-        if !self.is_bench_window_active(device_id) {
-            return Err(InjectTurnError {
-                code: "bench_window_required".into(),
-                http_status: 403,
-                message: "数字音频注入仅允许在已打开的测试时间窗内使用".into(),
-            });
-        }
         if pcm.is_empty() {
             return Err(InjectTurnError::invalid("数字音频不能为空"));
         }
-        let sender = {
+        let (session_id, sender, allowed) = {
             let map = self.device_requests.lock().map_err(|_| {
                 InjectTurnError::conflict("session_lock_failed", "设备会话表锁失败")
             })?;
@@ -772,8 +848,24 @@ impl Shared {
                     "设备 {device_id} 当前不在线"
                 )));
             };
-            handle.sender.clone()
+            (
+                handle.session_id.clone(),
+                handle.sender.clone(),
+                handle.permission.clone(),
+            )
         };
+        if !allowed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(InjectTurnError::forbidden(
+                "设备授权已撤销，无法注入数字音频",
+            ));
+        }
+        if !self.is_bench_window_active_for_session(device_id, &session_id) {
+            return Err(InjectTurnError {
+                code: "bench_window_required".into(),
+                http_status: 403,
+                message: "数字音频注入仅允许在已打开的测试时间窗内使用".into(),
+            });
+        }
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if sender
             .send(DeviceRequest::InjectAudio {

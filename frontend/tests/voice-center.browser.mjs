@@ -193,17 +193,26 @@ try {
       return { ...structuredClone(state.wakeword), pushed: { device_id: input.device_id, size: 2_097_152, target: input.target, screen_pack: input.screen_pack } };
     },
     voice_firmware_status: () => ({ artifacts: [], devices: [], records: [], offer_hours: 24, now: 0 }),
-    voice_asr_corpus_manage: ({ input }) => ({
-      enabled: Boolean(state.builtin.asr_corpus?.enabled),
-      max_items: state.builtin.asr_corpus?.max_items || 500,
-      max_days: state.builtin.asr_corpus?.max_days || 7,
-      corpus_dir_rel: "asr-corpus",
-      valid_tags: ["命令词", "数字", "材料名", "有噪声"],
-      total_count: state.builtin.asr_corpus?.total_count || 0,
-      labeled_count: state.builtin.asr_corpus?.labeled_count || 0,
-      items: [],
-      ...(input?.action === "set_config" ? { enabled: Boolean(input.enabled) } : {}),
-    }),
+    voice_asr_corpus_manage: ({ input }) => {
+      if (input?.action === "set_process_trace") {
+        state.builtin.process_trace_enabled = Boolean(input.enabled);
+        return { process_trace_enabled: state.builtin.process_trace_enabled };
+      }
+      if (input?.action === "trace_label") {
+        return { ok: true, label: { reference_text: input.reference_text, input_source: input.input_source || "live_mic" } };
+      }
+      return {
+        enabled: Boolean(state.builtin.asr_corpus?.enabled),
+        max_items: state.builtin.asr_corpus?.max_items || 500,
+        max_days: state.builtin.asr_corpus?.max_days || 7,
+        corpus_dir_rel: "asr-corpus",
+        valid_tags: ["命令词", "数字", "材料名", "有噪声"],
+        total_count: state.builtin.asr_corpus?.total_count || 0,
+        labeled_count: state.builtin.asr_corpus?.labeled_count || 0,
+        items: [],
+        ...(input?.action === "set_config" ? { enabled: Boolean(input.enabled) } : {}),
+      };
+    },
     voice_bench_recordings_manage: () => ({
       recordings_dir_rel: "voice-bench/recordings",
       corpus_name: "xiaozhi-e2e-default-v1",
@@ -1290,7 +1299,6 @@ try {
       "voice-ai-bench-prompt-actions",
       "voice-bench-recordings-box",
       "voice-debug-inject-box",
-      "voice-asr-corpus-section",
     ];
     const nodes = ids.map((id) => document.getElementById(id));
     if (nodes.some((n) => !n)) return false;
@@ -1299,7 +1307,8 @@ try {
     }
     return true;
   });
-  assert.equal(hubOrderOk, true, "VD6：AI 联调与测试内部五块顺序必须严格一致");
+  assert.equal(hubOrderOk, true, "VD6：AI 联调与测试内部四块顺序必须严格一致");
+  assert.equal(await page.locator("#voice-asr-corpus-section").count(), 0, "识别语料已并入完整过程记录与对话记录与排障");
   // 验证挪来的调试注入开关仍保留确认弹窗与原 id
   const debugSwitch = page.locator("#voice-group-ai-bench-hub #voice-debug-inject-switch");
   assert.equal(await debugSwitch.isChecked(), false, "调试注入开关默认关闭");
