@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 精简“一键复制 AI 全自动调试提示词”并加入诊断/修复/复测/审查子代理分工（2026-11-27）
+
+- **现象**：旧版全自动联调提示词篇幅过长且大量重复 `AGENTS.md` / `safety.md` 已有规范，同时缺少子代理角色分工指引。
+- **根因与修复**：重写 `frontend/src/voiceState/aiBench.js::buildAiBenchPrompt`（含 `e2e` 主提示词及 `text`/`asr` 次要提示词），删除与项目规范重复的逐条“严禁”限制和内部文件名/参数名，改为开头引用 `AGENTS.md` 与 `safety.md`（§4.6 / §4.7），只保留本任务特有的前提暂停、素材 4 字段与动态覆盖率、三个脚本推荐命令（本地优先与云端费用提醒）、收尾关开关，并新增 4 角色子代理分工（诊断只测不改 / 对症修复 / 独立复测 / 提交前审查，不支持时按同顺序自执行，真机串行、最多 3 轮），主提示词篇幅压至旧版一半以下；同步更新 `voiceState.test.mjs` 与技术书 `n143`。
+- **验证**：`node scripts/verify.mjs --finish` 通过（前端单测 430 项、脚本 89 项、浏览器 20 个文件，已快更）；另有 `frontend/tests/voiceState.test.mjs` 定向单测，实机联调未执行（`unverified`）。
+- **关联**：`frontend/src/voiceState/aiBench.js`、`frontend/tests/voiceState.test.mjs`、`docs/integration/revisions/native-voice-spec.md`。
+
 ### 加固语音中心“一键复制 AI 全自动调试提示词”的安全红线、3 轮调优边界、覆盖率披露与费用收尾提醒（2026-11-27）
 
 - **现象**：原有全自动调试提示词对前提未满足的暂停边界、不可触碰的安全门禁文件、自动改代码轮次上限、标准语料与网上样本的覆盖率区分、拉取快更冲突止损、云端 ASR 费用及收尾关开关约束不够明确。

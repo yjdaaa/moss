@@ -2743,65 +2743,54 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).key, "text_inject");
   assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).text, "文字直通（无音频）");
 
-  // 3. VD4 一键全自动提示词包含网上真人语音自动准备与缓存复用、30–50 cm、四步关键命令（文字直通+整体外放+离线识别）与红线要求，且绝不含合成音回退或令牌/密钥/本机绝对路径
+  // 3. VG 精简提示词：引用项目规范不重复堆限制、含子代理 4 角色分工与单代理回退、真机串行、最多 3 轮、覆盖率与收尾，篇幅大幅收敛且绝不含令牌/密钥/本机绝对路径
   const e2ePromptCold = buildAiBenchPrompt(coldStatus, "e2e");
+  assert.match(e2ePromptCold, /标准语料已录 0 \/ 13 句，网上样本 0 条/);
   assert.match(e2ePromptCold, /录制测试语料/);
-  assert.match(e2ePromptCold, /至少录完一位说话人的全部语料/);
-  assert.match(e2ePromptCold, /由 AI 自主从网上公开中文真人语音/);
-  assert.match(e2ePromptCold, /live-xiaozhi-debug\.mjs/);
-  assert.match(e2ePromptCold, /xiaozhi-e2e\.mjs/);
-  assert.match(e2ePromptCold, /asr-bench\.mjs/);
 
   const e2ePrompt = buildAiBenchPrompt({ ...readyStatus, extra: fakeSecret }, "e2e");
-  assert.match(e2ePrompt, /xiaozhi-e2e\.mjs/);
-  assert.match(e2ePrompt, /live-xiaozhi-debug\.mjs/);
-  assert.match(e2ePrompt, /asr-bench\.mjs/);
-  assert.match(e2ePrompt, /--device aa:bb:cc:11:22:33/);
-  assert.match(e2ePrompt, /--speaker/);
+  assert.ok(e2ePrompt.length < 1800, `VG 主提示词须明显短于旧版（旧版 5687 字符），当前 ${e2ePrompt.length} 字符`);
+  // 引用项目规范，不重复堆砌具体门禁文件名或内部参数名
   assert.match(e2ePrompt, /AGENTS\.md/);
+  assert.match(e2ePrompt, /docs\/developer\/safety\.md.*§4\.6 \/ §4\.7/);
+  assert.doesNotMatch(e2ePrompt, /sim_guard\.rs|PREROLL_MS|System\.Speech|或同名.*\.txt|<id>\.txt/);
+  // 前提由用户完成、预检不满足暂停、仅到生成预览、git pull + --finish
+  assert.match(e2ePrompt, /git pull/);
   assert.match(e2ePrompt, /node scripts\/verify\.mjs --finish/);
+  assert.match(e2ePrompt, /由用户完成/);
+  assert.match(e2ePrompt, /暂停/);
   assert.match(e2ePrompt, /30–50 cm/);
-  assert.match(e2ePrompt, /suggestions\.json.*不要自动.*应用/s);
-  assert.match(e2ePrompt, /不要修改语料来让测试通过/);
-  assert.doesNotMatch(e2ePrompt, /System\.Speech|回退到系统自带朗读/);
-  // VE1 / VE2 / VE3：网上真人语音 4 字段元数据、无 .txt 回退、许可证/限量/临时目录/不进仓库与 --max-online 20
+  assert.match(e2ePrompt, /生成预览/);
+  // 网上素材 4 字段 + 动态覆盖率状态与汇报要求
   assert.match(e2ePrompt, /`text`、`dataset`、`license`、`source_url`/);
-  assert.doesNotMatch(e2ePrompt, /或同名.*\.txt|<id>\.txt/);
-  assert.match(e2ePrompt, /Mozilla Common Voice/);
-  assert.match(e2ePrompt, /AISHELL-1/);
-  assert.match(e2ePrompt, /非商用/);
-  assert.match(e2ePrompt, /禁止演绎/);
-  assert.match(e2ePrompt, /需要登录、申请或同意条款.*跳过/s);
-  assert.match(e2ePrompt, /不超过 200 条/);
-  assert.match(e2ePrompt, /不超过 300 MB/);
-  assert.match(e2ePrompt, /临时目录/);
-  assert.match(e2ePrompt, /不运行下载得到的任何脚本或程序/);
-  assert.match(e2ePrompt, /绝不加入仓库，也不提交/);
-  assert.match(e2ePrompt, /--max-online 20/);
-  // VF1：前提未满足暂停、禁止改设置/数据库/令牌、禁止改安全门禁文件、禁止真实激光机动作
-  assert.match(e2ePrompt, /AI 必须暂停/);
-  assert.match(e2ePrompt, /严禁通过修改 `settings\.json`、数据库、令牌文件或任何运行目录文件/);
-  assert.match(e2ePrompt, /crates\/moss-voice-server\/src\/sim_guard\.rs/);
-  assert.match(e2ePrompt, /debug_api\.rs.*bench window/);
-  assert.match(e2ePrompt, /TurnGate/);
-  assert.match(e2ePrompt, /停止和急停快路径/);
-  assert.match(e2ePrompt, /调试入口的鉴权/);
-  assert.match(e2ePrompt, /主窗口 ACL/);
-  assert.match(e2ePrompt, /严禁让真实激光机运动、出光或发送任务/);
-  // VF2：最多 3 轮、每轮只改一项、记录改前改后指标、未变好撤回、禁改测评脚本与测试、分级验证、本地提交不推送
-  assert.match(e2ePrompt, /最多 3 轮/);
-  assert.match(e2ePrompt, /每轮只改一个参数或一处逻辑/);
-  assert.match(e2ePrompt, /改前和改后的关键指标/);
-  assert.match(e2ePrompt, /指标没有变好或者变差时，撤回这一轮改动/);
-  assert.match(e2ePrompt, /不得修改测评脚本（`scripts\/voice-bench\/\*`）/);
-  assert.match(e2ePrompt, /不得删除或放宽仓库中的任何测试/);
-  assert.match(e2ePrompt, /node scripts\/verify\.mjs --affected --fmt-write/);
-  assert.match(e2ePrompt, /绝不推送/);
-  // VF3：素材覆盖率（标准语料 X / 13 + 网上样本分开展示，未知态如实标“未知”）
-  assert.match(e2ePromptCold, /标准语料已录 0 \/ 13 句，网上样本 0 条/);
+  assert.match(e2ePrompt, /recordings\/online\//);
   assert.match(e2ePrompt, /标准语料已录 13 \/ 13 句.*网上样本 0 条/);
-  assert.match(e2ePrompt, /标准语料 `X \/ 13` 句有真人录音/);
-  assert.match(e2ePrompt, /工作室术语识别：已覆盖 \/ 未覆盖/);
+  assert.match(e2ePrompt, /素材覆盖率/);
+  assert.match(e2ePrompt, /标准语料 X \/ 13 句有真人录音/);
+  assert.match(e2ePrompt, /工作室术语识别是否覆盖/);
+  // 三个脚本命令与参数（本地优先 + 云端费用提醒）
+  assert.match(e2ePrompt, /live-xiaozhi-debug\.mjs --device aa:bb:cc:11:22:33/);
+  assert.match(e2ePrompt, /xiaozhi-e2e\.mjs --device aa:bb:cc:11:22:33 --max-online 20 --max-minutes 30/);
+  assert.match(
+    e2ePrompt,
+    /asr-bench\.mjs --models sense_voice,sense_voice_2025,x_asr_streaming,qwen3_asr_0_6b,firered_asr2_ctc --noise-levels clean,fan,pump/,
+  );
+  assert.match(e2ePrompt, /云端.*费用/);
+  assert.match(e2ePrompt, /scripts\/voice-bench\/README\.md/);
+  // 子代理 4 角色分工 + 无子代理回退 + 真机串行 + 最多 3 轮 + 收尾关闭开关
+  assert.match(e2ePrompt, /如果你支持子代理，按以下角色分工；不支持就由你自己按同样的阶段顺序执行/);
+  assert.match(e2ePrompt, /1\. 诊断（只测不改）/);
+  assert.match(e2ePrompt, /2\. 对症修复/);
+  assert.match(e2ePrompt, /3\. 独立复测/);
+  assert.match(e2ePrompt, /4\. 提交前审查/);
+  assert.match(e2ePrompt, /真机测试一次只能跑一个/);
+  assert.match(e2ePrompt, /最多 3 轮/);
+  assert.match(e2ePrompt, /关闭“允许本机 AI 调试注入”开关/);
+  // 零凭据与绝对路径泄露
+  assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
+  assert.ok(!e2ePrompt.includes(fakeSecret), "提示词绝不能包含密钥");
+  assert.ok(!/\/Users\/|\/home\/|[A-Z]:\\Users\\/i.test(e2ePrompt), "提示词绝不能包含本机绝对路径");
+
   const partialUnknownPrompt = buildAiBenchPrompt(
     {
       debug_inject: { enabled: true },
@@ -2817,18 +2806,7 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
     "e2e",
   );
   assert.match(partialUnknownPrompt, /标准语料已录 5 \/ 13 句，网上样本 未知/);
-  // VF4：先 git pull 再 --finish，失败或冲突即停并汇报最后 30 行
-  assert.match(e2ePrompt, /先执行 `git pull` 拉取最新代码/);
-  assert.match(e2ePrompt, /提示用户重启 MOSS/);
-  assert.match(e2ePrompt, /最后 30 行输出/);
-  assert.match(e2ePrompt, /不要自行解决合并冲突/);
-  // VF5：默认只测本地模型（--models）、云端提示费用、收尾关闭调试开关与过程记录
-  assert.match(e2ePrompt, /asr-bench\.mjs --models sense_voice,sense_voice_2025,x_asr_streaming,qwen3_asr_0_6b,firered_asr2_ctc --noise-levels clean,fan,pump/);
-  assert.match(e2ePrompt, /已配置的云端识别模型会产生调用费用/);
-  assert.match(e2ePrompt, /## 收尾/);
-  assert.match(e2ePrompt, /关闭“允许本机 AI 调试注入”开关/);
-  assert.match(e2ePrompt, /完整过程记录.*按需.*关闭/);
-  // 若 status 报告了具体已安装本地 ASR，推荐命令仅列出已安装本地模型
+
   const installedLocalPrompt = buildAiBenchPrompt(
     {
       ...readyStatus,
@@ -2843,9 +2821,6 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
     "e2e",
   );
   assert.match(installedLocalPrompt, /asr-bench\.mjs --models sense_voice,qwen3_asr_0_6b --noise-levels clean,fan,pump/);
-  assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
-  assert.ok(!e2ePrompt.includes(fakeSecret), "提示词绝不能包含密钥");
-  assert.ok(!/\/Users\/|\/home\/|[A-Z]:\\Users\\/i.test(e2ePrompt), "提示词绝不能包含本机绝对路径");
 
   const e2ePromptWithOpts = buildAiBenchPrompt(readyStatus, "e2e", {
     compareDigital: true,
@@ -2858,11 +2833,13 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
 
   const textPrompt = buildAiBenchPrompt(readyStatus, "text");
   assert.match(textPrompt, /live-xiaozhi-debug\.mjs/);
+  assert.ok(textPrompt.length < 500, `精简后的文字直通提示词应明显缩短，当前 ${textPrompt.length} 字符`);
   assert.ok(!textPrompt.includes(fakeToken));
 
   const asrPrompt = buildAiBenchPrompt(readyStatus, "asr");
   assert.match(asrPrompt, /asr-bench\.mjs/);
   assert.match(asrPrompt, /8 条已标注/);
+  assert.ok(asrPrompt.length < 600, `精简后的识别测评提示词应明显缩短，当前 ${asrPrompt.length} 字符`);
   assert.ok(!asrPrompt.includes(fakeToken));
 
   // 4. VD6 组件源码守卫：测试时间窗标记与“立即结束测试”按钮、AI 联调与测试四块顺序与唯一主按钮、对话记录“模拟（整体测试）”
