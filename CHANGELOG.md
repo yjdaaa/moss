@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 创作画板导入的 SVG / DXF 默认按原尺寸 1:1 输出，超出机器行程才等比缩小（2026-11-26）
+
+- **现象**：导入的 SVG / DXF 在宽、高留空时按导出图 0.1 mm / 像素换算，填了宽高也是含四周留边的整幅画板尺寸，CAD 零件无法按图纸原尺寸切出。
+- **根因与修复**：`plan_sketch` 新增原尺寸排版：场景里有导入图形且宽、高都留空时按 `moss_vector.canvas_mm_per_unit`（0.25 mm / 画板单位）1:1、不加四周留边，超出 `work_area_*` 整体等比缩小（`auto_fitted`、`fit_note`），结果带 `native_size`；填了宽高与纯手绘画板行为不变。前端导入时写入比例，导入提示与尺寸栏说明同步更新。
+- **验证**：`laser-api` 新增 `draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big`（40 × 20 mm 出光范围 1:1、300 × 150 mm 缩到 100 × 50、填宽照旧、纯手绘不变），原有画板矢量测试全过。未在真机出光验证。
+- **关联**：`crates/laser-api/src/generation/draw.rs`（`plan_sketch`、`NativeSize`）、`crates/laser-api/src/sketch.rs`（`vector_unit_mm`）、`frontend/src/pages/DrawPage.jsx`、`frontend/src/components/draw/DrawMaterialCard.jsx`。
+
 ### 创作画板支持导入 DXF 并修正 SVG 显示框，摄像头画面可设为画板参考底图（2026-11-26）
 
 - **现象**：CAD 零件图（DXF）无法导入画板；导入的 SVG 若原画幅四周有留白，画布显示的图片与实际刀路轮廓错位、被拉伸；摄像头拍到的木牌照片只能干看，不能拿来摆位。

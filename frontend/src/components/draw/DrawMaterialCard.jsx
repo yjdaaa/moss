@@ -215,6 +215,9 @@ export function DrawMaterialCard({
           />
         </label>
       </div>
+      <div className="wb-params-hint" id="draw-size-hint">
+        宽、高都留空时：导入的 SVG / DXF 按原尺寸 1:1 输出（超出机器行程自动等比缩小）；填了宽或高就按填的尺寸等比放进去。
+      </div>
       <div className="wb-params-hint" id="draw-workspace-limits-meta" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
         <span>当前机器行程：{limitsSourceText} mm</span>
         {workspaceLimits?.has_manual && onResetManualLimits ? (

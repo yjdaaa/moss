@@ -76,6 +76,8 @@ pub(crate) struct SketchGeometry {
     pub cut_text: Vec<Vec<Vec<Point>>>,
     /// 场景里有插入的图片（矢量刻不了）
     pub has_image: bool,
+    /// 场景里有导入的 SVG / DXF（2026-11-26 r70）：画板每单位对应多少 mm，用于“宽 / 高留空时按原尺寸输出”
+    pub vector_unit_mm: Option<f64>,
 }
 
 impl SketchGeometry {
@@ -130,6 +132,7 @@ impl SketchGeometry {
             filled_text: self.filled_text.iter().map(each).collect(),
             cut_text: self.cut_text.iter().map(each).collect(),
             has_image: self.has_image,
+            vector_unit_mm: self.vector_unit_mm,
         }
     }
 }
@@ -199,6 +202,9 @@ fn arrow_head(from: Point, tip: Point, length: f64) -> [Vec<Point>; 2] {
     [wing(0.45), wing(-0.45)]
 }
 
+/// 导入时 1 mm 放成 4 个画板单位（前端 `SVG_CANVAS_PX_PER_MM`）；旧数据没写 `canvas_mm_per_unit` 时按它算。
+const DEFAULT_VECTOR_UNIT_MM: f64 = 0.25;
+
 /// 导入 SVG 的矢量数据上限：防止异常文件让规划卡死（与前端 `svgImport.js` 的采样上限一致）。
 const MAX_VECTOR_IMAGE_POINTS: usize = 400_000;
 const MAX_VECTOR_IMAGE_PATHS: usize = 20_000;
@@ -251,6 +257,16 @@ fn push_vector_image(
     let (Some(src_w), Some(src_h)) = (src_w, src_h) else {
         return Err("导入的 SVG 矢量数据缺少尺寸，请重新导入".into());
     };
+    if out.vector_unit_mm.is_none() {
+        let unit = match data.get("canvas_mm_per_unit") {
+            None | Some(Value::Null) => DEFAULT_VECTOR_UNIT_MM,
+            Some(v) => v
+                .as_f64()
+                .filter(|u| u.is_finite() && *u > 0.0 && *u <= 100.0)
+                .ok_or("导入的 SVG 矢量数据画布比例不对，请重新导入")?,
+        };
+        out.vector_unit_mm = Some(unit);
+    }
     let paths = data
         .get("paths")
         .and_then(Value::as_array)

@@ -1032,7 +1032,8 @@ export function DrawPage({
           height: Math.max(sizeMm.height, MIN_VECTOR_IMAGE_MM) * SVG_CANVAS_PX_PER_MM,
           fileId,
           status: "saved",
-          customData: { moss_vector: data, source_name: file.name },
+          // canvas_mm_per_unit（r70）：宽、高留空时后端按这个比例 1:1 输出
+          customData: { moss_vector: { ...data, canvas_mm_per_unit: 1 / SVG_CANVAS_PX_PER_MM }, source_name: file.name },
         },
       ]);
       const next = [...current, element];
@@ -1042,11 +1043,11 @@ export function DrawPage({
       setSceneRev(computeSceneRevision(next.filter((el) => !el.isDeleted)));
       setHasSceneImages(hasSceneImageElements(next));
       const sizeText = `${sizeMm.width.toFixed(1)} × ${sizeMm.height.toFixed(1)} mm`;
-      // 画板“宽 / 高”是整幅画板（含四周留边、填充过扫描余量）的尺寸，不等于这个图形本身，所以不自动填，只提示原始尺寸
+      // 宽、高留空时后端按原尺寸 1:1 输出（r70），超出机器行程自动等比缩小；填了宽 / 高就按填的
       const ignoredText = isDxf ? ignoredDxfSummary(ignored) : ignoredSummary(ignored);
       const unitNote = isDxf && units?.assumed ? "；文件没写单位，按毫米算" : "";
       setStatus(
-        `已导入 ${kind}：${file.name}（原始尺寸 ${sizeText}${unitNote}；成品大小仍由“宽 / 高”决定，生成预览后看“轮廓尺寸”核对）${ignoredText ? `；${ignoredText}` : ""}`,
+        `已导入 ${kind}：${file.name}（原始尺寸 ${sizeText}${unitNote}；宽、高留空时按原尺寸 1:1 输出，超出机器行程自动等比缩小，填了宽 / 高就按填的）${ignoredText ? `；${ignoredText}` : ""}`,
       );
     } catch (error) {
       const msg = error?.message || String(error);

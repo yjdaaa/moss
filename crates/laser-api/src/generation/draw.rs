@@ -240,14 +240,18 @@ pub(crate) fn generate_draw_artifacts(
     } else {
         area_w - 2.0 * raster_overscan
     };
-    let (width_mm, height_mm, draw_auto_fitted) = draw_target_size_mm(
+    let width_given = optional_positive_mm(object.get("width_mm"), "width_mm")?;
+    let height_given = optional_positive_mm(object.get("height_mm"), "height_mm")?;
+    let (mut width_mm, mut height_mm, mut draw_auto_fitted) = draw_target_size_mm(
         img_w,
         img_h,
-        optional_positive_mm(object.get("width_mm"), "width_mm")?,
-        optional_positive_mm(object.get("height_mm"), "height_mm")?,
+        width_given,
+        height_given,
         (usable_w, area_h),
         (area_w, area_h),
     )?;
+    // 原尺寸排版结果（r70）：None = 没用；Some(false) = 1:1；Some(true) = 超出幅面已等比缩小
+    let mut native_layout: Option<bool> = None;
     let path_preview_name = format!("{id}.path.png");
     let fill_spacing = recommendation
         .as_ref()
@@ -287,9 +291,15 @@ pub(crate) fn generate_draw_artifacts(
         } else {
             None
         };
-        let (planned, cut_report) = plan_sketch(
+        let layout = layout_sketch.as_ref().unwrap_or(sketch);
+        // 原尺寸（r70）：画板里有导入的 SVG / DXF 且宽、高都没填时，按导入比例 1:1，超出幅面等比缩小
+        let native = (width_given.is_none() && height_given.is_none())
+            .then_some(layout.vector_unit_mm)
+            .flatten()
+            .map(|unit| (unit, (area_w, area_h)));
+        let (planned, cut_report, native_size) = plan_sketch(
             sketch,
-            layout_sketch.as_ref().unwrap_or(sketch),
+            layout,
             width_mm,
             height_mm,
             laser_core::vector_plan::FillOptions {
@@ -298,7 +308,13 @@ pub(crate) fn generate_draw_artifacts(
             },
             &parse_path_options(object)?,
             cut_setup.as_ref().map(|(cut, _)| cut),
+            native,
         )?;
+        if let Some((w, h, shrunk)) = native_size {
+            (width_mm, height_mm) = (w, h);
+            draw_auto_fitted = shrunk;
+            native_layout = Some(shrunk);
+        }
         if let Some((cut, from_material)) = &cut_setup {
             cut_json = Some(cut_options_json(cut, cut_report.as_ref(), from_material));
         }
@@ -478,7 +494,21 @@ pub(crate) fn generate_draw_artifacts(
     res_map.insert("width_mm".into(), serde_json::json!(width_mm));
     res_map.insert("height_mm".into(), serde_json::json!(height_mm));
     res_map.insert("auto_fitted".into(), serde_json::json!(draw_auto_fitted));
-    if draw_auto_fitted {
+    if let Some(shrunk) = native_layout {
+        res_map.insert("native_size".into(), serde_json::json!(true));
+        res_map.insert(
+            "fit_note".into(),
+            serde_json::json!(if shrunk {
+                format!(
+                    "导入图形按原尺寸会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
+                )
+            } else {
+                format!(
+                    "宽 / 高留空：导入图形按原尺寸 1:1 输出，成品 {width_mm:.1} × {height_mm:.1} mm"
+                )
+            }),
+        );
+    } else if draw_auto_fitted {
         res_map.insert(
             "fit_note".into(),
             serde_json::json!(format!(
@@ -571,6 +601,9 @@ pub(crate) fn generate_draw_artifacts(
 /// 先把有填充色的图形与文字扫描填满，再从填充结束处描所有轮廓与笔画（同 LightBurn 先 Fill 层后 Line 层）。
 /// 留边与光栅导出一致（四周 16 个画板单位），等比放进成品尺寸并居中；有填充时四周再让出过扫描的距离，
 /// 关光滑行也不越出成品范围（激光头起点在左下角，不往负方向走）。
+/// 原尺寸排版的实际成品（2026-11-26 r70）：`(宽 mm, 高 mm, 是否因超出幅面等比缩小)`；没用原尺寸时为 `None`。
+type NativeSize = Option<(f64, f64, bool)>;
+
 fn plan_sketch(
     sketch: &crate::sketch::SketchGeometry,
     // 排版（缩放、居中、过扫描留边）按它算：只刻选中图形时是整幅画，否则就是 `sketch`
@@ -581,10 +614,14 @@ fn plan_sketch(
     path_options: &laser_core::vector_plan::PlanOptions,
     // 切割刻法（r47）：先内后外切穿，切缝补偿按嵌套层数决定方向，规划后再加桥位、引线、过切
     cut: Option<&laser_core::cut::CutOptions>,
+    // 原尺寸（2026-11-26 r70）：`(每画板单位 mm, 机器幅面)`；给了就忽略 width_mm / height_mm，
+    // 按这个比例 1:1 排版、不加四周留边，超出幅面时整体等比缩小
+    native: Option<(f64, (f64, f64))>,
 ) -> Result<
     (
         laser_core::vector_plan::Planned,
         Option<laser_core::cut::CutReport>,
+        NativeSize,
     ),
     String,
 > {
@@ -604,12 +641,48 @@ fn plan_sketch(
     } else {
         (0.0, 0.0)
     };
-    let (inner_w, inner_h) = (width_mm - 2.0 * reach_x, height_mm - 2.0 * reach_y);
-    if inner_w <= 0.0 || inner_h <= 0.0 {
-        return Err("成品尺寸太小，放不下过扫描，请加大尺寸或调小过扫描".into());
-    }
-    let (frame_w, frame_h) = ((x1 - x0) + 2.0 * PADDING, (y1 - y0) + 2.0 * PADDING);
-    let scale = (inner_w / frame_w).min(inner_h / frame_h);
+    let padding = if native.is_some() { 0.0 } else { PADDING };
+    let (frame_w, frame_h) = ((x1 - x0) + 2.0 * padding, (y1 - y0) + 2.0 * padding);
+    let (width_mm, height_mm, scale, native_size) = match native {
+        Some((unit, (area_w, area_h))) => {
+            let (need_w, need_h) = (
+                frame_w * unit + 2.0 * reach_x,
+                frame_h * unit + 2.0 * reach_y,
+            );
+            if need_w <= area_w + 1e-9 && need_h <= area_h + 1e-9 {
+                (need_w, need_h, unit, Some(false))
+            } else {
+                // 超出幅面：整体等比缩小到放得下（过扫描 / 引线余量不缩）
+                let axis = |avail: f64, frame: f64| {
+                    if frame > 1e-9 {
+                        avail / frame
+                    } else {
+                        f64::INFINITY
+                    }
+                };
+                let s = axis(area_w - 2.0 * reach_x, frame_w)
+                    .min(axis(area_h - 2.0 * reach_y, frame_h))
+                    .min(unit);
+                if !s.is_finite() || s <= 0.0 {
+                    return Err("机器幅面放不下过扫描 / 引线余量，请调小过扫描或换大幅面".into());
+                }
+                (
+                    frame_w * s + 2.0 * reach_x,
+                    frame_h * s + 2.0 * reach_y,
+                    s,
+                    Some(true),
+                )
+            }
+        }
+        None => {
+            let (inner_w, inner_h) = (width_mm - 2.0 * reach_x, height_mm - 2.0 * reach_y);
+            if inner_w <= 0.0 || inner_h <= 0.0 {
+                return Err("成品尺寸太小，放不下过扫描，请加大尺寸或调小过扫描".into());
+            }
+            let scale = (inner_w / frame_w).min(inner_h / frame_h);
+            (width_mm, height_mm, scale, None)
+        }
+    };
     if !scale.is_finite() || scale <= 0.0 {
         return Err("画板图形尺寸无效".into());
     }
@@ -619,12 +692,14 @@ fn plan_sketch(
     );
     let mm = sketch.map(|(x, y)| {
         (
-            (x - x0 + PADDING) * scale + ox,
-            (y - y0 + PADDING) * scale + oy,
+            (x - x0 + padding) * scale + ox,
+            (y - y0 + padding) * scale + oy,
         )
     });
+    let native_size: NativeSize = native_size.map(|shrunk| (width_mm, height_mm, shrunk));
     if let Some(cut) = cut {
-        return plan_cut(&mm, height_mm, path_options, cut);
+        let (planned, report) = plan_cut(&mm, height_mm, path_options, cut)?;
+        return Ok((planned, report, native_size));
     }
     // 扫描角度按机器视角逆时针，画板坐标 y 向下时取反
     let options = |rule| FillOptions {
@@ -652,7 +727,7 @@ fn plan_sketch(
     // 激光头起点在左下角：y 向下坐标里是 (0, height)；规划内部自检出光总长度不变
     let planned = plan_layers(vec![fills, strokes], (0.0, height_mm), path_options)
         .map_err(|e| e.to_string())?;
-    Ok((planned, None))
+    Ok((planned, None, native_size))
 }
 
 /// 点在多边形里（射线法，首尾点可重复）。

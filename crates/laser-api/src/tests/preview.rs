@@ -2096,3 +2096,111 @@ fn workbench_multiline_text_with_border_fits_the_board() {
     let res = post_json(&service, "/api/text-task/generate", &tiny);
     assert_eq!(res["success"], false, "{res}");
 }
+
+/// 2026-11-26 r70：画板里有导入的 SVG / DXF 且宽、高都没填时按原尺寸 1:1 输出（不加四周留边），
+/// 超出机器幅面整体等比缩小并写明；填了宽 / 高仍按填的尺寸等比放进去；纯手绘画板不受影响。
+#[test]
+fn draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let png = draw_test_png();
+    let square = |size: f64| {
+        serde_json::json!({
+            "version": 1,
+            "size": [size, size / 2.0],
+            "canvas_mm_per_unit": 0.25,
+            "paths": [{
+                "rings": [[[0, 0], [size, 0], [size, size / 2.0], [0, size / 2.0], [0, 0]]],
+                "open": [],
+                "fill": false,
+                "stroke": true
+            }]
+        })
+    };
+    // 元素框按导入比例 4 单位 / mm
+    let scene = |size: f64| {
+        serde_json::json!({"elements": [{
+            "type": "image", "x": 0, "y": 0, "width": size * 4.0, "height": size * 2.0,
+            "fileId": "f", "customData": {"moss_vector": square(size)}
+        }]})
+    };
+    let burn_extent = |res: &serde_json::Value| {
+        let gcode = std::fs::read_to_string(
+            temp.path()
+                .join(res["result"]["artifacts"]["gcode_file"].as_str().unwrap()),
+        )
+        .unwrap();
+        laser_core::gcode::motion_extents(&gcode).unwrap().unwrap()
+    };
+    let base = |size: f64| {
+        serde_json::json!({"image_data_url": png, "material": "椴木", "thickness_mm": 3.0,
+            "mode": "vector", "vector_style": "outline", "scene_json": scene(size)})
+    };
+
+    let exact = post_json(&service, "/api/draw/preview", &base(40.0));
+    assert_eq!(exact["success"], true, "{exact}");
+    let artifacts = &exact["result"]["artifacts"];
+    assert_eq!(artifacts["native_size"], true, "{artifacts}");
+    assert_eq!(artifacts["auto_fitted"], false);
+    let e = burn_extent(&exact);
+    assert!(
+        (e.width() - 40.0).abs() < 0.05 && (e.height() - 20.0).abs() < 0.05,
+        "原尺寸 40 × 20 mm 1:1：{e:?}"
+    );
+    assert!(
+        (artifacts["width_mm"].as_f64().unwrap() - 40.0).abs() < 0.05,
+        "成品不加四周留边：{artifacts}"
+    );
+    assert!(
+        artifacts["fit_note"]
+            .as_str()
+            .unwrap()
+            .contains("原尺寸 1:1")
+    );
+
+    // 300 × 150 mm 放不进默认 100 × 100 mm 幅面：等比缩小到 100 × 50
+    let big = post_json(&service, "/api/draw/preview", &base(300.0));
+    assert_eq!(big["success"], true, "{big}");
+    let artifacts = &big["result"]["artifacts"];
+    assert_eq!(artifacts["auto_fitted"], true);
+    assert!(
+        artifacts["fit_note"].as_str().unwrap().contains("等比缩小"),
+        "{artifacts}"
+    );
+    let e = burn_extent(&big);
+    assert!(
+        (e.width() - 100.0).abs() < 0.05 && (e.height() - 50.0).abs() < 0.05,
+        "按比例缩到幅面内：{e:?}"
+    );
+
+    // 填了宽：照旧按填的尺寸等比放进去（含四周留边），不走原尺寸
+    let mut sized = base(40.0);
+    sized["width_mm"] = serde_json::json!(60);
+    let res = post_json(&service, "/api/draw/preview", &sized);
+    assert_eq!(res["success"], true, "{res}");
+    assert!(
+        res["result"]["artifacts"].get("native_size").is_none(),
+        "{res}"
+    );
+    let e = burn_extent(&res);
+    assert!(
+        e.width() < 60.0 && e.width() > 40.0,
+        "按 60 mm 宽放进去（含留边）：{e:?}"
+    );
+
+    // 纯手绘画板：不受影响（仍按导出图 0.1 mm/像素）
+    let mut plain = base(40.0);
+    plain["scene_json"] = serde_json::json!({"elements": [
+        {"type": "rectangle", "x": 0, "y": 0, "width": 40, "height": 20, "strokeColor": "#000", "backgroundColor": "transparent"}
+    ]});
+    let res = post_json(&service, "/api/draw/preview", &plain);
+    assert_eq!(res["success"], true, "{res}");
+    assert!(
+        res["result"]["artifacts"].get("native_size").is_none(),
+        "{res}"
+    );
+}
