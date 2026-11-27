@@ -500,7 +500,7 @@ pub(crate) fn generate_draw_artifacts(
             "fit_note".into(),
             serde_json::json!(if shrunk {
                 format!(
-                    "导入图形按原尺寸会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
+                    "导入图形按原尺寸会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm（四周留了余量，没有拉满行程）"
                 )
             } else {
                 format!(
@@ -512,7 +512,7 @@ pub(crate) fn generate_draw_artifacts(
         res_map.insert(
             "fit_note".into(),
             serde_json::json!(format!(
-                "画板按 0.1 mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
+                "画板按 0.1 mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm（四周留了余量，没有拉满行程）"
             )),
         );
     }
@@ -652,7 +652,7 @@ fn plan_sketch(
             if need_w <= area_w + 1e-9 && need_h <= area_h + 1e-9 {
                 (need_w, need_h, unit, Some(false))
             } else {
-                // 超出幅面：整体等比缩小到放得下（过扫描 / 引线余量不缩）
+                // 超出幅面：整体等比缩小到放得下（过扫描 / 引线余量不缩），且不拉满行程，四周各留余量（r71）
                 let axis = |avail: f64, frame: f64| {
                     if frame > 1e-9 {
                         avail / frame
@@ -660,8 +660,11 @@ fn plan_sketch(
                         f64::INFINITY
                     }
                 };
-                let s = axis(area_w - 2.0 * reach_x, frame_w)
-                    .min(axis(area_h - 2.0 * reach_y, frame_h))
+                let room = |area: f64, reach: f64| {
+                    (area - 2.0 * super::auto_fit_margin_mm(area)).max(area * 0.5) - 2.0 * reach
+                };
+                let s = axis(room(area_w, reach_x), frame_w)
+                    .min(axis(room(area_h, reach_y), frame_h))
                     .min(unit);
                 if !s.is_finite() || s <= 0.0 {
                     return Err("机器幅面放不下过扫描 / 引线余量，请调小过扫描或换大幅面".into());

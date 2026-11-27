@@ -540,13 +540,18 @@ fn gcode_max_xy(gcode: &str) -> (f64, f64) {
 
 #[test]
 fn draw_natural_size_is_fitted_into_the_machine_and_explicit_size_is_not() {
-    // 1500 × 100 像素按 0.1 mm 是 150 × 10 mm，可放范围 98 × 100 → 等比缩到 98 × 6.53
+    // 1500 × 100 像素按 0.1 mm 是 150 × 10 mm，可放范围 98 × 100；r71 起不拉满行程，
+    // 100 mm 机器每边留 2 mm → 等比缩到 94 × 6.27
     let (w, h, fitted) =
         draw_target_size_mm(1500, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
     assert!(
-        fitted && (w - 98.0).abs() < 1e-9 && (h - 98.0 / 15.0).abs() < 1e-9,
+        fitted && (w - 94.0).abs() < 1e-9 && (h - 94.0 / 15.0).abs() < 1e-9,
         "{w} {h}"
     );
+    // 大机器按 2% 留边：400 mm 行程每边 8 mm
+    let (w, _, _) =
+        draw_target_size_mm(6000, 100, None, None, (400.0, 400.0), (400.0, 400.0)).unwrap();
+    assert!((w - 384.0).abs() < 1e-9, "{w}");
     let (w, _, fitted) =
         draw_target_size_mm(200, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
     assert!(!fitted && (w - 20.0).abs() < 1e-9);
@@ -2162,7 +2167,7 @@ fn draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big() {
             .contains("原尺寸 1:1")
     );
 
-    // 300 × 150 mm 放不进默认 100 × 100 mm 幅面：等比缩小到 100 × 50
+    // 300 × 150 mm 放不进默认 100 × 100 mm 幅面：等比缩小，且不拉满行程（r71 每边留 2 mm）→ 96 × 48
     let big = post_json(&service, "/api/draw/preview", &base(300.0));
     assert_eq!(big["success"], true, "{big}");
     let artifacts = &big["result"]["artifacts"];
@@ -2173,8 +2178,8 @@ fn draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big() {
     );
     let e = burn_extent(&big);
     assert!(
-        (e.width() - 100.0).abs() < 0.05 && (e.height() - 50.0).abs() < 0.05,
-        "按比例缩到幅面内：{e:?}"
+        (e.width() - 96.0).abs() < 0.05 && (e.height() - 48.0).abs() < 0.05,
+        "按比例缩到幅面内并留余量：{e:?}"
     );
 
     // 填了宽：照旧按填的尺寸等比放进去（含四周留边），不走原尺寸

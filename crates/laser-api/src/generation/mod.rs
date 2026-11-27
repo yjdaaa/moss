@@ -219,6 +219,12 @@ fn optional_positive_mm(
 /// 画板成品尺寸（毫米）：宽高都填时锁定比例放进该框内；只填一边按比例算另一边；
 /// 都没填按导出图每像素 0.1 mm，超出可用范围时等比缩小并返回 `true`；填写的尺寸超出直接拒绝，不悄悄缩小。
 /// `usable` 为实际可放图案的范围（光栅模式宽度已扣除两侧过扫描），`machine` 为机器幅面（只用于提示）。
+/// 自动缩小时每边留出的余量（2026-11-26 r71，用户“最好不要拉满行程，留点余空”）：该轴行程的 2%，至少 2 mm。
+/// 只用于“放不下才等比缩小”；能放下的不因余量缩小，用户填的尺寸也不受影响。
+pub(crate) fn auto_fit_margin_mm(axis_mm: f64) -> f64 {
+    (axis_mm * 0.02).max(2.0)
+}
+
 pub(crate) fn draw_target_size_mm(
     img_w: u32,
     img_h: u32,
@@ -241,7 +247,10 @@ pub(crate) fn draw_target_size_mm(
             let (nw, nh) = (w * DRAW_PIXEL_MM, h * DRAW_PIXEL_MM);
             if nw > usable_w + 1e-9 || nh > usable_h + 1e-9 {
                 auto_fitted = true;
-                let scale = (usable_w / nw).min(usable_h / nh);
+                // 不拉满行程：四周各留 auto_fit_margin_mm（r71）
+                let fit_w = (usable_w - 2.0 * auto_fit_margin_mm(machine.0)).max(usable_w * 0.5);
+                let fit_h = (usable_h - 2.0 * auto_fit_margin_mm(machine.1)).max(usable_h * 0.5);
+                let scale = (fit_w / nw).min(fit_h / nh);
                 (nw * scale, nh * scale)
             } else {
                 (nw, nh)

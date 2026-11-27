@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 创作画板自动等比缩小时不再拉满机器行程，四周各留 2% 余量（2026-11-26）
+
+- **现象**：导入图形按原尺寸或画板按 0.1 mm/像素超出机器幅面时，自动缩小会正好贴满行程边缘，没有余量。
+- **根因与修复**：新增 `auto_fit_margin_mm`（每轴行程的 2%、至少 2 mm），`draw_target_size_mm` 与 `plan_sketch` 原尺寸缩小都改为缩到行程减两侧余量以内，`fit_note` 写明留了余量；能放下的仍 1:1，填了宽高的不受影响。
+- **验证**：`laser-api` 全部 269 项通过，`draw_natural_size_is_fitted_into_the_machine_and_explicit_size_is_not`（100 mm 机器缩到 94、400 mm 机器每边 8 mm）与 `draw_vector_imported_shapes_keep_native_size_and_shrink_only_when_too_big`（300 × 150 缩到 96 × 48）已更新。未在真机出光验证。
+- **关联**：`crates/laser-api/src/generation/{mod.rs,draw.rs}`、`crates/laser-api/src/tests/preview.rs`。
+
 ### 创作画板导入的 SVG / DXF 默认按原尺寸 1:1 输出，超出机器行程才等比缩小（2026-11-26）
 
 - **现象**：导入的 SVG / DXF 在宽、高留空时按导出图 0.1 mm / 像素换算，填了宽高也是含四周留边的整幅画板尺寸，CAD 零件无法按图纸原尺寸切出。
