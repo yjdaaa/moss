@@ -68,16 +68,61 @@ impl<'a> Session<'a> {
             .map(laser_runtime::ProcessTrace::scoped);
         self.trace_turn_input(&input, kind, turn_trace.as_ref());
         let trace_tts = turn_trace.as_ref().map(|_| Vec::new());
-        let recording_offset = if kind == TurnKind::Answer {
-            self.recording_started.elapsed().as_millis() as u64
-        } else {
-            0
-        };
+        let recording_offset =
+            if kind == TurnKind::Answer && !matches!(&input, TurnInput::Text { .. }) {
+                self.recording_started.elapsed().as_millis() as u64
+            } else {
+                0
+            };
         let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
+        let is_text_inject = matches!(&input, TurnInput::Text { .. });
+        let simulated = matches!(
+            &input,
+            TurnInput::Text {
+                simulated: true,
+                ..
+            }
+        );
+        let injected_text = match &input {
+            TurnInput::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        let corpus_enabled = self
+            .shared
+            .config
+            .asr_corpus
+            .as_ref()
+            .is_some_and(|store| store.is_enabled());
+        let corpus_interims = if kind == TurnKind::Answer && !simulated && corpus_enabled {
+            std::mem::take(&mut self.pending_corpus_interims)
+        } else {
+            self.pending_corpus_interims.clear();
+            Vec::new()
+        };
+        let fast_stop_pcm = self.pending_fast_stop_pcm.take();
+        let corpus_audio = if kind == TurnKind::Answer && !simulated && corpus_enabled {
+            match &input {
+                TurnInput::Utterance {
+                    pcm, sample_rate, ..
+                } if !pcm.is_empty() => Some((pcm.clone(), *sample_rate)),
+                TurnInput::FastStop { .. } => fast_stop_pcm,
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let started_at_ms = crate::unix_now_ms();
         let timing = if kind == TurnKind::Answer {
-            let mut stages = std::mem::take(&mut self.recording_marks);
+            let mut stages = if is_text_inject {
+                self.recording_marks.clear();
+                BTreeMap::new()
+            } else {
+                std::mem::take(&mut self.recording_marks)
+            };
             let end = if is_fast_stop {
                 "interim_stop"
+            } else if is_text_inject {
+                "text_injected"
             } else {
                 "utterance_end"
             };
@@ -103,7 +148,9 @@ impl<'a> Session<'a> {
         // 接进历史；只在会话内存里，随历史截断丢弃，不落盘。
         let mut pending_photo = None;
         let history = if kind == TurnKind::Answer {
-            if conversation.personal_context.is_some() {
+            if simulated {
+                self.history.clone()
+            } else if conversation.personal_context.is_some() {
                 if is_fast_stop {
                     Vec::new()
                 } else {
@@ -136,7 +183,7 @@ impl<'a> Session<'a> {
         } else {
             Vec::new()
         };
-        let person_hint = if kind == TurnKind::Answer {
+        let person_hint = if kind == TurnKind::Answer && !simulated {
             if let Some(personal) = &conversation.personal_context {
                 let valid = self.last_verified_person.as_ref().is_some_and(|hint| {
                     hint.verified_at.elapsed() <= SHORT_UTTERANCE_CONTINUITY_WINDOW
@@ -157,6 +204,32 @@ impl<'a> Session<'a> {
         };
         let is_report = matches!(input, TurnInput::Report { .. });
         let debug_capture_epoch = self.shared.state.debug_capture_epoch();
+        if kind == TurnKind::Answer {
+            self.shared.state.upsert_turn_detail(crate::TurnDetail {
+                turn_id: format!("{}:{}", self.session_id, self.turn_number),
+                device_id: self.device_id.into(),
+                session_id: self.session_id.into(),
+                turn: self.turn_number,
+                simulated,
+                status: "running".into(),
+                outcome: "running".into(),
+                route: "running".into(),
+                injected_text: injected_text.clone().unwrap_or_default(),
+                corrected_text: String::new(),
+                stages_ms: timing
+                    .as_ref()
+                    .map(|t| t.stages.clone())
+                    .unwrap_or_default(),
+                tools: Vec::new(),
+                reply: String::new(),
+                spoken: String::new(),
+                playback: crate::PlaybackDetail::default(),
+                stop_skipped_reason: None,
+                error: None,
+                started_at_ms,
+                finished_at_ms: None,
+            });
+        }
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
         let direct_trace = crate::conversation::TurnTrace {
             trace: turn_trace
@@ -218,6 +291,19 @@ impl<'a> Session<'a> {
             endpoint_wait: None,
             released_at: None,
             music_error: None,
+            simulated,
+            started_at_ms,
+            injected_text,
+            route: None,
+            detail_tools: Vec::new(),
+            underrun_started_at: None,
+            playback_frames: 0,
+            playback_underruns: 0,
+            playback_stall_ms: 0,
+            stop_skipped_reason: None,
+            last_error: None,
+            corpus_audio,
+            corpus_interims,
         }) && !replaced.close
         {
             self.stash_uncommitted_photo(&mut replaced);
@@ -451,6 +537,9 @@ impl<'a> Session<'a> {
                     TurnEvent::RawHeard { .. }
                     | TurnEvent::SmartTurnProb(_)
                     | TurnEvent::Timing { .. }
+                    | TurnEvent::TimingOverwrite { .. }
+                    | TurnEvent::Route(_)
+                    | TurnEvent::StopSkipped(_)
                     | TurnEvent::PersonResolved { .. }
                     | TurnEvent::Trace { .. }
                     | TurnEvent::SpeechSoon
@@ -547,6 +636,17 @@ impl<'a> Session<'a> {
                 }
                 self.listen.barge.reset();
             }
+            TurnEvent::Route(route) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.route = Some(route);
+                }
+            }
+            TurnEvent::StopSkipped(reason) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.stop_skipped_reason = Some(reason.clone());
+                }
+                self.event(EventRecord::warn(DiagCategory::Device, reason));
+            }
             TurnEvent::Timing { stage, ms } => {
                 if let Some(turn) = self.turn.as_mut()
                     && let Some(timing) = turn.timing.as_mut()
@@ -555,6 +655,15 @@ impl<'a> Session<'a> {
                         .stages
                         .entry(stage.into())
                         .or_insert(turn.recording_offset.saturating_add(ms));
+                }
+            }
+            TurnEvent::TimingOverwrite { stage, ms } => {
+                if let Some(turn) = self.turn.as_mut()
+                    && let Some(timing) = turn.timing.as_mut()
+                {
+                    timing
+                        .stages
+                        .insert(stage.into(), turn.recording_offset.saturating_add(ms));
                 }
             }
             TurnEvent::ToolTiming { name, ms } => {
@@ -590,16 +699,30 @@ impl<'a> Session<'a> {
                 name,
                 arguments,
                 result,
+                ms,
+                blocked,
+                block_reason,
             } => {
-                if self.shared.state.debug_enabled()
-                    && let Some(turn) = self.turn.as_mut()
-                    && turn.debug_tools.len() < 16
-                {
-                    turn.debug_tools.push(crate::DebugToolTrace {
-                        name,
-                        arguments,
-                        result,
-                    });
+                if let Some(turn) = self.turn.as_mut() {
+                    if turn.detail_tools.len() < 16 {
+                        turn.detail_tools.push(crate::TurnToolDetail {
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            result: result.clone(),
+                            ms,
+                            blocked,
+                            block_reason: block_reason.clone(),
+                        });
+                    }
+                    if self.shared.state.debug_enabled() && turn.debug_tools.len() < 16 {
+                        turn.debug_tools.push(crate::DebugToolTrace {
+                            name,
+                            arguments,
+                            result,
+                            blocked,
+                            block_reason,
+                        });
+                    }
                 }
             }
             TurnEvent::TextReply(text) => {
@@ -875,11 +998,16 @@ impl<'a> Session<'a> {
                     }
                 }
             }
-            TurnEvent::Failed(error) => self.event(EventRecord::from_provider(
-                EventLevel::Error,
-                "对话出错：",
-                &error,
-            )),
+            TurnEvent::Failed(error) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.last_error = Some(error.to_string());
+                }
+                self.event(EventRecord::from_provider(
+                    EventLevel::Error,
+                    "对话出错：",
+                    &error,
+                ));
+            }
             TurnEvent::Warning(error) => {
                 self.event(EventRecord::from_provider(EventLevel::Warn, "", &error))
             }
@@ -932,49 +1060,63 @@ impl<'a> Session<'a> {
             && let Some(conversation) = &self.conversation
         {
             let messages = std::mem::take(&mut turn.pending_messages);
-            let turn_ctx = ToolContext {
-                device_id: self.device_id.into(),
-                session_id: self.session_id.into(),
-            };
-            if let Some(personal) = &conversation.personal_context {
-                let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
-                if let (Some(extraction), Some(verified_person)) =
-                    (&conversation.context_extraction, commit_scope)
-                {
-                    extraction.turn_completed(
-                        &turn_ctx,
-                        Some(verified_person),
-                        &messages,
-                        trace::background_llm(conversation, self.device_id, "长期记忆提取"),
-                    );
-                }
-                let photo_in_messages = turn
-                    .pending_photo
-                    .as_ref()
-                    .is_none_or(|photo| messages.contains(photo));
-                let committed = personal.commit(
-                    &turn_ctx,
-                    commit_scope,
-                    messages,
-                    conversation.settings.history_budget,
-                );
-                if !(committed && photo_in_messages) && !turn.close {
-                    self.stash_uncommitted_photo(&mut turn);
-                }
-            } else {
-                if let Some(extraction) = &conversation.context_extraction {
-                    extraction.turn_completed(
-                        &turn_ctx,
-                        None,
-                        &messages,
-                        trace::background_llm(conversation, self.device_id, "长期记忆提取"),
-                    );
-                }
+            if turn.simulated {
+                // VA2 #3 模拟轮次仅保留在当前会话内存中支持多轮追问，绝不触发长期记忆、人物资料或用户档案提取。
                 append_history(
                     &mut self.history,
                     messages,
                     conversation.settings.history_budget,
                 );
+            } else {
+                let turn_ctx = ToolContext {
+                    device_id: self.device_id.into(),
+                    session_id: self.session_id.into(),
+                };
+                if let Some(personal) = &conversation.personal_context {
+                    let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
+                    if let (Some(extraction), Some(verified_person)) =
+                        (&conversation.context_extraction, commit_scope)
+                    {
+                        extraction.turn_completed(
+                            &turn_ctx,
+                            Some(verified_person),
+                            &messages,
+                            trace::background_llm(conversation, self.device_id, "长期记忆提取"),
+                        );
+                    }
+                    let photo_in_messages = turn
+                        .pending_photo
+                        .as_ref()
+                        .is_none_or(|photo| messages.contains(photo));
+                    let committed = personal.commit(
+                        &turn_ctx,
+                        commit_scope,
+                        messages,
+                        conversation.settings.history_budget,
+                    );
+                    if !(committed && photo_in_messages) && !turn.close {
+                        self.stash_uncommitted_photo(&mut turn);
+                    }
+                } else {
+                    if let Some(extraction) = &conversation.context_extraction {
+                        extraction.turn_completed(
+                            &turn_ctx,
+                            None,
+                            &messages,
+                            trace::background_llm(conversation, self.device_id, "长期记忆提取"),
+                        );
+                    }
+                    append_history(
+                        &mut self.memory_history,
+                        messages.clone(),
+                        conversation.settings.history_budget,
+                    );
+                    append_history(
+                        &mut self.history,
+                        messages,
+                        conversation.settings.history_budget,
+                    );
+                }
             }
         }
         self.listen.playback_started = None;
@@ -1362,7 +1504,14 @@ impl<'a> Session<'a> {
                 if let Some(heard) = self.heard_text(&turn) {
                     messages.push(ChatMessage::assistant(heard));
                 }
-                if let Some(personal) = &conversation.personal_context {
+                if turn.simulated {
+                    // VA2 #3 被打断的模拟轮次同样不提交给按人记忆或长期记忆
+                    append_history(
+                        &mut self.history,
+                        messages,
+                        conversation.settings.history_budget,
+                    );
+                } else if let Some(personal) = &conversation.personal_context {
                     let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
                     let committed = personal.commit(
                         &ToolContext {
@@ -1379,6 +1528,11 @@ impl<'a> Session<'a> {
                         self.stash_uncommitted_photo(&mut turn);
                     }
                 } else {
+                    append_history(
+                        &mut self.memory_history,
+                        messages.clone(),
+                        conversation.settings.history_budget,
+                    );
                     append_history(
                         &mut self.history,
                         messages,

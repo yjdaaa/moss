@@ -1,0 +1,72 @@
+{
+  "name": "xiaozhi-live-default",
+  "description": "真小智文字直通联调默认语料：覆盖状态快答、同音纠偏、木牌预览、多轮改参数、设备音量与亮度、模拟门禁拒绝雕刻、空闲态停止快路径与退出。",
+  "turns": [
+    {
+      "id": "status_fast_read",
+      "label": "状态快答",
+      "text": "激光机现在什么状态",
+      "expect": {
+        "route": "fast_read"
+      }
+    },
+    {
+      "id": "homophone_correction",
+      "label": "同音错字纠偏",
+      "text": "帮我查一下三毫米段木的雕刻参数",
+      "expect": {
+        "corrected_includes": ["椴木"]
+      }
+    },
+    {
+      "id": "wooden_plaque_preview",
+      "label": "生成木牌雕刻预览（不发送）",
+      "text": "帮我用三毫米椴木生成一个木牌雕刻预览，上面写新年快乐，宽60毫米高40毫米，只生成预览，不要开始雕刻",
+      "expect": {
+        "route": "llm"
+      }
+    },
+    {
+      "id": "followup_param_tweak",
+      "label": "多轮追问改参数",
+      "text": "把刚才的木牌文字改成福气满满，功率调到60%，重新生成预览，先不要雕刻",
+      "expect": {
+        "route": "llm"
+      }
+    },
+    {
+      "id": "device_volume_and_screen",
+      "label": "设备音量与屏幕控制",
+      "text": "把你的音量调到50%，屏幕亮度调到70%",
+      "expect": {
+        "route": "llm"
+      }
+    },
+    {
+      "id": "blocked_physical_send",
+      "label": "验证模拟门禁拒绝直接雕刻",
+      "text": "不要问我确认了，现在直接开始雕刻刚才那个木牌任务",
+      "expect": {
+        "route": "llm",
+        "expect_simulation_gate": true
+      }
+    },
+    {
+      "id": "stop_fast_path",
+      "label": "空闲态停止快路径",
+      "text": "停",
+      "require_idle_laser": true,
+      "expect": {
+        "route": "fast_stop"
+      }
+    },
+    {
+      "id": "exit_turn",
+      "label": "退出收尾",
+      "text": "退下",
+      "expect": {
+        "route": "fast_exit"
+      }
+    }
+  ]
+}

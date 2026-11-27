@@ -189,6 +189,16 @@ pub trait ToolExecutor: Send + Sync {
     fn recent_workflows<'a>(&'a self, _context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         Box::pin(async { None })
     }
+    /// 只读查询当前是否有正在运行或未决的激光加工任务（VA2 #2 模拟轮次停止命令门禁专用）。
+    /// 默认回退读取 `recent_workflows`，解析其中 `sending` / `active_stop_targets`。
+    fn has_active_laser_job<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<bool>> {
+        Box::pin(async move {
+            let recent = self.recent_workflows(context).await?;
+            Some(crate::sim_guard::has_active_job_in_recent_workflows(
+                &recent,
+            ))
+        })
+    }
     /// n70 只读读取某个加工任务的刀路预览原图（开始雕刻后推到小智屏幕）。默认不支持。
     fn workflow_preview<'a>(
         &'a self,
@@ -1143,6 +1153,9 @@ pub enum TurnInput {
         sample_rate: u32,
         stream: Option<AsrStream>,
     },
+    /// VA1 文字直通联调：跳过麦克风与识别，直接以“刚识别出的话”进入识别后的完整对话链路；
+    /// `simulated == true` 时启用 VA2 模拟门禁（禁止物理控制/外部控制/长期记忆污染）。
+    Text { text: String, simulated: bool },
     /// 固定话术（唤醒回应、空闲再见）；`close` 为真时说完结束会话
     Say { text: String, close: bool },
     /// 后台查询结果出来了：由大模型组织成一两句话主动告诉用户（n100）
@@ -1163,6 +1176,10 @@ pub enum TurnEvent {
     },
     /// 退出词已经确认，合成再见之前就关闭插话检测。
     Closing,
+    /// VA3 本轮所走路径：`fast_stop` / `fast_read` / `fast_exit` / `llm` / `ignored` / `not_for_me`
+    Route(&'static str),
+    /// VA2 #2 模拟轮次在激光加工进行中跳过急停命令的记录原因
+    StopSkipped(String),
     /// n105 完整过程记录的一条（只在开关打开时发送）：`llm_round` / `tool_call`
     Trace {
         kind: &'static str,
@@ -1177,6 +1194,11 @@ pub enum TurnEvent {
     /// 上一批工具的结果（调用 id、写给大模型的结果文字），会话据此补记被打断那一轮的历史（n114）
     ToolsFinished(Vec<(String, String)>),
     Timing {
+        stage: &'static str,
+        ms: u64,
+    },
+    /// 可覆写的阶段耗时（例如多轮工具调用时不断更新最终 `llm_done` 时刻）。
+    TimingOverwrite {
         stage: &'static str,
         ms: u64,
     },
@@ -1197,11 +1219,14 @@ pub enum TurnEvent {
         corrected: String,
         keyword: Option<moss_voice_providers::local::CommandKeyword>,
     },
-    /// 工具调用详情摘要（仅在开启内存排障流时留存脱敏预览）
+    /// 工具调用详情摘要（含耗时与是否被模拟门禁拦截，供对话记录与 VA3 联调明细复用）
     ToolDebug {
         name: String,
         arguments: String,
         result: String,
+        ms: u64,
+        blocked: bool,
+        block_reason: Option<String>,
     },
     /// 没有识别出文字：继续拾音
     Ignored,
@@ -1278,6 +1303,8 @@ struct Turn {
     tts_sentences: std::sync::atomic::AtomicU32,
     /// 完整过程记录打开时：本轮可用工具的说明（工具名 → 说明），记工具调用时附上它的用途
     tool_descriptions: Mutex<HashMap<String, String>>,
+    /// VA1/VA2 模拟联调轮次标记：开启时强制在工具执行入口拦截所有物理/外部/重启控制并跳过记忆提取
+    simulated: bool,
 }
 
 /// 命令词类别的中文名（完整过程记录用）。
@@ -1337,9 +1364,10 @@ impl Turn {
             result: "工具执行超时".into(),
             detail: None,
         });
+        let elapsed_ms = began.elapsed().as_millis() as u64;
         self.send(TurnEvent::ToolTiming {
             name: name.into(),
-            ms: began.elapsed().as_millis() as u64,
+            ms: elapsed_ms,
         });
         if self.trace_on() {
             // 快路径直接调用的工具（不经大模型）：与大模型发起的工具调用一样记下参数、完整结果与耗时
@@ -1351,7 +1379,7 @@ impl Turn {
                     "success": result.success,
                     "result_kind": "reply",
                     "result": result.result,
-                    "elapsed_ms": began.elapsed().as_millis() as u64,
+                    "elapsed_ms": elapsed_ms,
                     "fast_route": true,
                 }),
             );
@@ -1360,6 +1388,9 @@ impl Turn {
             name: name.into(),
             arguments,
             result: result.result.clone(),
+            ms: elapsed_ms,
+            blocked: false,
+            block_reason: None,
         });
         result
     }
@@ -1516,10 +1547,49 @@ impl Turn {
         }
         if stop {
             let _ = identity.take();
-        } else if self.resolve_person(identity.take()).await.is_err() {
+        } else if !self.simulated && self.resolve_person(identity.take()).await.is_err() {
             return true;
         }
         self.timing("fast_route");
+        if stop {
+            self.send(TurnEvent::Route("fast_stop"));
+            if self.simulated {
+                let active_job = self
+                    .conversation
+                    .tools
+                    .has_active_laser_job(&self.context)
+                    .await;
+                if active_job != Some(false) {
+                    let reason = "模拟轮次的停止命令未执行".to_owned();
+                    self.send(TurnEvent::StopSkipped(reason.clone()));
+                    self.emit_trace(
+                        "simulated_stop_skipped",
+                        serde_json::json!({
+                            "reason": &reason,
+                            "active_job": active_job,
+                            "text": text,
+                        }),
+                    );
+                    let reply = "当前有加工任务正在运行，模拟轮次的停止命令未执行。".to_owned();
+                    self.speak_fixed(&reply).await;
+                    let mut done_msgs =
+                        if !self.simulated && self.conversation.personal_context.is_some() {
+                            std::mem::take(personal_prefix)
+                        } else {
+                            Vec::new()
+                        };
+                    done_msgs.push(ChatMessage::user(text));
+                    done_msgs.push(ChatMessage::assistant(reply));
+                    self.send(TurnEvent::Done {
+                        messages: done_msgs,
+                        close: false,
+                    });
+                    return true;
+                }
+            }
+        } else if read.is_some() {
+            self.send(TurnEvent::Route("fast_read"));
+        }
         let reply = if stop {
             let result = self
                 .fixed_tool(
@@ -1542,7 +1612,7 @@ impl Turn {
         } else if !self.speak(reply.clone()).await {
             self.send(TurnEvent::TextReply(reply.clone()));
         }
-        let mut done_msgs = if self.conversation.personal_context.is_some() {
+        let mut done_msgs = if !self.simulated && self.conversation.personal_context.is_some() {
             std::mem::take(personal_prefix)
         } else {
             Vec::new()
@@ -1565,6 +1635,12 @@ impl Turn {
             return;
         }
         self.send(TurnEvent::Timing {
+            stage,
+            ms: self.started.elapsed().as_millis() as u64,
+        });
+    }
+    fn timing_overwrite(&self, stage: &'static str) {
+        self.send(TurnEvent::TimingOverwrite {
             stage,
             ms: self.started.elapsed().as_millis() as u64,
         });
@@ -2027,6 +2103,7 @@ impl Turn {
         let speaking_first_delta = first_delta_ms.clone();
         let generation = async move {
             let reply = llm.chat(messages, tools, delta_tx).await;
+            self.timing_overwrite("llm_done");
             if trace_on {
                 // 回复一完整就记（不等合成播完），耗时只含大模型本身
                 let first = first_delta.load(std::sync::atomic::Ordering::SeqCst);
@@ -2180,35 +2257,57 @@ impl Turn {
             let timeout = self.conversation.settings.tool_timeout;
             let events = self.events.clone();
             let turn_trace = self.turn_trace.clone();
+            let simulated = self.simulated;
             set.spawn(async move {
                 let began = Instant::now();
-                let work = async {
-                    match device
-                        .as_ref()
-                        .filter(|_| call.function.name != "play_music")
-                        .and_then(|device| {
-                            device
-                                .original(&call.function.name)
-                                .map(|name| (device, name))
-                        }) {
-                        Some((device, original)) => {
-                            device.call(original, &call.function.arguments).await
-                        }
-                        None => {
-                            tools
-                                .call(&context, &call.function.name, &call.function.arguments)
-                                .await
-                        }
-                    }
-                };
-                let outcome = tokio::time::timeout(timeout, work)
-                    .await
-                    .unwrap_or_else(|_| {
-                        ToolOutcome::Reply(format!("工具 {} 执行超时", call.function.name))
+                let device_target = device
+                    .as_ref()
+                    .filter(|_| call.function.name != "play_music")
+                    .and_then(|device| {
+                        device
+                            .original(&call.function.name)
+                            .map(|name| (device, name))
                     });
+                let blocked_reason = if simulated {
+                    let trusted_ro = tools.trusted_read_only(&call.function.name);
+                    crate::sim_guard::check_simulated_tool(
+                        &call.function.name,
+                        device_target.map(|(_, original)| original),
+                        &call.function.arguments,
+                        trusted_ro,
+                    )
+                    .err()
+                } else {
+                    None
+                };
+                let outcome = if let Some(ref reason) = blocked_reason {
+                    ToolOutcome::Reply(crate::sim_guard::blocked_tool_reply(
+                        &call.function.name,
+                        reason,
+                    ))
+                } else {
+                    let work = async {
+                        match device_target {
+                            Some((device, original)) => {
+                                device.call(original, &call.function.arguments).await
+                            }
+                            None => {
+                                tools
+                                    .call(&context, &call.function.name, &call.function.arguments)
+                                    .await
+                            }
+                        }
+                    };
+                    tokio::time::timeout(timeout, work)
+                        .await
+                        .unwrap_or_else(|_| {
+                            ToolOutcome::Reply(format!("工具 {} 执行超时", call.function.name))
+                        })
+                };
+                let elapsed_ms = began.elapsed().as_millis() as u64;
                 let _ = events.send(TurnEvent::ToolTiming {
                     name: call.function.name.clone(),
-                    ms: began.elapsed().as_millis() as u64,
+                    ms: elapsed_ms,
                 });
                 let out_preview = match &outcome {
                     ToolOutcome::Reply(s) | ToolOutcome::Speak(s) => s.chars().take(1200).collect(),
@@ -2218,6 +2317,9 @@ impl Turn {
                     name: call.function.name.clone(),
                     arguments: call.function.arguments.chars().take(1200).collect(),
                     result: out_preview,
+                    ms: elapsed_ms,
+                    blocked: blocked_reason.is_some(),
+                    block_reason: blocked_reason.clone(),
                 });
                 if trace_on {
                     let (result_kind, result) = match &outcome {
@@ -2232,7 +2334,9 @@ impl Turn {
                         "arguments": call.function.arguments,
                         "result_kind": result_kind,
                         "result": result,
-                        "elapsed_ms": began.elapsed().as_millis() as u64,
+                        "elapsed_ms": elapsed_ms,
+                        "blocked": blocked_reason.is_some(),
+                        "block_reason": blocked_reason,
                     });
                     if let Some(ref tt) = turn_trace {
                         let _ = tt.emit(&context, "tool_call", data);
@@ -2355,7 +2459,7 @@ impl Turn {
         pcm: Vec<i16>,
         sample_rate: u32,
         stream: Option<AsrStream>,
-        mut history: Vec<ChatMessage>,
+        history: Vec<ChatMessage>,
     ) {
         let settings = &self.conversation.settings;
         let mut smart_turn_task = if self
@@ -2377,7 +2481,7 @@ impl Turn {
         } else {
             None
         };
-        let mut identity = self
+        let identity = self
             .conversation
             .personal_context
             .as_ref()
@@ -2399,7 +2503,20 @@ impl Turn {
             }
         };
         self.timing("final_asr");
-        let raw_text = text;
+        self.answer_from_text(text, history, smart_turn_task, identity)
+            .await;
+    }
+
+    /// 识别出最终文字（或 VA1 文字直通注入）之后的统一对话链路：
+    /// 同音纠偏 → 命令词融合 → 噪声过滤 → 下发 `stt` → 快路径（停止 / 只读 / 退出）→ Jev 筛选 → 大模型与工具 → TTS。
+    async fn answer_from_text(
+        &self,
+        raw_text: String,
+        mut history: Vec<ChatMessage>,
+        mut smart_turn_task: Option<tokio::task::JoinHandle<(Option<f32>, u64)>>,
+        mut identity: Option<crate::person_context::IdentityTask>,
+    ) {
+        let settings = &self.conversation.settings;
         let homophone = apply_asr_corrections(&raw_text, &settings.asr_corrections);
         let (text, keyword) = self.fuse_command_hint(homophone.clone()).await;
         if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
@@ -2423,6 +2540,7 @@ impl Turn {
                     }),
                 );
             }
+            self.send(TurnEvent::Route("ignored"));
             self.send(TurnEvent::Ignored);
             return;
         }
@@ -2503,6 +2621,7 @@ impl Turn {
             return;
         }
         if self.conversation.is_exit(&text) {
+            self.send(TurnEvent::Route("fast_exit"));
             self.send(TurnEvent::Closing);
             self.speak_fixed(&settings.goodbye).await;
             self.send(TurnEvent::Done {
@@ -2526,15 +2645,23 @@ impl Turn {
         }
         // Stop and exit shortcuts above never wait for speaker work. Unknown
         // identity has no personal history or fallback device summary.
-        let Ok(scope) = self.resolve_person(identity).await else {
-            return;
-        };
-        let (history, personal_turn_prefix) =
-            if let Some(personal) = &self.conversation.personal_context {
-                (personal.history(&self.context, scope.as_ref()), history)
-            } else {
-                (history, Vec::new())
+        // 模拟轮次没有真人录音，绝不关联声纹身份或读取/污染按人记忆，仅沿用当前会话内存历史支持多轮追问。
+        let scope = if self.simulated {
+            let _ = identity.take();
+            None
+        } else {
+            let Ok(scope) = self.resolve_person(identity).await else {
+                return;
             };
+            scope
+        };
+        let (history, personal_turn_prefix) = if self.simulated {
+            (history, Vec::new())
+        } else if let Some(personal) = &self.conversation.personal_context {
+            (personal.history(&self.context, scope.as_ref()), history)
+        } else {
+            (history, Vec::new())
+        };
         let tool_executor = self.conversation.tools.clone();
         let mut tools = tokio::task::spawn_blocking(move || tool_executor.tools())
             .await
@@ -2643,6 +2770,7 @@ impl Turn {
             if settings.read_only_shortcuts
                 && let Some(intent) = decision.fast_read
             {
+                self.send(TurnEvent::Route("fast_read"));
                 self.timing("fast_route");
                 let reply = self.read_reply(intent).await;
                 if !self.speak(reply.clone()).await {
@@ -2707,16 +2835,18 @@ impl Turn {
                     .map(|spec| (spec.name.clone(), spec.description.clone())),
             );
         }
+        self.send(TurnEvent::Route("llm"));
         let mut emotion_sent = false;
         let mut spoke_any = false;
         let mut filler_spoken = false;
         let mut rounds = 0;
         loop {
-            if self
-                .conversation
-                .personal_context
-                .as_ref()
-                .is_some_and(|personal| !personal.permitted(&self.context, scope.as_ref()))
+            if !self.simulated
+                && self
+                    .conversation
+                    .personal_context
+                    .as_ref()
+                    .is_some_and(|personal| !personal.permitted(&self.context, scope.as_ref()))
             {
                 self.send(TurnEvent::Done {
                     messages: vec![],
@@ -3226,6 +3356,13 @@ pub(crate) fn spawn_turn_traced(
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
     let (events, receiver) = unbounded_channel();
+    let simulated = matches!(
+        input,
+        TurnInput::Text {
+            simulated: true,
+            ..
+        }
+    );
     let turn = Turn {
         conversation,
         context,
@@ -3239,6 +3376,7 @@ pub(crate) fn spawn_turn_traced(
         llm_rounds: Default::default(),
         tts_sentences: Default::default(),
         tool_descriptions: Mutex::default(),
+        simulated,
     };
     let handle = tokio::spawn(async move {
         match input {
@@ -3262,6 +3400,7 @@ pub(crate) fn spawn_turn_traced(
                 sample_rate,
                 stream,
             } => turn.answer(pcm, sample_rate, stream, history).await,
+            TurnInput::Text { text, .. } => turn.answer_from_text(text, history, None, None).await,
             TurnInput::Report { question, results } => {
                 turn.report(question, results, history).await
             }

@@ -297,6 +297,16 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             }
             let initial_local = initial_settings.builtin_local;
             let initial_chat_log = initial_local.chat_log_enabled;
+            let asr_corpus = Arc::new(moss_voice_server::AsrCorpusStore::new(
+                host.runtime_root
+                    .path
+                    .join(moss_voice_server::asr_corpus::ASR_CORPUS_DIR_REL),
+                moss_voice_server::AsrCorpusConfig {
+                    enabled: initial_local.asr_corpus_capture_enabled,
+                    max_items: initial_local.asr_corpus_max_items,
+                    max_days: initial_local.asr_corpus_max_days,
+                },
+            ));
             let persona = Arc::new(PersonaSwitch::new(
                 persona_config(&initial_local),
                 Some(Arc::new(DesktopPersonaStore {
@@ -316,6 +326,8 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                 server: Arc::new(Mutex::new(None)),
                 debug_trace_enabled: Arc::new(std::sync::atomic::AtomicBool::new(initial_chat_log)),
                 chat_log_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                debug_inject: Arc::new(Mutex::new(DebugInjectRuntime::default())),
+                asr_corpus,
                 last_error: Mutex::new(None),
                 diagnostics,
                 music_warning: Mutex::new(None),
@@ -569,6 +581,11 @@ impl BuiltinVoice {
                 Some((_, true)) => STREAMING_PLAYBACK_START_MS,
                 _ => defaults.playback_start_ms,
             };
+            let active_job_api = self.host.api_service.clone();
+            let debug_trace_control = Arc::new(DesktopProcessTraceControl {
+                settings_file: self.settings_file(),
+                trace: self.host.api_service.process_trace().cloned(),
+            });
             let config = ServerConfig {
                 ws_port: settings.builtin_ws_port,
                 http_port: settings.builtin_http_port,
@@ -605,6 +622,11 @@ impl BuiltinVoice {
                 full_font_dir: Some(self.full_font_dir()),
                 debug_epoch: self.chat_log_epoch.clone(),
                 eager_device_mcp: true,
+                active_laser_job: Some(Arc::new(move || {
+                    laser_host::voice_has_active_laser_job(&active_job_api)
+                })),
+                debug_process_trace: Some(debug_trace_control),
+                asr_corpus: Some(self.asr_corpus.clone()),
                 ..defaults
             };
             let registry = Arc::new(DbRegistry {
@@ -618,6 +640,7 @@ impl BuiltinVoice {
                 .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
             self.trace_service_start(&server, local_models, model_labels);
             server.prewarm_speech_cache();
+            self.attach_debug_api_if_enabled(&server);
             {
                 let mut guard = self
                     .server

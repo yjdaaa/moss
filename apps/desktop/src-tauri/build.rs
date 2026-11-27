@@ -73,6 +73,8 @@ fn main() {
         "voice_wakeword_import_base",
         "voice_wakeword_manage",
         "voice_usb_provision",
+        // VB1/VB2 识别（ASR）录音语料采集与标注（仅受信任主窗口，voice-private-main.json）
+        "voice_asr_corpus_manage",
         // 内置语音服务的模型配置（NV5）
         "voice_builtin_models_test",
         "voice_builtin_models_list",

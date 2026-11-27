@@ -18,14 +18,67 @@ pub const MAX_PROBLEM_EVENTS: usize = 200;
 /// 对话耗时最多保留轮数。
 pub const MAX_TIMINGS: usize = 50;
 const MAX_DEBUG_TRACES: usize = 100;
+const MAX_TURN_DETAILS: usize = 100;
 const MAX_DEBUG_TEXT_CHARS: usize = 2000;
 const MAX_DEBUG_TOOLS: usize = 16;
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DebugToolTrace {
     pub name: String,
     pub arguments: String,
     pub result: String,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
+}
+
+/// VA3 单次工具调用的完整联调明细（含耗时与模拟门禁拦截信息）。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TurnToolDetail {
+    pub name: String,
+    pub arguments: String,
+    pub result: String,
+    pub ms: u64,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
+}
+
+/// VA3 播放欠载与卡顿统计。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PlaybackDetail {
+    pub frames: u64,
+    pub underruns: u64,
+    pub stall_ms: u64,
+}
+
+/// VA3 每轮完整联调明细（支持轮次运行中与结束后经本机调试入口查询；正文已脱敏）。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TurnDetail {
+    pub turn_id: String,
+    pub device_id: String,
+    pub session_id: String,
+    pub turn: u64,
+    pub simulated: bool,
+    pub status: String,
+    pub outcome: String,
+    pub route: String,
+    pub injected_text: String,
+    pub corrected_text: String,
+    pub stages_ms: BTreeMap<String, u64>,
+    pub tools: Vec<TurnToolDetail>,
+    pub reply: String,
+    pub spoken: String,
+    pub playback: PlaybackDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_skipped_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
 }
 
 /// 已脱敏的语音对话记录（说了什么、调了什么工具、回了什么）。
@@ -55,6 +108,9 @@ pub struct TurnDebugTrace {
     /// 超过上限而没有保留的工具调用数。
     #[serde(default)]
     pub tools_dropped: usize,
+    /// VA2 #3 模拟联调轮次标记：前端对话记录面板据此标识模拟轮次。
+    #[serde(default)]
+    pub simulated: bool,
 }
 
 pub fn scrub_debug_text(raw: &str) -> String {
@@ -449,6 +505,7 @@ pub struct LiveState {
     debug_enabled: std::sync::atomic::AtomicBool,
     debug_epoch: Arc<std::sync::atomic::AtomicU64>,
     debug_traces: Mutex<VecDeque<TurnDebugTrace>>,
+    turn_details: Mutex<VecDeque<TurnDetail>>,
 }
 
 impl LiveState {
@@ -549,6 +606,8 @@ impl LiveState {
                 name: t.name.chars().take(64).collect(),
                 arguments: scrub(&t.arguments),
                 result: scrub(&t.result),
+                blocked: t.blocked,
+                block_reason: t.block_reason.map(|reason| scrub(&reason)),
             })
             .collect();
         trace.tools_dropped = total_tools.saturating_sub(MAX_DEBUG_TOOLS);
@@ -580,6 +639,51 @@ impl LiveState {
             .lock()
             .map(|items| items.iter().rev().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// VA3 登记一轮刚启动的联调明细（运行中即可经调试入口轮询）。
+    pub fn upsert_turn_detail(&self, mut detail: TurnDetail) {
+        detail.device_id = detail.device_id.chars().take(64).collect();
+        detail.injected_text = scrub_debug_text(&detail.injected_text);
+        detail.corrected_text = scrub_debug_text(&detail.corrected_text);
+        detail.reply = scrub_debug_text(&detail.reply);
+        detail.spoken = scrub_debug_text(&detail.spoken);
+        detail.error = detail.error.map(|e| scrub_debug_text(&e));
+        detail.stop_skipped_reason = detail.stop_skipped_reason.map(|r| scrub_debug_text(&r));
+        detail.tools = detail
+            .tools
+            .into_iter()
+            .take(MAX_DEBUG_TOOLS)
+            .map(|t| TurnToolDetail {
+                name: t.name.chars().take(64).collect(),
+                arguments: scrub_debug_text(&t.arguments),
+                result: scrub_debug_text(&t.result),
+                ms: t.ms,
+                blocked: t.blocked,
+                block_reason: t.block_reason.map(|r| scrub_debug_text(&r)),
+            })
+            .collect();
+        if let Ok(mut details) = self.turn_details.lock() {
+            if let Some(existing) = details.iter_mut().find(|d| d.turn_id == detail.turn_id) {
+                *existing = detail;
+            } else {
+                details.push_back(detail);
+                while details.len() > MAX_TURN_DETAILS {
+                    details.pop_front();
+                }
+            }
+        }
+    }
+
+    /// VA3 按 `turn_id` 查询某一轮的完整明细（运行中或已结束）。
+    pub fn turn_detail(&self, turn_id: &str) -> Option<TurnDetail> {
+        self.turn_details
+            .lock()
+            .ok()?
+            .iter()
+            .rev()
+            .find(|d| d.turn_id == turn_id)
+            .cloned()
     }
     /// 写一条事件：传字符串为日常记录（info / general），传 [`EventRecord`] 可指定级别与分类。
     pub fn event(&self, record: impl Into<EventRecord>) {
@@ -957,12 +1061,14 @@ mod tests {
                 name: "generate_text_laser_task_tool".into(),
                 arguments: "{\"material\":\"椴木\"}".into(),
                 result: "ok sk-secret999".into(),
+                ..DebugToolTrace::default()
             }],
             reply: "已生成预览。".into(),
             spoken: "已生成预览。".into(),
             outcome: "done".into(),
             truncated: false,
             tools_dropped: 0,
+            simulated: false,
         };
         assert!(state.finish_debug_trace(sample(1)).is_none());
         assert!(
@@ -992,6 +1098,7 @@ mod tests {
                 name: format!("tool_{i}"),
                 arguments: "{}".into(),
                 result: "ok".into(),
+                ..DebugToolTrace::default()
             })
             .collect();
         state.finish_debug_trace(long);
@@ -1054,12 +1161,14 @@ mod tests {
                     name: "call".into(),
                     arguments: r#"{"token":"fake_json_tok","ok":"椴木"}"#.into(),
                     result: "wss://fakeuser:fakepass@example.invalid/ws?k=fake1&token=fake2".into(),
+                    ..DebugToolTrace::default()
                 }],
                 reply: "tokens_used: 120 done".into(),
                 spoken: "done".into(),
                 outcome: "done".into(),
                 truncated: false,
                 tools_dropped: 0,
+                simulated: false,
             })
             .unwrap();
         let serialized = serde_json::to_string(&trace).unwrap();

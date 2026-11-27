@@ -40,7 +40,8 @@ pub use voice::DeleteVoiceDeviceOutcome;
 /// 补齐 `workflows`、`approvals`、`material_aliases` 高频查询索引。
 /// v19（2026-11-12 n81）：新增有界语音对话记录表 `voice_chat_logs`（说了什么、工具调用、回了什么，上限 500 条）。
 /// v20（2026-11-18）：`voice_devices` 增加 `status_revision` 递增修订号，用于 USB 配网并发撤销 CAS 校验。
-pub const SCHEMA_VERSION: i64 = 20;
+/// v21（2026-11-27 VA）：`voice_chat_logs` 增加 `simulated` 模拟轮次标记，区分真实语音与文字直通联调轮次。
+pub const SCHEMA_VERSION: i64 = 21;
 
 const AUDIT_LOG_MAX_ROWS: i64 = 2000;
 pub const VOICE_CHAT_LOGS_MAX_ROWS: i64 = 500;
@@ -61,6 +62,8 @@ pub struct VoiceChatLogRecord {
     pub outcome: String,
     pub truncated: bool,
     pub tools_dropped: i64,
+    #[serde(default)]
+    pub simulated: bool,
 }
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。

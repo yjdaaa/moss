@@ -186,6 +186,8 @@ struct Listening {
     stream: Option<(AsrStream, Option<Resampler>)>,
     /// 最新流式中间识别文字（用于半截话防抢话判定与路由预热）
     last_interim: String,
+    /// VB1 语料采集开启时记录本轮流式中间识别序列（关闭时保持为空）
+    interims: Vec<crate::asr_corpus::InterimEntry>,
     /// 防抖中的流式预热任务（新 interim 到达时替换；同句进入静音判停时直接唤醒复用，避免自撞单槽推理）
     prewarm_task: Option<(
         String,
@@ -423,6 +425,30 @@ struct ActiveTurn {
     released_at: Option<Instant>,
     /// 本轮触发点歌但歌曲无法启动时待补播的短提示（在本轮 Done 收尾后播报）
     music_error: Option<&'static str>,
+    /// VA1/VA2 模拟联调轮次标记
+    simulated: bool,
+    /// VA3 轮次开始的 Unix 毫秒时间戳
+    started_at_ms: u64,
+    /// VA1/VA3 注入的原始文字（仅文字直通轮次预填）
+    injected_text: Option<String>,
+    /// VA3 本轮路径（`fast_stop` / `fast_read` / `fast_exit` / `llm` / `ignored` / `not_for_me`）
+    route: Option<&'static str>,
+    /// VA3 本轮全部工具调用明细（含耗时与模拟门禁拒绝信息，不受 chat_log_enabled 开关影响）
+    detail_tools: Vec<crate::TurnToolDetail>,
+    /// VA3 当前播放欠载窗口起始时刻
+    underrun_started_at: Option<Instant>,
+    /// VA3 播放已发帧数与欠载次数/总卡顿时长（毫秒）
+    playback_frames: u64,
+    playback_underruns: u64,
+    playback_stall_ms: u64,
+    /// VA2 #2 模拟轮次跳过急停时的记录原因
+    stop_skipped_reason: Option<String>,
+    /// VA3 本轮最后一次出错的摘要
+    last_error: Option<String>,
+    /// VB1 语料采集开启时的本轮原始上行音频与采样率（仅真实语音、非模拟轮次填充）
+    corpus_audio: Option<(Vec<i16>, u32)>,
+    /// VB1 语料采集开启时的本轮流式中间识别序列
+    corpus_interims: Vec<crate::asr_corpus::InterimEntry>,
 }
 
 impl Drop for ActiveTurn {
@@ -915,6 +941,8 @@ struct Session<'a> {
     notices: JobNoticeState,
     conversation: Option<Arc<Conversation>>,
     history: Vec<ChatMessage>,
+    /// 仅包含真实（非模拟）轮次的对话历史：会话结束时只把这份交给长期记忆与用户档案提取（VA2 #3）
+    memory_history: Vec<ChatMessage>,
     turn: Option<ActiveTurn>,
     /// 个人模式下尚未提交到任何说话人历史的视觉照片上下文（被 Ignored / 暂停切回 / 思考合并 / 打断且未识别出原话时暂存到下一轮）
     carried_photo: Option<ChatMessage>,
@@ -926,6 +954,9 @@ struct Session<'a> {
     mqtt: bool,
     /// n71 常连模式下这一轮对话要结束（说完再见、用户说退出、空闲到期）：在会话循环里关语音通道
     pending_goodbye: Option<String>,
+    /// VB1 拾音结束移交到 `start_turn` 的本轮中间识别序列与可选快停音频
+    pending_corpus_interims: Vec<crate::asr_corpus::InterimEntry>,
+    pending_fast_stop_pcm: Option<(Vec<i16>, u32)>,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。

@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 新增识别（ASR）真实语料隐私采集、主窗口标注面板与离线自动测评脚本（2026-11-27）
+
+- **现象**：激光工作室噪声、材料术语与口语数字下各识别模型缺乏基于真实小智录音的量化对比，且缺少命令词保护下的热词与同音纠错候选产出工具。
+- **根因与修复**：`moss-voice-server::asr_corpus` 新增默认关闭的真实语料采集与 500 条/7 天先到先清存储（16 kHz 单声道 WAV + 元数据存 `<runtime>/asr-corpus/<date>/`，模拟轮次不保存，绝不进诊断包、过程记录与声纹）；经敏感主窗口命令 `voice_asr_corpus_manage`（`voice-private-main.json` + `require_private_settings_window`）与语音中心“识别语料”面板支持确认开启、关闭询问删除、播放录音、校对标注（`<turn-id>.label.json`）及删除。新增 `scripts/voice-bench/asr-bench.mjs` 经 `python3 -I` 复用 `chain_clips.py` 混噪并复用 `moss-voice-local` 与云端接口输出脱敏报告与候选（拦截违规命令词候选且绝不自动生效）。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1600 项、前端单测 427 项、脚本 81 项、浏览器 20 个文件、回环 E2E 41 项，已快更）；已补 `moss-voice-server`（默认关闭、模拟轮次不存、条数/天数上限、16 kHz 重采样与端到端采集）、`moss-voice-host`（诊断包零泄露、关闭后可删）、`moss-desktop` 主窗口 ACL、前端 `voiceState.test.mjs`/`voicePrivacyAcl.test.mjs` 与脚本 `asr-bench.test.mjs` 单测。未在真实小智与真模型权重上跑实机测评（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/asr_corpus.rs`、`crates/moss-voice-host/src/builtin/asr_corpus.rs`、`apps/desktop/src-tauri/{src/voice_builtin.rs,capabilities/voice-private-main.json}`、`frontend/src/{voiceState/asrCorpus.js,components/voice-builtin/VoiceAsrCorpusCard.jsx}`、`scripts/voice-bench/{asr-bench.mjs,asr_noise_mix.py,chain_clips.py}`。
+
+### 新增真小智文字直通联调通道、模拟安全门禁与 AI 自动联调归档脚本（2026-11-27）
+
+- **现象**：真机小智联调依赖人工开口唤醒与逐轮点界面，难以自动复现同音纠偏、多轮工具、TTS 与播放卡顿，且缺少单轮耗时与完整过程记录自动归档。
+- **根因与修复**：`moss-voice-server` 新增 `TurnInput::Text { text, simulated }` 复用识别后完整链路、先下发 `stt` 字幕并记录 `TurnDetail`；`sim_guard` 在工具执行入口拒绝模拟轮次的物理/家居/Agent/固件/重启工具（严格模式亦不走审批放行），有活动任务时停止快路径跳过 `0x18`，长期记忆与人物提取跳过模拟轮次并经 schema v21 记录 `simulated`。新增语音侧 `127.0.0.1` 调试入口 `debug_api` 与 `debug_text_inject_enabled`（默认关、主窗口确认热启停、`0600` 随机令牌 24 小时作废，仅 4 项接口），配套桌面开关/输入框与 `scripts/voice-bench/live-xiaozhi-debug.mjs` 脱敏归档。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1600 项、前端单测 427 项、脚本 81 项、浏览器 20 个文件、回环 E2E 41 项，已快更）；已补 `moss-voice-server`（门禁/急停/记忆/HTTP 入口与明细）、`moss-voice-host`（`0600` 令牌与 24h 过期）、`laser-runtime`（schema v21）、前端 `voiceState.test.mjs` 与脚本 `live-xiaozhi-debug.test.mjs` 单测。未在真小智硬件与真实激光机上实测（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{sim_guard.rs,debug_api.rs,conversation.rs,state.rs,session.rs,lib.rs}`、`crates/moss-voice-host/src/builtin/debug_inject.rs`、`crates/laser-runtime/src/db/{migrate.rs,voice.rs}`、`frontend/src/components/voice-builtin/{BuiltinServicePanel,BuiltinDevicesPanel,LiveDebugTraces}.jsx`、`scripts/voice-bench/{live-xiaozhi-debug.mjs,live-corpus.json,README.md}`。
+
 ### 修复实时调参目标绑定、倍率残留预警、铭牌先雕后切与 4 项审查问题（2026-11-27）
 
 - **现象**：工作台加工中实时调参按连接表单寻址且后端允许无任务新开连接，途中改面板会发错设备，严格模式晚到审批会把倍率残留给空闲控制器；监视区不显示 `Ov:` 且开刻确认框无非 100% 提醒；“切下外框”勾选框隐藏时仍可能提交 `border_cut`；“回工作原点”发 `G0` 会忽略 `F1000`；审批卡缺 `target.fields` 会误读当前界面连接预判软限位；数字孪生仍读取并在改板宽时写入旧偏移 `textOffsetX/Y`；文档与无用组件/提示词残留未清。

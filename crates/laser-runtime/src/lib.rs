@@ -1034,4 +1034,48 @@ mod tests {
         assert!(!orphan_old.exists(), "超期无引用的孤儿 .gcode 应被回收");
         assert!(non_artifact.exists(), "非生成产物后缀文件不得误删");
     }
+
+    #[test]
+    fn schema_v21_adds_simulated_column_to_voice_chat_logs_and_round_trips() {
+        let db = RuntimeDb::open_memory().unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        db.append_voice_chat_log(&VoiceChatLogRecord {
+            id: 0,
+            at_ms: 1_790_000_001_000,
+            device_id: "dev-sim".into(),
+            session_id: "sess-sim".into(),
+            turn: 1,
+            raw_asr: "测试文字".into(),
+            corrected_asr: "测试文字".into(),
+            reply: "已收到".into(),
+            spoken: "已收到".into(),
+            tools_json: "[]".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+            simulated: true,
+        })
+        .unwrap();
+        db.append_voice_chat_log(&VoiceChatLogRecord {
+            id: 0,
+            at_ms: 1_790_000_002_000,
+            device_id: "dev-real".into(),
+            session_id: "sess-real".into(),
+            turn: 2,
+            raw_asr: "真实说话".into(),
+            corrected_asr: "真实说话".into(),
+            reply: "好的".into(),
+            spoken: "好的".into(),
+            tools_json: "[]".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+            simulated: false,
+        })
+        .unwrap();
+        let rows = db.list_voice_chat_logs(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].simulated);
+        assert!(rows[1].simulated);
+    }
 }

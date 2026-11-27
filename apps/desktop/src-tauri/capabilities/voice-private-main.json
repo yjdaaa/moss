@@ -34,6 +34,7 @@
     "allow-voice-wakeword-status",
     "allow-voice-wakeword-import-base",
     "allow-voice-wakeword-manage",
-    "allow-voice-usb-provision"
+    "allow-voice-usb-provision",
+    "allow-voice-asr-corpus-manage"
   ]
 }

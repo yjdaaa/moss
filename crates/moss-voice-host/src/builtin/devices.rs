@@ -208,6 +208,11 @@ impl DeviceRegistry for DbRegistry {
                 name: t.name.clone(),
                 arguments: moss_voice_server::scrub_debug_text(&t.arguments),
                 result: moss_voice_server::scrub_debug_text(&t.result),
+                blocked: t.blocked,
+                block_reason: t
+                    .block_reason
+                    .as_deref()
+                    .map(moss_voice_server::scrub_debug_text),
             })
             .collect();
         let tools_json = serde_json::to_string(&scrubbed_tools).unwrap_or_else(|_| "[]".to_owned());
@@ -225,6 +230,7 @@ impl DeviceRegistry for DbRegistry {
             outcome: trace.outcome.clone(),
             truncated: trace.truncated,
             tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
+            simulated: trace.simulated,
         };
         if let Ok(db) = self.db.lock() {
             // 拿锁后二次核验开关与代次，保证与清空/关闭时的 db.lock() 屏障严格串行
@@ -373,6 +379,15 @@ impl BuiltinVoice {
                 .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
             return Ok(serde_json::json!({ "requested": label, "summary": summary }));
         }
+        if label == "inject_text" {
+            let text = value
+                .and_then(|v| v.get("text").or(Some(v)))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| invalid("请先输入要发送的测试文字"))?;
+            return self.inject_text_for_device(device_id, text);
+        }
         if label == "push_bot_pose" {
             let raw_pose = value
                 .and_then(|v| v.get("pose").or(Some(v)))
@@ -475,7 +490,7 @@ impl BuiltinVoice {
             }
             _ => {
                 return Err(invalid(
-                    "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview、push_bot_pose、capture_photo、camera_frame 或 clear_camera_frame",
+                    "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview、push_bot_pose、inject_text、capture_photo、camera_frame 或 clear_camera_frame",
                 ));
             }
         };

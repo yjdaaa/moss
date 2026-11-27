@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-asr-corpus-manage"
+description = "Enables the voice_asr_corpus_manage command without any pre-configured scope."
+commands.allow = ["voice_asr_corpus_manage"]
+
+[[permission]]
+identifier = "deny-voice-asr-corpus-manage"
+description = "Denies the voice_asr_corpus_manage command without any pre-configured scope."
+commands.deny = ["voice_asr_corpus_manage"]

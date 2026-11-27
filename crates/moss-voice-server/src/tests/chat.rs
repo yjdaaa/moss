@@ -31,6 +31,7 @@ mod playback;
 mod preview;
 mod screen;
 mod shortcut;
+mod simulated_inject;
 mod streaming;
 mod trace;
 mod turns;

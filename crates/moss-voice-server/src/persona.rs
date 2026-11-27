@@ -556,6 +556,10 @@ impl ToolExecutor for PersonaTools {
     fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         self.original.recent_workflows(context)
     }
+
+    fn has_active_laser_job<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<bool>> {
+        self.original.has_active_laser_job(context)
+    }
 }
 
 #[cfg(test)]

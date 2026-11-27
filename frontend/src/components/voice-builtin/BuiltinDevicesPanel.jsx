@@ -10,6 +10,7 @@ import {
   builtinDeviceControlsView,
   builtinDeviceInfoView,
   builtinDeviceView,
+  debugInjectStateView,
   partitionBuiltinDevices,
   removeDeviceConfirmText,
   voiceErrorText,
@@ -24,6 +25,8 @@ export function BuiltinDevicesPanel({ builtin }) {
   const [asking, setAsking] = useState("");
   const [controlDrafts, setControlDrafts] = useState({});
   const [controlNotice, setControlNotice] = useState({});
+  const [injectDrafts, setInjectDrafts] = useState({});
+  const [injectNotice, setInjectNotice] = useState({});
   if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
   if (status.error) return <div className="voice-hint voice-hint--bad">{status.error}</div>;
 
@@ -31,6 +34,7 @@ export function BuiltinDevicesPanel({ builtin }) {
   const { activeDevices, revokedDevices } = partitionBuiltinDevices(devices);
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
   const autoAllow = status.local?.settings?.auto_allow_devices === true;
+  const debugInject = debugInjectStateView(status);
   const pending = activeDevices.filter((device) => builtinDeviceView(device).status === "pending").length;
   const summary = devices.length
     ? [
@@ -134,6 +138,22 @@ export function BuiltinDevicesPanel({ builtin }) {
       setControlNotice((prev) => ({ ...prev, [device.device_id]: doneText }));
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "设备操作失败", tone: "error" });
+    } finally {
+      setAsking("");
+    }
+  };
+  const sendDebugInjectText = async (device) => {
+    const text = String(injectDrafts[device.device_id] || "").trim();
+    if (!text) return;
+    setAsking(device.device_id);
+    setInjectNotice((prev) => ({ ...prev, [device.device_id]: "" }));
+    try {
+      const ack = await voiceApi.deviceRequest(device.device_id, "inject_text", { text });
+      setInjectDrafts((prev) => ({ ...prev, [device.device_id]: "" }));
+      const turnText = ack?.turn ? `（模拟第 ${ack.turn} 轮）` : "（模拟轮次）";
+      setInjectNotice((prev) => ({ ...prev, [device.device_id]: `已注入测试文字${turnText}，已触发后半段对话链路` }));
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "发送测试文字失败", tone: "error" });
     } finally {
       setAsking("");
     }
@@ -436,6 +456,46 @@ export function BuiltinDevicesPanel({ builtin }) {
                   </div>
                   {controlNotice[device.device_id] && (
                     <div className="voice-ok" style={{ marginTop: 6 }}>{controlNotice[device.device_id]}</div>
+                  )}
+                </div>
+              )}
+              {debugInject.showDeviceInput(device, online) && (
+                <div className="voice-device-controls" id={`voice-device-inject-${device.device_id}`}>
+                  <div className="voice-device-controls-head">
+                    <b>发送测试文字（模拟联调）</b>
+                    <span className="voice-muted">跳过麦克风与识别，走完整后半段链路；自动带模拟标记并拒绝物理动作</span>
+                  </div>
+                  <div className="voice-actions" style={{ marginTop: 6 }}>
+                    <input
+                      type="text"
+                      className="text-input"
+                      id={`voice-device-inject-input-${device.device_id}`}
+                      maxLength={500}
+                      placeholder="输入要注入小智的话（例如：激光机现在什么状态）"
+                      value={injectDrafts[device.device_id] || ""}
+                      disabled={Boolean(asking)}
+                      onChange={(e) =>
+                        setInjectDrafts((prev) => ({ ...prev, [device.device_id]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && String(injectDrafts[device.device_id] || "").trim()) {
+                          void sendDebugInjectText(device);
+                        }
+                      }}
+                      style={{ flex: 1, minWidth: 220 }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      id={`voice-device-inject-send-${device.device_id}`}
+                      disabled={Boolean(asking) || !String(injectDrafts[device.device_id] || "").trim()}
+                      onClick={() => void sendDebugInjectText(device)}
+                    >
+                      发送测试文字
+                    </button>
+                  </div>
+                  {injectNotice[device.device_id] && (
+                    <div className="voice-ok" style={{ marginTop: 6 }}>{injectNotice[device.device_id]}</div>
                   )}
                 </div>
               )}

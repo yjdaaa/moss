@@ -43,10 +43,12 @@ use moss_voice_server::persona::{
     CustomRole, PersonaConfig, PersonaStore, PersonaSwitch, PersonaTools,
 };
 
+mod asr_corpus;
 mod chain_test;
 mod colab;
 mod colab_runner;
 mod conversation;
+mod debug_inject;
 mod devices;
 mod firmware;
 mod home;
@@ -75,6 +77,7 @@ mod local_vision_tests;
 
 use self::colab::*;
 use self::conversation::*;
+use self::debug_inject::*;
 use self::devices::*;
 use self::firmware::*;
 use self::home::*;
@@ -104,6 +107,10 @@ pub struct BuiltinVoice {
     debug_trace_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// 对话记录关闭/清空代次：每次关闭或清表递增，防止在途轮次回写数据库
     chat_log_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// VA2 #4 本机 AI 调试注入令牌与端口运行态（随开关热启停、24 小时自动作废）
+    debug_inject: Arc<Mutex<DebugInjectRuntime>>,
+    /// VB1/VB2 识别（ASR）真实录音语料库（默认关闭、热生效、不进诊断包与过程记录）
+    asr_corpus: Arc<moss_voice_server::AsrCorpusStore>,
     memory: Arc<MemoryService>,
     speaker: Arc<moss_voice_server::speaker_enrollment::SpeakerEnrollment>,
     speaker_backend: Arc<DesktopSpeakerBackend>,

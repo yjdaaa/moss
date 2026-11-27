@@ -401,9 +401,9 @@ export function maskLogLine(line) {
 
 export const VOICE_TIMING_STAGES = {
   barge_in: "自然插话确认",
-  recording_start: "开始拾音", vad_start: "VAD 确认开始", vad_end: "VAD 判停", utterance_end: "说完 / 松开", smart_turn: "语义判停",
+  recording_start: "开始拾音", vad_start: "VAD 确认开始", vad_end: "VAD 判停", utterance_end: "说完 / 松开", text_injected: "文字直通注入", smart_turn: "语义判停",
   interim_stop: "中间结果命中停止", final_asr: "最终识别", jev_filter: "Jev 筛选分流", fast_route: "快捷路由",
-  first_llm_delta: "模型首字", first_sentence: "第一句切出", first_synthesis_start: "首次合成开始",
+  first_llm_delta: "模型首字", llm_done: "模型完成", first_sentence: "第一句切出", first_synthesis_start: "首次合成开始",
   first_synthesis_ready: "首段音频就绪", first_audio_frame: "首帧发给设备", turn_end: "本轮结束",
 };
 

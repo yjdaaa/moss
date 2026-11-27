@@ -16,10 +16,12 @@
 //! 运行在专用的 tokio 运行时中（2 个工作线程），只在用户启用内置语音时创建；停止时整个运行时随之关闭，
 //! 不影响 MOSS 现有的 HTTP 服务、发送线程与急停路径。设备登记与 token 密钥由宿主通过 [`DeviceRegistry`] 提供。
 
+pub mod asr_corpus; // VB1/VB2 识别语料采集与标注（默认关，不进诊断包与过程记录）
 pub mod audio;
 mod barge;
 pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
+pub mod debug_api; // VA2 #4–#5 本机 127.0.0.1 调试文字直通入口（独立于 0.0.0.0 OTA 路由）
 pub mod fast;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 pub use moss_xiaozhi_display::{glyph_font, goggle_bot, screen_pack};
@@ -37,6 +39,7 @@ pub mod plugins;
 pub mod preview_push;
 mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
 mod session;
+pub mod sim_guard; // VA2 模拟轮次工具门禁（独立于提示词与桌面审批）
 #[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
@@ -53,6 +56,10 @@ pub use moss_xiaozhi_proto::TextFontCapability;
 use moss_xiaozhi_proto::TokenSigner;
 use serde::Serialize;
 
+pub use asr_corpus::{
+    AsrCorpusConfig, AsrCorpusItem, AsrCorpusLabel, AsrCorpusMeta, AsrCorpusStore,
+    CapturedUtterance,
+};
 pub use audio::{EnergyVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory};
 pub use conversation::{
     Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
@@ -68,8 +75,8 @@ pub use ota::{
 pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
 pub use state::{
     DebugToolTrace, DiagCategory, DiagSource, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
-    MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, ServerEvent, SessionView, ToolTiming,
-    TurnDebugTrace, TurnTiming, scrub_debug_text,
+    MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, PlaybackDetail, ServerEvent, SessionView,
+    ToolTiming, TurnDebugTrace, TurnDetail, TurnTiming, TurnToolDetail, scrub_debug_text,
 };
 pub use tools::{HostTools, ToolHost, ToolHostResult};
 /// 设备登记状态。
@@ -238,6 +245,12 @@ pub struct ServerConfig {
     pub eager_device_mcp: bool,
     /// 等设备端 MCP 请求回包的最长时间（默认 60 秒；测试可设短值加速验证超时重试）。
     pub mcp_pending_ttl: Duration,
+    /// VA2/VA4 可选只读回调：查询当前是否有活跃的激光加工/走边框任务（不引入对 `laser-api` 的 crate 依赖）。
+    pub active_laser_job: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// VA2 #5 本机调试入口的过程记录启停控制（由宿主注入，读写 `settings.json` 与 `ProcessTrace`）。
+    pub debug_process_trace: Option<Arc<dyn debug_api::ProcessTraceControl>>,
+    /// VB1 识别（ASR）真实录音语料库（默认关闭；模拟轮次不保存，不进诊断包与过程记录）。
+    pub asr_corpus: Option<Arc<asr_corpus::AsrCorpusStore>>,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -284,6 +297,9 @@ impl Default for ServerConfig {
             debug_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             eager_device_mcp: false,
             mcp_pending_ttl: session::MCP_PENDING_TTL,
+            active_laser_job: None,
+            debug_process_trace: None,
+            asr_corpus: None,
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -321,9 +337,71 @@ pub const SNAPSHOT_STATUS: &str = "status";
 /// 设备实际使用的拾音模式（`auto` / `manual` / `realtime`）。
 pub const SNAPSHOT_LISTEN: &str = "listen";
 
+/// VA1 文字直通注入成功回执。
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InjectTurnAck {
+    pub turn_id: String,
+    pub device_id: String,
+    pub session_id: String,
+    pub turn: u64,
+    pub simulated: bool,
+}
+
+/// VA1 文字直通注入拒绝/失败信息。
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InjectTurnError {
+    pub code: String,
+    pub http_status: u16,
+    pub message: String,
+}
+
+impl InjectTurnError {
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_text".into(),
+            http_status: 400,
+            message: message.into(),
+        }
+    }
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            code: "device_revoked".into(),
+            http_status: 403,
+            message: message.into(),
+        }
+    }
+    pub fn offline(message: impl Into<String>) -> Self {
+        Self {
+            code: "device_offline".into(),
+            http_status: 404,
+            message: message.into(),
+        }
+    }
+    pub fn busy(phase: &str) -> Self {
+        Self {
+            code: "device_busy".into(),
+            http_status: 409,
+            message: format!("设备当前正忙（{phase}），为不打断正在进行的对话，本次文字注入已拒绝"),
+        }
+    }
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            http_status: 409,
+            message: message.into(),
+        }
+    }
+}
+
 /// 桌面端可以对一台已连接设备发起的即时请求（2026-11-02：设备信息刷新与重启）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum DeviceRequest {
+    /// VA1 文字直通注入：在设备空闲时把文字作为“刚识别出的话”送入完整对话链路。
+    InjectText {
+        text: String,
+        simulated: bool,
+        reply: tokio::sync::oneshot::Sender<Result<InjectTurnAck, InjectTurnError>>,
+    },
     /// 取设备自带 MCP 的 `self.get_device_status`，结果写成设备快照
     RefreshInfo,
     /// 取 `self.reboot`：设备重启后会重新请求 OTA，固件版本随之刷新
@@ -471,6 +549,58 @@ impl Shared {
         let active = self.active_device_sessions();
         state::LiveState::aggregate_pulse_of(active.iter())
     }
+
+    /// VA1 异步向指定在线设备注入一段文字，等待会话同步受理或返回明确忙碌/离线错误。
+    pub(crate) async fn inject_text_async(
+        &self,
+        device_id: &str,
+        text: String,
+        simulated: bool,
+    ) -> Result<InjectTurnAck, InjectTurnError> {
+        let trimmed = text.trim();
+        if trimmed.is_empty()
+            || trimmed.chars().count() > 500
+            || trimmed.chars().any(char::is_control)
+        {
+            return Err(InjectTurnError::invalid(
+                "注入文字须为 1~500 字且不含控制字符",
+            ));
+        }
+        let sender = {
+            let map = self.device_requests.lock().map_err(|_| {
+                InjectTurnError::conflict("session_lock_failed", "设备会话表锁失败")
+            })?;
+            let Some(handle) = map.get(device_id) else {
+                return Err(InjectTurnError::offline(format!(
+                    "设备 {device_id} 当前不在线"
+                )));
+            };
+            handle.sender.clone()
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(DeviceRequest::InjectText {
+                text: trimmed.to_owned(),
+                simulated,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 的会话刚刚结束，注入未送达"
+            )));
+        }
+        match tokio::time::timeout(Duration::from_secs(5), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 会话在受理注入前断开"
+            ))),
+            Err(_) => Err(InjectTurnError::conflict(
+                "inject_timeout",
+                "等待设备会话受理注入超时，请稍后再试",
+            )),
+        }
+    }
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -497,6 +627,8 @@ pub struct VoiceServer {
     ws_port: u16,
     http_port: u16,
     mdns: Option<mdns_sd::ServiceDaemon>,
+    debug_gate: Arc<debug_api::DebugApiGate>,
+    debug_listener: std::sync::Mutex<Option<(u16, tokio::sync::watch::Sender<bool>)>>,
 }
 
 fn bind(ip: IpAddr, port: u16, label: &str) -> Result<std::net::TcpListener, String> {
@@ -732,6 +864,8 @@ impl VoiceServer {
             ws_port,
             http_port,
             mdns,
+            debug_gate: Arc::new(debug_api::DebugApiGate::new()),
+            debug_listener: std::sync::Mutex::new(None),
         })
     }
 
@@ -798,7 +932,9 @@ impl VoiceServer {
             if !handle.supports_mcp
                 && !matches!(
                     request,
-                    DeviceRequest::PreviewScreen { .. } | DeviceRequest::ShowScene { .. }
+                    DeviceRequest::PreviewScreen { .. }
+                        | DeviceRequest::ShowScene { .. }
+                        | DeviceRequest::InjectText { .. }
                 )
             {
                 return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));
@@ -1125,12 +1261,137 @@ impl VoiceServer {
         }
     }
 
+    /// VA1 同步向指定在线设备注入一段文字（供桌面 UI 与测试调用；不阻塞或死锁 Tokio 运行时线程）。
+    pub fn inject_text(
+        &self,
+        device_id: &str,
+        text: &str,
+        simulated: bool,
+    ) -> Result<InjectTurnAck, InjectTurnError> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Err(InjectTurnError::conflict(
+                "voice_builtin_stopped",
+                "内置语音服务未运行",
+            ));
+        };
+        let shared = self.shared.clone();
+        let dev = device_id.to_owned();
+        let txt = text.to_owned();
+        let handle = runtime.handle().clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            handle.spawn(async move {
+                let res = shared.inject_text_async(&dev, txt, simulated).await;
+                let _ = tx.send(res);
+            });
+            rx.recv().unwrap_or_else(|_| {
+                Err(InjectTurnError::conflict(
+                    "inject_aborted",
+                    "文字注入任务已中止",
+                ))
+            })
+        } else {
+            handle.block_on(async move { shared.inject_text_async(&dev, txt, simulated).await })
+        }
+    }
+
+    /// VA3 查询某一轮的完整联调明细。
+    pub fn turn_detail(&self, turn_id: &str) -> Option<TurnDetail> {
+        self.shared.state.turn_detail(turn_id)
+    }
+
+    /// VA2 #4 热启动或更新本机 `127.0.0.1` 调试 HTTP 入口（不断开已连接小智会话）；返回实际监听端口。
+    pub fn enable_debug_api(
+        &self,
+        preferred_port: u16,
+        token: String,
+        issued_at: u64,
+        expires_at: u64,
+        on_expired: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<u16, String> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Err("内置语音服务未运行".into());
+        };
+        self.debug_gate.set_on_expired(on_expired);
+        self.debug_gate.enable(token, issued_at, expires_at);
+        let mut slot = self
+            .debug_listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((port, _)) = slot.as_ref() {
+            return Ok(*port);
+        }
+        let (std_listener, actual_port) = debug_api::bind_loopback_listener(preferred_port)?;
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let mut server_stop = self.shutdown.subscribe();
+        let app = debug_api::router(debug_api::DebugApiState {
+            shared: self.shared.clone(),
+            gate: self.debug_gate.clone(),
+            trace_control: self.shared.config.debug_process_trace.clone(),
+            active_laser_job: self.shared.config.active_laser_job.clone(),
+        });
+        let events = self.shared.clone();
+        runtime.spawn(async move {
+            match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(listener) => {
+                    let _ = axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async move {
+                        tokio::select! {
+                            _ = stop_rx.wait_for(|stop| *stop) => {}
+                            _ = server_stop.wait_for(|stop| *stop) => {}
+                        }
+                    })
+                    .await;
+                }
+                Err(error) => events.state.event(
+                    EventRecord::error(DiagCategory::Network, "本机调试入口启动失败")
+                        .source(DiagSource::Moss)
+                        .detail(error.to_string()),
+                ),
+            }
+        });
+        *slot = Some((actual_port, stop_tx));
+        self.shared.state.event(
+            EventRecord::info(
+                DiagCategory::Config,
+                format!("本机 AI 调试注入入口已开启（仅监听 127.0.0.1:{actual_port}）"),
+            )
+            .source(DiagSource::Moss),
+        );
+        Ok(actual_port)
+    }
+
+    /// VA2 #4 立即作废令牌并关闭本机调试入口（不断开已连接小智会话）。
+    pub fn disable_debug_api(&self) {
+        self.debug_gate.disable();
+        if let Ok(mut slot) = self.debug_listener.lock()
+            && let Some((_, stop_tx)) = slot.take()
+        {
+            let _ = stop_tx.send(true);
+        }
+    }
+
+    /// 本机调试入口当前监听的回环端口；未开启或未运行时为 `None`。
+    pub fn debug_api_port(&self) -> Option<u16> {
+        if !self.debug_gate.snapshot().enabled {
+            return None;
+        }
+        self.debug_listener
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(port, _)| *port))
+    }
+
     /// 通知所有会话结束并关闭运行时（最多等 2 秒）。
     pub fn stop(mut self) {
         self.shutdown_now();
     }
 
     fn shutdown_now(&mut self) {
+        self.disable_debug_api();
         self.shared.camera_preview.clear_all();
         if let Some(daemon) = self.mdns.take() {
             let _ = daemon.shutdown();

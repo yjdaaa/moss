@@ -202,6 +202,7 @@ fn stage_label(key: &str) -> &str {
         "fast_route" => "走快路径",
         "jev_filter" => "Jev 前置筛选完成",
         "first_llm_delta" => "大模型吐出第一个字",
+        "llm_done" => "大模型回复完成",
         "first_sentence" => "切出第一句",
         "first_synthesis_start" => "开始合成第一句",
         "first_synthesis_ready" => "第一句音频就绪",
@@ -502,6 +503,19 @@ pub(crate) fn voice_step_text(kind: &str, data: &Value) -> String {
             ),
         },
         "say" => format!("播报固定话术：「{}」", clip(text_of(data, "text"), 80)),
+        "text_inject" => format!(
+            "文字直通注入{}：「{}」",
+            if data["simulated"].as_bool() == Some(true) {
+                "（模拟）"
+            } else {
+                ""
+            },
+            clip(text_of(data, "text"), 120)
+        ),
+        "simulated_stop_skipped" => format!(
+            "{}（存在正在运行的加工任务，未发送急停）",
+            text_of(data, "reason")
+        ),
         "report_input" => format!(
             "后台查询有结果，准备主动播报：{}",
             clip(text_of(data, "question"), 60)
@@ -986,6 +1000,18 @@ impl<'a> Session<'a> {
                     "turn_kind_label": kind_label,
                     "text": text,
                     "source": source.key(),
+                }),
+            ),
+            TurnInput::Text { text, simulated } => self.trace_record_in(
+                trace,
+                &flow,
+                turn_no,
+                "text_inject",
+                serde_json::json!({
+                    "turn_kind": kind,
+                    "turn_kind_label": kind_label,
+                    "text": text,
+                    "simulated": simulated,
                 }),
             ),
             TurnInput::Say { text, close } => self.trace_record_in(

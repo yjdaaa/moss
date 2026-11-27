@@ -6,11 +6,6 @@
 用法：python3 -I scripts/voice-bench/chain_clips.py <输出目录> <真人 zh.wav> [噪声档，默认 0,999] [commands：只生成停止 / 退出命令词片段]"""
 import array, json, os, random, subprocess, sys, wave
 
-out, human = sys.argv[1:3]
-LEVELS = [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [0, 999]
-# 第 4 个参数为 commands 时只生成命令词片段（停止 / 退出），用来测命令词在噪声里认不认得出
-COMMANDS_ONLY = len(sys.argv) > 4 and sys.argv[4] == "commands"
-os.makedirs(out, exist_ok=True)
 RATE = 16000
 
 def read_wav(path):
@@ -28,8 +23,8 @@ def resample(pcm, src):
         o.append(int(pcm[j] * (1 - t) + b * t))
     return o
 
-def say(voice, text, rate=None):
-    tmp = os.path.join(out, "_say.wav")
+def say(voice, text, rate=None, out_dir="."):
+    tmp = os.path.join(out_dir, "_say.wav")
     subprocess.run(["say", "-v", voice, *(["-r", str(rate)] if rate else []), "-o", tmp, "--data-format=LEI16@16000", text], check=True)
     pcm = read_wav(tmp); os.remove(tmp)
     return trim(pcm)
@@ -67,43 +62,56 @@ def noise(pcm, level, seed):
         return o
     return array.array("h", [max(-32768, min(32767, s + int(rnd.gauss(0, level)))) for s in pcm])
 
-SENTENCES = [
-    ("status", "帮我看看激光机现在什么状态。"),
-    ("power", "把功率调到百分之六十，速度一千五。"),
-    ("start", "开始雕刻吧。"),
-    ("wood", "椴木三毫米用多大功率能切透？"),
-    ("chat", "今天有点累，陪我聊两句。"),
-]
-speech = []  # (名字, 参考文本, pcm, 说明：pause700 句中停顿 / exit 退出词 / stop 停止词)
-VOICES = (("Tingting", "f", None), ("Tingting", "fast", 260))
-if COMMANDS_ONLY:
-    COMMANDS = (("stop", "停。", "stop"), ("stopdown", "停下。", "stop"), ("exit", "退下。", "exit"),
-                ("exit1", "退一下。", "exit"), ("bye", "再见。", "exit"))
-    for voice, tag, rate in VOICES:
-        for name, text, note in COMMANDS:
-            speech.append((f"{tag}-{name}", text, gain(say(voice, text, rate)), note))
-else:
-    speech.append(("human-zh", "开饭时间早上九点至下午五点", gain(trim(read_wav(human))), ""))
-    for voice, tag, rate in VOICES:
-        for name, text in SENTENCES:
-            speech.append((f"{tag}-{name}", text, gain(say(voice, text, rate)), ""))
-        # 句中想一想：“帮我把功率调到……百分之六十”，停顿 700 ms
-        a = say(voice, "帮我把功率调到", rate); b = say(voice, "百分之六十。", rate)
-        speech.append((f"{tag}-pause", "帮我把功率调到百分之六十。", gain(a + array.array("h", [0] * (RATE * 7 // 10)) + b), "pause700"))
-    # 退出词放最后：应当说完再见就断开（设备回到待机，不再“聆听中”）
-    for voice, tag, rate in VOICES:
-        speech.append((f"{tag}-exit", "退下。", gain(say(voice, "退下。", rate)), "exit"))
 
-meta = []
-LEAD, TAIL = RATE * 2, RATE * 5 // 2
-for level in LEVELS:
-    for n, (name, ref, pcm, note) in enumerate(speech):
-        clip = array.array("h", [0] * LEAD) + pcm + array.array("h", [0] * TAIL)
-        clip = noise(clip, level, 7 * n + level)
-        f = f"{level}-{name}.s16"
-        open(os.path.join(out, f), "wb").write(clip.tobytes())
-        meta.append({"file": f, "name": name, "level": level, "ref": ref, "note": note,
-                     "on_ms": LEAD * 1000 // RATE, "off_ms": (LEAD + len(pcm)) * 1000 // RATE,
-                     "len_ms": len(clip) * 1000 // RATE})
-json.dump(meta, open(os.path.join(out, "meta.json"), "w"), ensure_ascii=False, indent=0)
-print(len(meta), "clips")
+def main():
+    out, human = sys.argv[1:3]
+    levels = [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [0, 999]
+    # 第 4 个参数为 commands 时只生成命令词片段（停止 / 退出），用来测命令词在噪声里认不认得出
+    commands_only = len(sys.argv) > 4 and sys.argv[4] == "commands"
+    os.makedirs(out, exist_ok=True)
+    sentences = [
+        ("status", "帮我看看激光机现在什么状态。"),
+        ("power", "把功率调到百分之六十，速度一千五。"),
+        ("start", "开始雕刻吧。"),
+        ("wood", "椴木三毫米用多大功率能切透？"),
+        ("chat", "今天有点累，陪我聊两句。"),
+    ]
+    speech = []  # (名字, 参考文本, pcm, 说明：pause700 句中停顿 / exit 退出词 / stop 停止词)
+    voices = (("Tingting", "f", None), ("Tingting", "fast", 260))
+    if commands_only:
+        commands = (("stop", "停。", "stop"), ("stopdown", "停下。", "stop"), ("exit", "退下。", "exit"),
+                    ("exit1", "退一下。", "exit"), ("bye", "再见。", "exit"))
+        for voice, tag, rate in voices:
+            for name, text, note in commands:
+                speech.append((f"{tag}-{name}", text, gain(say(voice, text, rate, out)), note))
+    else:
+        speech.append(("human-zh", "开饭时间早上九点至下午五点", gain(trim(read_wav(human))), ""))
+        for voice, tag, rate in voices:
+            for name, text in sentences:
+                speech.append((f"{tag}-{name}", text, gain(say(voice, text, rate, out)), ""))
+            # 句中想一想：“帮我把功率调到……百分之六十”，停顿 700 ms
+            a = say(voice, "帮我把功率调到", rate, out); b = say(voice, "百分之六十。", rate, out)
+            speech.append((f"{tag}-pause", "帮我把功率调到百分之六十。", gain(a + array.array("h", [0] * (RATE * 7 // 10)) + b), "pause700"))
+        # 退出词放最后：应当说完再见就断开（设备回到待机，不再“聆听中”）
+        for voice, tag, rate in voices:
+            speech.append((f"{tag}-exit", "退下。", gain(say(voice, "退下。", rate, out)), "exit"))
+
+    meta = []
+    lead, tail = RATE * 2, RATE * 5 // 2
+    for level in levels:
+        for n, (name, ref, pcm, note) in enumerate(speech):
+            clip = array.array("h", [0] * lead) + pcm + array.array("h", [0] * tail)
+            clip = noise(clip, level, 7 * n + level)
+            f = f"{level}-{name}.s16"
+            with open(os.path.join(out, f), "wb") as fp:
+                fp.write(clip.tobytes())
+            meta.append({"file": f, "name": name, "level": level, "ref": ref, "note": note,
+                         "on_ms": lead * 1000 // RATE, "off_ms": (lead + len(pcm)) * 1000 // RATE,
+                         "len_ms": len(clip) * 1000 // RATE})
+    with open(os.path.join(out, "meta.json"), "w", encoding="utf-8") as fp:
+        json.dump(meta, fp, ensure_ascii=False, indent=0)
+    print(len(meta), "clips")
+
+
+if __name__ == "__main__":
+    main()

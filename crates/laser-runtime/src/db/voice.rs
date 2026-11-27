@@ -378,8 +378,8 @@ impl RuntimeDb {
         self.connection.execute(
             "INSERT INTO voice_chat_logs(
                at_ms, device_id, session_id, turn, raw_asr, corrected_asr, reply, spoken,
-               tools_json, outcome, truncated, tools_dropped, created_at, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+               tools_json, outcome, truncated, tools_dropped, simulated, created_at, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
             params![
                 entry.at_ms,
                 entry.device_id,
@@ -393,6 +393,7 @@ impl RuntimeDb {
                 entry.outcome,
                 i64::from(entry.truncated),
                 entry.tools_dropped,
+                i64::from(entry.simulated),
                 now,
             ],
         )?;
@@ -413,7 +414,7 @@ impl RuntimeDb {
         let bounded = (limit.clamp(1, VOICE_CHAT_LOGS_MAX_ROWS as usize)) as i64;
         let mut stmt = self.connection.prepare(
             "SELECT id, at_ms, device_id, session_id, turn, raw_asr, corrected_asr, reply, spoken,
-                    tools_json, outcome, truncated, tools_dropped
+                    tools_json, outcome, truncated, tools_dropped, simulated
              FROM voice_chat_logs
              ORDER BY at_ms DESC, id DESC
              LIMIT ?1",
@@ -433,6 +434,7 @@ impl RuntimeDb {
                 outcome: row.get(10)?,
                 truncated: row.get::<_, i64>(11)? != 0,
                 tools_dropped: row.get(12)?,
+                simulated: row.get::<_, i64>(13)? != 0,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

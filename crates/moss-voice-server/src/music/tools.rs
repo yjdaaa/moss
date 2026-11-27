@@ -109,6 +109,9 @@ impl ToolExecutor for MusicTools {
     fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         self.underlying.recent_workflows(context)
     }
+    fn has_active_laser_job<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<bool>> {
+        self.underlying.has_active_laser_job(context)
+    }
 }
 #[cfg(test)]
 mod tests {

@@ -41,6 +41,10 @@ pub trait ToolHost: Send + Sync {
     fn recent_workflows(&self, _device_id: &str, _session_id: &str) -> Option<Value> {
         None
     }
+    /// 只读查询当前是否有正在运行/待决的激光加工或走边框任务（VA2 #2 模拟轮次急停门禁专用）。
+    fn has_active_laser_job(&self) -> Option<bool> {
+        None
+    }
     /// n70 只读读取某个加工任务的刀路预览原图（PNG / JPEG 字节），同样不走工具分发。默认不支持。
     fn workflow_preview(
         &self,
@@ -164,6 +168,22 @@ impl ToolExecutor for HostTools {
                 .await
                 .ok()
                 .flatten()
+        })
+    }
+    fn has_active_laser_job<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<bool>> {
+        Box::pin(async move {
+            let host = self.host.clone();
+            if let Some(active) = tokio::task::spawn_blocking(move || host.has_active_laser_job())
+                .await
+                .ok()
+                .flatten()
+            {
+                return Some(active);
+            }
+            let recent = self.recent_workflows(context).await?;
+            Some(crate::sim_guard::has_active_job_in_recent_workflows(
+                &recent,
+            ))
         })
     }
     fn workflow_preview<'a>(

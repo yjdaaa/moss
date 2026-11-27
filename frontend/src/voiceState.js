@@ -15,3 +15,4 @@ export * from "./voiceState/modelSources.js";
 export * from "./voiceState/pipelineTest.js";
 export * from "./voiceState/agent.js";
 export * from "./voiceState/twin.js";
+export * from "./voiceState/asrCorpus.js";

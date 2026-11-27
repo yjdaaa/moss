@@ -108,6 +108,25 @@ impl BuiltinVoice {
                 return Ok(status);
             }
         }
+        let debug_inject_patch = match patch.get("debug_text_inject_enabled") {
+            Some(v) => Some(
+                v.as_bool()
+                    .ok_or_else(|| invalid("本机 AI 调试注入开关取值不正确"))?,
+            ),
+            None => None,
+        };
+        if let Some(enabled) = debug_inject_patch {
+            self.set_debug_text_inject_enabled(enabled)?;
+            let only_debug_inject = patch
+                .as_object()
+                .is_some_and(|obj| obj.keys().all(|k| k == "debug_text_inject_enabled"));
+            if only_debug_inject {
+                let mut status = self.status();
+                status["restarted"] = Value::Bool(false);
+                status["hot_applied"] = Value::Bool(true);
+                return Ok(status);
+            }
+        }
         let debug_enable_patch = match patch
             .get("chat_log_enabled")
             .or_else(|| patch.get("debug_trace_enabled"))

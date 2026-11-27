@@ -878,12 +878,14 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
             name: "get_weather".into(),
             arguments: "{}".into(),
             result: "晴，22度".into(),
+            ..Default::default()
         }],
         reply: "今天天气晴朗，气温22度，非常适合出门。".into(),
         spoken: "今天天气晴朗，".into(),
         outcome: "interrupted".into(),
         truncated: false,
         tools_dropped: 0,
+        simulated: false,
     });
 
     // 模拟重启 BuiltinVoice 实例：历史记录仍在
@@ -928,12 +930,14 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
             name: "fetch".into(),
             arguments: r#"{"token":"fake_json_tok"}"#.into(),
             result: "https://fakeuser:fakepass@example.invalid/x?token=fake2".into(),
+            ..Default::default()
         }],
         reply: "Bearer fake_reply_tok".into(),
         spoken: "done".into(),
         outcome: "done".into(),
         truncated: false,
         tools_dropped: 0,
+        simulated: false,
     };
     restarted_registry.record_chat_turn(&secret_turn());
     assert_eq!(
@@ -1677,6 +1681,7 @@ fn remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_r
             outcome: "done".into(),
             truncated: false,
             tools_dropped: 0,
+            simulated: false,
         })
         .unwrap();
     }
@@ -1832,4 +1837,272 @@ fn remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_r
         DeviceStatus::Allowed,
         "已开启自动允许时，移除后的设备再次连入按新设备直接放行"
     );
+}
+
+#[test]
+fn debug_text_inject_switch_creates_0600_token_hot_applies_and_revokes_on_disable_or_expiry() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host)).0.unwrap();
+
+    // 1. 默认关闭，且直接注入返回 403 debug_inject_disabled
+    let initial = builtin.status();
+    assert_eq!(initial["debug_inject"]["enabled"], false);
+    assert_eq!(
+        initial["local"]["settings"]["debug_text_inject_enabled"],
+        false
+    );
+    let err = builtin
+        .device_request(
+            "aa:bb:cc:11:22:33",
+            "inject_text",
+            Some(&serde_json::json!({"text": "激光机现在什么状态"})),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, 403);
+    assert_eq!(err.code, "debug_inject_disabled");
+
+    // 2. 开启开关：热生效不重启，生成 0600 令牌文件与无密钥元数据，status() 绝不泄露令牌原文
+    let enabled = builtin
+        .local_save(&serde_json::json!({"debug_text_inject_enabled": true}))
+        .unwrap();
+    assert_eq!(enabled["hot_applied"], true);
+    assert_eq!(enabled["restarted"], false);
+    assert_eq!(enabled["debug_inject"]["enabled"], true);
+    assert_eq!(
+        enabled["debug_inject"]["token_file_rel"],
+        "debug/voice-debug.token"
+    );
+    let token_path = temp.path().join("debug/voice-debug.token");
+    let meta_path = temp.path().join("debug/voice-debug.json");
+    assert!(token_path.is_file(), "开启后必须生成令牌文件");
+    assert!(meta_path.is_file(), "开启后必须生成元数据文件");
+    let token = std::fs::read_to_string(&token_path).unwrap();
+    let token = token.trim().to_owned();
+    assert!(token.len() >= 64);
+    let meta_text = std::fs::read_to_string(&meta_path).unwrap();
+    assert!(!meta_text.contains(&token), "元数据文件绝不能包含令牌原文");
+    let status_text = serde_json::to_string(&enabled).unwrap();
+    assert!(
+        !status_text.contains(&token),
+        "status 响应绝不能泄露令牌原文"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "令牌文件权限必须为 0600");
+    }
+
+    // 3. 关闭开关：立即作废并删除令牌与元数据文件
+    let disabled = builtin
+        .local_save(&serde_json::json!({"debug_text_inject_enabled": false}))
+        .unwrap();
+    assert_eq!(disabled["hot_applied"], true);
+    assert_eq!(disabled["debug_inject"]["enabled"], false);
+    assert!(!token_path.exists(), "关闭开关后必须删除令牌文件");
+    assert!(!meta_path.exists(), "关闭开关后必须删除元数据文件");
+
+    // 4. 开启满 24 小时后自动作废并清理文件，再次注入被拒绝
+    builtin
+        .local_save(&serde_json::json!({"debug_text_inject_enabled": true}))
+        .unwrap();
+    assert!(token_path.is_file());
+    builtin.expire_debug_inject_for_test();
+    let after_expire = builtin.status();
+    assert_eq!(after_expire["debug_inject"]["enabled"], false);
+    assert!(!token_path.exists(), "过期后应立即清理令牌文件");
+    let err2 = builtin
+        .device_request(
+            "aa:bb:cc:11:22:33",
+            "inject_text",
+            Some(&serde_json::json!({"text": "测试"})),
+        )
+        .unwrap_err();
+    assert_eq!(err2.status, 403);
+    assert_eq!(err2.code, "debug_inject_disabled");
+}
+
+#[test]
+fn asr_corpus_capture_defaults_off_excludes_diagnostics_and_allows_delete_after_disable() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host)).0.unwrap();
+
+    // 1. 默认关闭，不带 confirmed 拒绝开启，且关闭态下读取录音与保存标注返回 403
+    let initial = builtin.status();
+    assert_eq!(initial["asr_corpus"]["enabled"], false);
+    assert_eq!(
+        initial["local"]["settings"]["asr_corpus_capture_enabled"],
+        false
+    );
+    let list_off = builtin
+        .asr_corpus_manage(&serde_json::json!({"action": "list"}))
+        .unwrap();
+    assert_eq!(list_off["enabled"], false);
+    assert_eq!(list_off["items"].as_array().unwrap().len(), 0);
+
+    let need_confirm = builtin
+        .asr_corpus_manage(&serde_json::json!({"action": "set_config", "enabled": true}))
+        .unwrap_err();
+    assert_eq!(need_confirm.status, 400);
+    assert_eq!(need_confirm.code, "confirmation_required");
+
+    // 2. 带 confirmed 开启后写入一条真实语料并保存标注
+    let enabled = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": true,
+            "max_items": 50,
+            "max_days": 5,
+            "confirmed": true
+        }))
+        .unwrap();
+    assert_eq!(enabled["enabled"], true);
+    assert_eq!(enabled["max_items"], 50);
+    assert_eq!(enabled["max_days"], 5);
+
+    let canary = "绝密测试语料CANARY_98765_椴木三毫米";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let saved_meta = builtin
+        .asr_corpus
+        .record(moss_voice_server::CapturedUtterance {
+            session_id: "sess-host".into(),
+            device_id: "aa:bb:cc:11:22:33".into(),
+            turn: 1,
+            captured_at_ms: now_ms,
+            simulated: false,
+            pcm: vec![900; 4_000],
+            sample_rate: 16_000,
+            raw_text: canary.into(),
+            corrected_text: canary.into(),
+            interims: Vec::new(),
+            asr_model: "本地 sense_voice".into(),
+            vad_engine: "本地判停 Silero v6.2".into(),
+            endpoint: Default::default(),
+            outcome: "done".into(),
+        })
+        .unwrap()
+        .expect("开启后真实语音应落盘");
+
+    let label_res = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "save_label",
+            "date": saved_meta.date,
+            "turn_id": saved_meta.turn_id,
+            "reference_text": canary,
+            "verified_correct": true,
+            "tags": ["材料名", "数字"]
+        }))
+        .unwrap();
+    assert_eq!(label_res["labeled_count"], 1);
+
+    let audio_res = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "audio",
+            "date": saved_meta.date,
+            "turn_id": saved_meta.turn_id,
+        }))
+        .unwrap();
+    assert!(
+        audio_res["audio_data_url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("data:audio/wav;base64,"))
+    );
+
+    // 3. 诊断包严禁包含任何语料文本、标注或录音数据
+    let bundle = builtin.diagnostics_bundle();
+    let bundle_json = serde_json::to_string(&bundle).unwrap();
+    assert!(
+        !bundle_json.contains(canary),
+        "诊断包绝不能包含识别语料原文或标注"
+    );
+    assert!(
+        !bundle_json.contains("asr-corpus"),
+        "诊断包绝不能包含识别语料路径或目录"
+    );
+    assert!(
+        bundle["excluded"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v == "识别测评录音语料与标注")),
+        "诊断包 excluded 应显式注明排除识别语料"
+    );
+
+    // 4. 关闭开关但不立即删除：列表隐藏明细、audio/save_label 返回 403，但关闭后仍允许 delete/clear 删除已有语料
+    let disabled_keep = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": false,
+            "delete_existing": false
+        }))
+        .unwrap();
+    assert_eq!(disabled_keep["enabled"], false);
+    assert_eq!(disabled_keep["total_count"], 1);
+    assert_eq!(disabled_keep["items"].as_array().unwrap().len(), 0);
+
+    let blocked_audio = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "audio",
+            "date": saved_meta.date,
+            "turn_id": saved_meta.turn_id,
+        }))
+        .unwrap_err();
+    assert_eq!(blocked_audio.status, 403);
+    assert_eq!(blocked_audio.code, "asr_corpus_disabled");
+
+    let deleted_after_off = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "delete",
+            "date": saved_meta.date,
+            "turn_id": saved_meta.turn_id,
+        }))
+        .unwrap();
+    assert_eq!(deleted_after_off["deleted"], true);
+    assert_eq!(deleted_after_off["total_count"], 0);
+
+    // 5. 关闭开关时勾选同时删除（delete_existing: true）应立即清空全部语料
+    builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": true,
+            "confirmed": true
+        }))
+        .unwrap();
+    builtin
+        .asr_corpus
+        .record(moss_voice_server::CapturedUtterance {
+            session_id: "sess-host".into(),
+            device_id: "aa:bb:cc:11:22:33".into(),
+            turn: 2,
+            captured_at_ms: now_ms + 5_000,
+            simulated: false,
+            pcm: vec![700; 3_200],
+            sample_rate: 16_000,
+            raw_text: "停下".into(),
+            corrected_text: "停下".into(),
+            interims: Vec::new(),
+            asr_model: "本地 sense_voice".into(),
+            vad_engine: "本地判停 Silero v6.2".into(),
+            endpoint: Default::default(),
+            outcome: "done".into(),
+        })
+        .unwrap()
+        .unwrap();
+    let disabled_wipe = builtin
+        .asr_corpus_manage(&serde_json::json!({
+            "action": "set_config",
+            "enabled": false,
+            "delete_existing": true
+        }))
+        .unwrap();
+    assert_eq!(disabled_wipe["enabled"], false);
+    assert_eq!(disabled_wipe["deleted_count"], 1);
+    assert_eq!(disabled_wipe["total_count"], 0);
 }

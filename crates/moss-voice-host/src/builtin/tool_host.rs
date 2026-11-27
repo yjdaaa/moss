@@ -295,6 +295,13 @@ impl ToolHost for DesktopToolHost {
         laser_host::voice_recent_workflows(&self.host.api_service, device_id, session_id)
     }
 
+    /// VA2 #2 只读查询激光侧是否存在运行中/未决的加工或走边框任务（不经工具分发）。
+    fn has_active_laser_job(&self) -> Option<bool> {
+        Some(laser_host::voice_has_active_laser_job(
+            &self.host.api_service,
+        ))
+    }
+
     /// n70 正在雕刻的任务的刀路预览原图：只读本机任务记录里的预览文件（限预览目录内），不走工具分发。
     fn workflow_preview(
         &self,

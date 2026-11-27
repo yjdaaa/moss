@@ -15,6 +15,7 @@ import {
   LiveDebugTraces,
   LocalModelsGroup,
   PrivateSettingsEntry,
+  VoiceAsrCorpusCard,
   XiaozhiUsbProvisionCard,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
@@ -837,6 +838,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                 // 2026-11-09：激光雕刻机与 MOSS 软件的事件和语音链路无关，两种链路都显示
                 { key: "builtin-events", modes: ["official", "builtin"], node: <BuiltinEvents builtin={builtin} /> },
                 { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
+                { key: "asr-corpus", modes: ["builtin"], node: <VoiceAsrCorpusCard builtin={builtin} active={activeTab === "records"} /> },
               ]}
             />
           </VoiceTabPanel>

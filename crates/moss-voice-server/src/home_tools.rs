@@ -245,6 +245,9 @@ impl ToolExecutor for HomeTools {
     fn recent_workflows<'a>(&'a self, ctx: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         self.original.recent_workflows(ctx)
     }
+    fn has_active_laser_job<'a>(&'a self, ctx: &'a ToolContext) -> BoxFuture<'a, Option<bool>> {
+        self.original.has_active_laser_job(ctx)
+    }
 }
 
 #[cfg(test)]

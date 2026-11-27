@@ -71,6 +71,13 @@ impl<'a> Session<'a> {
                             turn.spoken_at.push(turn.frames_sent);
                         }
                     }
+                    if let Some(turn) = self.turn.as_mut()
+                        && let Some(since) = turn.underrun_started_at.take()
+                    {
+                        turn.playback_stall_ms = turn
+                            .playback_stall_ms
+                            .saturating_add(since.elapsed().as_millis() as u64);
+                    }
                     self.send_frame(socket, &data).await?;
                     if let Some(turn) = self.turn.as_mut() {
                         turn.frames_sent += 1;
@@ -94,12 +101,25 @@ impl<'a> Session<'a> {
                 }
                 PumpTick::Waiting => {
                     // 还在攒启动缓冲或上游暂时供不上：不发帧，稍后重检（SpeechMore/Done 也会唤醒）
+                    if self.listen.playback_started.is_some()
+                        && let Some(turn) = self.turn.as_mut()
+                        && turn.underrun_started_at.is_none()
+                    {
+                        turn.underrun_started_at = Some(Instant::now());
+                    }
                     if let Phase::Speaking { next, .. } = &mut self.phase {
                         *next = Instant::now() + STARVED_POLL;
                     }
                     return Ok(());
                 }
                 PumpTick::Done => {
+                    if let Some(turn) = self.turn.as_mut()
+                        && let Some(since) = turn.underrun_started_at.take()
+                    {
+                        turn.playback_stall_ms = turn
+                            .playback_stall_ms
+                            .saturating_add(since.elapsed().as_millis() as u64);
+                    }
                     // 等设备把已发出的帧播完再发 tts stop，避免尾字被吞
                     if let Phase::Speaking {
                         next,
@@ -163,6 +183,15 @@ impl<'a> Session<'a> {
         interrupted: Option<&str>,
     ) -> Result<(), String> {
         let stats = self.pump.stats();
+        if let Some(turn) = self.turn.as_mut() {
+            if let Some(since) = turn.underrun_started_at.take() {
+                turn.playback_stall_ms = turn
+                    .playback_stall_ms
+                    .saturating_add(since.elapsed().as_millis() as u64);
+            }
+            turn.playback_frames = stats.frames;
+            turn.playback_underruns = stats.underruns;
+        }
         if let Some(reason) = interrupted {
             self.screen.pending_oled_preview = None;
             self.screen.preview_hold = None;

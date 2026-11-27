@@ -59,6 +59,7 @@ impl<'a> Session<'a> {
             preroll: VecDeque::new(),
             stream,
             last_interim: String::new(),
+            interims: Vec::new(),
             prewarm_task: None,
             hold_used: false,
             hold_deadline: None,
@@ -236,6 +237,25 @@ impl<'a> Session<'a> {
             &interim,
             &conversation.settings.asr_corrections,
         );
+        if self
+            .shared
+            .config
+            .asr_corpus
+            .as_ref()
+            .is_some_and(|store| store.is_enabled())
+            && !interim.trim().is_empty()
+            && let Phase::Listening(listening) = &mut self.phase
+            && listening.interims.len() < 64
+            && listening
+                .interims
+                .last()
+                .is_none_or(|prev| prev.text != interim)
+        {
+            listening.interims.push(crate::asr_corpus::InterimEntry {
+                at_ms: self.recording_started.elapsed().as_millis() as u64,
+                text: interim.clone(),
+            });
+        }
         if self.trace_handle().is_some() {
             // 识别流的降噪情况（辅助程序打开流时报告）在第一个中间结果时记下，按真实先后排在中间文字之前
             let denoise = match &self.phase {
@@ -263,7 +283,26 @@ impl<'a> Session<'a> {
             }
             // 替换 Listening 会丢弃旧 ASR 接收器与预热任务；本次语音只开始一个 FastStop 轮次，
             // 后续最终结果和设备 listen stop 不会再次触发。
-            self.phase = Phase::Idle;
+            let fast_stop_capture = match std::mem::replace(&mut self.phase, Phase::Idle) {
+                Phase::Listening(mut listening)
+                    if self
+                        .shared
+                        .config
+                        .asr_corpus
+                        .as_ref()
+                        .is_some_and(|store| store.is_enabled()) =>
+                {
+                    let pcm = std::mem::take(&mut listening.utterance);
+                    let interims = std::mem::take(&mut listening.interims);
+                    (
+                        (!pcm.is_empty()).then_some((pcm, self.uplink_rate)),
+                        interims,
+                    )
+                }
+                _ => (None, Vec::new()),
+            };
+            self.pending_fast_stop_pcm = fast_stop_capture.0;
+            self.pending_corpus_interims = fast_stop_capture.1;
             self.event(format!(
                 "流式中间结果整句命中急停词（{}）：立即请求急停",
                 crate::fast::normalized(&corrected)
@@ -588,10 +627,15 @@ impl<'a> Session<'a> {
         if !keep_for_keywords && let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
-        let stream = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Listening(mut listening) => listening.stream.take().map(|(stream, _)| stream),
-            _ => None,
+        let (stream, captured_interims) = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Listening(mut listening) => (
+                listening.stream.take().map(|(stream, _)| stream),
+                std::mem::take(&mut listening.interims),
+            ),
+            _ => (None, Vec::new()),
         };
+        self.pending_corpus_interims = captured_interims;
+        self.pending_fast_stop_pcm = None;
         self.set_state("idle");
         let seconds = pcm.len() as f64 / self.uplink_rate as f64;
         self.event(format!("收到一段语音：{seconds:.1} 秒（{}）", end.label()));

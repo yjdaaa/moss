@@ -17,18 +17,79 @@ impl<'a> Session<'a> {
             timing.outcome = outcome.into();
             timing.at_ms = at_ms;
             let turn_no = timing.turn;
+            let stages_snapshot = timing.stages.clone();
             self.shared
                 .state
                 .finish_timing_with_trace(timing, turn.trace.as_ref());
-            if turn.kind == TurnKind::Answer
-                && self.shared.state.debug_enabled()
-                && let Some(captured_epoch) = turn.debug_capture_epoch
-                && let Some(raw_asr) = turn.debug_raw_asr.take()
-            {
-                let corrected_asr = turn
+
+            if turn.kind == TurnKind::Answer {
+                let raw_text = turn
+                    .debug_raw_asr
+                    .clone()
+                    .or_else(|| turn.injected_text.clone())
+                    .unwrap_or_default();
+                let corrected_text = turn
                     .debug_corrected_asr
-                    .take()
-                    .unwrap_or_else(|| raw_asr.clone());
+                    .clone()
+                    .unwrap_or_else(|| raw_text.clone());
+                // VB1：采集真实小智语音轮次（16 kHz 单声道 WAV + 元数据）；模拟轮次或关闭时直接跳过，绝不进过程记录或声纹。
+                if !turn.simulated
+                    && let Some(corpus) = self
+                        .shared
+                        .config
+                        .asr_corpus
+                        .clone()
+                        .filter(|store| store.is_enabled())
+                    && let Some((pcm, sample_rate)) = turn.corpus_audio.take()
+                {
+                    let asr_model = self
+                        .conversation
+                        .as_ref()
+                        .and_then(|c| {
+                            c.settings
+                                .model_labels
+                                .iter()
+                                .find_map(|s| s.strip_prefix("ASR:"))
+                        })
+                        .unwrap_or_default()
+                        .to_owned();
+                    let endpoint = crate::asr_corpus::EndpointTiming {
+                        vad_start_ms: stages_snapshot.get("vad_start").copied(),
+                        vad_end_ms: stages_snapshot.get("vad_end").copied(),
+                        utterance_end_ms: stages_snapshot
+                            .get("utterance_end")
+                            .or_else(|| stages_snapshot.get("interim_stop"))
+                            .copied(),
+                        final_asr_ms: stages_snapshot.get("final_asr").copied(),
+                        endpoint_wait_ms: turn.endpoint_wait.map(|(_, total)| total),
+                    };
+                    let utterance = crate::asr_corpus::CapturedUtterance {
+                        session_id: self.session_id.to_owned(),
+                        device_id: self.device_id.to_owned(),
+                        turn: turn_no,
+                        captured_at_ms: at_ms,
+                        simulated: false,
+                        pcm,
+                        sample_rate,
+                        raw_text: raw_text.clone(),
+                        corrected_text: corrected_text.clone(),
+                        interims: std::mem::take(&mut turn.corpus_interims),
+                        asr_model,
+                        vad_engine: self.vad_engine.clone(),
+                        endpoint,
+                        outcome: outcome.to_owned(),
+                    };
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn_blocking(move || {
+                            let _ = corpus.record(utterance);
+                        });
+                    } else {
+                        let _ = corpus.record(utterance);
+                    }
+                } else {
+                    turn.corpus_audio = None;
+                    turn.corpus_interims.clear();
+                }
                 let spoken = turn.spoken.join("");
                 let full_reply = turn
                     .pending_messages
@@ -46,33 +107,90 @@ impl<'a> Session<'a> {
                 } else {
                     turn.debug_text_reply.join("")
                 };
-                if let Some((scrubbed, epoch)) = self.shared.state.finish_debug_trace_with_epoch(
-                    crate::TurnDebugTrace {
-                        id: 0,
-                        at_ms,
-                        device_id: self.device_id.into(),
-                        session_id: self.session_id.into(),
-                        turn: turn_no,
-                        at: at_ms / 1000,
-                        raw_asr,
-                        corrected_asr,
-                        tools: std::mem::take(&mut turn.debug_tools),
-                        reply,
-                        spoken,
-                        outcome: outcome.into(),
-                        truncated: false,
-                        tools_dropped: 0,
-                    },
-                    captured_epoch,
-                ) {
-                    let registry = self.shared.registry.clone();
-                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        handle
-                            .spawn_blocking(move || registry.record_chat_turn_at(&scrubbed, epoch));
-                    } else {
-                        registry.record_chat_turn_at(&scrubbed, epoch);
+                let stats = self.pump.stats();
+                let frames = turn.playback_frames.max(stats.frames);
+                let underruns = turn.playback_underruns.max(stats.underruns);
+                let stall_ms = turn.playback_stall_ms.saturating_add(
+                    turn.underrun_started_at
+                        .take()
+                        .map_or(0, |since| since.elapsed().as_millis() as u64),
+                );
+                let route = turn.route.unwrap_or(match outcome {
+                    "ignored" => "ignored",
+                    "not_for_me" => "not_for_me",
+                    _ => "unknown",
+                });
+
+                // 先落入 debug_traces，再把 turn_detail 置为终态，避免轮询方看到 turn_detail.status == "done" 时读到尚未写入的对话记录。
+                if self.shared.state.debug_enabled()
+                    && let Some(captured_epoch) = turn.debug_capture_epoch
+                    && let Some(raw_asr) = turn
+                        .debug_raw_asr
+                        .take()
+                        .or_else(|| turn.injected_text.clone())
+                {
+                    let corrected_asr = turn
+                        .debug_corrected_asr
+                        .take()
+                        .unwrap_or_else(|| raw_asr.clone());
+                    if let Some((scrubbed, epoch)) =
+                        self.shared.state.finish_debug_trace_with_epoch(
+                            crate::TurnDebugTrace {
+                                id: 0,
+                                at_ms,
+                                device_id: self.device_id.into(),
+                                session_id: self.session_id.into(),
+                                turn: turn_no,
+                                at: at_ms / 1000,
+                                raw_asr,
+                                corrected_asr,
+                                tools: std::mem::take(&mut turn.debug_tools),
+                                reply: reply.clone(),
+                                spoken: spoken.clone(),
+                                outcome: outcome.into(),
+                                truncated: false,
+                                tools_dropped: 0,
+                                simulated: turn.simulated,
+                            },
+                            captured_epoch,
+                        )
+                    {
+                        let registry = self.shared.registry.clone();
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            handle.spawn_blocking(move || {
+                                registry.record_chat_turn_at(&scrubbed, epoch)
+                            });
+                        } else {
+                            registry.record_chat_turn_at(&scrubbed, epoch);
+                        }
                     }
                 }
+
+                self.shared.state.upsert_turn_detail(crate::TurnDetail {
+                    turn_id: format!("{}:{turn_no}", self.session_id),
+                    device_id: self.device_id.into(),
+                    session_id: self.session_id.into(),
+                    turn: turn_no,
+                    simulated: turn.simulated,
+                    status: outcome.into(),
+                    outcome: outcome.into(),
+                    route: route.into(),
+                    injected_text: raw_text,
+                    corrected_text,
+                    stages_ms: stages_snapshot,
+                    tools: std::mem::take(&mut turn.detail_tools),
+                    reply,
+                    spoken,
+                    playback: crate::PlaybackDetail {
+                        frames,
+                        underruns,
+                        stall_ms,
+                    },
+                    stop_skipped_reason: turn.stop_skipped_reason.clone(),
+                    error: turn.last_error.clone(),
+                    started_at_ms: turn.started_at_ms,
+                    finished_at_ms: Some(at_ms),
+                });
             }
         }
     }
@@ -173,6 +291,7 @@ impl<'a> Session<'a> {
                 ServerMode::Chat => shared.config.conversation.clone(),
             },
             history: Vec::new(),
+            memory_history: Vec::new(),
             turn: None,
             carried_photo: None,
             last_verified_person: None,
@@ -181,6 +300,8 @@ impl<'a> Session<'a> {
             device_mcp: None,
             mqtt: false,
             pending_goodbye: None,
+            pending_corpus_interims: Vec::new(),
+            pending_fast_stop_pcm: None,
         })
     }
 
@@ -372,18 +493,22 @@ impl<'a> Session<'a> {
                 .context_extraction
                 .as_ref()
                 .is_some_and(|e| e.extractor.enabled());
-            if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting) {
+            if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting)
+                && !self.memory_history.is_empty()
+            {
                 memory.queue_summary(
                     self.device_id,
-                    &self.history,
+                    &self.memory_history,
                     trace::background_llm(conversation, self.device_id, "对话记忆摘要"),
                 );
             }
             // NV19-03: independent of the NV10 summary; off unless the user enabled it.
-            if let Some(extraction) = &conversation.context_extraction {
+            if let Some(extraction) = &conversation.context_extraction
+                && !self.memory_history.is_empty()
+            {
                 extraction.session_closed(
                     &end_ctx,
-                    &self.history,
+                    &self.memory_history,
                     trace::background_llm(conversation, self.device_id, "长期记忆提取"),
                 );
             }
@@ -429,6 +554,7 @@ impl<'a> Session<'a> {
             self.conversation_closed();
         }
         self.history.clear();
+        self.memory_history.clear();
         self.last_verified_person = None;
         self.event(format!("这一轮对话结束（{reason}），设备保持常连在线"));
         Ok(())

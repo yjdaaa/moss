@@ -338,6 +338,7 @@ pub fn run() {
             voice_builtin::voice_wakeword_import_base,
             voice_builtin::voice_wakeword_manage,
             voice_builtin::voice_usb_provision,
+            voice_builtin::voice_asr_corpus_manage,
             voice_builtin::voice_home_discover,
             voice_builtin::voice_agent_status,
             voice_builtin::voice_agent_save,
@@ -638,6 +639,7 @@ mod tests {
             "allow-voice-wakeword-import-base",
             "allow-voice-wakeword-manage",
             "allow-voice-usb-provision",
+            "allow-voice-asr-corpus-manage",
         ];
         let default: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
@@ -678,6 +680,7 @@ mod tests {
                     "voice_wakeword_import_base",
                     "voice_wakeword_manage",
                     "voice_usb_provision",
+                    "voice_asr_corpus_manage",
                     "voice_home_status",
                     "voice_home_save",
                     "voice_home_backup_export",

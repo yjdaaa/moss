@@ -2516,4 +2516,157 @@ test("Colab T4 固定模型归一：笔记本忽略请求模型字段，表单�
   assert.match(colabSectionSrc, /hasLegacyModelOverride/, "已存有历史自定义模型值时允许直接点保存归一");
 });
 
+test("VA5 本机 AI 调试注入开关与设备发送测试文字输入框：默认关闭、开启前须确认、关闭时不显示输入框且不泄露令牌", async () => {
+  const { readFileSync } = await import("node:fs");
+  const {
+    DEBUG_TEXT_INJECT_CONFIRM_OPTIONS,
+    DEBUG_TEXT_INJECT_CONFIRM_TEXT,
+    debugInjectStateView,
+  } = await import("../src/voiceState.js");
+
+  // 1. 开启确认文案必须写明本机令牌、24 小时自动作废与禁止物理动作
+  assert.match(DEBUG_TEXT_INJECT_CONFIRM_TEXT, /debug\/voice-debug\.token/);
+  assert.match(DEBUG_TEXT_INJECT_CONFIRM_TEXT, /24 小时/);
+  assert.match(DEBUG_TEXT_INJECT_CONFIRM_TEXT, /不能触发.*物理动作/);
+  assert.equal(DEBUG_TEXT_INJECT_CONFIRM_OPTIONS.tone, "warning");
+
+  // 2. 默认关闭时，即使设备在线且已允许也不显示输入框
+  const offView = debugInjectStateView({
+    local: { settings: { debug_text_inject_enabled: false } },
+    debug_inject: { enabled: false, active: false, token_file_rel: "debug/voice-debug.token" },
+  });
+  assert.equal(offView.enabled, false);
+  assert.equal(offView.showDeviceInput({ device_id: "d1", status: "allowed" }, true), false);
+
+  // 3. 开启后仅对在线且已允许设备显示输入框；离线/待允许/已撤销不显示；只暴露相对路径
+  const onView = debugInjectStateView({
+    debug_inject: {
+      enabled: true,
+      active: true,
+      port: 18009,
+      expires_at: 1_900_000_000,
+      token_file_rel: "debug/voice-debug.token",
+    },
+  });
+  assert.equal(onView.enabled, true);
+  assert.equal(onView.active, true);
+  assert.equal(onView.port, 18009);
+  assert.equal(onView.tokenFileRel, "debug/voice-debug.token");
+  assert.equal(onView.showDeviceInput({ device_id: "d1", status: "allowed" }, true), true);
+  assert.equal(onView.showDeviceInput({ device_id: "d1", status: "allowed" }, false), false);
+  assert.equal(onView.showDeviceInput({ device_id: "d1", status: "pending" }, true), false);
+  assert.equal(onView.showDeviceInput({ device_id: "d1", status: "revoked" }, true), false);
+
+  // 4. 组件源码核验：开关开启前必须走 showConfirm、输入框只在开启时渲染、对话记录标出模拟轮次
+  const servicePanelSrc = readFileSync(
+    new URL("../src/components/voice-builtin/BuiltinServicePanel.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(servicePanelSrc, /voice-debug-inject-switch/);
+  assert.match(servicePanelSrc, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/);
+  assert.match(servicePanelSrc, /debug_text_inject_enabled:\s*on/);
+
+  const devicesPanelSrc = readFileSync(
+    new URL("../src/components/voice-builtin/BuiltinDevicesPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(devicesPanelSrc, /debugInject\.showDeviceInput\(device,\s*online\)/);
+  assert.match(devicesPanelSrc, /voiceApi\.deviceRequest\(device\.device_id,\s*"inject_text"/);
+
+  const tracesSrc = readFileSync(
+    new URL("../src/components/voice-builtin/LiveDebugTraces.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(tracesSrc, /trace\.simulated/);
+  assert.match(tracesSrc, /模拟门禁已拒绝/);
+});
+
+test("VB2/VB4 识别语料面板：默认关闭、仅开关开启时可用、标注载荷校验与保存、删除前二次确认", async () => {
+  const { readFileSync } = await import("node:fs");
+  const {
+    ASR_CORPUS_CLEAR_ALL_CONFIRM_TEXT,
+    ASR_CORPUS_DELETE_ITEM_CONFIRM_TEXT,
+    ASR_CORPUS_DISABLE_CHOICE_TEXT,
+    ASR_CORPUS_ENABLE_CONFIRM_TEXT,
+    ASR_CORPUS_TAGS,
+    asrCorpusView,
+    buildAsrCorpusLabelPayload,
+    toggleAsrCorpusTag,
+  } = await import("../src/voiceState.js");
+
+  // 1. 开关默认关闭，关闭态 panelUsable 必须为 false 且不暴露条目
+  const offView = asrCorpusView({
+    enabled: false,
+    total_count: 3,
+    labeled_count: 1,
+    items: [{ date: "2026-11-27", turn_id: "s-t1", raw_text: "不应该显示" }],
+  });
+  assert.equal(offView.enabled, false);
+  assert.equal(offView.panelUsable, false);
+  assert.deepEqual(offView.items, []);
+  assert.match(offView.summary, /采集已关/);
+
+  // 2. 开启后 panelUsable 为 true
+  const onView = asrCorpusView({
+    enabled: true,
+    max_items: 500,
+    max_days: 7,
+    total_count: 1,
+    labeled_count: 0,
+    items: [{ date: "2026-11-27", turn_id: "s-t1", raw_text: "三毫米段木" }],
+  });
+  assert.equal(onView.enabled, true);
+  assert.equal(onView.panelUsable, true);
+  assert.equal(onView.items.length, 1);
+
+  // 3. 标注载荷与标签校验
+  assert.deepEqual(ASR_CORPUS_TAGS, ["命令词", "数字", "材料名", "有噪声"]);
+  assert.equal(
+    buildAsrCorpusLabelPayload({ date: "2026-11-27", turn_id: "s-t1" }, "   ", [], false).error,
+    "正确文字不能为空",
+  );
+  const tagsAfterToggle = toggleAsrCorpusTag(toggleAsrCorpusTag([], "材料名"), "数字");
+  assert.deepEqual(tagsAfterToggle, ["材料名", "数字"]);
+  assert.deepEqual(toggleAsrCorpusTag(tagsAfterToggle, "材料名"), ["数字"]);
+
+  const built = buildAsrCorpusLabelPayload(
+    { date: "2026-11-27", turn_id: "s-t1" },
+    "  三毫米椴木  ",
+    ["材料名", "非法标签", "材料名"],
+    false,
+  );
+  assert.deepEqual(built.payload, {
+    action: "save_label",
+    date: "2026-11-27",
+    turn_id: "s-t1",
+    reference_text: "三毫米椴木",
+    verified_correct: false,
+    tags: ["材料名"],
+  });
+
+  // 4. 隐私与删除确认文案校验 + 组件源码守卫
+  assert.match(ASR_CORPUS_ENABLE_CONFIRM_TEXT, /不.*诊断包/);
+  assert.match(ASR_CORPUS_ENABLE_CONFIRM_TEXT, /声纹/);
+  assert.match(ASR_CORPUS_DISABLE_CHOICE_TEXT, /删除/);
+  assert.match(ASR_CORPUS_DELETE_ITEM_CONFIRM_TEXT, /删除/);
+  assert.match(ASR_CORPUS_CLEAR_ALL_CONFIRM_TEXT, /清空/);
+
+  const cardSrc = readFileSync(
+    new URL("../src/components/voice-builtin/VoiceAsrCorpusCard.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(cardSrc, /!view\.panelUsable/);
+  assert.match(cardSrc, /showConfirm\(\s*ASR_CORPUS_ENABLE_CONFIRM_TEXT/);
+  assert.match(cardSrc, /showChoice\(\s*ASR_CORPUS_DISABLE_CHOICE_TEXT/);
+  assert.match(cardSrc, /showConfirm\(\s*ASR_CORPUS_DELETE_ITEM_CONFIRM_TEXT/);
+  assert.match(cardSrc, /showConfirm\(\s*ASR_CORPUS_CLEAR_ALL_CONFIRM_TEXT/);
+  assert.match(cardSrc, /voiceApi\.asrCorpusManage\(/);
+  assert.match(cardSrc, /✓ 正确/);
+
+  const pageSrc = readFileSync(new URL("../src/pages/VoicePage.jsx", import.meta.url), "utf8");
+  assert.match(pageSrc, /<VoiceAsrCorpusCard/);
+});
+
+
+
 

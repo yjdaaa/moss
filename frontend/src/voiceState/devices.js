@@ -301,6 +301,40 @@ export const AUTO_ALLOW_DEVICES_CONFIRM_OPTIONS = {
   confirmText: "开启自动允许",
 };
 
+/** 开启「允许本机 AI 调试注入」前的确认文案与弹窗选项（VA2 #4 / VA5）。 */
+export const DEBUG_TEXT_INJECT_CONFIRM_TEXT =
+  "开启后仅在本机 127.0.0.1 开放受限联调入口，并在运行目录生成随机令牌文件（debug/voice-debug.token，权限 0600），供本机 AI 脚本与桌面输入框向已连上的小智发送测试文字：\n" +
+  "• 令牌在关闭开关或开启满 24 小时后自动作废；\n" +
+  "• 所有模拟轮次都不能触发发送任务、移动、回零、解锁、倍率、家居控制、本机 Agent 或固件推送等物理动作；\n" +
+  "• 模拟轮次不会进入长期记忆与人物资料。\n" +
+  "确定开启？";
+
+export const DEBUG_TEXT_INJECT_CONFIRM_OPTIONS = {
+  title: "开启本机 AI 调试注入？",
+  tone: "warning",
+  confirmText: "开启调试注入",
+};
+
+/** 本机 AI 调试文字注入状态视图（VA5；绝不包含令牌原文）。 */
+export function debugInjectStateView(status) {
+  const info = status?.debug_inject && typeof status.debug_inject === "object" ? status.debug_inject : {};
+  const enabled = info.enabled === true || status?.local?.settings?.debug_text_inject_enabled === true;
+  const active = enabled && info.active === true;
+  const port = Number.isInteger(info.port) && info.port > 0 ? info.port : null;
+  const expiresAt = Number(info.expires_at) > 0 ? Number(info.expires_at) : 0;
+  const tokenFileRel = String(info.token_file_rel || "debug/voice-debug.token");
+  return {
+    enabled,
+    active,
+    port,
+    expiresAt,
+    tokenFileRel,
+    showDeviceInput(device, online) {
+      return Boolean(enabled && online && device?.status === "allowed");
+    },
+  };
+}
+
 /** 允许设备前的确认文字。 */
 export function allowDeviceConfirmText(device) {
   const facts = [

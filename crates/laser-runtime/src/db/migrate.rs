@@ -533,6 +533,24 @@ impl RuntimeDb {
                 "INSERT INTO schema_version(version,applied_at) VALUES(20,unixepoch());",
             )?;
         }
+        if current.unwrap_or(0) < 21 {
+            // 2026-11-27（VA）：voice_chat_logs 增加模拟轮次标记 simulated，对话记录面板据此区分真实语音与调试文字注入。
+            let existing = {
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_chat_logs')")?;
+                statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if !existing.iter().any(|name| name == "simulated") {
+                tx.execute_batch(
+                    "ALTER TABLE voice_chat_logs ADD COLUMN simulated INTEGER NOT NULL DEFAULT 0 CHECK(simulated IN (0, 1));",
+                )?;
+            }
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(21,unixepoch());",
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }

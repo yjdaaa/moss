@@ -86,6 +86,8 @@ export const voiceApi = {
   wakewordManage: (input) => invokeVoice("voice_wakeword_manage", { input }),
   // USB 串口一键给小智配网写地址（仅打包私密窗口）
   usbProvision: (input) => invokeVoice("voice_usb_provision", { input }),
+  // VB1/VB2 识别（ASR）录音语料采集、试听、标注与删除（仅受信任主窗口，voice-private-main.json）
+  asrCorpusManage: (input) => invokeVoice("voice_asr_corpus_manage", { input }),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),
   mcpDelete: (name, revision, confirmed) => invokeVoice("voice_mcp_delete", { name, revision, confirmed }),

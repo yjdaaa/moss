@@ -45,7 +45,8 @@ export function LiveDebugTraces({ builtin }) {
           t.spoken,
           t.device_id,
           deviceLabel(t.device_id),
-          ...(Array.isArray(t.tools) ? t.tools.map((x) => `${x.name} ${x.arguments} ${x.result}`) : []),
+          t.simulated ? "模拟 simulated" : "",
+          ...(Array.isArray(t.tools) ? t.tools.map((x) => `${x.name} ${x.arguments} ${x.result} ${x.block_reason || ""}`) : []),
         ]
           .filter(Boolean)
           .join(" ")
@@ -274,6 +275,11 @@ export function LiveDebugTraces({ builtin }) {
               <div className="voice-debug-card" key={trace.id ? `log-${trace.id}` : `${trace.session_id}-${trace.turn}-${idx}`}>
                 <div className="voice-debug-head">
                   <b>第 {trace.turn} 轮</b>
+                  {trace.simulated && (
+                    <span className="ob-pill ob-pill--info voice-tag" title="本轮来自文字直通模拟联调，已禁止物理动作且不写入长期记忆">
+                      模拟
+                    </span>
+                  )}
                   <span className="voice-muted mono">{formatTime(trace.at)}</span>
                   {trace.device_id && <span className="voice-muted">{deviceLabel(trace.device_id)}</span>}
                   <span className={`ob-pill ob-pill--${voiceOutcomeLabel(trace.outcome).tone}`}>{voiceOutcomeLabel(trace.outcome).text}</span>
@@ -309,8 +315,16 @@ export function LiveDebugTraces({ builtin }) {
                   <div className="voice-debug-tools">
                     {trace.tools.map((t, ti) => (
                       <details key={ti}>
-                        <summary className="mono">工具调用：{t.name}</summary>
+                        <summary className="mono">
+                          工具调用：{t.name}
+                          {t.blocked && (
+                            <span className="ob-pill ob-pill--warn voice-tag" style={{ marginLeft: 6 }}>
+                              模拟门禁已拒绝
+                            </span>
+                          )}
+                        </summary>
                         <div className="voice-muted mono">参数：{t.arguments || "{}"}</div>
+                        {t.block_reason && <div className="voice-muted">拦截原因：{t.block_reason}</div>}
                         <div className="voice-muted mono">结果：{t.result || "—"}</div>
                       </details>
                     ))}

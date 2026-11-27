@@ -31,6 +31,7 @@ const SENSITIVE_COMMANDS = [
   "voice_firmware_status", "voice_firmware_import", "voice_firmware_manage",
   "voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage",
   "voice_usb_provision",
+  "voice_asr_corpus_manage",
 ];
 
 test("n67：独立安全窗口已取消，页面、入口与打开窗口的命令都不存在", () => {

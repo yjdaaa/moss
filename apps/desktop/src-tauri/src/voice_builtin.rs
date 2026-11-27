@@ -1057,9 +1057,25 @@ pub async fn voice_plugins_save(
     result
 }
 
+/// VB1/VB2 识别（ASR）录音语料采集、读取、标注与删除（默认关闭，仅受信任主窗口调用）。
+#[tauri::command]
+pub async fn voice_asr_corpus_manage(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_private_settings_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |voice| voice.asr_corpus_manage(&input)).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, input));
+    result
+}
+
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 45] = [
+pub const COMMANDS: [&str; 46] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -1105,4 +1121,5 @@ pub const COMMANDS: [&str; 45] = [
     "voice_local_model_delete",
     "voice_local_laya_setup",
     "voice_usb_provision",
+    "voice_asr_corpus_manage",
 ];

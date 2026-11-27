@@ -147,6 +147,33 @@ fn default_barge_in_ms() -> u32 {
     400
 }
 
+pub const DEFAULT_ASR_CORPUS_MAX_ITEMS: u32 = 500;
+pub const DEFAULT_ASR_CORPUS_MAX_DAYS: u32 = 7;
+
+fn default_asr_corpus_max_items() -> u32 {
+    DEFAULT_ASR_CORPUS_MAX_ITEMS
+}
+
+fn default_asr_corpus_max_days() -> u32 {
+    DEFAULT_ASR_CORPUS_MAX_DAYS
+}
+
+pub fn validate_asr_corpus_max_items(count: u64) -> Result<u32, String> {
+    if (1..=5000).contains(&count) {
+        Ok(count as u32)
+    } else {
+        Err("识别语料最多保留条数须为 1 ~ 5000 的整数".into())
+    }
+}
+
+pub fn validate_asr_corpus_max_days(days: u64) -> Result<u32, String> {
+    if (1..=90).contains(&days) {
+        Ok(days as u32)
+    } else {
+        Err("识别语料最多保留天数须为 1 ~ 90 的整数".into())
+    }
+}
+
 pub fn validate_barge_in_ms(ms: u64) -> Result<u32, String> {
     if (300..=600).contains(&ms) {
         Ok(ms as u32)
@@ -749,6 +776,20 @@ pub struct BuiltinLocal {
     /// 开启后仅对之后首次连入的新设备直接登记为 `allowed` 并下发 token；存量 `pending` 仍需逐台确认，已撤销设备仍拒绝。
     #[serde(default)]
     pub auto_allow_devices: bool,
+    /// 本机 AI 文字直通联调开关（2026-11-27 VA，默认关）：仅允许经过来源校验的桌面主窗口开启；
+    /// 开启后在本机生成 24 小时有效的随机令牌文件并仅在 127.0.0.1 开放受限调试入口，模拟轮次禁止任何物理动作。
+    #[serde(default)]
+    pub debug_text_inject_enabled: bool,
+    /// 保存最近的识别录音用于离线识别测评（2026-11-27 VB，默认关）：
+    /// 仅允许经来源校验的桌面主窗口确认开启，不进诊断包与过程记录，不用于声纹识别或身份判断。
+    #[serde(default)]
+    pub asr_corpus_capture_enabled: bool,
+    /// 识别语料最多保留条数（默认 500，与天数上限先到者先清理）
+    #[serde(default = "default_asr_corpus_max_items")]
+    pub asr_corpus_max_items: u32,
+    /// 识别语料最多保留天数（默认 7 天，与条数上限先到者先清理）
+    #[serde(default = "default_asr_corpus_max_days")]
+    pub asr_corpus_max_days: u32,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
     /// 旁人说话不接话（2026-11-15 n100 / n101，默认开）：自动 / 实时拾音时允许大模型判断“这句不是对小智说的”
@@ -838,6 +879,10 @@ impl Default for BuiltinLocal {
             screen_card_style: default_screen_card_style(),
             screen_pack_auto_keep: false,
             auto_allow_devices: false,
+            debug_text_inject_enabled: false,
+            asr_corpus_capture_enabled: false,
+            asr_corpus_max_items: default_asr_corpus_max_items(),
+            asr_corpus_max_days: default_asr_corpus_max_days(),
             job_done_announce: true,
             ignore_bystanders: true,
             chat_log_enabled: true,

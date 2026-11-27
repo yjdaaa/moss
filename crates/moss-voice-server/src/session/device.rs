@@ -419,6 +419,16 @@ impl<'a> Session<'a> {
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         self.prune_stalled_device_mcp();
+        if let crate::DeviceRequest::InjectText {
+            text,
+            simulated,
+            reply,
+        } = request
+        {
+            return self
+                .handle_inject_text(socket, text, simulated, reply)
+                .await;
+        }
         if let crate::DeviceRequest::ShowScene { scene, style } = request {
             return self.show_scene_request(socket, scene, style).await;
         }
@@ -515,12 +525,97 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// VA1 真小智文字直通注入：在设备空闲（或静音聆听无人说话）时立即下发 `stt` 字幕并进入完整对话链路，
+    /// 绝不打断正在进行的对话、拾音或音乐播放。
+    async fn handle_inject_text(
+        &mut self,
+        socket: &mut crate::link::Link,
+        text: String,
+        simulated: bool,
+        reply: tokio::sync::oneshot::Sender<Result<crate::InjectTurnAck, crate::InjectTurnError>>,
+    ) -> Result<(), String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty()
+            || trimmed.chars().count() > 500
+            || trimmed.chars().any(char::is_control)
+        {
+            let _ = reply.send(Err(crate::InjectTurnError::invalid(
+                "注入文字须为 1~500 字且不含控制字符",
+            )));
+            return Ok(());
+        }
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = reply.send(Err(crate::InjectTurnError::forbidden(
+                "设备授权已撤销，无法注入文字",
+            )));
+            return Ok(());
+        }
+        if self.conversation.is_none() {
+            let _ = reply.send(Err(crate::InjectTurnError::conflict(
+                "echo_mode",
+                "内置语音当前处于回声模式（未配置识别/大模型/合成），无法执行对话注入",
+            )));
+            return Ok(());
+        }
+        if self.busy()
+            || self.actively_speaking_user()
+            || self.music.as_ref().is_some_and(|m| m.active())
+        {
+            let _ = reply.send(Err(crate::InjectTurnError::busy(self.phase.label())));
+            return Ok(());
+        }
+        // 设备处于自动拾音静默等待时，清空空缓冲再进入思考，避免旧静音缓冲随后误判
+        self.listen.hold_check = None;
+        self.pending_listen_stop = false;
+        if let Some(worker) = self.vad_worker.as_mut() {
+            worker.reset();
+        }
+        self.last_activity = Instant::now();
+        let injected = trimmed.to_owned();
+        if !self.send_stt(socket, injected.clone()).await {
+            let _ = reply.send(Err(crate::InjectTurnError::offline(
+                "向设备下发 stt 字幕失败，会话可能已断开",
+            )));
+            return Err("发送失败".into());
+        }
+        self.event(format!(
+            "文字直通注入{}：{} 字",
+            if simulated { "（模拟）" } else { "" },
+            injected.chars().count()
+        ));
+        self.start_turn(
+            TurnInput::Text {
+                text: injected,
+                simulated,
+            },
+            TurnKind::Answer,
+        );
+        let ack = crate::InjectTurnAck {
+            turn_id: format!("{}:{}", self.session_id, self.turn_number),
+            device_id: self.device_id.into(),
+            session_id: self.session_id.into(),
+            turn: self.turn_number,
+            simulated,
+        };
+        let _ = reply.send(Ok(ack));
+        Ok(())
+    }
+
     async fn dispatch_device_request(
         &mut self,
         socket: &mut crate::link::Link,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         match request {
+            crate::DeviceRequest::InjectText {
+                text,
+                simulated,
+                reply,
+            } => {
+                return self
+                    .handle_inject_text(socket, text, simulated, reply)
+                    .await;
+            }
             crate::DeviceRequest::SyncTools => {
                 let Some(device) = self.device_mcp.as_mut() else {
                     return Ok(());
