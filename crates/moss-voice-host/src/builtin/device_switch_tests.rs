@@ -886,6 +886,7 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
         truncated: false,
         tools_dropped: 0,
         simulated: false,
+        bench_window: false,
     });
 
     // 模拟重启 BuiltinVoice 实例：历史记录仍在
@@ -938,6 +939,7 @@ fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
         truncated: false,
         tools_dropped: 0,
         simulated: false,
+        bench_window: false,
     };
     restarted_registry.record_chat_turn(&secret_turn());
     assert_eq!(
@@ -1682,6 +1684,7 @@ fn remove_device_clears_records_prefs_approvals_deliveries_rejects_revoked_and_r
             truncated: false,
             tools_dropped: 0,
             simulated: false,
+            bench_window: false,
         })
         .unwrap();
     }
@@ -1979,6 +1982,7 @@ fn asr_corpus_capture_defaults_off_excludes_diagnostics_and_allows_delete_after_
             turn: 1,
             captured_at_ms: now_ms,
             simulated: false,
+            bench_window: false,
             pcm: vec![900; 4_000],
             sample_rate: 16_000,
             raw_text: canary.into(),
@@ -2083,6 +2087,7 @@ fn asr_corpus_capture_defaults_off_excludes_diagnostics_and_allows_delete_after_
             turn: 2,
             captured_at_ms: now_ms + 5_000,
             simulated: false,
+            bench_window: false,
             pcm: vec![700; 3_200],
             sample_rate: 16_000,
             raw_text: "停下".into(),
@@ -2105,4 +2110,164 @@ fn asr_corpus_capture_defaults_off_excludes_diagnostics_and_allows_delete_after_
     assert_eq!(disabled_wipe["enabled"], false);
     assert_eq!(disabled_wipe["deleted_count"], 1);
     assert_eq!(disabled_wipe["total_count"], 0);
+}
+
+#[test]
+fn bench_recordings_validates_quality_stores_per_speaker_excludes_diagnostics_and_requires_confirm_to_clear()
+ {
+    use base64::Engine as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host)).0.unwrap();
+
+    let make_wav_b64 = |sample_rate: u32, duration_ms: u64, amplitude: f32| -> String {
+        let count = ((u64::from(sample_rate) * duration_ms) / 1000) as usize;
+        let samples: Vec<i16> = (0..count)
+            .map(|i| {
+                let phase = 2.0 * std::f32::consts::PI * 440.0 * (i as f32) / (sample_rate as f32);
+                (phase.sin() * amplitude * 32767.0)
+                    .round()
+                    .clamp(-32768.0, 32767.0) as i16
+            })
+            .collect();
+        let wav = moss_voice_providers::wav::encode_wav(&samples, sample_rate);
+        format!(
+            "data:audio/wav;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&wav)
+        )
+    };
+
+    // 1. 初始列表包含默认语料且无录音
+    let initial = builtin
+        .bench_recordings_manage(&serde_json::json!({"action": "list"}))
+        .unwrap();
+    assert_eq!(initial["recordings_dir_rel"], "voice-bench/recordings");
+    assert_eq!(initial["total_recordings"], 0);
+    assert!(initial["corpus_count"].as_u64().unwrap() >= 12);
+
+    // 2. 质量校验：过短(<0.5s)、过长(>15s)、过轻、削顶、路径穿越均必须拒绝
+    let too_short = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": "我",
+            "corpus_id": "status_fast_read",
+            "audio_wav_base64": make_wav_b64(16_000, 200, 0.35),
+        }))
+        .unwrap_err();
+    assert_eq!(too_short.code, "bench_recording_quality_failed");
+
+    let too_quiet = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": "我",
+            "corpus_id": "status_fast_read",
+            "audio_wav_base64": make_wav_b64(16_000, 1200, 0.002),
+        }))
+        .unwrap_err();
+    assert_eq!(too_quiet.code, "bench_recording_quality_failed");
+
+    let clipped_samples: Vec<i16> = vec![32767; 16_000];
+    let clipped_b64 = base64::engine::general_purpose::STANDARD.encode(
+        moss_voice_providers::wav::encode_wav(&clipped_samples, 16_000),
+    );
+    let clipped = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": "我",
+            "corpus_id": "status_fast_read",
+            "audio_wav_base64": clipped_b64,
+        }))
+        .unwrap_err();
+    assert_eq!(clipped.code, "bench_recording_quality_failed");
+
+    let bad_speaker = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": "../escape",
+            "corpus_id": "status_fast_read",
+            "audio_wav_base64": make_wav_b64(48_000, 1500, 0.4),
+        }))
+        .unwrap_err();
+    assert_eq!(bad_speaker.code, "bench_recordings_invalid");
+
+    // 3. 合法录音（48 kHz 自动重采样至 16 kHz）落盘到 <runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}
+    let speaker_canary = "说话人CANARY_家人A";
+    let saved = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": speaker_canary,
+            "corpus_id": "status_fast_read",
+            "audio_wav_base64": make_wav_b64(48_000, 1500, 0.4),
+        }))
+        .unwrap();
+    assert_eq!(saved["total_recordings"], 1);
+    assert_eq!(saved["saved"]["sample_rate"], 16_000);
+    assert_eq!(saved["saved"]["speaker"], speaker_canary);
+    let wav_path = temp
+        .path()
+        .join("voice-bench")
+        .join("recordings")
+        .join(speaker_canary)
+        .join("status_fast_read.wav");
+    let json_path = temp
+        .path()
+        .join("voice-bench")
+        .join("recordings")
+        .join(speaker_canary)
+        .join("status_fast_read.json");
+    assert!(wav_path.is_file(), "应写入 16 kHz WAV 文件");
+    assert!(json_path.is_file(), "应写入元数据 JSON 文件");
+    let decoded =
+        moss_voice_providers::wav::decode_wav(&std::fs::read(&wav_path).unwrap()).unwrap();
+    assert_eq!(decoded.sample_rate, 16_000);
+
+    // 读取试听音频 Data URL（不暴露绝对路径）
+    let audio = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "audio",
+            "speaker": speaker_canary,
+            "corpus_id": "status_fast_read",
+        }))
+        .unwrap();
+    assert!(
+        audio["audio_data_url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("data:audio/wav;base64,"))
+    );
+    let audio_json = serde_json::to_string(&audio).unwrap();
+    assert!(!audio_json.contains(&temp.path().to_string_lossy().to_string()));
+
+    // 4. 诊断包绝不能包含测试录音内容、说话人标签或目录路径
+    let bundle = builtin.diagnostics_bundle();
+    let bundle_json = serde_json::to_string(&bundle).unwrap();
+    assert!(
+        !bundle_json.contains(speaker_canary),
+        "诊断包绝不能包含测试录音说话人标签"
+    );
+    assert!(
+        !bundle_json.contains("voice-bench/recordings"),
+        "诊断包绝不能包含测试录音路径"
+    );
+    assert!(
+        bundle["excluded"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v == "本机整体测试真人录音与元数据")),
+        "诊断包 excluded 应显式注明排除本机测试真人录音"
+    );
+
+    // 5. 清空必须显式 confirmed: true，确认后删除全部录音
+    let clear_unconfirmed = builtin
+        .bench_recordings_manage(&serde_json::json!({"action": "clear"}))
+        .unwrap_err();
+    assert_eq!(clear_unconfirmed.code, "confirmation_required");
+
+    let cleared = builtin
+        .bench_recordings_manage(&serde_json::json!({"action": "clear", "confirmed": true}))
+        .unwrap();
+    assert_eq!(cleared["deleted_count"], 1);
+    assert_eq!(cleared["total_recordings"], 0);
+    assert!(!wav_path.exists());
 }

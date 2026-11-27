@@ -176,6 +176,10 @@ struct Listening {
     speaking: bool,
     /// 本轮确认开始说话的时刻（手动模式为进入拾音时刻，自动模式按尾部有效起音跨度回推）
     speech_began_at: Option<Instant>,
+    /// VC3 本轮确认开始说话的 Unix 毫秒时间戳（供拾音判停归因与外放时间轴对齐）
+    speech_began_at_ms: Option<u64>,
+    /// VC2/VC3 本轮拾音期间上行峰值音量（0..=100）
+    peak_uplink_level: u8,
     /// 本轮已累计的有效说话采样数（不含自动模式起音前的纯静音 preroll）
     voiced_samples: usize,
     /// 最近一次向小智屏幕推送实时中间识别字幕的时刻
@@ -427,8 +431,17 @@ struct ActiveTurn {
     music_error: Option<&'static str>,
     /// VA1/VA2 模拟联调轮次标记
     simulated: bool,
+    /// VC1 测试时间窗内按模拟处理的真实音频轮次标记
+    bench_window: bool,
+    /// VC2 数字音频对照注入轮次标记（不写入 asr-corpus）
+    digital_audio: bool,
     /// VA3 轮次开始的 Unix 毫秒时间戳
     started_at_ms: u64,
+    /// VC3 拾音开始 / 判停 / 首帧下发的 Unix 毫秒时间戳与拾音峰值音量
+    speech_began_at_ms: Option<u64>,
+    speech_end_at_ms: Option<u64>,
+    first_audio_frame_at_ms: Option<u64>,
+    peak_uplink_level: Option<u8>,
     /// VA1/VA3 注入的原始文字（仅文字直通轮次预填）
     injected_text: Option<String>,
     /// VA3 本轮路径（`fast_stop` / `fast_read` / `fast_exit` / `llm` / `ignored` / `not_for_me`）
@@ -807,6 +820,15 @@ struct MusicHud {
     next_refresh: Instant,
 }
 
+/// VC2 测试时间窗内的数字音频按帧注入器（按设备上行帧节奏喂入 VAD 与流式识别，跳过麦克风）。
+struct DigitalAudioFeed {
+    pcm: Vec<i16>,
+    offset: usize,
+    frame_samples: usize,
+    frame_duration: Duration,
+    next_at: Instant,
+}
+
 /// 副屏渲染、画风包、底栏字幕与动态字模状态（从 `Session` 67 个扁平字段中收敛）。
 #[derive(Default)]
 struct SessionScreenState {
@@ -957,6 +979,16 @@ struct Session<'a> {
     /// VB1 拾音结束移交到 `start_turn` 的本轮中间识别序列与可选快停音频
     pending_corpus_interims: Vec<crate::asr_corpus::InterimEntry>,
     pending_fast_stop_pcm: Option<(Vec<i16>, u32)>,
+    /// VC2/VC3 最近 3 秒上行音量窗口与移交到 `start_turn` 的拾音墙钟时间/峰值音量
+    recent_uplink_levels: VecDeque<(Instant, u8)>,
+    pending_speech_began_at_ms: Option<u64>,
+    pending_speech_end_at_ms: Option<u64>,
+    pending_peak_uplink_level: Option<u8>,
+    /// VC2 测试时间窗内按帧喂入的数字音频队列与待回执通道
+    digital_feed: Option<DigitalAudioFeed>,
+    pending_digital_ack:
+        Option<oneshot::Sender<Result<crate::InjectTurnAck, crate::InjectTurnError>>>,
+    next_turn_is_digital: bool,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。

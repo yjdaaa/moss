@@ -429,6 +429,26 @@ impl<'a> Session<'a> {
                 .handle_inject_text(socket, text, simulated, reply)
                 .await;
         }
+        if let crate::DeviceRequest::InjectAudio {
+            pcm,
+            sample_rate,
+            frame_ms,
+            lead_silence_ms,
+            tail_silence_ms,
+            reply,
+        } = request
+        {
+            return self
+                .handle_inject_audio(
+                    pcm,
+                    sample_rate,
+                    frame_ms,
+                    lead_silence_ms,
+                    tail_silence_ms,
+                    reply,
+                )
+                .await;
+        }
         if let crate::DeviceRequest::ShowScene { scene, style } = request {
             return self.show_scene_request(socket, scene, style).await;
         }
@@ -601,6 +621,130 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// VC2 测试时间窗内的服务端数字音频对照注入：按设备上行帧节奏送入真实 VAD/ASR/对话链路，跳过麦克风。
+    async fn handle_inject_audio(
+        &mut self,
+        pcm: Vec<i16>,
+        sample_rate: u32,
+        frame_ms: u32,
+        lead_silence_ms: u32,
+        tail_silence_ms: u32,
+        reply: oneshot::Sender<Result<crate::InjectTurnAck, crate::InjectTurnError>>,
+    ) -> Result<(), String> {
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = reply.send(Err(crate::InjectTurnError::forbidden(
+                "设备授权已撤销，无法注入数字音频",
+            )));
+            return Ok(());
+        }
+        if !self.shared.is_bench_window_active(self.device_id) {
+            let _ = reply.send(Err(crate::InjectTurnError {
+                code: "bench_window_required".into(),
+                http_status: 403,
+                message: "数字音频注入仅允许在已打开的测试时间窗内使用".into(),
+            }));
+            return Ok(());
+        }
+        if self.conversation.is_none() {
+            let _ = reply.send(Err(crate::InjectTurnError::conflict(
+                "echo_mode",
+                "内置语音当前处于回声模式，无法执行数字音频对照注入",
+            )));
+            return Ok(());
+        }
+        if self.busy()
+            || self.actively_speaking_user()
+            || self.digital_feed.is_some()
+            || self.music.as_ref().is_some_and(|m| m.active())
+        {
+            let _ = reply.send(Err(crate::InjectTurnError::busy(self.phase.label())));
+            return Ok(());
+        }
+        let body_pcm = if sample_rate == self.uplink_rate {
+            pcm
+        } else {
+            let mut resampler = Resampler::new(sample_rate, self.uplink_rate);
+            resampler.process(&pcm)
+        };
+        if body_pcm.is_empty() {
+            let _ = reply.send(Err(crate::InjectTurnError::invalid("数字音频不能为空")));
+            return Ok(());
+        }
+        let lead_samples = self.uplink_rate as usize * (lead_silence_ms as usize) / 1000;
+        let tail_samples = self.uplink_rate as usize * (tail_silence_ms as usize) / 1000;
+        let mut full_pcm = Vec::with_capacity(lead_samples + body_pcm.len() + tail_samples);
+        full_pcm.resize(lead_samples, 0i16);
+        full_pcm.extend_from_slice(&body_pcm);
+        full_pcm.resize(full_pcm.len() + tail_samples, 0i16);
+
+        let frame_samples = (self.uplink_rate as usize * (frame_ms as usize) / 1000).max(1);
+        let duration_secs = body_pcm.len() as f64 / f64::from(self.uplink_rate.max(1));
+        self.start_listening(false);
+        self.last_activity = Instant::now();
+        self.next_turn_is_digital = true;
+        self.pending_digital_ack = Some(reply);
+        self.digital_feed = Some(DigitalAudioFeed {
+            pcm: full_pcm,
+            offset: 0,
+            frame_samples,
+            frame_duration: Duration::from_millis(u64::from(frame_ms)),
+            next_at: Instant::now(),
+        });
+        self.event(format!(
+            "测试时间窗数字音频对照注入：约 {duration_secs:.1} 秒（{} Hz，每帧 {frame_ms} ms）",
+            self.uplink_rate
+        ));
+        Ok(())
+    }
+
+    pub(super) async fn tick_digital_feed(
+        &mut self,
+        socket: &mut crate::link::Link,
+    ) -> Result<(), String> {
+        if !self.shared.is_bench_window_active(self.device_id) {
+            self.cancel_digital_feed("测试时间窗已关闭，数字音频注入中止");
+            return Ok(());
+        }
+        if !matches!(self.phase, Phase::Listening(_)) {
+            self.digital_feed = None;
+            return Ok(());
+        }
+        let (chunk, finished) = {
+            let Some(feed) = self.digital_feed.as_mut() else {
+                return Ok(());
+            };
+            let end = (feed.offset + feed.frame_samples).min(feed.pcm.len());
+            let chunk = feed.pcm[feed.offset..end].to_vec();
+            feed.offset = end;
+            feed.next_at = Instant::now() + feed.frame_duration;
+            (chunk, feed.offset >= feed.pcm.len())
+        };
+        if finished {
+            self.digital_feed = None;
+        }
+        if !chunk.is_empty() {
+            self.record_uplink_level(crate::audio::pcm_rms_level(&chunk));
+            if !self.listen.listen_manual
+                && let Some(worker) = self.vad_worker.as_mut()
+            {
+                worker.submit(chunk, false)?;
+                if finished {
+                    self.pending_listen_stop = true;
+                }
+                return Ok(());
+            }
+            if let Some((utterance, end)) = self.hear(&chunk, None) {
+                self.next_turn_is_digital = true;
+                return self.finish_or_hold_utterance(socket, utterance, end).await;
+            }
+        }
+        if finished && matches!(self.phase, Phase::Listening(_)) {
+            self.next_turn_is_digital = true;
+            self.finish_listen_stop(socket).await?;
+        }
+        Ok(())
+    }
+
     async fn dispatch_device_request(
         &mut self,
         socket: &mut crate::link::Link,
@@ -614,6 +758,25 @@ impl<'a> Session<'a> {
             } => {
                 return self
                     .handle_inject_text(socket, text, simulated, reply)
+                    .await;
+            }
+            crate::DeviceRequest::InjectAudio {
+                pcm,
+                sample_rate,
+                frame_ms,
+                lead_silence_ms,
+                tail_silence_ms,
+                reply,
+            } => {
+                return self
+                    .handle_inject_audio(
+                        pcm,
+                        sample_rate,
+                        frame_ms,
+                        lead_silence_ms,
+                        tail_silence_ms,
+                        reply,
+                    )
                     .await;
             }
             crate::DeviceRequest::SyncTools => {

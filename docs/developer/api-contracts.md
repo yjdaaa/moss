@@ -680,18 +680,21 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 
 客户端新增 Tauri 命令 `app_update_status()` 与 `app_update_install({tag})`（无 HTTP 接口），入口校验受信任主窗口（桌面端 `window_is_trusted_main`，Android 端 `is_trusted_mobile_main`）。`app_update_status` 返回 `{supported, unsupported_reason, platform, phase, version, downloaded, total, error}`，其中 `platform` 为 `windows` / `macos` / `android` / `other`，`phase` 为 `idle` / `checking` / `downloading` / `installing` / `restarting`（桌面）/ `installer_launched`（Android）/ `error`。`app_update_install` 在 `ApiService::device_work_in_progress()` 为真时拒绝（下载完安装前二次复核），只从固定前缀 `https://github.com/yjdaaa/moss/releases/download/<tag>/latest.json` 拉取更新包并用内置公钥校验 minisign 签名与 `version:` 字段；桌面端按“完全退出”顺序急停并停服务后替换重启，Android 端把校验通过的 APK 暂存于应用私有缓存并经 `FileProvider` 拉起系统安装器确认升级。
 
-### 5.3 本机 AI 文字直通调试入口（VA，2026-11-27）
+### 5.3 本机 AI 调试入口、测试时间窗与数字音频对照（VA / VC，2026-11-27）
 
-位于语音侧 `moss-voice-server::debug_api`，独立绑定 `127.0.0.1`（默认端口 `18009`，被占用时自动分配并写入 `<runtime>/debug/voice-debug.json`，绝不挂在 `laser-api` 或 `0.0.0.0:8003` 上）。仅在桌面主窗口开启 `builtin_local.debug_text_inject_enabled` 后监听；开启时在 `<runtime>/debug/voice-debug.token`（权限 `0600`）写入 32 字节随机令牌，关闭开关或开启满 24 小时后自动作废删档。所有路由要求：① 对端为回环地址（否则 403 `loopback_only`）；② 不携带 `Origin` 请求头（否则 403 `origin_not_allowed`）；③ 开关开启且未过 24 小时有效期（关闭返回 403 `debug_disabled`，过期返回 401 `token_expired` 并自动清理文件与开关）；④ `Authorization: Bearer <token>` 常量时间匹配（缺失或错误返回 401 `unauthorized`）。
+位于语音侧 `moss-voice-server::debug_api`，独立绑定 `127.0.0.1`（默认端口 `18009`，被占用时自动分配并写入 `<runtime>/debug/voice-debug.json`，绝不挂在 `laser-api` 或 `0.0.0.0:8003` 上）。仅在桌面主窗口开启 `builtin_local.debug_text_inject_enabled` 后监听；开启时在 `<runtime>/debug/voice-debug.token`（权限 `0600`）写入 32 字节随机令牌，关闭开关或开启满 24 小时后自动作废删档（同时自动关闭全部测试时间窗）。所有路由要求：① 对端为回环地址（否则 403 `loopback_only`）；② 不携带 `Origin` 请求头（否则 403 `origin_not_allowed`）；③ 开关开启且未过 24 小时有效期（关闭返回 403 `debug_disabled`，过期返回 401 `token_expired` 并自动清理文件、关闭开关与时间窗）；④ `Authorization: Bearer <token>` 常量时间匹配（缺失或错误返回 401 `unauthorized`）。
 
 | 路径 | 方法 | 请求体 / 参数 | 响应与错误 |
 |---|---|---|---|
-| `/debug/v1/devices` | GET | 无 | 200 `{mode, active_laser_job, devices:[{device_id, session_id, state, level, transport, connected_at, device_mcp_enabled, device_tools_ready, device_tools_count, screen_monochrome}]}` |
+| `/debug/v1/devices` | GET | 无 | 200 `{mode, active_laser_job, bench_windows:[{device_id, session_id, opened_at_ms, expires_at_ms, max_minutes}], devices:[{device_id, session_id, state, level, recent_peak_level, latest_turn, latest_turn_id, bench_window, transport, connected_at, device_mcp_enabled, device_tools_ready, device_tools_count, screen_monochrome}]}` |
+| `/debug/v1/devices/{device_id}/turns` | GET | 查询参数 `limit?`（默认 20，限 1..=50） | 200 `{device_id, turns:[TurnDetail...]}`，按轮次倒序返回该设备近期完整明细 |
+| `/debug/v1/bench-window` | POST | `{device_id, action:"open"\|"close", max_minutes?}`（或布尔 `open`；`max_minutes` 默认 30、限 1..=60） | 打开或关闭该设备的整体测试时间窗：开启返回 200 `{device_id, action:"open", bench_window:{...}}`（离线 404 `device_offline`、撤销 403 `device_revoked`、回声模式 409 `echo_mode`、非法时长 400 `invalid_max_minutes`）；关闭返回 200 `{device_id, action:"close", closed, bench_window:null}`。时间窗内该设备全部真实音频轮次强制按 `simulated=true` 处理，到期/断连/关开关/令牌过期自动关闭 |
 | `/debug/v1/devices/{device_id}/inject` | POST | `{text: string}` | 强制以 `simulated = true` 注入到该在线会话并先下发 `stt` 字幕；成功 202 `{turn_id, device_id, session_id, turn, simulated:true, accepted_at_ms}`；空文本或超长 400 `text_invalid`，离线 404 `device_offline`，已撤销 403 `device_revoked`，回声模式 409 `echo_mode`，正在对话/播放/拾音 409 `device_busy`（绝不打断进行中对话） |
-| `/debug/v1/turns/{turn_id}` | GET | 路径参数 `turn_id` | 200 `{turn_id, device_id, session_id, turn, simulated, injected_text, corrected_text, route, outcome, started_at_ms, finished_at_ms, stages:{...}, tools:[{name, arguments, result, ms, blocked, block_reason}], reply, spoken, playback:{frames, underruns, stall_ms}, stop_skipped_reason?, device_online, device_state, device_level}`；不存在 404 `turn_not_found` |
+| `/debug/v1/devices/{device_id}/inject-audio` | POST | `{pcm_base64, sample_rate?:16000\|24000, frame_ms?:20\|40\|60, lead_silence_ms?, tail_silence_ms?}` | 仅在目标设备**已打开测试时间窗**时允许（未开窗 403 `bench_window_required`）；按设备帧节奏把 16-bit LE 单声道 PCM（最长 30 秒）注入该会话用于数字对照，触发轮次恒 `simulated=true`、`digital_audio=true` 且绝不进入 `asr-corpus`；成功 202 `{device_id, session_id, accepted_at_ms, duration_ms, frame_ms, frame_count, expected_min_turn}`；参数错 400、离线 404、回声/忙 409 |
+| `/debug/v1/turns/{turn_id}` | GET | 路径参数 `turn_id` | 200 `{turn_id, device_id, session_id, turn, simulated, bench_window, simulated_label?, digital_audio, injected_text, corrected_text, route, outcome, started_at_ms, finished_at_ms, speech_began_at_ms?, speech_end_at_ms?, first_audio_frame_at_ms?, peak_uplink_level, corpus_date?, corpus_turn_id?, stages:{...}, tools:[{name, arguments, result, ms, blocked, block_reason}], reply, spoken, playback:{frames, underruns, stall_ms}, stop_skipped_reason?, device_online, device_state, device_level}`；不存在 404 `turn_not_found` |
 | `/debug/v1/process-trace` | POST | `{enabled: bool, flush?: bool}` | 200 `{enabled, previous_enabled, trace_dir_rel, using_custom_dir}`；未挂载 503 `process_trace_unavailable`，读写失败 500 `process_trace_failed` |
 
-不提供任何直接调用工具、修改其他设置或下发设备命令的接口。配套桌面 Tauri 命令沿用主窗口来源校验（`require_main_window`）：`voice_local_save({debug_text_inject_enabled})` 热启停上述入口（不断开在线小智）；`voice_device_request({deviceId, action:"inject_text", payload:{text}})` 仅在调试开关开启且未过期时走同一模拟注入链路（关闭时返回 403 `debug_inject_disabled`）；`voice_builtin_status` 新增无密钥字段 `debug_inject{enabled, active, host, port, issued_at, expires_at, ttl_hours, token_file_rel, meta_file_rel}`，且 `debug_traces[]` 每条附带 `simulated: bool`（工具摘要附带 `blocked` / `block_reason`）。
+不提供任何直接调用工具、修改其他设置或下发设备命令的接口。配套桌面 Tauri 命令沿用主窗口来源校验（`require_main_window`）：`voice_local_save({debug_text_inject_enabled})` 热启停上述入口（不断开在线小智，关闭时同步关闭全部测试时间窗）；`voice_device_request({deviceId, action:"inject_text", payload:{text}})` 仅在调试开关开启且未过期时走同一模拟注入链路（关闭时返回 403 `debug_inject_disabled`）；`voice_device_request({deviceId, action:"close_bench_window"})` 供桌面“立即结束测试”按钮主动关闭该设备的测试时间窗；`voice_builtin_status` 返回无密钥字段 `debug_inject{enabled, active, host, port, issued_at, expires_at, ttl_hours, token_file_rel, meta_file_rel, bench_windows[]}`，在线会话对象附带 `bench_window`、`latest_turn`、`recent_peak_level`，`debug_traces[]` 每条附带 `simulated: bool` 与 `bench_window: bool`（工具摘要附带 `blocked` / `block_reason`）。
 
 ### 5.4 识别（ASR）真实录音语料采集与标注命令（VB，2026-11-27）
 
@@ -703,7 +706,18 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 - `"save_label"`：`{date, turn_id, reference_text, verified_correct?, tags?}`（关闭态返回 403 `asr_corpus_disabled`；校验非空与合法标签后原子写入同目录 `<turn-id>.label.json`）；
 - `"delete"`：`{date, turn_id}`（关闭态仍允许删除单条语料）；`"clear"`：`{confirmed: true}`（清空全部语料）。
 
-`voice_builtin_status` 附带无录音、无文本的摘要 `asr_corpus{enabled, max_items, max_days, corpus_dir_rel}`；`diagnostics_bundle()` 严禁包含任何语料内容并在 `excluded` 显式列出“识别测评录音语料与标注”。
+`voice_builtin_status` 附带无录音、无文本的计数摘要 `asr_corpus{enabled, max_items, max_days, corpus_dir_rel, total_count, labeled_count}`（仅整数统计）；`diagnostics_bundle()` 严禁包含任何语料内容并在 `excluded` 显式列出“识别测评录音语料与标注”。
+
+### 5.5 整体测试真人录音语料管理命令（VD2，2026-11-27）
+
+无 HTTP 接口；仅通过敏感 Tauri 命令 `voice_bench_recordings_manage({input})` 提供，只授权给 `capabilities/voice-private-main.json` 的桌面主窗口，入口校验 `require_private_settings_window(&window)?`（不在 `default.json`）。`input.action` 取值：
+
+- `"status"` / `"list"`：返回 `{recordings_dir_rel:"voice-bench/recordings", corpus_name, corpus_count, corpus_items[], total_recordings, speaker_count, complete_speaker_count, complete_speakers[], speakers[], recordings[]}`（`corpus_items` 来自内置 `scripts/voice-bench/e2e-corpus.json`，不回传本机绝对路径）；
+- `"save"`：`{speaker, corpus_id, text?, audio_wav_base64}`（校验说话人标签与语料编号无路径穿越，解码并线性重采样至 16 kHz 单声道 WAV，校验时长 0.5–15 秒、电平不过低、无削顶，不通过返回 400 `bench_recording_quality_failed`；原子写入 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}`）；
+- `"audio"`：`{speaker, corpus_id}`（返回 `{speaker, corpus_id, sample_rate:16000, duration_ms, audio_data_url}`）；
+- `"delete"`：`{speaker, corpus_id}`（删除单条录音与元数据）；`"delete_speaker"`：`{speaker, confirmed: true}`；`"clear"`：`{confirmed: true}`（清空全部测试录音，缺少 `confirmed: true` 返回 400 `confirmation_required`）。
+
+`voice_builtin_status` 附带无录音、无绝对路径的摘要 `bench_recordings{recordings_dir_rel, corpus_count, total_recordings, speaker_count, complete_speaker_count, speakers[]}`；`diagnostics_bundle()` 严禁包含任何测试录音或说话人元数据，并在 `excluded` 显式列出“本机整体测试真人录音与元数据”。
 
 ## 6. 黄金样本生成要求（阶段 1）
 

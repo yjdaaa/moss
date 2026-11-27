@@ -5,6 +5,7 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
 import { voiceApi } from "../voiceApi.js";
 import {
+  AiBenchAssistantCard,
   BuiltinDevicesPanel,
   BuiltinEvents,
   BuiltinJevModelGroup,
@@ -15,7 +16,6 @@ import {
   LiveDebugTraces,
   LocalModelsGroup,
   PrivateSettingsEntry,
-  VoiceAsrCorpusCard,
   XiaozhiUsbProvisionCard,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
@@ -785,6 +785,8 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
               id="records"
               mode={mode}
               parts={[
+                // VD6（2026-11-27 用户确认放置方案）：仅内置链路显示，默认展开，集中 AI 联调清单、复制提示词、录制测试语料、调试注入开关与识别语料
+                { key: "ai-bench-hub", modes: ["builtin"], node: <AiBenchAssistantCard builtin={builtin} active={activeTab === "records"} /> },
                 {
                   key: "approvals",
                   modes: ["official", "builtin"],
@@ -838,7 +840,6 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                 // 2026-11-09：激光雕刻机与 MOSS 软件的事件和语音链路无关，两种链路都显示
                 { key: "builtin-events", modes: ["official", "builtin"], node: <BuiltinEvents builtin={builtin} /> },
                 { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
-                { key: "asr-corpus", modes: ["builtin"], node: <VoiceAsrCorpusCard builtin={builtin} active={activeTab === "records"} /> },
               ]}
             />
           </VoiceTabPanel>

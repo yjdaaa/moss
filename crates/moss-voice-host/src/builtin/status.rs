@@ -34,6 +34,7 @@ pub(super) const BUNDLE_EXCLUDED: &[&str] = &[
     "任何密钥、令牌、密码（只记录是否填过）",
     "录音和合成音频",
     "识别测评录音语料与标注",
+    "本机整体测试真人录音与元数据",
     "排障开关关闭时的对话文字",
     "对话记忆、长期记忆、资料库内容与声纹",
     "家居地址与令牌、固件文件",
@@ -293,6 +294,7 @@ impl BuiltinVoice {
             "debug_traces": self.persisted_chat_traces(view.as_ref()),
             "debug_inject": self.debug_inject_status(),
             "asr_corpus": self.asr_corpus_summary(),
+            "bench_recordings": self.bench_recordings_summary(),
             "device_prefs": settings.builtin_device_prefs,
             "memory_enabled": self.memory.enabled(),
             "devices": self.devices(),
@@ -339,6 +341,7 @@ impl BuiltinVoice {
                         "truncated": r.truncated,
                         "tools_dropped": usize::try_from(r.tools_dropped.max(0)).unwrap_or(0),
                         "simulated": r.simulated,
+                        "bench_window": r.bench_window,
                     })
                 })
                 .collect();

@@ -1122,6 +1122,9 @@ fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
         transport: "mqtt".into(),
         text_font_size: Some(14),
         text_font_bpp: Some(1),
+        bench_window: None,
+        latest_turn: 0,
+        recent_peak_level: 0,
     });
     server.shared.state.open(SessionView {
         session_id: "ffff_active".into(),
@@ -1145,6 +1148,9 @@ fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
         transport: "mqtt".into(),
         text_font_size: Some(20),
         text_font_bpp: Some(4),
+        bench_window: None,
+        latest_turn: 0,
+        recent_peak_level: 0,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     server.shared.device_requests.lock().unwrap().insert(

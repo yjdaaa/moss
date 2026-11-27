@@ -231,6 +231,7 @@ impl DeviceRegistry for DbRegistry {
             truncated: trace.truncated,
             tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
             simulated: trace.simulated,
+            bench_window: trace.bench_window,
         };
         if let Ok(db) = self.db.lock() {
             // 拿锁后二次核验开关与代次，保证与清空/关闭时的 db.lock() 屏障严格串行
@@ -388,6 +389,20 @@ impl BuiltinVoice {
                 .ok_or_else(|| invalid("请先输入要发送的测试文字"))?;
             return self.inject_text_for_device(device_id, text);
         }
+        if label == "close_bench_window" {
+            let server = self
+                .server
+                .lock()
+                .map_err(|_| internal("内置语音服务状态锁失败"))?;
+            let closed = server
+                .as_ref()
+                .is_some_and(|s| s.close_bench_window(device_id, "桌面手动结束"));
+            return Ok(serde_json::json!({
+                "requested": label,
+                "device_id": device_id,
+                "closed": closed,
+            }));
+        }
         if label == "push_bot_pose" {
             let raw_pose = value
                 .and_then(|v| v.get("pose").or(Some(v)))
@@ -490,7 +505,7 @@ impl BuiltinVoice {
             }
             _ => {
                 return Err(invalid(
-                    "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview、push_bot_pose、inject_text、capture_photo、camera_frame 或 clear_camera_frame",
+                    "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview、push_bot_pose、inject_text、close_bench_window、capture_photo、camera_frame 或 clear_camera_frame",
                 ));
             }
         };

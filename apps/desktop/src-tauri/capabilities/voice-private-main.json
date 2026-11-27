@@ -35,6 +35,7 @@
     "allow-voice-wakeword-import-base",
     "allow-voice-wakeword-manage",
     "allow-voice-usb-provision",
-    "allow-voice-asr-corpus-manage"
+    "allow-voice-asr-corpus-manage",
+    "allow-voice-bench-recordings-manage"
   ]
 }

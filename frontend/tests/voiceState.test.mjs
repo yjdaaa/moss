@@ -2557,14 +2557,20 @@ test("VA5 本机 AI 调试注入开关与设备发送测试文字输入框：默
   assert.equal(onView.showDeviceInput({ device_id: "d1", status: "pending" }, true), false);
   assert.equal(onView.showDeviceInput({ device_id: "d1", status: "revoked" }, true), false);
 
-  // 4. 组件源码核验：开关开启前必须走 showConfirm、输入框只在开启时渲染、对话记录标出模拟轮次
+  // 4. 组件源码核验：开关已挪到“记录与诊断 › AI 联调与测试”（保留确认弹窗与原 id），服务页不再显示；输入框只在开启时渲染
   const servicePanelSrc = readFileSync(
     new URL("../src/components/voice-builtin/BuiltinServicePanel.jsx", import.meta.url),
     "utf8",
   );
-  assert.match(servicePanelSrc, /voice-debug-inject-switch/);
-  assert.match(servicePanelSrc, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/);
-  assert.match(servicePanelSrc, /debug_text_inject_enabled:\s*on/);
+  assert.doesNotMatch(servicePanelSrc, /voice-debug-inject-switch/);
+
+  const aiHubSrc = readFileSync(
+    new URL("../src/components/voice-builtin/AiBenchAssistantCard.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(aiHubSrc, /voice-debug-inject-switch/);
+  assert.match(aiHubSrc, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/);
+  assert.match(aiHubSrc, /debug_text_inject_enabled:\s*on/);
 
   const devicesPanelSrc = readFileSync(
     new URL("../src/components/voice-builtin/BuiltinDevicesPanel.jsx", import.meta.url),
@@ -2663,8 +2669,238 @@ test("VB2/VB4 识别语料面板：默认关闭、仅开关开启时可用、标
   assert.match(cardSrc, /voiceApi\.asrCorpusManage\(/);
   assert.match(cardSrc, /✓ 正确/);
 
+  // VD6：VoiceAsrCorpusCard 作为子块内嵌在 AiBenchAssistantCard（记录与诊断 › AI 联调与测试），不再单独成组
+  const aiHubForAsr = readFileSync(
+    new URL("../src/components/voice-builtin/AiBenchAssistantCard.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(aiHubForAsr, /<VoiceAsrCorpusCard[\s\S]*embedded/);
   const pageSrc = readFileSync(new URL("../src/pages/VoicePage.jsx", import.meta.url), "utf8");
-  assert.match(pageSrc, /<VoiceAsrCorpusCard/);
+  assert.match(pageSrc, /key:\s*"ai-bench-hub"/);
+});
+
+test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词脱敏与测试时间窗界面标记", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { aiBenchChecklistView, buildAiBenchPrompt } = await import("../src/voiceState.js");
+
+  const fakeSecret = ["sk", "LeakTestKey0123456789ABCDEF"].join("-");
+  const fakeToken = "debugtoken0123456789abcdef0123456789abcdef";
+
+  // 1. 未就绪态：5 项清单逐项给出打叉与修复指引（第 3 项为真人测试语料录音，不再出现合成 TTS 项）
+  const coldStatus = {
+    debug_inject: { enabled: false, active: false, token: fakeToken },
+    sessions: [],
+    bench_recordings: { corpus_count: 13, total_recordings: 0, speaker_count: 0, complete_speaker_count: 0 },
+    asr_corpus: { enabled: false, total_count: 0, labeled_count: 0 },
+  };
+  const coldView = aiBenchChecklistView(coldStatus);
+  assert.equal(coldView.items.length, 5);
+  assert.equal(coldView.items.find((i) => i.key === "debug_inject").ok, false);
+  assert.equal(coldView.items.find((i) => i.key === "online_device").ok, false);
+  assert.equal(coldView.items.find((i) => i.key === "bench_recordings").ok, false);
+  assert.equal(coldView.items.find((i) => i.key === "asr_corpus").ok, false);
+  assert.equal(coldView.items.find((i) => i.key === "bench_window").active, false);
+  assert.equal(coldView.items.some((i) => i.key === "local_tts"), false);
+
+  // 2. 全就绪 + 测试时间窗打开态
+  const readyStatus = {
+    debug_inject: { enabled: true, active: true, port: 18009, token: fakeToken },
+    sessions: [
+      {
+        device_id: "aa:bb:cc:11:22:33",
+        session_id: "sess-1",
+        state: "listening",
+        bench_window: { active: true, max_minutes: 30, expires_at: 1_900_000_000 },
+      },
+    ],
+    bench_recordings: { corpus_count: 13, total_recordings: 26, speaker_count: 2, complete_speaker_count: 2 },
+    asr_corpus: { enabled: true, total_count: 12, labeled_count: 8 },
+  };
+  const readyView = aiBenchChecklistView(readyStatus);
+  assert.equal(readyView.readyCount, 5);
+  assert.equal(readyView.activeBenchWindows.length, 1);
+  assert.match(readyView.items.find((i) => i.key === "bench_recordings").statusText, /2 位说话人已录齐/);
+  assert.match(readyView.items.find((i) => i.key === "asr_corpus").statusText, /8\/12/);
+  assert.match(readyView.items.find((i) => i.key === "bench_window").statusText, /整体测试中（物理动作已锁定/);
+
+  // 3. VD4 提示词包含真人录音前提、30–50 cm、关键命令与红线要求，且绝不含合成音回退或令牌/密钥/本机绝对路径
+  const e2ePromptCold = buildAiBenchPrompt(coldStatus, "e2e");
+  assert.match(e2ePromptCold, /录制测试语料/);
+  assert.match(e2ePromptCold, /至少录完一位说话人的全部语料/);
+
+  const e2ePrompt = buildAiBenchPrompt({ ...readyStatus, extra: fakeSecret }, "e2e");
+  assert.match(e2ePrompt, /xiaozhi-e2e\.mjs/);
+  assert.match(e2ePrompt, /--device aa:bb:cc:11:22:33/);
+  assert.match(e2ePrompt, /--speaker/);
+  assert.match(e2ePrompt, /AGENTS\.md/);
+  assert.match(e2ePrompt, /node scripts\/verify\.mjs --finish/);
+  assert.match(e2ePrompt, /30–50 cm/);
+  assert.match(e2ePrompt, /suggestions\.json.*不要自动应用/s);
+  assert.match(e2ePrompt, /不要修改语料来让测试通过/);
+  assert.doesNotMatch(e2ePrompt, /System\.Speech|回退到系统自带朗读/);
+  assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
+  assert.ok(!e2ePrompt.includes(fakeSecret), "提示词绝不能包含密钥");
+  assert.ok(!/\/Users\/|\/home\/|[A-Z]:\\Users\\/i.test(e2ePrompt), "提示词绝不能包含本机绝对路径");
+
+  const textPrompt = buildAiBenchPrompt(readyStatus, "text");
+  assert.match(textPrompt, /live-xiaozhi-debug\.mjs/);
+  assert.ok(!textPrompt.includes(fakeToken));
+
+  const asrPrompt = buildAiBenchPrompt(readyStatus, "asr");
+  assert.match(asrPrompt, /asr-bench\.mjs/);
+  assert.match(asrPrompt, /8 条已标注/);
+  assert.ok(!asrPrompt.includes(fakeToken));
+
+  // 4. VD6 组件源码守卫：测试时间窗标记与“立即结束测试”按钮、AI 联调与测试五块顺序、对话记录“模拟（整体测试）”
+  const devicesPanelSrc = readFileSync(
+    new URL("../src/components/voice-builtin/BuiltinDevicesPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(devicesPanelSrc, /整体测试中（物理动作已锁定）/);
+  assert.match(devicesPanelSrc, /立即结束测试/);
+  assert.match(devicesPanelSrc, /voiceApi\.deviceRequest\(device\.device_id,\s*"close_bench_window"\)/);
+
+  const assistantSrc = readFileSync(
+    new URL("../src/components/voice-builtin/AiBenchAssistantCard.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(assistantSrc, /复制 AI 整体测试提示词/);
+  assert.match(assistantSrc, /复制文字直通提示词/);
+  assert.match(assistantSrc, /复制识别测评提示词/);
+  assert.match(assistantSrc, /buildAiBenchPrompt\(/);
+  assert.match(assistantSrc, /aiBenchChecklistView\(/);
+  const idxChecklist = assistantSrc.indexOf('id="voice-ai-bench-checklist"');
+  const idxCopy = assistantSrc.indexOf('id="voice-ai-bench-prompt-actions"');
+  const idxRecorder = assistantSrc.indexOf("<BenchRecordingsSection");
+  const idxSwitch = assistantSrc.indexOf('id="voice-debug-inject-switch"');
+  const idxCorpus = assistantSrc.indexOf("<VoiceAsrCorpusCard");
+  assert.ok(
+    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch && idxSwitch < idxCorpus,
+    "VD6：AI 联调与测试分组内必须严格按 状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关 → 识别语料 排列",
+  );
+
+  const tracesSrc = readFileSync(
+    new URL("../src/components/voice-builtin/LiveDebugTraces.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(tracesSrc, /模拟（整体测试）/);
+  assert.match(tracesSrc, /trace\.bench_window/);
+
+  const pageSrc = readFileSync(new URL("../src/pages/VoicePage.jsx", import.meta.url), "utf8");
+  assert.match(pageSrc, /<AiBenchAssistantCard/);
+});
+
+test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/削顶校验、权限指引与删除前确认", async () => {
+  const { readFileSync } = await import("node:fs");
+  const {
+    BENCH_RECORDINGS_CLEAR_ALL_CONFIRM_TEXT,
+    BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_TEXT,
+    analyzeRecordingQuality,
+    benchRecordingGuideState,
+    formatCorpusPromptSegments,
+    micPermissionErrorHint,
+    resampleFloatTo16k,
+    validateSpeakerLabel,
+  } = await import("../src/voiceState.js");
+
+  // 1. 说话人标签校验（拒绝空值与路径穿越）
+  assert.equal(validateSpeakerLabel("我").ok, true);
+  assert.equal(validateSpeakerLabel("家人 A").ok, true);
+  assert.equal(validateSpeakerLabel("").ok, false);
+  assert.equal(validateSpeakerLabel("../escape").ok, false);
+  assert.equal(validateSpeakerLabel("a/b").ok, false);
+
+  // 2. 48 kHz -> 16 kHz 重采样长度准确
+  const src48k = new Float32Array(48_000).fill(0.25);
+  const dst16k = resampleFloatTo16k(src48k, 48_000, 16_000);
+  assert.equal(dst16k.length, 16_000);
+
+  // 3. 时长（0.5–15 秒）、电平过低与削顶校验
+  const makeTone = (ms, amp) => {
+    const n = Math.round((16_000 * ms) / 1000);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) out[i] = Math.sin((2 * Math.PI * 440 * i) / 16_000) * amp;
+    return out;
+  };
+  assert.equal(analyzeRecordingQuality(makeTone(300, 0.35), 16_000).ok, false, "<0.5s 拒绝");
+  assert.equal(analyzeRecordingQuality(makeTone(16_000, 0.35), 16_000).ok, false, ">15s 拒绝");
+  assert.equal(analyzeRecordingQuality(makeTone(1500, 0.002), 16_000).ok, false, "音量过低拒绝");
+  assert.equal(analyzeRecordingQuality(new Float32Array(16_000).fill(1.0), 16_000).ok, false, "削顶拒绝");
+  const good = analyzeRecordingQuality(makeTone(1800, 0.35), 16_000);
+  assert.equal(good.ok, true, "正常 1.8s 语音通过校验");
+  assert.ok(good.peakLevel >= 30 && good.peakLevel <= 40);
+
+  // 4. 句中停顿说明渲染
+  const segs = formatCorpusPromptSegments({
+    text: "前半句，后半句",
+    segments: [
+      { text: "前半句", pause_ms_after: 700 },
+      { text: "后半句", pause_ms_after: 0 },
+    ],
+  });
+  assert.equal(segs.some((s) => s.type === "pause" && s.label.includes("0.7 秒")), true);
+
+  // 5. 录制引导状态切换（进度、开始/停止/重录/试听/保存/下一句按钮门控）
+  const corpus = [
+    { id: "c1", label: "句1", text: "第一句" },
+    { id: "c2", label: "句2", text: "第二句" },
+  ];
+  const idleGuide = benchRecordingGuideState({ corpusItems: corpus, recordings: [], speaker: "我", currentIndex: 0 });
+  assert.equal(idleGuide.progressText, "已录 0 / 2");
+  assert.equal(idleGuide.canStart, true);
+  assert.equal(idleGuide.canStop, false);
+  assert.equal(idleGuide.canSave, false);
+  assert.equal(idleGuide.canNext, true);
+
+  const recordingGuide = benchRecordingGuideState({
+    corpusItems: corpus,
+    recordings: [],
+    speaker: "我",
+    currentIndex: 0,
+    recording: true,
+  });
+  assert.equal(recordingGuide.canStart, false);
+  assert.equal(recordingGuide.canStop, true);
+  assert.equal(recordingGuide.canSave, false);
+
+  const badDraftGuide = benchRecordingGuideState({
+    corpusItems: corpus,
+    recordings: [],
+    speaker: "我",
+    currentIndex: 0,
+    draft: { wavDataUrl: "data:audio/wav;base64,AA==", quality: { ok: false, error: "音量过低" } },
+  });
+  assert.equal(badDraftGuide.canSave, false, "质量校验未通过不得允许保存");
+  assert.equal(badDraftGuide.canRetry, true);
+
+  const okDraftGuide = benchRecordingGuideState({
+    corpusItems: corpus,
+    recordings: [{ speaker: "我", corpus_id: "c1", duration_ms: 1200, peak_level: 40 }],
+    speaker: "我",
+    currentIndex: 0,
+    draft: { wavDataUrl: "data:audio/wav;base64,AA==", quality: good },
+  });
+  assert.equal(okDraftGuide.progressText, "已录 1 / 2");
+  assert.equal(okDraftGuide.canSave, true);
+  assert.equal(okDraftGuide.canPreview, true);
+
+  // 6. 权限拒绝提示覆盖 macOS / Windows / Linux
+  const deniedErr = Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+  assert.match(micPermissionErrorHint(deniedErr, "MacIntel"), /隐私与安全性 › 麦克风/);
+  assert.match(micPermissionErrorHint(deniedErr, "Win32"), /隐私和安全性 › 麦克风/);
+  assert.match(micPermissionErrorHint(deniedErr, "Linux x86_64"), /允许 MOSS 访问麦克风/);
+
+  // 7. 删除前确认守卫
+  assert.match(BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_TEXT, /删除/);
+  assert.match(BENCH_RECORDINGS_CLEAR_ALL_CONFIRM_TEXT, /删除全部/);
+  const recSrc = readFileSync(
+    new URL("../src/components/voice-builtin/BenchRecordingsSection.jsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(recSrc, /showConfirm\(\s*BENCH_RECORDINGS_CLEAR_ALL_CONFIRM_TEXT/);
+  assert.match(recSrc, /showConfirm\(\s*BENCH_RECORDINGS_DELETE_ITEM_CONFIRM_TEXT/);
+  assert.match(recSrc, /voiceApi\.benchRecordingsManage\(/);
+  assert.match(recSrc, /不用于声纹/);
 });
 
 

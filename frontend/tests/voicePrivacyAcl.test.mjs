@@ -32,6 +32,7 @@ const SENSITIVE_COMMANDS = [
   "voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage",
   "voice_usb_provision",
   "voice_asr_corpus_manage",
+  "voice_bench_recordings_manage",
 ];
 
 test("n67：独立安全窗口已取消，页面、入口与打开窗口的命令都不存在", () => {
@@ -179,4 +180,34 @@ test("2026-11-07 应用内更新命令只认主窗口，更新插件的前端命
   }
   assert.match(native, /device_work_in_progress\(\)/, "加工中拒绝更新");
   assert.match(native, /on_before_exit\(move \|\| crate::shutdown_desktop_services/, "Windows 安装器结束进程前走急停收尾");
+});
+
+test("VD2/VD6：测试录音主窗口 ACL、macOS 麦克风权限说明与 AI 联调与测试集中放置在记录与诊断页", () => {
+  const plist = desktop("Info.plist");
+  assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key>/, "macOS Info.plist 必须声明麦克风权限说明");
+  assert.match(plist, /用于录制本机语音测试语料/);
+
+  assert.match(frontend("src/voiceApi.js"), /benchRecordingsManage: \(input\) => invokeVoice\("voice_bench_recordings_manage", \{ input \}\)/);
+
+  const servicePanel = frontend("src/components/voice-builtin/BuiltinServicePanel.jsx");
+  assert.doesNotMatch(servicePanel, /voice-debug-inject-switch/, "VD6：调试注入开关不再显示在服务页");
+
+  const aiHub = frontend("src/components/voice-builtin/AiBenchAssistantCard.jsx");
+  assert.match(aiHub, /id="ai-bench-hub"/);
+  assert.match(aiHub, /title="AI 联调与测试"/);
+  assert.match(aiHub, /voice-debug-inject-switch/, "VD6：调试注入开关挪入 AI 联调与测试分组并保留原 id");
+  assert.match(aiHub, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/, "VD6：挪动后保留原确认弹窗");
+  assert.match(aiHub, /<BenchRecordingsSection/);
+  assert.match(aiHub, /<VoiceAsrCorpusCard[\s\S]*embedded/);
+
+  const page = frontend("src/pages/VoicePage.jsx");
+  const serviceTab = page.split('<VoiceTabPanel tab="service"')[1].split("</VoiceTabPanel>")[0];
+  assert.doesNotMatch(serviceTab, /AiBenchAssistantCard/, "VD6：AI 联调卡片不再放在服务标签");
+  const recordsTab = page.split('<VoiceTabPanel tab="records"')[1].split("</VoiceTabPanel>")[0];
+  assert.match(recordsTab, /key:\s*"ai-bench-hub",\s*modes:\s*\["builtin"\]/, "VD6：AI 联调与测试仅在内置链路下的记录与诊断显示");
+  assert.ok(
+    recordsTab.indexOf('key: "ai-bench-hub"') < recordsTab.indexOf('key: "approvals"'),
+    "VD6：AI 联调与测试须位于记录与诊断最上方",
+  );
+  assert.doesNotMatch(recordsTab, /key:\s*"asr-corpus"/, "VD6：识别语料不再在记录与诊断单独列一组");
 });

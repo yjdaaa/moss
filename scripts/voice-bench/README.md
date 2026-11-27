@@ -95,4 +95,83 @@ node scripts/voice-bench/asr-bench.mjs
 **安全规则**：
 - 同音纠错候选严禁把任何内容映射成停止/退出等命令词，也不允许改写命令词本身；违规候选直接丢弃并在报告里注明。
 - 所有候选只写入 `suggestions.json`，脚本绝不自动修改代码或 `settings.json`；是否采纳由人或 AI 复核并补测试决定。
+- 若语料中同时包含手工标注（`manual`）与整体测试自动回采（`e2e-playback`）条目，报告会按 `label_source` 分组展示指标，避免外放回采与真人原声混淆。
 - 脚本退出前打印归档目录路径；未找到任何已标注语料时提示先开采集与标注，并返回非 `0` 状态码。
+
+---
+
+# 真小智整体测试脚本（VC2 / VC3 / VD1 / VD3：真人录音外放 → 真麦克风 → 全链路 → 4 环节归因）
+
+一条命令跑完“电脑喇叭外放真人测试录音 → 真小智麦克风拾音 → MOSS 全链路处理 → 小智扬声器播报”，自动按 **拾音判停 / 识别纠偏 / 意图工具 / 合成播放** 四个环节归因并按说话人分组统计，定位问题出在哪一段并给出对应代码位置或参数调整建议。
+
+## 前提条件
+
+1. 在 MOSS 桌面端主窗口打开 **语音中心 → 记录与诊断 → AI 联调与测试**：
+   - 在 **“录制测试语料”** 中至少录完一位说话人的全部语料（使用电脑麦克风录制 16 kHz 单声道 WAV，存放在本机 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}`，支持多位说话人标签，不进诊断包、不用于声纹）；
+   - 勾选 **“允许本机 AI 调试注入”** 并完成二次确认；
+   - （可选推荐）在同一分组开启 **“识别语料”** 采集，整体测试会自动为外放录音回写 `label_source: "e2e-playback"`（带说话人标签）。
+2. 唤醒真小智（喊“你好小智”或按对话键），或开启常连模式让设备保持在线。
+3. 将小智摆放在距离电脑喇叭 **30–50 cm** 处，调至适中音量（避免过小拾不到音或过大爆音）。
+4. 确认本机播放器可用：macOS 用 `afplay`、Windows 用 PowerShell `System.Media.SoundPlayer`、Linux 用 `paplay` 或 `aplay`。
+
+## 声音来源规则（VD1 / VD3：只用真人录音）
+
+- **绝不使用合成声音**：已彻底移除本地 TTS 与系统朗读（`say` / `System.Speech` / `espeak`），不保留回退开关。
+- **默认素材目录**：`<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.wav`（电脑麦克风直录真人语音）。未指定 `--speaker` 时按已录制说话人轮流覆盖各句；传入 `--speaker <标签>` 时只使用该说话人。
+- **缺录音处理**：
+  - 某句语料没有可用的真人录音时，脚本跳过该句，并在终端输出与 `report.md` 的 **“缺少真人录音的语料（已跳过）”** 列出清单，提示前往 App 录制；
+  - 所有语料都没有真人录音时，脚本不打开测试时间窗，直接提示前往 App 录制并以非 `0` 状态码退出。
+- **设备录音隔离**：VB 的 `<runtime>/asr-corpus` 是经小智麦克风采集的录音，再次外放会被麦克风染色两次，默认不作为外放素材；仅在显式传入 `--include-device-corpus` 时补充使用，并在报告与汇总中明确标为 **“二次录制”**。
+
+## 运行方式
+
+```bash
+node scripts/voice-bench/xiaozhi-e2e.mjs
+```
+
+### 常用参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `--corpus <path>` | 指定整体测试语料 JSON 文件 | `scripts/voice-bench/e2e-corpus.json` |
+| `--device <device_id>` | 指定目标小智设备编号 | 自动选第一台在线设备 |
+| `--speaker <标签>` | 只使用指定说话人的真人录音（例如 `我`、`家人 A`） | 全部已录制说话人轮流 |
+| `--recordings-dir <path>` | 指定真人录音目录 | `<runtime>/voice-bench/recordings` |
+| `--include-device-corpus` | 显式允许使用 `<runtime>/asr-corpus` 手工标注录音补充（报告标明“二次录制”） | 关闭 |
+| `--max-minutes <1..60>` | 测试时间窗最长锁定时长（分钟） | `30`（硬上限 `60`） |
+| `--noise <fan\|pump\|burst>` | 外放期间叠加低音量循环背景噪声（经 `python3 -I` 复用 `chain_clips.py`） | 关闭 |
+| `--noise-gain <0..1>` | 背景噪声增益 | `0.22` |
+| `--compare-digital` | 在时间窗内用同一份真人录音追加服务端数字 PCM 对照注入，逐句量化麦克风与房间 CER 损失 | 关闭 |
+| `--turn-timeout-ms <ms>` | 单句等待上限（超时记失败并继续下一句） | `90000` |
+| `--quiet-ms <ms>` | 外放前/后要求设备处于 `listening` 且安静的时长 | `1000` |
+| `--runtime-dir <path>` | 指定 MOSS 运行目录 | 系统默认运行目录 |
+| `--url http://127.0.0.1:<port>` | 显式指定本机调试入口地址（仅回环） | 自动读取 `<runtime>/debug/voice-debug.json` |
+| `--token-file <path>` | 显式指定调试令牌文件 | `<runtime>/debug/voice-debug.token` |
+| `--out-dir <path>` | 显式指定归档输出目录 | `<runtime>/voice-bench/e2e-<run-id>/` |
+| `--skip-calibration` | 跳过开跑前外放校准（仅调试脚本用，不建议在真机跳过） | 关闭 |
+
+## 安全锁、校准与串行执行
+
+- **测试时间窗（VC1）**：开跑前自动调用 `POST /debug/v1/bench-window` 锁定该设备，期间包括真实麦克风拾音在内的**所有轮次**一律走 `simulated = true`（`sim_guard` 拦截物理/外部工具、有加工任务时不发 `0x18`、不写长期记忆、对话记录标“模拟（整体测试）”）；桌面“已连接设备”显示“整体测试中（物理动作已锁定）”与“立即结束测试”按钮。无论正常结束还是异常中断，脚本都在 `finally` 中关闭时间窗、停掉背景噪声并恢复 `ProcessTrace` 原状。
+- **开跑前校准**：选用第一条可用真人录音外放校准，读取该设备的 `recent_peak_level` 与识别结果；若识别不到或电平明显过低/过高，打印“把小智放到离喇叭 30–50 cm、调高或调低电脑音量”并以非 `0` 状态码退出。
+- **严格串行**：只在设备处于 `listening` 且连续安静 1 秒后开始外放；外放结束后等待 `thinking` → `speaking` → 回到 `listening` 且安静 1 秒再放下一句，确保外放与小智播报零重叠。
+
+## 输出归档与自动语料标注
+
+每次运行在 `<runtime>/voice-bench/e2e-<run-id>/` 生成 6 个全脱敏文件（不含密钥、令牌与本机绝对路径）：
+
+- `turns.jsonl`：每轮一行 4 环节归因（拾音判停：外放/服务端时刻、首字被吞、抢话、判停延迟；识别纠偏：原文/纠偏文本与双 CER、可选数字对照损益；意图工具：路径、工具与预期命中、门禁拦截；合成播放：外放结束到首声/播完耗时、首包、欠载卡顿）及说话人标签；
+- `timeline.jsonl` / `timeline.txt`：本次时间窗内的 `ProcessTrace` 片段；
+- `report.md`：总览表、**按说话人分组统计表**、**缺少真人录音的语料清单**、4 个环节各自最差项置顶诊断表，以及按严重程度排序的“建议优先调整的环节”（附对应代码位置与参数名，如 `PREROLL_MS`、`BASE_SILENCE_MS`、`conversation.rs` 纠错表、热词等）；
+- `summary.json`：各环节通过率、按说话人指标 `by_speaker`、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
+- `audio-manifest.json`：外放音频清单（仅文件名、说话人标签、来源类型与时长，绝不复制用户原始录音）。
+
+若桌面端开启了 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会自动生成 `<turn-id>.label.json`（正确文字 = 外放原句，`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
+
+## 语料编写规范
+
+编辑自定义整体测试语料（或扩展 `scripts/voice-bench/e2e-corpus.json`）时必须遵守以下规则：
+1. **禁止编写触发真实发送、续雕、走边框、移头、回零、解锁、实时倍率、家居控制、本机 Agent 或固件推送的句子**——唯一例外是专门验证安全门禁的条目，该条目必须显式声明 `"expect_simulation_gate": true` 且仅能在测试时间窗打开的前提下运行；
+2. 停止快路径测试句（如“停”）必须标记 `"require_idle_laser": true`，确保存在活跃激光任务时自动跳过；
+3. 句中停顿抢话测试句使用 `segments: [{ text, pause_ms_after }]` 精确标注停顿时间（例如 `700` ms），App 内录制引导会自动向朗读者显示“这里停顿约 0.7 秒”；
+4. 每句可填写 `expect_route`、`expect_tool`、`key_terms`（关键术语验收词）与 `tags`；**严禁通过删改语料或放宽预期来让失败的测试“看起来通过”**。

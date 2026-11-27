@@ -19,8 +19,8 @@ import {
 } from "../../voiceState.js";
 import { formatTime } from "./shared.js";
 
-/** VB1/VB2 识别（ASR）真实录音语料采集与人工标注面板（仅受信任主窗口，默认关闭）。 */
-export function VoiceAsrCorpusCard({ builtin, active = true }) {
+/** VB1/VB2 识别（ASR）真实录音语料采集与人工标注面板（仅受信任主窗口，默认关闭；VD6 起可内嵌到“AI 联调与测试”分组）。 */
+export function VoiceAsrCorpusCard({ builtin, active = true, embedded = false }) {
   const initialSummary = builtin?.status?.asr_corpus;
   const [data, setData] = useState(() => ({
     enabled: Boolean(initialSummary?.enabled),
@@ -258,8 +258,8 @@ export function VoiceAsrCorpusCard({ builtin, active = true }) {
     return true;
   });
 
-  return (
-    <VoiceGroup id="asr-corpus" title="识别语料" summary={view.summary}>
+  const content = (
+    <>
       <div className="voice-inline-actions" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
         <label className="voice-check">
           <input
@@ -459,6 +459,24 @@ export function VoiceAsrCorpusCard({ builtin, active = true }) {
           )}
         </div>
       )}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className="voice-block" id="voice-asr-corpus-section">
+        <div className="voice-block-h">
+          <h3>识别语料（离线 ASR 测评）</h3>
+          <span className={`ob-pill ${view.enabled ? "ob-pill--ok" : "ob-pill--off"}`}>{view.summary}</span>
+        </div>
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <VoiceGroup id="asr-corpus" title="识别语料" summary={view.summary}>
+      {content}
     </VoiceGroup>
   );
 }

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增真小智纯真人录音整体测试、测试时间窗安全锁与语音中心“AI 联调与测试”分组（2026-11-27）
+
+- **现象**：VA 文字直通跳过拾音判停，VB 离线测评不覆盖真机端到端对话，且外放整体测试需完全使用真人录音（不用合成声）并在应用内提供集中录制、开关与一键提示词入口。
+- **根因与修复**：`moss-voice-server::debug_api` 新增测试时间窗 `POST /debug/v1/bench-window`（默认 30 / 上限 60 分钟，期间设备真实音频轮次强制 `simulated=true` 经 `sim_guard` 锁定物理/外部工具、有任务时不发 `0x18`、跳过记忆与声纹并经 schema v22 标为“模拟（整体测试）”，5 类触发自动关窗）及窗内数字对照 `inject-audio`。新增主窗口命令 `voice_bench_recordings_manage`（`voice-private-main.json` + `NSMicrophoneUsageDescription`，不进诊断包）用于电脑麦录制 16 kHz WAV 并校验时长/电平/削顶；`xiaozhi-e2e.mjs` 彻底移除合成音源，默认用真人录音按说话人统计（缺录跳过、全缺非 0、`--include-device-corpus` 标“二次录制”）。语音中心「记录与诊断」顶部集中新建“AI 联调与测试”分组（清单、提示词、录制引导、调试开关、识别语料）。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1606 项、前端单测 430 项、脚本 86 项、浏览器 20 个文件、回环 E2E 41 项，已快更）；另有定向单测（覆盖 `moss-voice-server`、`moss-voice-host`、`moss-desktop` 主窗口 ACL 与 `Info.plist`、`laser-runtime` schema v22、`xiaozhi-e2e.test.mjs`、`voiceState.test.mjs`、`voicePrivacyAcl.test.mjs` 与 `voice-center.browser.mjs`），真小智外放与实机麦克风录制未验证（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{debug_api.rs,lib.rs,state.rs,session.rs}`、`crates/moss-voice-host/src/builtin/{bench_recordings.rs,devices.rs,debug_inject.rs,status.rs}`、`apps/desktop/src-tauri/{Info.plist,capabilities/voice-private-main.json,src/voice_builtin.rs}`、`scripts/voice-bench/{voice-assets.mjs,xiaozhi-e2e.mjs,e2e-corpus.json}`、`frontend/src/{voiceState/{aiBench.js,benchRecordings.js},pages/VoicePage.jsx,components/voice-builtin/{AiBenchAssistantCard,BenchRecordingsSection,BuiltinServicePanel,VoiceAsrCorpusCard}.jsx}`。
+
 ### 新增识别（ASR）真实语料隐私采集、主窗口标注面板与离线自动测评脚本（2026-11-27）
 
 - **现象**：激光工作室噪声、材料术语与口语数字下各识别模型缺乏基于真实小智录音的量化对比，且缺少命令词保护下的热词与同音纠错候选产出工具。

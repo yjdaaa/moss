@@ -16,3 +16,5 @@ export * from "./voiceState/pipelineTest.js";
 export * from "./voiceState/agent.js";
 export * from "./voiceState/twin.js";
 export * from "./voiceState/asrCorpus.js";
+export * from "./voiceState/aiBench.js";
+export * from "./voiceState/benchRecordings.js";

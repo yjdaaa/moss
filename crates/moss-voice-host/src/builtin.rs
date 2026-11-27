@@ -44,6 +44,7 @@ use moss_voice_server::persona::{
 };
 
 mod asr_corpus;
+mod bench_recordings;
 mod chain_test;
 mod colab;
 mod colab_runner;

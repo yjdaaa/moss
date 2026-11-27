@@ -70,6 +70,7 @@ pub struct CapturedUtterance {
     pub turn: u64,
     pub captured_at_ms: u64,
     pub simulated: bool,
+    pub bench_window: bool,
     pub pcm: Vec<i16>,
     pub sample_rate: u32,
     pub raw_text: String,
@@ -91,6 +92,8 @@ pub struct AsrCorpusMeta {
     pub session_id: String,
     pub turn: u64,
     pub simulated: bool,
+    #[serde(default)]
+    pub bench_window: bool,
     pub sample_rate: u32,
     pub duration_ms: u64,
     pub asr_model: String,
@@ -104,7 +107,7 @@ pub struct AsrCorpusMeta {
     pub outcome: String,
 }
 
-/// 落盘到 `<runtime>/asr-corpus/<date>/<turn-id>.label.json` 的人工标注。
+/// 落盘到 `<runtime>/asr-corpus/<date>/<turn-id>.label.json` 的标注（人工或整体测试自动回写）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AsrCorpusLabel {
     pub turn_id: String,
@@ -114,6 +117,10 @@ pub struct AsrCorpusLabel {
     #[serde(default)]
     pub tags: Vec<String>,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_profile: Option<serde_json::Value>,
 }
 
 /// 语音中心“识别语料”列表展示条目（不含本机绝对路径）。
@@ -221,6 +228,7 @@ impl AsrCorpusStore {
             session_id: scrub_meta_text(&utt.session_id, 64),
             turn: utt.turn,
             simulated: false,
+            bench_window: utt.bench_window,
             sample_rate: ASR_CORPUS_SAMPLE_RATE,
             duration_ms,
             asr_model: scrub_meta_text(&utt.asr_model, 128),
@@ -342,6 +350,8 @@ impl AsrCorpusStore {
             verified_correct,
             tags: normalized_tags,
             updated_at_ms: (self.now_ms_fn)(),
+            label_source: None,
+            voice_profile: None,
         };
         let label_path = day_dir.join(format!("{turn_id}.label.json"));
         reject_symlink(&label_path)?;
@@ -575,7 +585,7 @@ fn scrub_meta_text(text: &str, max_chars: usize) -> String {
     scrubbed.chars().take(max_chars).collect()
 }
 
-fn local_date_from_ms(ms: u64) -> String {
+pub fn local_date_from_ms(ms: u64) -> String {
     let secs = (ms / 1000) as i64;
     let nanos = ((ms % 1000) * 1_000_000) as u32;
     Local
@@ -585,7 +595,7 @@ fn local_date_from_ms(ms: u64) -> String {
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string())
 }
 
-fn sanitize_turn_id(session_id: &str, turn: u64) -> String {
+pub fn sanitize_turn_id(session_id: &str, turn: u64) -> String {
     let safe_session: String = session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
@@ -736,6 +746,7 @@ mod tests {
             turn,
             captured_at_ms: at_ms,
             simulated,
+            bench_window: false,
             pcm: vec![1200; (sample_rate / 4) as usize],
             sample_rate,
             raw_text: "三毫米段木刻字".into(),

@@ -297,6 +297,12 @@
           "markdownDescription": "Enables the voice_asr_corpus_manage command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_bench_recordings_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-bench-recordings-manage",
+          "markdownDescription": "Enables the voice_bench_recordings_manage command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_builtin_models_list command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-builtin-models-list",
@@ -751,6 +757,12 @@
           "type": "string",
           "const": "deny-voice-asr-corpus-manage",
           "markdownDescription": "Denies the voice_asr_corpus_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_bench_recordings_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-bench-recordings-manage",
+          "markdownDescription": "Denies the voice_bench_recordings_manage command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_builtin_models_list command without any pre-configured scope.",

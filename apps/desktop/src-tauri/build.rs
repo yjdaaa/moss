@@ -75,6 +75,8 @@ fn main() {
         "voice_usb_provision",
         // VB1/VB2 识别（ASR）录音语料采集与标注（仅受信任主窗口，voice-private-main.json）
         "voice_asr_corpus_manage",
+        // VD2 整体测试真人录音语料管理（仅受信任主窗口，voice-private-main.json）
+        "voice_bench_recordings_manage",
         // 内置语音服务的模型配置（NV5）
         "voice_builtin_models_test",
         "voice_builtin_models_list",

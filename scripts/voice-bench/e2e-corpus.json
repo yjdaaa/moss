@@ -1,0 +1,112 @@
+{
+  "name": "xiaozhi-e2e-default-v1",
+  "description": "VC3 真小智外放整体测试默认语料（13 句）：覆盖状态快查、易错同音词（椴木/亚克力/切缝/走边框/过扫描/工作原点）、700ms 句中停顿防抢话、铭牌预览与多轮改参、设备音量与亮度、门禁验证句、空闲停止快路径与退出词。所有句子均不触发激光发送或移动（门禁验证句除外）。",
+  "turns": [
+    {
+      "id": "status_fast_read",
+      "label": "状态快查",
+      "text": "激光机现在什么状态",
+      "expect_route": "fast_read",
+      "tags": []
+    },
+    {
+      "id": "homophone_basswood",
+      "label": "同音词 · 椴木",
+      "text": "三毫米椴木切割一般用多大功率",
+      "key_terms": ["椴木", "切割", "功率"],
+      "tags": ["材料名", "数字"]
+    },
+    {
+      "id": "homophone_acrylic",
+      "label": "同音词 · 亚克力",
+      "text": "五毫米亚克力雕刻速度设多少合适",
+      "key_terms": ["亚克力", "雕刻", "速度"],
+      "tags": ["材料名", "数字"]
+    },
+    {
+      "id": "homophone_kerf_frame",
+      "label": "同音词 · 切缝与走边框",
+      "text": "切缝和走边框这两个概念分别是什么作用",
+      "key_terms": ["切缝", "走边框"],
+      "tags": []
+    },
+    {
+      "id": "homophone_overscan_origin",
+      "label": "同音词 · 过扫描与工作原点",
+      "text": "过扫描和工作原点分别是什么意思",
+      "key_terms": ["过扫描", "工作原点"],
+      "tags": []
+    },
+    {
+      "id": "pause_700ms_nameplate_preview",
+      "label": "700ms 停顿长句 + 铭牌预览",
+      "text": "帮我生成一个铭牌预览，文字写MOSS实验室，尺寸八十乘四十毫米，只预览不要发送",
+      "segments": [
+        {
+          "text": "帮我生成一个铭牌预览，文字写MOSS实验室",
+          "pause_ms_after": 700
+        },
+        {
+          "text": "尺寸八十乘四十毫米，只预览不要发送",
+          "pause_ms_after": 0
+        }
+      ],
+      "expect_route": "llm",
+      "expect_tool": "generate_text_laser_task_tool",
+      "key_terms": ["铭牌", "预览"],
+      "tags": ["数字"]
+    },
+    {
+      "id": "followup_change_size",
+      "label": "多轮追问改参数",
+      "text": "把刚才那个铭牌的尺寸改成一百乘五十毫米，只更新预览不要发送",
+      "expect_route": "llm",
+      "expect_tool": "generate_text_laser_task_tool",
+      "key_terms": ["铭牌", "预览"],
+      "tags": ["数字"]
+    },
+    {
+      "id": "device_volume",
+      "label": "设备自身控制 · 音量",
+      "text": "把小智音量调到五十",
+      "expect_tool": "self.audio_speaker.set_volume",
+      "tags": ["数字"]
+    },
+    {
+      "id": "device_brightness",
+      "label": "设备自身控制 · 屏幕亮度",
+      "text": "把小智屏幕亮度调到七十",
+      "expect_tool": "self.screen.set_brightness",
+      "tags": ["数字"]
+    },
+    {
+      "id": "gate_refuse_engrave",
+      "label": "安全门禁验证 · 拒绝直接雕刻",
+      "text": "直接开始雕刻吧",
+      "expect_simulation_gate": true,
+      "tags": []
+    },
+    {
+      "id": "numbers_and_material_qa",
+      "label": "材料与数字参数问答",
+      "text": "两毫米胶合板功率百分之六十速度一千五合适吗",
+      "key_terms": ["胶合板", "功率", "速度"],
+      "tags": ["材料名", "数字"]
+    },
+    {
+      "id": "fast_stop_idle",
+      "label": "停止快路径（仅空闲运行）",
+      "text": "停",
+      "require_idle_laser": true,
+      "expect_route": "fast_stop",
+      "tags": ["命令词"]
+    },
+    {
+      "id": "fast_exit",
+      "label": "结束对话",
+      "text": "退下",
+      "expect_route": "fast_exit",
+      "tags": ["命令词"]
+    }
+  ]
+}

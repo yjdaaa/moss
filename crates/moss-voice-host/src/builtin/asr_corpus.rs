@@ -15,11 +15,22 @@ use super::*;
 impl BuiltinVoice {
     pub(super) fn asr_corpus_summary(&self) -> Value {
         let cfg = self.asr_corpus.config();
+        let (total_count, labeled_count) = self
+            .asr_corpus
+            .list()
+            .map(|items| {
+                let total = items.len();
+                let labeled = items.iter().filter(|item| item.label.is_some()).count();
+                (total, labeled)
+            })
+            .unwrap_or((0, 0));
         json!({
             "enabled": cfg.enabled,
             "max_items": cfg.max_items,
             "max_days": cfg.max_days,
             "corpus_dir_rel": ASR_CORPUS_DIR_REL,
+            "total_count": total_count,
+            "labeled_count": labeled_count,
         })
     }
 

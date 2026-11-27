@@ -1,6 +1,6 @@
 # 语音中心敏感 ACL 与本地安全窗口
 
-状态：当前实现为 2026-11-07 n67（见下节）：独立安全窗口已取消，敏感语音命令只由 `capabilities/voice-private-main.json` 授权给本进程回环后端上的 `main` 窗口，处理函数开头再调用 `require_private_settings_window`；USB 一键配网 `voice_usb_provision` 与 2026-11-27 新增的识别（ASR）真实录音语料命令 `voice_asr_corpus_manage`（VB1/VB2，n137）同样走这道门。安装版 WebView2 GUI 点击验收未做，2026-11-15 用户决定实机验收不再排期。
+状态：当前实现为 2026-11-07 n67（见下节）：独立安全窗口已取消，敏感语音命令只由 `capabilities/voice-private-main.json` 授权给本进程回环后端上的 `main` 窗口，处理函数开头再调用 `require_private_settings_window`；USB 一键配网 `voice_usb_provision`、2026-11-27 新增的识别（ASR）真实录音语料命令 `voice_asr_corpus_manage`（VB1/VB2，n137）与整体测试真人录音命令 `voice_bench_recordings_manage`（VD2，n139）同样走这道门。安装版 WebView2 GUI 点击验收未做，2026-11-15 用户决定实机验收不再排期。
 
 n67 之前的记录：
 
@@ -66,7 +66,7 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 
 ## 验证
 
-- Rust `moss-desktop` ACL 检查（`lib.rs` 测试，n67 起）：全部敏感命令（含 `voice_usb_provision`、`voice_asr_corpus_manage` 与 `voice_context.rs` 的两条）处理函数开头调用 `require_private_settings_window(&window)?`，该函数只认 `crate::window_is_trusted_main(window)`，源码中不再有 `is_voice_private_asset`；四张私密卡、固件卡、唤醒词区块与“识别语料”面板（默认关闭，不进诊断包与声纹）均只挂在主窗口语音中心。
+- Rust `moss-desktop` ACL 检查（`lib.rs` 测试，n67 起）：全部敏感命令（含 `voice_usb_provision`、`voice_asr_corpus_manage`、`voice_bench_recordings_manage` 与 `voice_context.rs` 的两条）处理函数开头调用 `require_private_settings_window(&window)?`，该函数只认 `crate::window_is_trusted_main(window)`，源码中不再有 `is_voice_private_asset`；四张私密卡、固件卡、唤醒词区块与“AI 联调与测试”（含“录制测试语料”和内嵌“识别语料”，均不进诊断包与声纹）均只挂在主窗口语音中心，macOS `Info.plist` 声明 `NSMicrophoneUsageDescription`。
 - 前端 `voicePrivacyAcl.test.mjs`：确认 `voice-private.html` / `voicePrivate.jsx`、`open_voice_private` 与 `voice-memory/plugins/home/context` 四个 capability 均已删除；`voice-private-main.json` 为 `windows:["main"]`、`remote.urls:["http://127.0.0.1:*"]`、无 `webviews`，权限与敏感命令清单一一对应且 `default.json` 不含其中任何一项；`window.navigate(parsed)` 仍保留。
 - n67 之前的记录：Vite 曾输出独立 `dist/voice-private.html`，固件三条命令曾只认打包私密页，现均已取消。
 - 2026-10-11 原软件回执：桌面 Rust 23/23、Rust workspace 630/630、前端 106/106（新增 3 项 ACL 回归）、FakeGrbl E2E 32/32；Windows release EXE / 普通 NSIS exit 0，Android aarch64 APK exit 0，APK 内原生 `.so` 与本轮编译库 SHA-256 一致。具体文件体积与 SHA-256 见 `CHANGELOG.md` 同日 ACL 修复条目；普通 NSIS 仍非 NV18 专用 sidecar 包。

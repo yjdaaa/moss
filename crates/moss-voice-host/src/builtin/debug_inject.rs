@@ -343,11 +343,12 @@ impl BuiltinVoice {
     /// 桌面端状态视图（绝不包含令牌原文，仅提供相对路径与端口/过期时间）。
     pub(super) fn debug_inject_status(&self) -> Value {
         let active = self.sync_debug_inject_expiry();
-        let port = self
+        let (port, bench_windows) = self
             .server
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().and_then(VoiceServer::debug_api_port));
+            .and_then(|g| g.as_ref().map(|s| (s.debug_api_port(), s.bench_windows())))
+            .unwrap_or((None, Vec::new()));
         let enabled = active.is_some();
         json!({
             "enabled": enabled,
@@ -359,6 +360,7 @@ impl BuiltinVoice {
             "ttl_hours": DEBUG_TOKEN_TTL_SECS / 3600,
             "token_file_rel": DEBUG_TOKEN_REL,
             "meta_file_rel": DEBUG_META_REL,
+            "bench_windows": bench_windows,
         })
     }
 

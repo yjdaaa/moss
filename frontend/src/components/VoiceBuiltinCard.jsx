@@ -24,6 +24,7 @@ export { ExperienceGroup } from "./voice-builtin/ExperienceGroup.jsx";
 export { LiveDebugTraces } from "./voice-builtin/LiveDebugTraces.jsx";
 export { BuiltinEvents } from "./voice-builtin/BuiltinEvents.jsx";
 export { VoiceAsrCorpusCard } from "./voice-builtin/VoiceAsrCorpusCard.jsx";
+export { AiBenchAssistantCard } from "./voice-builtin/AiBenchAssistantCard.jsx";
 
 // 2026-11-26 语音中心瘦身：常用的记忆、家居在前；联网查询插件与声纹（实验）收在后面，仍默认全关、按需点开
 const PRIVATE_TASKS = [

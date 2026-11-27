@@ -87,13 +87,15 @@ impl<'a> Session<'a> {
                         self.listen.playback_started = Some(Instant::now());
                         self.listen.barge.reset();
                     }
-                    if let Some(turn) = self.turn.as_mut()
-                        && let Some(timing) = turn.timing.as_mut()
-                    {
-                        timing.stages.entry("first_audio_frame".into()).or_insert(
-                            turn.recording_offset
-                                .saturating_add(turn.started.elapsed().as_millis() as u64),
-                        );
+                    if let Some(turn) = self.turn.as_mut() {
+                        turn.first_audio_frame_at_ms
+                            .get_or_insert_with(crate::unix_now_ms);
+                        if let Some(timing) = turn.timing.as_mut() {
+                            timing.stages.entry("first_audio_frame".into()).or_insert(
+                                turn.recording_offset
+                                    .saturating_add(turn.started.elapsed().as_millis() as u64),
+                            );
+                        }
                     }
                     if let Phase::Speaking { sent, .. } = &mut self.phase {
                         *sent += 1;

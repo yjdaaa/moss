@@ -738,3 +738,645 @@ fn asr_corpus_captures_real_utterance_and_skips_simulated_turn() {
 
     server.stop();
 }
+
+/// VC1 核心安全测试：打开测试时间窗后，真实音频轮次的发送与移动被模拟门禁拒绝、有加工任务时停止快路径不发急停、
+/// 对话记录标为“模拟（整体测试）”、真实外放录音仍可落盘到 asr-corpus；主动关闭时间窗后立刻恢复普通轮次并记录事件。
+#[test]
+fn vc1_bench_window_locks_real_audio_turns_skips_estop_and_restores_after_close() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = Arc::new(crate::AsrCorpusStore::new(
+        temp.path().join("asr-corpus"),
+        crate::AsrCorpusConfig {
+            enabled: true,
+            max_items: 500,
+            max_days: 7,
+        },
+    ));
+    let tools = Arc::new(SimTestTools::default());
+    tools.strict_mode.store(true, Ordering::Release);
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("直接开始雕刻并移动激光头".into()),
+            Ok("停".into()),
+            Ok("请移动激光头到原点附近".into()),
+        ])),
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            // 第 1 轮（窗口内真实音频）：模型尝试调用 send + move + preview
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![
+                    ToolCall::new(
+                        "bw-send",
+                        "laser_workflow_tool",
+                        r#"{"action":"confirm_send","workflow_id":"wf-1","confirmed":true}"#,
+                    ),
+                    ToolCall::new(
+                        "bw-move",
+                        "laser_safe_action_tool",
+                        r#"{"action":"absolute_move","x_mm":15,"y_mm":15,"confirmed":true}"#,
+                    ),
+                    ToolCall::new(
+                        "bw-preview",
+                        "laser_workflow_tool",
+                        r#"{"action":"preview","text":"测试铭牌","material":"椴木","thickness_mm":3}"#,
+                    ),
+                ],
+                delay_ms: 0,
+            },
+            say(&["测试时间窗内已拒绝发送与移动，只生成了预览。"]),
+            // 第 3 轮（关闭时间窗后的普通真实音频）：允许执行正常工具调用
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "normal-move",
+                    "laser_safe_action_tool",
+                    r#"{"action":"absolute_move","x_mm":10,"y_mm":10,"confirmed":true}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["已恢复普通轮次并执行移动请求。"]),
+        ])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        tools.clone(),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            asr_corpus: Some(corpus.clone()),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    server.set_debug_enabled(true);
+
+    let token = "vc1-test-token-0123456789abcdef0123456789abcdef";
+    let now = crate::unix_now();
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let mut device = chat_device(&server, &registry, 1);
+    wait_until("设备会话上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+
+    // 参数边界校验：max_minutes 为 0 或超过 60 必须 400 拒绝
+    assert_eq!(
+        client
+            .post(format!("{base}/debug/v1/bench-window"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({"device_id": DEVICE, "action": "open", "max_minutes": 0}))
+            .send()
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/debug/v1/bench-window"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({"device_id": DEVICE, "action": "open", "max_minutes": 61}))
+            .send()
+            .unwrap()
+            .status(),
+        400
+    );
+
+    // 1. 打开测试时间窗
+    let open_res = client
+        .post(format!("{base}/debug/v1/bench-window"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"device_id": DEVICE, "action": "open", "max_minutes": 30}))
+        .send()
+        .unwrap();
+    assert_eq!(open_res.status(), 200);
+    let open_body: Value = open_res.json().unwrap();
+    assert_eq!(open_body["bench_window"]["active"], true);
+    assert_eq!(open_body["bench_window"]["max_minutes"], 30);
+
+    let dev_list: Value = client
+        .get(format!("{base}/debug/v1/devices"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(dev_list["devices"][0]["bench_window"]["active"], true);
+
+    // 2. 时间窗内真实音频轮次：发送与移动全部被 sim_guard 拒绝，仅预览放行
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("窗口内第 1 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .first()
+            .is_some_and(|d| d.turn == 1 && d.status == "done")
+    });
+    {
+        let executed = tools.calls.lock().unwrap();
+        assert_eq!(executed.len(), 1, "时间窗内只能放行 preview：{executed:?}");
+        assert!(executed[0].1.contains("\"preview\""));
+    }
+    let d1 = server.turn_details_for_device(DEVICE, 5).remove(0);
+    assert!(d1.simulated && d1.bench_window);
+    assert_eq!(d1.simulated_label.as_deref(), Some("模拟（整体测试）"));
+    assert!(d1.speech_began_at_ms.is_some());
+    assert!(d1.speech_end_at_ms.is_some());
+    assert!(d1.first_audio_frame_at_ms.is_some());
+    assert!(d1.corpus_date.is_some() && d1.corpus_turn_id.is_some());
+    assert_eq!(d1.tools.iter().filter(|t| t.blocked).count(), 2);
+
+    // 对话记录面板标为 bench_window = true（前端渲染“模拟（整体测试）”）
+    let traces = server.status().debug_traces;
+    assert_eq!(traces.len(), 1);
+    assert!(traces[0].simulated && traces[0].bench_window);
+
+    // VC3 #7：外放真实麦克风语音在时间窗内仍可保存进 asr-corpus 供自动标注
+    wait_until("时间窗内真实音频写入 asr-corpus", || {
+        corpus.list().map(|v| v.len()).unwrap_or(0) == 1
+    });
+    assert!(corpus.list().unwrap()[0].meta.bench_window);
+
+    // 3. 时间窗内有激光任务在跑时，真实音频说“停”绝不发急停
+    tools.active_laser_job.store(true, Ordering::Release);
+    speak_manual(&mut device, 1, 500);
+    let items_stop = collect_items(&mut device);
+    assert!(
+        texts(&items_stop)
+            .iter()
+            .any(|s| s.contains("模拟轮次的停止命令未执行")),
+        "{:?}",
+        texts(&items_stop)
+    );
+    wait_until("窗口内第 2 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .first()
+            .is_some_and(|d| d.turn == 2 && d.status == "done")
+    });
+    assert!(
+        !tools
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, a)| a.contains("emergency_stop")),
+        "时间窗内有加工任务时停止快路径绝不能发急停"
+    );
+
+    // 4. 主动关闭测试时间窗 -> 写入关闭事件，立刻恢复普通轮次
+    let close_res = client
+        .post(format!("{base}/debug/v1/bench-window"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"device_id": DEVICE, "action": "close"}))
+        .send()
+        .unwrap();
+    assert_eq!(close_res.status(), 200);
+    assert!(server.bench_windows().is_empty());
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（脚本主动关闭）")),
+        "关闭时间窗必须写入诊断事件"
+    );
+
+    // 关闭后再次真实语音触发移动：应恢复正常（进入 ToolExecutor，非模拟轮次）
+    tools.active_laser_job.store(false, Ordering::Release);
+    tools.strict_mode.store(false, Ordering::Release);
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("关闭窗口后第 3 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .first()
+            .is_some_and(|d| d.turn == 3 && d.status == "done")
+    });
+    let d3 = server.turn_details_for_device(DEVICE, 5).remove(0);
+    assert!(!d3.simulated && !d3.bench_window);
+    assert_eq!(d3.simulated_label, None);
+    assert!(
+        tools
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, a)| n == "laser_safe_action_tool" && a.contains("absolute_move")),
+        "关闭时间窗后普通轮次应恢复正常工具执行"
+    );
+
+    server.stop();
+}
+
+/// VC1 自动关闭全覆盖：到达最长时长自动关闭、设备断开自动关闭、关闭调试开关自动关闭、令牌失效自动关闭，且不污染长期记忆。
+#[test]
+fn vc1_bench_window_auto_closes_on_timeout_disconnect_disable_and_token_expiry() {
+    struct CountingMemoryStore {
+        writes: AtomicUsize,
+    }
+    impl VoiceMemoryStore for CountingMemoryStore {
+        fn allowed(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn load(&self, _: &str) -> Result<Option<MemoryRecord>, String> {
+            Ok(None)
+        }
+        fn ensure(&self, device_id: &str) -> Result<MemoryRecord, String> {
+            Ok(MemoryRecord {
+                device_id: device_id.into(),
+                summary: String::new(),
+                revision: 0,
+                updated_at: 0.0,
+            })
+        }
+        fn update(
+            &self,
+            device_id: &str,
+            revision: i64,
+            summary: &str,
+        ) -> Result<Option<MemoryRecord>, String> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(MemoryRecord {
+                device_id: device_id.into(),
+                summary: summary.into(),
+                revision: revision + 1,
+                updated_at: 1.0,
+            }))
+        }
+        fn list(&self) -> Result<Vec<MemoryRecord>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    let mem_store = Arc::new(CountingMemoryStore {
+        writes: AtomicUsize::new(0),
+    });
+    let memory = MemoryService::new(mem_store.clone());
+    memory.configure(true, || Ok(())).unwrap();
+
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("时间窗内聊聊椴木".into())])),
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["好的，已记录椴木参数仅限本轮。"])])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(SimTestTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_memory(memory);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let token = "vc1-autoclose-token-0123456789abcdef0123456789";
+    let now = crate::unix_now();
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let mut device = chat_device(&server, &registry, 1);
+    wait_until("设备 1 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+
+    // A. 超时自动关闭（120 ms 测试时长）
+    server
+        .shared
+        .open_bench_window_for_test(DEVICE, Duration::from_millis(120))
+        .unwrap();
+    assert_eq!(server.bench_windows().len(), 1);
+    wait_until("测试时间窗超时自动关闭", || {
+        server.bench_windows().is_empty()
+    });
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（到达最长时长）")),
+        "超时关闭应写事件"
+    );
+
+    // B. 时间窗内跑完一轮真实音频后设备断开：自动关闭且不写长期记忆
+    server.open_bench_window(DEVICE, 30).unwrap();
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("窗口内轮次完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .first()
+            .is_some_and(|d| d.status == "done")
+    });
+    let _ = device.close(None);
+    wait_until("断开后会话与时间窗关闭", || {
+        server.active_device_sessions().is_empty() && server.bench_windows().is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        mem_store.writes.load(Ordering::SeqCst),
+        0,
+        "时间窗内真实音频轮次绝不能写入长期记忆"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（设备断开）")),
+        "设备断开后必须自动关闭时间窗并写事件"
+    );
+
+    // C. 重连后打开时间窗，关闭调试开关 -> 自动关闭时间窗
+    let _device2 = chat_device(&server, &registry, 1);
+    wait_until("设备 2 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    server.open_bench_window(DEVICE, 30).unwrap();
+    assert_eq!(server.bench_windows().len(), 1);
+    server.disable_debug_api();
+    assert!(server.bench_windows().is_empty());
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（调试开关已关闭）")),
+        "关闭调试开关必须立即关闭时间窗"
+    );
+
+    // D. 重新开启调试入口并打开时间窗，令牌过期 -> 拒绝访问并自动关闭时间窗
+    let port2 = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base2 = format!("http://127.0.0.1:{port2}");
+    server.open_bench_window(DEVICE, 30).unwrap();
+    assert_eq!(server.bench_windows().len(), 1);
+    server.shared.debug_gate.force_expire_for_test();
+    let expired_res = client
+        .post(format!("{base2}/debug/v1/bench-window"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"device_id": DEVICE, "action": "open", "max_minutes": 10}))
+        .send()
+        .unwrap();
+    assert_eq!(expired_res.status(), 401);
+    let _ = base;
+    wait_until("令牌失效自动关闭时间窗", || {
+        server.bench_windows().is_empty()
+    });
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("测试时间窗已关闭（调试令牌已失效）")),
+        "令牌失效必须自动关闭时间窗并写事件"
+    );
+
+    server.stop();
+}
+
+/// VC2 + VC5：数字音频注入仅允许在测试时间窗内使用（窗外 403）、新接口全部经过鉴权与 Origin 校验，
+/// 且数字音频注入走完整 VAD/ASR/对话链路但不落盘进 asr-corpus。
+#[test]
+fn vc2_digital_audio_inject_requires_bench_window_enforces_auth_and_skips_asr_corpus() {
+    fn encode_base64_for_test(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            out.push(TABLE[(b0 >> 2) as usize] as char);
+            out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(TABLE[(b2 & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = Arc::new(crate::AsrCorpusStore::new(
+        temp.path().join("asr-corpus"),
+        crate::AsrCorpusConfig {
+            enabled: true,
+            max_items: 500,
+            max_days: 7,
+        },
+    ));
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("三毫米椴木参数".into())])),
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["数字对照轮次收到三毫米椴木参数。"])])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr.clone(),
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(SimTestTools::default()),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            asr_corpus: Some(corpus.clone()),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let token = "vc2-digital-token-0123456789abcdef0123456789abcd";
+    let now = crate::unix_now();
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let mut device = chat_device(&server, &registry, 1);
+    wait_until("设备上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+
+    // 合成 0.36 秒 440 Hz 16 kHz PCM
+    let samples = tone(16_000, 440.0, 360, 8000.0);
+    let pcm_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let pcm_b64 = encode_base64_for_test(&pcm_bytes);
+
+    // 1. 新接口全部经过鉴权与 Origin 拦截
+    assert_eq!(
+        client
+            .post(format!("{base}/debug/v1/bench-window"))
+            .json(&serde_json::json!({"device_id": DEVICE, "action": "open"}))
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/debug/v1/devices/{DEVICE}/inject-audio"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Origin", "http://localhost:5173")
+            .json(&serde_json::json!({"pcm_base64": pcm_b64}))
+            .send()
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/debug/v1/devices/{DEVICE}/turns"))
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
+
+    // 2. 未打开测试时间窗时调用 inject-audio 必须 403 bench_window_required
+    let no_win_res = client
+        .post(format!("{base}/debug/v1/devices/{DEVICE}/inject-audio"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"pcm_base64": pcm_b64, "sample_rate": 16000, "frame_ms": 60}))
+        .send()
+        .unwrap();
+    assert_eq!(no_win_res.status(), 403);
+    let no_win_body: Value = no_win_res.json().unwrap();
+    assert_eq!(no_win_body["error"], "bench_window_required");
+
+    // 3. 打开测试时间窗后允许数字音频对照注入，并走完真实 VAD/ASR/TTS 链路
+    let open_res = client
+        .post(format!("{base}/debug/v1/bench-window"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"device_id": DEVICE, "action": "open", "max_minutes": 10}))
+        .send()
+        .unwrap();
+    assert_eq!(open_res.status(), 200);
+
+    let inject_res = client
+        .post(format!("{base}/debug/v1/devices/{DEVICE}/inject-audio"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "pcm_base64": pcm_b64,
+            "sample_rate": 16000,
+            "frame_ms": 20,
+            "lead_silence_ms": 60,
+            "tail_silence_ms": 360
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(inject_res.status(), 202);
+    let ack: Value = inject_res.json().unwrap();
+    let turn_id = ack["turn_id"].as_str().unwrap().to_owned();
+    assert_eq!(ack["simulated"], true);
+
+    let items = collect_items(&mut device);
+    assert!(items.iter().any(|i| matches!(i, Item::Frame)));
+    wait_until("数字对照轮次完成", || {
+        server
+            .turn_detail(&turn_id)
+            .is_some_and(|d| d.status == "done")
+    });
+
+    let detail: Value = client
+        .get(format!("{base}/debug/v1/turns/{turn_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(detail["simulated"], true);
+    assert_eq!(detail["bench_window"], true);
+    assert_eq!(detail["digital_audio"], true);
+    assert_eq!(detail["injected_text"], "三毫米椴木参数");
+    assert!(detail["corpus_turn_id"].is_null());
+    assert!(
+        !asr.heard.lock().unwrap().is_empty(),
+        "数字音频注入必须经过真实 ASR 识别"
+    );
+
+    // 设备轮次列表接口可读回该轮
+    let turns_res: Value = client
+        .get(format!("{base}/debug/v1/devices/{DEVICE}/turns?limit=10"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(turns_res["turns"][0]["turn_id"], turn_id);
+
+    // 数字对照音频绝不进入 asr-corpus
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(
+        corpus.list().unwrap().is_empty(),
+        "服务端数字音频对照注入不得写入 asr-corpus"
+    );
+
+    server.stop();
+}

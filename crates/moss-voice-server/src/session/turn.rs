@@ -76,13 +76,26 @@ impl<'a> Session<'a> {
             };
         let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
         let is_text_inject = matches!(&input, TurnInput::Text { .. });
-        let simulated = matches!(
-            &input,
-            TurnInput::Text {
-                simulated: true,
-                ..
-            }
-        );
+        let in_bench_window =
+            kind == TurnKind::Answer && self.shared.is_bench_window_active(self.device_id);
+        let digital_audio =
+            kind == TurnKind::Answer && std::mem::take(&mut self.next_turn_is_digital);
+        let simulated = in_bench_window
+            || digital_audio
+            || matches!(
+                &input,
+                TurnInput::Text {
+                    simulated: true,
+                    ..
+                }
+            );
+        let simulated_label = if in_bench_window {
+            Some("模拟（整体测试）".to_owned())
+        } else if simulated {
+            Some("模拟".to_owned())
+        } else {
+            None
+        };
         let injected_text = match &input {
             TurnInput::Text { text, .. } => Some(text.clone()),
             _ => None,
@@ -93,14 +106,18 @@ impl<'a> Session<'a> {
             .asr_corpus
             .as_ref()
             .is_some_and(|store| store.is_enabled());
-        let corpus_interims = if kind == TurnKind::Answer && !simulated && corpus_enabled {
+        // VB1 + VC3 #7：仅真实麦克风上行语音（含整体测试时间窗内的外放录音）可进入 asr-corpus；
+        // VA 文字直通与 VC2 服务端数字音频对照注入绝不进入 asr-corpus。
+        let allow_corpus_capture =
+            kind == TurnKind::Answer && corpus_enabled && !is_text_inject && !digital_audio;
+        let corpus_interims = if allow_corpus_capture {
             std::mem::take(&mut self.pending_corpus_interims)
         } else {
             self.pending_corpus_interims.clear();
             Vec::new()
         };
         let fast_stop_pcm = self.pending_fast_stop_pcm.take();
-        let corpus_audio = if kind == TurnKind::Answer && !simulated && corpus_enabled {
+        let corpus_audio = if allow_corpus_capture {
             match &input {
                 TurnInput::Utterance {
                     pcm, sample_rate, ..
@@ -111,6 +128,19 @@ impl<'a> Session<'a> {
         } else {
             None
         };
+        let (speech_began_at_ms, speech_end_at_ms, peak_uplink_level) =
+            if kind == TurnKind::Answer && !is_text_inject {
+                (
+                    self.pending_speech_began_at_ms.take(),
+                    self.pending_speech_end_at_ms.take(),
+                    self.pending_peak_uplink_level.take(),
+                )
+            } else {
+                self.pending_speech_began_at_ms = None;
+                self.pending_speech_end_at_ms = None;
+                self.pending_peak_uplink_level = None;
+                (None, None, None)
+            };
         let started_at_ms = crate::unix_now_ms();
         let timing = if kind == TurnKind::Answer {
             let mut stages = if is_text_inject {
@@ -205,12 +235,19 @@ impl<'a> Session<'a> {
         let is_report = matches!(input, TurnInput::Report { .. });
         let debug_capture_epoch = self.shared.state.debug_capture_epoch();
         if kind == TurnKind::Answer {
+            self.shared
+                .state
+                .set_latest_turn(self.session_id, self.turn_number);
+            let turn_id = format!("{}:{}", self.session_id, self.turn_number);
             self.shared.state.upsert_turn_detail(crate::TurnDetail {
-                turn_id: format!("{}:{}", self.session_id, self.turn_number),
+                turn_id: turn_id.clone(),
                 device_id: self.device_id.into(),
                 session_id: self.session_id.into(),
                 turn: self.turn_number,
                 simulated,
+                bench_window: in_bench_window,
+                simulated_label,
+                digital_audio,
                 status: "running".into(),
                 outcome: "running".into(),
                 route: "running".into(),
@@ -228,7 +265,22 @@ impl<'a> Session<'a> {
                 error: None,
                 started_at_ms,
                 finished_at_ms: None,
+                speech_began_at_ms,
+                speech_end_at_ms,
+                first_audio_frame_at_ms: None,
+                peak_uplink_level,
+                corpus_date: None,
+                corpus_turn_id: None,
             });
+            if digital_audio && let Some(ack_tx) = self.pending_digital_ack.take() {
+                let _ = ack_tx.send(Ok(crate::InjectTurnAck {
+                    turn_id,
+                    device_id: self.device_id.into(),
+                    session_id: self.session_id.into(),
+                    turn: self.turn_number,
+                    simulated,
+                }));
+            }
         }
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
         let direct_trace = crate::conversation::TurnTrace {
@@ -247,6 +299,7 @@ impl<'a> Session<'a> {
             person_hint,
             gate,
             Some(direct_trace),
+            simulated,
         );
         if let Some(mut replaced) = self.turn.replace(ActiveTurn {
             turn_number: self.turn_number,
@@ -292,7 +345,13 @@ impl<'a> Session<'a> {
             released_at: None,
             music_error: None,
             simulated,
+            bench_window: in_bench_window,
+            digital_audio,
             started_at_ms,
+            speech_began_at_ms,
+            speech_end_at_ms,
+            first_audio_frame_at_ms: None,
+            peak_uplink_level,
             injected_text,
             route: None,
             detail_tools: Vec::new(),

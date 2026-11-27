@@ -2481,11 +2481,14 @@ impl Turn {
         } else {
             None
         };
-        let identity = self
-            .conversation
-            .personal_context
-            .as_ref()
-            .map(|context| context.start(&self.context, &pcm, sample_rate));
+        let identity = if self.simulated {
+            None
+        } else {
+            self.conversation
+                .personal_context
+                .as_ref()
+                .map(|context| context.start(&self.context, &pcm, sample_rate))
+        };
         let text = match self.transcribe(&pcm, sample_rate, stream).await {
             Ok(text) => text,
             Err(error) => {
@@ -3330,6 +3333,13 @@ pub fn spawn_turn_gated(
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
+    let simulated = matches!(
+        input,
+        TurnInput::Text {
+            simulated: true,
+            ..
+        }
+    );
     spawn_turn_traced(
         conversation,
         context,
@@ -3339,9 +3349,11 @@ pub fn spawn_turn_gated(
         session_person_hint,
         gate,
         None,
+        simulated,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_turn_traced(
     conversation: Arc<Conversation>,
     context: ToolContext,
@@ -3351,18 +3363,20 @@ pub(crate) fn spawn_turn_traced(
     session_person_hint: Option<crate::person_context::PersonScope>,
     gate: Option<TurnGate>,
     turn_trace: Option<TurnTrace>,
+    simulated: bool,
 ) -> (
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
     let (events, receiver) = unbounded_channel();
-    let simulated = matches!(
-        input,
-        TurnInput::Text {
-            simulated: true,
-            ..
-        }
-    );
+    let simulated = simulated
+        || matches!(
+            input,
+            TurnInput::Text {
+                simulated: true,
+                ..
+            }
+        );
     let turn = Turn {
         conversation,
         context,

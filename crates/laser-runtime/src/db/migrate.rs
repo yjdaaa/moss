@@ -551,6 +551,24 @@ impl RuntimeDb {
                 "INSERT INTO schema_version(version,applied_at) VALUES(21,unixepoch());",
             )?;
         }
+        if current.unwrap_or(0) < 22 {
+            // 2026-11-27（VC1）：voice_chat_logs 增加 bench_window 列，标识在测试时间窗内按模拟处理的真实音频轮次（界面标“模拟（整体测试）”）。
+            let existing = {
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_chat_logs')")?;
+                statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if !existing.iter().any(|name| name == "bench_window") {
+                tx.execute_batch(
+                    "ALTER TABLE voice_chat_logs ADD COLUMN bench_window INTEGER NOT NULL DEFAULT 0 CHECK(bench_window IN (0, 1));",
+                )?;
+            }
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(22,unixepoch());",
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }

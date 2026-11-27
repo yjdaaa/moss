@@ -54,6 +54,9 @@ try {
       ota_ip_urls: ["http://192.0.2.10:8003/xiaozhi/ota/", "http://192.0.2.20:8003/xiaozhi/ota/"],
       models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, audiocpp_env: { ready: true, installed: true, binary_found: true, backend: "metal", accelerator_label: "Apple Metal 硬件加速", summary: "audio.cpp 原生克隆引擎已就绪（Apple Metal 硬件加速 · 免装 Python）" }, tts_clone_ref: { configured: false, file_name: "", sample_rate: 0, duration_secs: 0, transcript: "", mode: "none" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "gtcrn_simple", kind: "denoise", label: "GTCRN 降噪", installed: false }, { id: "dpdfnet_baseline", kind: "denoise", label: "DPDFNet 降噪", installed: true }, { id: "kws_zipformer_zh", kind: "kws", label: "命令词抗噪", installed: false }, { id: "smart_turn_v3", kind: "turn", label: "Smart Turn", installed: false }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "qwen3_tts_1_7b_clone", kind: "tts", engine: "audio_cpp_tts", label: "Qwen3-TTS 1.7B 声音克隆（离线复刻）", size: 2695186240, note: "上传 5～20 秒清晰干声即可断网克隆任意人声。", speed_adjustable: false, installed: true }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
       debug_enabled: true,
+      debug_inject: { enabled: false, active: false, host: "127.0.0.1", port: null, ttl_hours: 24, token_file_rel: "debug/voice-debug.token", bench_windows: [] },
+      asr_corpus: { enabled: false, max_items: 500, max_days: 7, corpus_dir_rel: "asr-corpus", total_count: 0, labeled_count: 0 },
+      bench_recordings: { recordings_dir_rel: "voice-bench/recordings", corpus_count: 2, total_recordings: 0, speaker_count: 0, complete_speaker_count: 0, speakers: [] },
       debug_traces: [
         {
           id: 1,
@@ -190,6 +193,42 @@ try {
       return { ...structuredClone(state.wakeword), pushed: { device_id: input.device_id, size: 2_097_152, target: input.target, screen_pack: input.screen_pack } };
     },
     voice_firmware_status: () => ({ artifacts: [], devices: [], records: [], offer_hours: 24, now: 0 }),
+    voice_asr_corpus_manage: ({ input }) => ({
+      enabled: Boolean(state.builtin.asr_corpus?.enabled),
+      max_items: state.builtin.asr_corpus?.max_items || 500,
+      max_days: state.builtin.asr_corpus?.max_days || 7,
+      corpus_dir_rel: "asr-corpus",
+      valid_tags: ["命令词", "数字", "材料名", "有噪声"],
+      total_count: state.builtin.asr_corpus?.total_count || 0,
+      labeled_count: state.builtin.asr_corpus?.labeled_count || 0,
+      items: [],
+      ...(input?.action === "set_config" ? { enabled: Boolean(input.enabled) } : {}),
+    }),
+    voice_bench_recordings_manage: () => ({
+      recordings_dir_rel: "voice-bench/recordings",
+      corpus_name: "xiaozhi-e2e-default-v1",
+      corpus_count: 2,
+      corpus_items: [
+        { id: "status_fast_read", label: "状态快查", text: "激光机现在什么状态", segments: [], pause_hint: null, tags: [] },
+        {
+          id: "pause_700ms_nameplate_preview",
+          label: "700ms 停顿长句",
+          text: "帮我生成一个铭牌预览，尺寸八十乘四十毫米",
+          segments: [
+            { text: "帮我生成一个铭牌预览", pause_ms_after: 700 },
+            { text: "尺寸八十乘四十毫米", pause_ms_after: 0 },
+          ],
+          pause_hint: "在「帮我生成一个铭牌预览」后停顿约 0.7 秒，再继续说后半句",
+          tags: ["数字"],
+        },
+      ],
+      total_recordings: 0,
+      speaker_count: 0,
+      complete_speaker_count: 0,
+      complete_speakers: [],
+      speakers: [],
+      recordings: [],
+    }),
     get_export_settings: () => ({ dir: "", effective_dir: "C:\\moss\\exports", available: true, ask_each_time: false }),
     voice_agent_save: ({ input }) => {
       state.agent.settings = structuredClone(input);
@@ -391,6 +430,15 @@ try {
         state.builtin.debug_enabled = Boolean(nextFlag);
       }
       if (settings.clear_debug_traces) state.builtin.debug_traces = [];
+      if (Object.prototype.hasOwnProperty.call(settings, "debug_text_inject_enabled")) {
+        state.builtin.debug_inject = {
+          ...(state.builtin.debug_inject || {}),
+          enabled: Boolean(settings.debug_text_inject_enabled),
+          active: Boolean(settings.debug_text_inject_enabled),
+          port: settings.debug_text_inject_enabled ? 18009 : null,
+          token_file_rel: "debug/voice-debug.token",
+        };
+      }
       const keys = Object.keys(settings || {});
       const hotOnly = keys.length > 0 && keys.every((k) => [
         "screen_card_style",
@@ -403,6 +451,7 @@ try {
         "persona_risk_notes",
         "screen_pack_auto_keep",
         "auto_allow_devices",
+        "debug_text_inject_enabled",
       ].includes(k));
       return { ...structuredClone(state.builtin), restarted: false, hot_applied: hotOnly };
     },
@@ -1223,6 +1272,42 @@ try {
   await page.locator("#voice-group-device-firmware #voice-firmware-card").waitFor();
   assert.ok(calls.some((call) => call.command === "voice_firmware_status"), "展开后在主窗口直接读取固件状态");
   await tab("记录与诊断").click();
+  // VD6：记录与诊断最上方默认展开“AI 联调与测试”（仅内置链路），依次为 状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关 → 识别语料子块
+  const recordsGroupIds = await page
+    .locator("#voice-panel-records .voice-group")
+    .evaluateAll((els) => els.map((el) => el.id));
+  assert.equal(recordsGroupIds[0], "voice-group-ai-bench-hub", "VD6：AI 联调与测试须在记录与诊断最上方");
+  assert.equal(recordsGroupIds.includes("voice-group-asr-corpus"), false, "VD6：识别语料不再在记录与诊断单独列一组");
+  if (process.env.VOICE_QA_DIR) await page.locator("#voice-group-ai-bench-hub").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub.png") });
+  assert.equal(
+    await page.locator("#voice-group-ai-bench-hub > .voice-group-h").getAttribute("aria-expanded"),
+    "true",
+    "VD6：AI 联调与测试默认展开",
+  );
+  const hubOrderOk = await page.evaluate(() => {
+    const ids = [
+      "voice-ai-bench-checklist",
+      "voice-ai-bench-prompt-actions",
+      "voice-bench-recordings-box",
+      "voice-debug-inject-box",
+      "voice-asr-corpus-section",
+    ];
+    const nodes = ids.map((id) => document.getElementById(id));
+    if (nodes.some((n) => !n)) return false;
+    for (let i = 0; i < nodes.length - 1; i += 1) {
+      if (!(nodes[i].compareDocumentPosition(nodes[i + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+    }
+    return true;
+  });
+  assert.equal(hubOrderOk, true, "VD6：AI 联调与测试内部五块顺序必须严格一致");
+  // 验证挪来的调试注入开关仍保留确认弹窗与原 id
+  const debugSwitch = page.locator("#voice-group-ai-bench-hub #voice-debug-inject-switch");
+  assert.equal(await debugSwitch.isChecked(), false, "调试注入开关默认关闭");
+  await debugSwitch.click();
+  await confirmDialog("开启调试注入");
+  await page.waitForFunction(() => document.querySelector("#voice-debug-inject-switch")?.checked === true);
+  await debugSwitch.click();
+  await page.waitForFunction(() => document.querySelector("#voice-debug-inject-switch")?.checked === false);
   // 8a. n68：服务事件带级别 / 分类 / 怎么办 / 技术细节，可只看错误和警告，覆盖计数明确提示，可导出诊断包
   await page.locator("#voice-approvals-card").getByText("原因：控制器忙，未开始加工（错误码 controller_busy）").waitFor();
   assert.match(await page.locator("#voice-group-approvals").innerText(), /最近 1 条/);
@@ -1278,6 +1363,7 @@ try {
   await tab("服务").click();
   assert.ok(await page.locator("#voice-panel-service #voice-builtin-card").isVisible(), "服务标签只放内置服务启停与连接地址");
   assert.ok(await page.locator("#voice-group-builtin-service").isVisible());
+  assert.equal(await page.locator("#voice-panel-service #voice-debug-inject-switch, #voice-panel-service #voice-group-ai-bench-hub").count(), 0, "VD6：服务标签不再显示调试注入开关与 AI 联调卡片");
   assert.equal(await page.locator("#voice-panel-service #voice-builtin-devices, #voice-panel-service #voice-goggle-bot-card").count(), 0, "设备表与副屏预览不在服务标签");
   // n71：常连模式开关在服务标签，默认关；打开后只提交本组三个字段
   const mqttGroup = page.locator("#voice-group-settings-builtinMqtt");

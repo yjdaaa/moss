@@ -339,6 +339,7 @@ pub fn run() {
             voice_builtin::voice_wakeword_manage,
             voice_builtin::voice_usb_provision,
             voice_builtin::voice_asr_corpus_manage,
+            voice_builtin::voice_bench_recordings_manage,
             voice_builtin::voice_home_discover,
             voice_builtin::voice_agent_status,
             voice_builtin::voice_agent_save,
@@ -640,6 +641,7 @@ mod tests {
             "allow-voice-wakeword-manage",
             "allow-voice-usb-provision",
             "allow-voice-asr-corpus-manage",
+            "allow-voice-bench-recordings-manage",
         ];
         let default: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
@@ -681,6 +683,7 @@ mod tests {
                     "voice_wakeword_manage",
                     "voice_usb_provision",
                     "voice_asr_corpus_manage",
+                    "voice_bench_recordings_manage",
                     "voice_home_status",
                     "voice_home_save",
                     "voice_home_backup_export",
@@ -1077,6 +1080,19 @@ mod tests {
             expected,
             Some("http://127.0.0.1:5177"),
         ));
+    }
+
+    #[test]
+    fn macos_info_plist_declares_microphone_usage_for_bench_recordings() {
+        let plist = include_str!("../Info.plist");
+        assert!(
+            plist.contains("<key>NSMicrophoneUsageDescription</key>"),
+            "macOS Info.plist 必须声明 NSMicrophoneUsageDescription"
+        );
+        assert!(
+            plist.contains("用于录制本机语音测试语料"),
+            "NSMicrophoneUsageDescription 必须包含本机语音测试语料说明"
+        );
     }
 
     #[test]

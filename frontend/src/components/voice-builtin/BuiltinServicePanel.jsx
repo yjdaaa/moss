@@ -1,17 +1,12 @@
 import React from "react";
 import { Play, Square, Copy, Usb } from "lucide-react";
-import { showAlert, showConfirm } from "../../appDialog.js";
+import { showAlert } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
 import { VoiceGroup, gotoVoiceGroup } from "../VoiceLayout.jsx";
-import {
-  builtinModeView,
-  DEBUG_TEXT_INJECT_CONFIRM_OPTIONS,
-  DEBUG_TEXT_INJECT_CONFIRM_TEXT,
-  debugInjectStateView,
-} from "../../voiceState.js";
-import { formatTime, TONE_CLASS } from "./shared.js";
+import { builtinModeView } from "../../voiceState.js";
+import { TONE_CLASS } from "./shared.js";
 
-/** 服务：运行状态、启停、设备要填的连接地址（n69 起设备表移到“设备 › 已连接设备”，副屏预览移到“设备 › 副屏预览”）。 */
+/** 服务：运行状态、启停、设备要填的连接地址（n69 起设备表移到“设备 › 已连接设备”，副屏预览移到“设备 › 副屏预览”；VD6 起 AI 调试注入开关移到“记录与诊断 › AI 联调与测试”）。 */
 export function BuiltinServicePanel({ builtin }) {
   const { status, busy, act } = builtin;
   if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
@@ -20,19 +15,6 @@ export function BuiltinServicePanel({ builtin }) {
   const running = Boolean(status.running);
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
   const modeView = builtinModeView(status);
-  const debugInject = debugInjectStateView(status);
-  const toggleDebugInject = async (on) => {
-    if (on) {
-      const ok = await showConfirm(
-        DEBUG_TEXT_INJECT_CONFIRM_TEXT,
-        DEBUG_TEXT_INJECT_CONFIRM_OPTIONS,
-      );
-      if (!ok) return;
-    }
-    await act(on ? "开启本机 AI 调试注入" : "关闭本机 AI 调试注入", () =>
-      voiceApi.localSave({ debug_text_inject_enabled: on }),
-    );
-  };
   const copyOta = async (url = status.ota_url, label = "设备 OTA 地址") => {
     if (!url) return;
     try {
@@ -111,29 +93,6 @@ export function BuiltinServicePanel({ builtin }) {
           <span className="voice-muted">
             在设备配网页面填入上方 <code>moss.local</code> 地址后，换网无需重改；若局域网广播解析不稳定，可改用右侧本机局域网 IP 地址。端口 {status.ws_port} / {status.http_port}，在下面“内置服务端口”组修改。
           </span>
-        </div>
-        <div className="voice-kv" id="voice-debug-inject-box" style={{ marginTop: 10 }}>
-          <label className="voice-check">
-            <input
-              type="checkbox"
-              id="voice-debug-inject-switch"
-              checked={debugInject.enabled}
-              disabled={Boolean(busy)}
-              onChange={(e) => void toggleDebugInject(e.target.checked)}
-            />
-            <span>允许本机 AI 调试注入（仅 127.0.0.1，24 小时自动作废，禁止任何物理动作）</span>
-          </label>
-          {debugInject.enabled ? (
-            <span className="voice-muted" id="voice-debug-inject-meta">
-              令牌文件位置：<code className="mono">{`<运行目录>/${debugInject.tokenFileRel}`}</code>（不在此处显示令牌内容）
-              {debugInject.active && debugInject.port ? ` · 本机入口 127.0.0.1:${debugInject.port}` : " · 启动内置服务后开放本机入口"}
-              {debugInject.expiresAt ? ` · 到期时间 ${formatTime(debugInject.expiresAt)}` : ""}
-            </span>
-          ) : (
-            <span className="voice-muted">
-              默认关闭。开启后可由本机联调脚本或在“设备 › 已连接设备”中向在线小智直接发送测试文字，跳过麦克风与识别跑完后半段链路。
-            </span>
-          )}
         </div>
       </div>
     </VoiceGroup>

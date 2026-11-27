@@ -158,11 +158,23 @@ export function BuiltinDevicesPanel({ builtin }) {
       setAsking("");
     }
   };
+  const closeBenchWindow = async (device) => {
+    setAsking(device.device_id);
+    try {
+      await voiceApi.deviceRequest(device.device_id, "close_bench_window");
+      await builtin.refresh?.();
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "结束整体测试失败", tone: "error" });
+    } finally {
+      setAsking("");
+    }
+  };
 
   const renderDeviceRow = (device, allowLabel = "允许") => {
     const view = builtinDeviceView(device);
     const session = sessions.find((item) => item.device_id === device.device_id) || null;
     const online = Boolean(session);
+    const benchWindowActive = Boolean(session?.bench_window?.active);
     const details = builtinDeviceInfoView(device);
     const controls = builtinDeviceControlsView(device, session, status.device_prefs);
     const hasAnyControl =
@@ -197,6 +209,16 @@ export function BuiltinDevicesPanel({ builtin }) {
                     {session?.transport === "mqtt" ? "常连在线" : "在线"}
                   </div>
                 )}
+                {benchWindowActive && (
+                  <div style={{ marginTop: 4 }}>
+                    <span
+                      className="ob-pill ob-pill--warn voice-tag"
+                      id={`voice-device-bench-badge-${device.device_id}`}
+                    >
+                      整体测试中（物理动作已锁定）
+                    </span>
+                  </div>
+                )}
               </>
             )}
           </td>
@@ -210,6 +232,17 @@ export function BuiltinDevicesPanel({ builtin }) {
           </td>
           <td>
             <span className="voice-actions">
+              {benchWindowActive && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  id={`voice-device-bench-stop-${device.device_id}`}
+                  disabled={Boolean(asking) || Boolean(busy)}
+                  onClick={() => void closeBenchWindow(device)}
+                >
+                  立即结束测试
+                </button>
+              )}
               {view.canAllow && (
                 <button type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={() => allow(device)}>
                   <ShieldCheck size={13} /> {allowLabel}

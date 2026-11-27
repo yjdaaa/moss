@@ -28,6 +28,10 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         data: &[u8],
     ) -> Result<(), String> {
+        // VC2 数字音频对照注入期间忽略真实麦克风帧，避免环境声混入对照音频
+        if self.digital_feed.is_some() {
+            return Ok(());
+        }
         let listening = matches!(self.phase, Phase::Listening(_));
         let may_interrupt = self.shared.config.barge_in
             && self.listen.listen_realtime
@@ -176,7 +180,7 @@ impl<'a> Session<'a> {
             };
             return self.take_over(socket, head, may_follow_up).await;
         }
-        self.set_level(crate::audio::pcm_rms_level(&pcm));
+        self.record_uplink_level(crate::audio::pcm_rms_level(&pcm));
         if !self.listen.listen_manual
             && let Some(worker) = self.vad_worker.as_mut()
         {
@@ -399,12 +403,14 @@ impl<'a> Session<'a> {
         if let Phase::Listening(recording) = &mut self.phase {
             recording.speaking = true;
             recording.speech_began_at = Some(self.recording_started);
+            recording.speech_began_at_ms = Some(crate::unix_now_ms().saturating_sub(head_ms));
+            recording.peak_uplink_level = head_level;
             recording.voiced_samples = head.len();
             recording.stream = stream;
             recording.feed(&head);
             recording.utterance = head;
         }
-        self.set_level(head_level);
+        self.record_uplink_level(head_level);
         self.last_activity = Instant::now();
         if follow_up {
             self.event(format!(
@@ -524,6 +530,7 @@ impl<'a> Session<'a> {
             }
             Ok(ClientMessage::Abort { reason }) => {
                 let reason = reason.unwrap_or_else(|| "设备打断".into());
+                self.cancel_digital_feed("数字音频注入因设备打断而取消");
                 self.screen.preview_hold = None;
                 self.screen.pending_oled_preview = None;
                 self.screen.one_shot_badge_url = None;

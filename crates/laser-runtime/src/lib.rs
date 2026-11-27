@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v21_adds_simulated_column_to_voice_chat_logs_and_round_trips() {
+    fn schema_v22_adds_simulated_and_bench_window_columns_to_voice_chat_logs_and_round_trips() {
         let db = RuntimeDb::open_memory().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         db.append_voice_chat_log(&VoiceChatLogRecord {
@@ -1054,14 +1054,33 @@ mod tests {
             truncated: false,
             tools_dropped: 0,
             simulated: true,
+            bench_window: false,
         })
         .unwrap();
         db.append_voice_chat_log(&VoiceChatLogRecord {
             id: 0,
             at_ms: 1_790_000_002_000,
+            device_id: "dev-bench".into(),
+            session_id: "sess-bench".into(),
+            turn: 2,
+            raw_asr: "整体测试外放语音".into(),
+            corrected_asr: "整体测试外放语音".into(),
+            reply: "好的".into(),
+            spoken: "好的".into(),
+            tools_json: "[]".into(),
+            outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
+            simulated: true,
+            bench_window: true,
+        })
+        .unwrap();
+        db.append_voice_chat_log(&VoiceChatLogRecord {
+            id: 0,
+            at_ms: 1_790_000_003_000,
             device_id: "dev-real".into(),
             session_id: "sess-real".into(),
-            turn: 2,
+            turn: 3,
             raw_asr: "真实说话".into(),
             corrected_asr: "真实说话".into(),
             reply: "好的".into(),
@@ -1071,11 +1090,13 @@ mod tests {
             truncated: false,
             tools_dropped: 0,
             simulated: false,
+            bench_window: false,
         })
         .unwrap();
         let rows = db.list_voice_chat_logs(10).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(!rows[0].simulated);
-        assert!(rows[1].simulated);
+        assert_eq!(rows.len(), 3);
+        assert!(!rows[0].simulated && !rows[0].bench_window);
+        assert!(rows[1].simulated && rows[1].bench_window);
+        assert!(rows[2].simulated && !rows[2].bench_window);
     }
 }

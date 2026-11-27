@@ -41,7 +41,8 @@ pub use voice::DeleteVoiceDeviceOutcome;
 /// v19（2026-11-12 n81）：新增有界语音对话记录表 `voice_chat_logs`（说了什么、工具调用、回了什么，上限 500 条）。
 /// v20（2026-11-18）：`voice_devices` 增加 `status_revision` 递增修订号，用于 USB 配网并发撤销 CAS 校验。
 /// v21（2026-11-27 VA）：`voice_chat_logs` 增加 `simulated` 模拟轮次标记，区分真实语音与文字直通联调轮次。
-pub const SCHEMA_VERSION: i64 = 21;
+/// v22（2026-11-27 VC1）：`voice_chat_logs` 增加 `bench_window` 测试时间窗标记，区分“模拟（整体测试）”与文字直通“模拟”。
+pub const SCHEMA_VERSION: i64 = 22;
 
 const AUDIT_LOG_MAX_ROWS: i64 = 2000;
 pub const VOICE_CHAT_LOGS_MAX_ROWS: i64 = 500;
@@ -64,6 +65,8 @@ pub struct VoiceChatLogRecord {
     pub tools_dropped: i64,
     #[serde(default)]
     pub simulated: bool,
+    #[serde(default)]
+    pub bench_window: bool,
 }
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。

@@ -54,7 +54,7 @@ pub struct PlaybackDetail {
     pub stall_ms: u64,
 }
 
-/// VA3 每轮完整联调明细（支持轮次运行中与结束后经本机调试入口查询；正文已脱敏）。
+/// VA3/VC3 每轮完整联调明细（支持轮次运行中与结束后经本机调试入口查询；正文已脱敏）。
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TurnDetail {
     pub turn_id: String,
@@ -62,6 +62,12 @@ pub struct TurnDetail {
     pub session_id: String,
     pub turn: u64,
     pub simulated: bool,
+    #[serde(default)]
+    pub bench_window: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated_label: Option<String>,
+    #[serde(default)]
+    pub digital_audio: bool,
     pub status: String,
     pub outcome: String,
     pub route: String,
@@ -79,6 +85,18 @@ pub struct TurnDetail {
     pub started_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_began_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_end_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_audio_frame_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_uplink_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_turn_id: Option<String>,
 }
 
 /// 已脱敏的语音对话记录（说了什么、调了什么工具、回了什么）。
@@ -111,6 +129,9 @@ pub struct TurnDebugTrace {
     /// VA2 #3 模拟联调轮次标记：前端对话记录面板据此标识模拟轮次。
     #[serde(default)]
     pub simulated: bool,
+    /// VC1 整体测试时间窗标记：窗口内真实音频轮次按模拟处理，前端对话记录显示“模拟（整体测试）”。
+    #[serde(default)]
+    pub bench_window: bool,
 }
 
 pub fn scrub_debug_text(raw: &str) -> String {
@@ -196,6 +217,15 @@ pub struct SessionView {
     pub text_font_size: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_font_bpp: Option<u8>,
+    /// VC1 整体测试时间窗状态（窗口打开期间该设备全部轮次强制按 simulated 处理，物理动作锁定）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_window: Option<crate::debug_api::BenchWindowView>,
+    /// 最近发起的对话轮次编号（0 表示尚无轮次，供本机联调脚本跟踪新轮次）。
+    #[serde(default)]
+    pub latest_turn: u64,
+    /// 最近约 3 秒内上行拾音帧的峰值音量（0..=100，供整体测试校准判断摆放与音量）。
+    #[serde(default)]
+    pub recent_peak_level: u8,
 }
 
 /// 事件级别。
@@ -685,6 +715,23 @@ impl LiveState {
             .find(|d| d.turn_id == turn_id)
             .cloned()
     }
+
+    /// VC3 按设备编号查询最近的轮次明细（新到旧，最多 `limit` 条）。
+    pub fn turn_details_for_device(&self, device_id: &str, limit: usize) -> Vec<TurnDetail> {
+        let cap = limit.clamp(1, MAX_TURN_DETAILS);
+        self.turn_details
+            .lock()
+            .map(|items| {
+                items
+                    .iter()
+                    .rev()
+                    .filter(|d| d.device_id == device_id)
+                    .take(cap)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     /// 写一条事件：传字符串为日常记录（info / general），传 [`EventRecord`] 可指定级别与分类。
     pub fn event(&self, record: impl Into<EventRecord>) {
         self.log.push(record);
@@ -736,6 +783,39 @@ impl LiveState {
             && let Some(view) = sessions.get_mut(session_id)
         {
             view.level = level.min(100);
+        }
+    }
+
+    pub fn set_recent_peak_level(&self, session_id: &str, peak: u8) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.recent_peak_level = peak.min(100);
+        }
+    }
+
+    pub fn set_latest_turn(&self, session_id: &str, turn: u64) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.latest_turn = turn;
+        }
+    }
+
+    pub fn set_bench_window(
+        &self,
+        device_id: &str,
+        window: Option<crate::debug_api::BenchWindowView>,
+    ) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            for view in sessions.values_mut() {
+                if view.device_id == device_id {
+                    view.bench_window = window
+                        .as_ref()
+                        .filter(|w| w.session_id == view.session_id)
+                        .cloned();
+                }
+            }
         }
     }
 
@@ -977,6 +1057,9 @@ mod tests {
             transport: "websocket".into(),
             text_font_size: None,
             text_font_bpp: None,
+            bench_window: None,
+            latest_turn: 0,
+            recent_peak_level: 0,
         });
         assert_eq!(state.aggregate_pulse(), (Some("idle".into()), 0));
         state.set_state("s1", "listening");
@@ -1025,6 +1108,9 @@ mod tests {
             transport: "websocket".into(),
             text_font_size: None,
             text_font_bpp: None,
+            bench_window: None,
+            latest_turn: 0,
+            recent_peak_level: 0,
         });
         state.set_level("s1", 10);
         assert_eq!(
@@ -1069,6 +1155,7 @@ mod tests {
             truncated: false,
             tools_dropped: 0,
             simulated: false,
+            bench_window: false,
         };
         assert!(state.finish_debug_trace(sample(1)).is_none());
         assert!(
@@ -1169,6 +1256,7 @@ mod tests {
                 truncated: false,
                 tools_dropped: 0,
                 simulated: false,
+                bench_window: false,
             })
             .unwrap();
         let serialized = serde_json::to_string(&trace).unwrap();

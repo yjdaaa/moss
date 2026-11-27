@@ -88,6 +88,8 @@ export const voiceApi = {
   usbProvision: (input) => invokeVoice("voice_usb_provision", { input }),
   // VB1/VB2 识别（ASR）录音语料采集、试听、标注与删除（仅受信任主窗口，voice-private-main.json）
   asrCorpusManage: (input) => invokeVoice("voice_asr_corpus_manage", { input }),
+  // VD2 整体测试真人录音语料保存、试听、列出与删除（仅受信任主窗口，voice-private-main.json）
+  benchRecordingsManage: (input) => invokeVoice("voice_bench_recordings_manage", { input }),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),
   mcpDelete: (name, revision, confirmed) => invokeVoice("voice_mcp_delete", { name, revision, confirmed }),

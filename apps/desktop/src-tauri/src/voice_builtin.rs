@@ -1073,9 +1073,25 @@ pub async fn voice_asr_corpus_manage(
     result
 }
 
+/// VD2 整体测试真人录音语料的保存、读取、列出与删除（仅受信任主窗口调用，不进诊断包与声纹）。
+#[tauri::command]
+pub async fn voice_bench_recordings_manage(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_private_settings_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |voice| voice.bench_recordings_manage(&input)).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, input));
+    result
+}
+
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 46] = [
+pub const COMMANDS: [&str; 47] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -1122,4 +1138,5 @@ pub const COMMANDS: [&str; 46] = [
     "voice_local_laya_setup",
     "voice_usb_provision",
     "voice_asr_corpus_manage",
+    "voice_bench_recordings_manage",
 ];

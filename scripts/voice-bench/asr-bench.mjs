@@ -13,7 +13,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { defaultRuntimeDir, redactText, redactValue } from "./live-xiaozhi-debug.mjs";
+import { defaultRuntimeDir, percentile, redactText, redactValue } from "./bench-common.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const NOISE_MIX_SCRIPT = join(SCRIPT_DIR, "asr_noise_mix.py");
@@ -460,13 +460,6 @@ export function extractSubstitutionSpans(alignment, terms = DEFAULT_WORKSHOP_TER
   return spans;
 }
 
-function percentile(values, p) {
-  const nums = values.filter((v) => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
-  if (nums.length === 0) return null;
-  const idx = Math.min(nums.length - 1, Math.max(0, Math.ceil((p / 100) * nums.length) - 1));
-  return nums[idx];
-}
-
 function formatRunId(date = new Date()) {
   const pad = (n, w = 2) => String(n).padStart(w, "0");
   return `asr-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
@@ -501,6 +494,9 @@ export function loadLabeledCorpus(corpusDir) {
           wav_path: wavPath,
           reference_text: referenceText,
           tags: Array.isArray(label?.tags) ? label.tags.map(String) : [],
+          label_source: String(label?.label_source || "manual"),
+          voice_profile: label?.voice_profile ?? null,
+          bench_window: Boolean(meta?.bench_window),
           original_raw_text: String(meta?.raw_text ?? ""),
           original_model: String(meta?.asr_model ?? ""),
         });
@@ -572,6 +568,25 @@ export function readWavPcm16(wavPath) {
   return { pcm, sampleRate };
 }
 
+/** 将单声道 16-bit 小端 PCM Buffer 封装为标准 RIFF/WAVE Buffer。 */
+export function encodeWavPcm16(pcmBuf, sampleRate = 16_000) {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, 4, "ascii");
+  header.writeUInt32LE(36 + pcmBuf.length, 4);
+  header.write("WAVE", 8, 4, "ascii");
+  header.write("fmt ", 12, 4, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, 4, "ascii");
+  header.writeUInt32LE(pcmBuf.length, 40);
+  return Buffer.concat([header, pcmBuf]);
+}
+
 /** 探测本机已安装的本地 ASR 模型（扫描 `<runtime>/models`）。 */
 export function discoverInstalledLocalModels(runtimeDir, extraModelDirs = []) {
   const roots = [join(runtimeDir, "models"), ...extraModelDirs].filter((d) => d && existsSync(d));
@@ -638,6 +653,7 @@ export class LocalHelperClient {
       const total = 8 + hLen + pLen;
       if (this.buf.length < total) break;
       const header = JSON.parse(this.buf.subarray(8, 8 + hLen).toString("utf8"));
+      const payload = pLen > 0 ? Buffer.from(this.buf.subarray(8 + hLen, total)) : Buffer.alloc(0);
       this.buf = this.buf.subarray(total);
       const waiter = this.pending.get(header.id);
       if (waiter) {
@@ -645,7 +661,7 @@ export class LocalHelperClient {
         if (header.kind === "error") {
           waiter.reject(new Error(header.message || "本地模型推理出错"));
         } else {
-          waiter.resolve(header);
+          waiter.resolve(pLen > 0 ? { ...header, payload } : header);
         }
       }
     }
@@ -1036,6 +1052,81 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     ),
   };
 
+  const byLabelSource = {};
+  const sourceGroups = new Map();
+  for (const row of rows) {
+    const src = String(row.label_source || "manual");
+    if (!sourceGroups.has(src)) sourceGroups.set(src, []);
+    sourceGroups.get(src).push(row);
+  }
+  for (const [src, groupRows] of sourceGroups.entries()) {
+    const gBuckets = new Map();
+    let gNumTotal = 0;
+    let gNumMatched = 0;
+    let gTermTotal = 0;
+    let gTermMatched = 0;
+    const clipIds = new Set();
+    for (const row of groupRows) {
+      clipIds.add(row.clip_id);
+      const bk = `${row.model_id}@@${row.noise_level}`;
+      if (!gBuckets.has(bk)) {
+        gBuckets.set(bk, {
+          model_id: row.model_id,
+          model_label: row.model_label,
+          noise_level: row.noise_level,
+          count: 0,
+          errors: 0,
+          edits: 0,
+          ref_chars: 0,
+          finals: [],
+        });
+      }
+      const b = gBuckets.get(bk);
+      b.count += 1;
+      if (row.error) {
+        b.errors += 1;
+        continue;
+      }
+      b.edits += row.edits;
+      b.ref_chars += row.ref_len;
+      if (typeof row.final_ms === "number") b.finals.push(row.final_ms);
+      const ne = evaluateNumberAndUnitAccuracy(row.reference_text, row.hypothesis);
+      gNumTotal += ne.total;
+      gNumMatched += ne.matched;
+      const rNorm = normalizeForCer(row.reference_text).join("");
+      const hNorm = normalizeForCer(row.hypothesis).join("");
+      for (const term of terms) {
+        const tNorm = normalizeForCer(term).join("");
+        if (!tNorm || !rNorm.includes(tNorm)) continue;
+        gTermTotal += 1;
+        if (hNorm.includes(tNorm)) gTermMatched += 1;
+      }
+    }
+    const gSummaryRows = [...gBuckets.values()].map((b) => ({
+      model_id: b.model_id,
+      model_label: b.model_label,
+      noise_level: b.noise_level,
+      count: b.count,
+      errors: b.errors,
+      cer: b.ref_chars > 0 ? Number((b.edits / b.ref_chars).toFixed(4)) : 0,
+      final_p50_ms: percentile(b.finals, 50),
+      final_p90_ms: percentile(b.finals, 90),
+    }));
+    byLabelSource[src] = {
+      label_source: src,
+      sample_count: clipIds.size,
+      row_count: groupRows.length,
+      overall_cer: (() => {
+        const edits = groupRows.reduce((s, r) => s + (r.error ? 0 : r.edits), 0);
+        const chars = groupRows.reduce((s, r) => s + (r.error ? 0 : r.ref_len), 0);
+        return chars > 0 ? Number((edits / chars).toFixed(4)) : 0;
+      })(),
+      number_unit: { total: gNumTotal, matched: gNumMatched },
+      terms: { total: gTermTotal, matched: gTermMatched },
+      summaryRows: gSummaryRows,
+    };
+  }
+
   return {
     summaryRows,
     commandRows: [...cmdStats.values()],
@@ -1043,6 +1134,7 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     overallTerms: { total: termTotal, matched: termMatched },
     worstClips,
     suggestions,
+    byLabelSource,
   };
 }
 
@@ -1082,6 +1174,29 @@ function renderMarkdownReport(runId, sampleCount, analysis) {
         r.first_interim_p90_ms,
       )} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
     );
+  }
+
+  const sourceEntries = Object.values(analysis.byLabelSource || {});
+  const hasPlaybackGroup = sourceEntries.some((g) => g.label_source === "e2e-playback");
+  if (hasPlaybackGroup || sourceEntries.length > 1) {
+    const labelSourceTitle = (src) =>
+      src === "e2e-playback" ? "整体测试外放录音（e2e-playback）" : src === "manual" ? "人工标注真实录音（manual）" : src;
+    lines.push(
+      "",
+      "## 1.5 按语料来源分组统计（人工标注真实录音 vs 整体测试外放录音）",
+      "",
+      "| 来源分组 | 样本数 | 模型 | 噪声档位 | 字错率 (CER) | 最终延迟 P50 / P90 |",
+      "| --- | ---: | --- | --- | ---: | ---: |",
+    );
+    for (const group of sourceEntries.sort((a, b) => a.label_source.localeCompare(b.label_source))) {
+      for (const r of group.summaryRows) {
+        lines.push(
+          `| ${labelSourceTitle(group.label_source)} | ${group.sample_count} | ${r.model_label} | ${noiseLabel(
+            r.noise_level,
+          )} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
+        );
+      }
+    }
   }
 
   lines.push(
@@ -1259,6 +1374,8 @@ export async function runAsrBench(options = {}) {
               date: sample.date,
               turn_id: sample.turn_id,
               tags: sample.tags,
+              label_source: sample.label_source || "manual",
+              voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,
               noise_level: level,
@@ -1278,6 +1395,8 @@ export async function runAsrBench(options = {}) {
               date: sample.date,
               turn_id: sample.turn_id,
               tags: sample.tags,
+              label_source: sample.label_source || "manual",
+              voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,
               noise_level: level,

@@ -65,6 +65,7 @@ pub use conversation::{
     Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
     TurnEndPredictor,
 };
+pub use debug_api::{BenchWindowView, DEFAULT_BENCH_WINDOW_MINUTES, MAX_BENCH_WINDOW_MINUTES};
 pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
 pub use jev::{
     DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter,
@@ -402,6 +403,15 @@ pub enum DeviceRequest {
         simulated: bool,
         reply: tokio::sync::oneshot::Sender<Result<InjectTurnAck, InjectTurnError>>,
     },
+    /// VC2 数字音频对照注入：仅允许在测试时间窗内按设备上行帧节奏注入 16/24 kHz PCM。
+    InjectAudio {
+        pcm: Vec<i16>,
+        sample_rate: u32,
+        frame_ms: u32,
+        lead_silence_ms: u32,
+        tail_silence_ms: u32,
+        reply: tokio::sync::oneshot::Sender<Result<InjectTurnAck, InjectTurnError>>,
+    },
     /// 取设备自带 MCP 的 `self.get_device_status`，结果写成设备快照
     RefreshInfo,
     /// 取 `self.reboot`：设备重启后会重新请求 OTA，固件版本随之刷新
@@ -476,6 +486,10 @@ pub(crate) struct Shared {
     pub ws_connections: Arc<tokio::sync::Semaphore>,
     pub http_requests: Arc<tokio::sync::Semaphore>,
     pub firmware_downloads: Arc<tokio::sync::Semaphore>,
+    /// VA2/VC1 本机 127.0.0.1 调试入口鉴权门禁与测试时间窗存储。
+    pub debug_gate: Arc<debug_api::DebugApiGate>,
+    pub bench_windows: debug_api::BenchWindowStore,
+    pub bench_window_changed: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -531,6 +545,7 @@ impl Shared {
 
     /// 每台在线设备只保留一条当前活跃会话（规则与 [`Self::active_session`] 一致，按 `device_id` 升序）。
     pub(crate) fn active_device_sessions(&self) -> Vec<state::SessionView> {
+        self.sync_bench_windows();
         let mut handles: Vec<(String, String)> = self
             .device_requests
             .lock()
@@ -542,6 +557,249 @@ impl Shared {
             .unwrap_or_default();
         handles.sort_by(|a, b| a.0.cmp(&b.0));
         self.state.sessions_for_handles(&handles)
+    }
+
+    /// VC1 同步检查调试令牌过期、调试开关状态与时间窗到期，到期立即恢复普通轮次并记录事件。
+    pub(crate) fn sync_bench_windows(&self) {
+        if self.debug_gate.check_expiry() {
+            self.close_all_bench_windows("调试令牌已失效");
+            return;
+        }
+        if !self.debug_gate.snapshot().enabled && !self.bench_windows.list_active().is_empty() {
+            self.close_all_bench_windows("调试开关已关闭");
+            return;
+        }
+        for expired in self.bench_windows.expire_due() {
+            self.state.set_bench_window(&expired.device_id, None);
+            self.state.event_in_flow(
+                EventRecord::info(
+                    DiagCategory::Config,
+                    format!(
+                        "测试时间窗已关闭（到达最长时长）：设备 {} 已恢复普通轮次",
+                        expired.device_id
+                    ),
+                )
+                .source(DiagSource::Moss),
+                session::device_flow(&expired.device_id),
+            );
+        }
+    }
+
+    pub(crate) fn is_bench_window_active(&self, device_id: &str) -> bool {
+        self.sync_bench_windows();
+        self.bench_windows.active_for(device_id).is_some()
+    }
+
+    pub(crate) fn bench_window_deadline_for(
+        &self,
+        device_id: &str,
+    ) -> Option<tokio::time::Instant> {
+        let win_deadline = self.bench_windows.next_deadline_for(device_id)?;
+        let token_deadline = self
+            .debug_gate
+            .remaining_until_expiry()
+            .map(|rem| tokio::time::Instant::now() + rem);
+        Some(match token_deadline {
+            Some(tok) => win_deadline.min(tok),
+            None => win_deadline,
+        })
+    }
+
+    pub(crate) fn open_bench_window(
+        &self,
+        device_id: &str,
+        max_minutes: u32,
+    ) -> Result<BenchWindowView, InjectTurnError> {
+        self.sync_bench_windows();
+        if !self.debug_gate.is_enabled_valid() {
+            return Err(InjectTurnError {
+                code: "debug_disabled".into(),
+                http_status: 403,
+                message: "本机 AI 调试注入开关未开启或令牌已失效，无法打开测试时间窗".into(),
+            });
+        }
+        if max_minutes == 0 || max_minutes > MAX_BENCH_WINDOW_MINUTES {
+            return Err(InjectTurnError::invalid(format!(
+                "max_minutes 须为 1 ~ {MAX_BENCH_WINDOW_MINUTES} 分钟"
+            )));
+        }
+        let Some(session) = self.active_session(device_id) else {
+            return Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 当前不在线"
+            )));
+        };
+        let view = self
+            .bench_windows
+            .open(device_id, &session.session_id, max_minutes);
+        self.state.set_bench_window(device_id, Some(view.clone()));
+        self.bench_window_changed.notify_waiters();
+        self.state.event_in_flow(
+            EventRecord::info(
+                DiagCategory::Config,
+                format!(
+                    "测试时间窗已打开（最长 {} 分钟）：设备 {} 的全部轮次将按模拟处理，物理动作已锁定",
+                    view.max_minutes, device_id
+                ),
+            )
+            .source(DiagSource::Moss),
+            session::device_flow(device_id),
+        );
+        Ok(view)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_bench_window_for_test(
+        &self,
+        device_id: &str,
+        ttl: Duration,
+    ) -> Result<BenchWindowView, InjectTurnError> {
+        self.sync_bench_windows();
+        if !self.debug_gate.is_enabled_valid() {
+            return Err(InjectTurnError {
+                code: "debug_disabled".into(),
+                http_status: 403,
+                message: "调试开关未开启".into(),
+            });
+        }
+        let Some(session) = self.active_session(device_id) else {
+            return Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 当前不在线"
+            )));
+        };
+        let view = self
+            .bench_windows
+            .open_with_duration(device_id, &session.session_id, ttl);
+        self.state.set_bench_window(device_id, Some(view.clone()));
+        self.bench_window_changed.notify_waiters();
+        Ok(view)
+    }
+
+    pub(crate) fn close_bench_window(&self, device_id: &str, reason: &str) -> bool {
+        let Some(closed) = self.bench_windows.close(device_id) else {
+            self.state.set_bench_window(device_id, None);
+            return false;
+        };
+        self.state.set_bench_window(&closed.device_id, None);
+        self.bench_window_changed.notify_waiters();
+        self.state.event_in_flow(
+            EventRecord::info(
+                DiagCategory::Config,
+                format!(
+                    "测试时间窗已关闭（{reason}）：设备 {} 已恢复普通轮次",
+                    closed.device_id
+                ),
+            )
+            .source(DiagSource::Moss),
+            session::device_flow(&closed.device_id),
+        );
+        true
+    }
+
+    pub(crate) fn close_bench_window_for_session(
+        &self,
+        device_id: &str,
+        session_id: &str,
+        reason: &str,
+    ) -> bool {
+        let Some(closed) = self.bench_windows.close_if_session(device_id, session_id) else {
+            return false;
+        };
+        self.state.set_bench_window(&closed.device_id, None);
+        self.bench_window_changed.notify_waiters();
+        self.state.event_in_flow(
+            EventRecord::info(
+                DiagCategory::Config,
+                format!(
+                    "测试时间窗已关闭（{reason}）：设备 {} 已恢复普通轮次",
+                    closed.device_id
+                ),
+            )
+            .source(DiagSource::Moss),
+            session::device_flow(&closed.device_id),
+        );
+        true
+    }
+
+    pub(crate) fn close_all_bench_windows(&self, reason: &str) -> usize {
+        let closed = self.bench_windows.close_all();
+        let count = closed.len();
+        for view in closed {
+            self.state.set_bench_window(&view.device_id, None);
+            self.state.event_in_flow(
+                EventRecord::info(
+                    DiagCategory::Config,
+                    format!(
+                        "测试时间窗已关闭（{reason}）：设备 {} 已恢复普通轮次",
+                        view.device_id
+                    ),
+                )
+                .source(DiagSource::Moss),
+                session::device_flow(&view.device_id),
+            );
+        }
+        if count > 0 {
+            self.bench_window_changed.notify_waiters();
+        }
+        count
+    }
+
+    /// VC2 异步在测试时间窗内按设备上行帧节奏注入数字音频，用于与喇叭外放对照。
+    pub(crate) async fn inject_audio_async(
+        &self,
+        device_id: &str,
+        pcm: Vec<i16>,
+        sample_rate: u32,
+        frame_ms: u32,
+        lead_silence_ms: u32,
+        tail_silence_ms: u32,
+    ) -> Result<InjectTurnAck, InjectTurnError> {
+        if !self.is_bench_window_active(device_id) {
+            return Err(InjectTurnError {
+                code: "bench_window_required".into(),
+                http_status: 403,
+                message: "数字音频注入仅允许在已打开的测试时间窗内使用".into(),
+            });
+        }
+        if pcm.is_empty() {
+            return Err(InjectTurnError::invalid("数字音频不能为空"));
+        }
+        let sender = {
+            let map = self.device_requests.lock().map_err(|_| {
+                InjectTurnError::conflict("session_lock_failed", "设备会话表锁失败")
+            })?;
+            let Some(handle) = map.get(device_id) else {
+                return Err(InjectTurnError::offline(format!(
+                    "设备 {device_id} 当前不在线"
+                )));
+            };
+            handle.sender.clone()
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(DeviceRequest::InjectAudio {
+                pcm,
+                sample_rate,
+                frame_ms,
+                lead_silence_ms,
+                tail_silence_ms,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 的会话刚刚结束，数字音频注入未送达"
+            )));
+        }
+        match tokio::time::timeout(Duration::from_secs(45), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(InjectTurnError::offline(format!(
+                "设备 {device_id} 会话在数字音频注入完成前断开"
+            ))),
+            Err(_) => Err(InjectTurnError::conflict(
+                "inject_audio_timeout",
+                "等待数字音频注入触发轮次超时",
+            )),
+        }
     }
 
     /// 按每台设备的当前活跃会话聚合主状态与音量（避免重启残留的半开旧连接卡死顶栏脉冲）。
@@ -627,7 +885,6 @@ pub struct VoiceServer {
     ws_port: u16,
     http_port: u16,
     mdns: Option<mdns_sd::ServiceDaemon>,
-    debug_gate: Arc<debug_api::DebugApiGate>,
     debug_listener: std::sync::Mutex<Option<(u16, tokio::sync::watch::Sender<bool>)>>,
 }
 
@@ -737,6 +994,9 @@ impl VoiceServer {
             ws_connections: Arc::new(tokio::sync::Semaphore::new(64)),
             http_requests: Arc::new(tokio::sync::Semaphore::new(64)),
             firmware_downloads: Arc::new(tokio::sync::Semaphore::new(2)),
+            debug_gate: Arc::new(debug_api::DebugApiGate::new()),
+            bench_windows: debug_api::BenchWindowStore::new(),
+            bench_window_changed: tokio::sync::Notify::new(),
         });
         shared.state.event(
             EventRecord::from(format!(
@@ -864,7 +1124,6 @@ impl VoiceServer {
             ws_port,
             http_port,
             mdns,
-            debug_gate: Arc::new(debug_api::DebugApiGate::new()),
             debug_listener: std::sync::Mutex::new(None),
         })
     }
@@ -935,6 +1194,7 @@ impl VoiceServer {
                     DeviceRequest::PreviewScreen { .. }
                         | DeviceRequest::ShowScene { .. }
                         | DeviceRequest::InjectText { .. }
+                        | DeviceRequest::InjectAudio { .. }
                 )
             {
                 return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));
@@ -1083,6 +1343,7 @@ impl VoiceServer {
 
     /// 移除设备时清理服务端内存中绑定该设备的摄像头缓存、待接进对话的照片与待下载唤醒词/画风包（n134）。
     pub fn clear_device_state(&self, device_id: &str) {
+        self.shared.close_bench_window(device_id, "设备已移除");
         self.shared.camera_preview.clear_device(device_id);
         let _ = self.shared.vision_photos.take(device_id);
         self.shared.assets_store.clear_device(device_id);
@@ -1300,6 +1561,31 @@ impl VoiceServer {
         self.shared.state.turn_detail(turn_id)
     }
 
+    /// VC3 按设备查询最近的联调明细（新到旧）。
+    pub fn turn_details_for_device(&self, device_id: &str, limit: usize) -> Vec<TurnDetail> {
+        self.shared.state.turn_details_for_device(device_id, limit)
+    }
+
+    /// VC1 打开指定设备的测试时间窗。
+    pub fn open_bench_window(
+        &self,
+        device_id: &str,
+        max_minutes: u32,
+    ) -> Result<BenchWindowView, InjectTurnError> {
+        self.shared.open_bench_window(device_id, max_minutes)
+    }
+
+    /// VC1 立即关闭指定设备的测试时间窗（桌面“立即结束测试”按钮或脚本调用）。
+    pub fn close_bench_window(&self, device_id: &str, reason: &str) -> bool {
+        self.shared.close_bench_window(device_id, reason)
+    }
+
+    /// VC1 当前全部处于打开状态的测试时间窗。
+    pub fn bench_windows(&self) -> Vec<BenchWindowView> {
+        self.shared.sync_bench_windows();
+        self.shared.bench_windows.list_active()
+    }
+
     /// VA2 #4 热启动或更新本机 `127.0.0.1` 调试 HTTP 入口（不断开已连接小智会话）；返回实际监听端口。
     pub fn enable_debug_api(
         &self,
@@ -1312,8 +1598,16 @@ impl VoiceServer {
         let Some(runtime) = self.runtime.as_ref() else {
             return Err("内置语音服务未运行".into());
         };
-        self.debug_gate.set_on_expired(on_expired);
-        self.debug_gate.enable(token, issued_at, expires_at);
+        let shared_for_expiry = self.shared.clone();
+        let wrapped_expired: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            shared_for_expiry.close_all_bench_windows("调试令牌已失效");
+            if let Some(cb) = on_expired.as_ref() {
+                cb();
+            }
+        });
+        self.shared.debug_gate.set_on_expired(Some(wrapped_expired));
+        self.shared.debug_gate.enable(token, issued_at, expires_at);
+        self.shared.bench_window_changed.notify_waiters();
         let mut slot = self
             .debug_listener
             .lock()
@@ -1326,7 +1620,7 @@ impl VoiceServer {
         let mut server_stop = self.shutdown.subscribe();
         let app = debug_api::router(debug_api::DebugApiState {
             shared: self.shared.clone(),
-            gate: self.debug_gate.clone(),
+            gate: self.shared.debug_gate.clone(),
             trace_control: self.shared.config.debug_process_trace.clone(),
             active_laser_job: self.shared.config.active_laser_job.clone(),
         });
@@ -1364,9 +1658,10 @@ impl VoiceServer {
         Ok(actual_port)
     }
 
-    /// VA2 #4 立即作废令牌并关闭本机调试入口（不断开已连接小智会话）。
+    /// VA2 #4 立即作废令牌、关闭全部测试时间窗并关闭本机调试入口（不断开已连接小智会话）。
     pub fn disable_debug_api(&self) {
-        self.debug_gate.disable();
+        self.shared.debug_gate.disable();
+        self.shared.close_all_bench_windows("调试开关已关闭");
         if let Ok(mut slot) = self.debug_listener.lock()
             && let Some((_, stop_tx)) = slot.take()
         {
@@ -1376,7 +1671,8 @@ impl VoiceServer {
 
     /// 本机调试入口当前监听的回环端口；未开启或未运行时为 `None`。
     pub fn debug_api_port(&self) -> Option<u16> {
-        if !self.debug_gate.snapshot().enabled {
+        self.shared.sync_bench_windows();
+        if !self.shared.debug_gate.snapshot().enabled {
             return None;
         }
         self.debug_listener

@@ -45,6 +45,7 @@ export function LiveDebugTraces({ builtin }) {
           t.spoken,
           t.device_id,
           deviceLabel(t.device_id),
+          t.bench_window ? "模拟（整体测试） 整体测试 bench_window" : "",
           t.simulated ? "模拟 simulated" : "",
           ...(Array.isArray(t.tools) ? t.tools.map((x) => `${x.name} ${x.arguments} ${x.result} ${x.block_reason || ""}`) : []),
         ]
@@ -275,9 +276,16 @@ export function LiveDebugTraces({ builtin }) {
               <div className="voice-debug-card" key={trace.id ? `log-${trace.id}` : `${trace.session_id}-${trace.turn}-${idx}`}>
                 <div className="voice-debug-head">
                   <b>第 {trace.turn} 轮</b>
-                  {trace.simulated && (
-                    <span className="ob-pill ob-pill--info voice-tag" title="本轮来自文字直通模拟联调，已禁止物理动作且不写入长期记忆">
-                      模拟
+                  {(trace.bench_window || trace.simulated) && (
+                    <span
+                      className={`ob-pill ${trace.bench_window ? "ob-pill--warn" : "ob-pill--info"} voice-tag`}
+                      title={
+                        trace.bench_window
+                          ? "本轮在整体测试时间窗内执行，已锁定物理动作且不写入长期记忆"
+                          : "本轮来自文字直通模拟联调，已禁止物理动作且不写入长期记忆"
+                      }
+                    >
+                      {trace.bench_window ? "模拟（整体测试）" : "模拟"}
                     </span>
                   )}
                   <span className="voice-muted mono">{formatTime(trace.at)}</span>

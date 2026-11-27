@@ -8,6 +8,8 @@
   <string>macOS 要求应用有定位权限才能读取 Wi-Fi 名称。MOSS 只在你点“用本机当前 Wi-Fi”或“扫描附近”时读取网络名给 USB 配网填写，不读取、不保存你的位置。</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>macOS 要求应用有定位权限才能读取 Wi-Fi 名称。MOSS 只在你点“用本机当前 Wi-Fi”或“扫描附近”时读取网络名给 USB 配网填写，不读取、不保存你的位置。</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>用于录制本机语音测试语料</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_telnet._tcp</string>

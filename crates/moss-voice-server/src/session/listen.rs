@@ -53,6 +53,8 @@ impl<'a> Session<'a> {
             manual,
             speaking: false,
             speech_began_at: manual.then(Instant::now),
+            speech_began_at_ms: manual.then(crate::unix_now_ms),
+            peak_uplink_level: 0,
             voiced_samples: 0,
             last_interim_stt_at: None,
             utterance: Vec::new(),
@@ -143,6 +145,8 @@ impl<'a> Session<'a> {
                         .checked_sub(Duration::from_millis(voiced_ms))
                         .map_or(self.recording_started, |t| t.max(self.recording_started));
                     listening.speech_began_at = Some(approx_began);
+                    listening.speech_began_at_ms =
+                        Some(crate::unix_now_ms().saturating_sub(voiced_ms));
                     listening.voiced_samples = voiced_span;
                     listening.utterance = merged;
                     began = true;
@@ -283,26 +287,43 @@ impl<'a> Session<'a> {
             }
             // 替换 Listening 会丢弃旧 ASR 接收器与预热任务；本次语音只开始一个 FastStop 轮次，
             // 后续最终结果和设备 listen stop 不会再次触发。
-            let fast_stop_capture = match std::mem::replace(&mut self.phase, Phase::Idle) {
-                Phase::Listening(mut listening)
-                    if self
-                        .shared
-                        .config
-                        .asr_corpus
-                        .as_ref()
-                        .is_some_and(|store| store.is_enabled()) =>
-                {
-                    let pcm = std::mem::take(&mut listening.utterance);
-                    let interims = std::mem::take(&mut listening.interims);
-                    (
-                        (!pcm.is_empty()).then_some((pcm, self.uplink_rate)),
-                        interims,
-                    )
-                }
-                _ => (None, Vec::new()),
-            };
-            self.pending_fast_stop_pcm = fast_stop_capture.0;
-            self.pending_corpus_interims = fast_stop_capture.1;
+            if self.digital_feed.is_some() || self.pending_digital_ack.is_some() {
+                self.digital_feed = None;
+                self.next_turn_is_digital = true;
+            }
+            let corpus_enabled = self
+                .shared
+                .config
+                .asr_corpus
+                .as_ref()
+                .is_some_and(|store| store.is_enabled())
+                && !self.next_turn_is_digital;
+            let (fast_stop_pcm, fast_stop_interims, began_ms, peak_lvl) =
+                match std::mem::replace(&mut self.phase, Phase::Idle) {
+                    Phase::Listening(mut listening) => {
+                        let began = listening.speech_began_at_ms;
+                        let peak = (listening.peak_uplink_level > 0)
+                            .then_some(listening.peak_uplink_level);
+                        if corpus_enabled {
+                            let pcm = std::mem::take(&mut listening.utterance);
+                            let interims = std::mem::take(&mut listening.interims);
+                            (
+                                (!pcm.is_empty()).then_some((pcm, self.uplink_rate)),
+                                interims,
+                                began,
+                                peak,
+                            )
+                        } else {
+                            (None, Vec::new(), began, peak)
+                        }
+                    }
+                    _ => (None, Vec::new(), None, None),
+                };
+            self.pending_fast_stop_pcm = fast_stop_pcm;
+            self.pending_corpus_interims = fast_stop_interims;
+            self.pending_speech_began_at_ms = began_ms;
+            self.pending_speech_end_at_ms = Some(crate::unix_now_ms());
+            self.pending_peak_uplink_level = peak_lvl;
             self.event(format!(
                 "流式中间结果整句命中急停词（{}）：立即请求急停",
                 crate::fast::normalized(&corrected)
@@ -627,30 +648,51 @@ impl<'a> Session<'a> {
         if !keep_for_keywords && let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
-        let (stream, captured_interims) = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Listening(mut listening) => (
-                listening.stream.take().map(|(stream, _)| stream),
-                std::mem::take(&mut listening.interims),
-            ),
-            _ => (None, Vec::new()),
-        };
+        if self.digital_feed.is_some() || self.pending_digital_ack.is_some() {
+            self.digital_feed = None;
+            self.next_turn_is_digital = true;
+        }
+        let (stream, captured_interims, began_ms, peak_lvl) =
+            match std::mem::replace(&mut self.phase, Phase::Idle) {
+                Phase::Listening(mut listening) => (
+                    listening.stream.take().map(|(stream, _)| stream),
+                    std::mem::take(&mut listening.interims),
+                    listening.speech_began_at_ms,
+                    (listening.peak_uplink_level > 0).then_some(listening.peak_uplink_level),
+                ),
+                _ => (None, Vec::new(), None, None),
+            };
         self.pending_corpus_interims = captured_interims;
         self.pending_fast_stop_pcm = None;
+        self.pending_speech_began_at_ms = began_ms;
+        self.pending_speech_end_at_ms = Some(crate::unix_now_ms());
+        self.pending_peak_uplink_level = peak_lvl;
         self.set_state("idle");
         let seconds = pcm.len() as f64 / self.uplink_rate as f64;
         self.event(format!("收到一段语音：{seconds:.1} 秒（{}）", end.label()));
         if self.conversation.is_none() {
+            self.cancel_digital_feed("当前为回声模式，无法执行对话数字注入");
             return self.echo(socket, pcm).await;
         }
         if pcm.is_empty() {
-            // 手动模式松开但没说话：设备已回到空闲
+            // 手动模式松开或数字注入未触发有效语音：设备已回到空闲
+            if let Some(tx) = self.pending_digital_ack.take() {
+                let _ = tx.send(Err(crate::InjectTurnError::conflict(
+                    "no_speech_detected",
+                    "数字音频未触发有效语音识别",
+                )));
+            }
+            self.next_turn_is_digital = false;
             return Ok(());
         }
         let sample_rate = self.uplink_rate;
-        if let Some(enrollment) = self
-            .conversation
-            .as_ref()
-            .and_then(|c| c.speaker_enrollment.as_ref())
+        let in_bench_window = self.shared.is_bench_window_active(self.device_id);
+        if !in_bench_window
+            && !self.next_turn_is_digital
+            && let Some(enrollment) = self
+                .conversation
+                .as_ref()
+                .and_then(|c| c.speaker_enrollment.as_ref())
         {
             enrollment.submit(self.device_id, self.session_id, &pcm, sample_rate);
         }

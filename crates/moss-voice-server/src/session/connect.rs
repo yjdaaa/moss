@@ -431,6 +431,9 @@ pub(crate) async fn serve_session(
                 transport: transport.into(),
                 text_font_size: init_font_size,
                 text_font_bpp: init_font_bpp,
+                bench_window: None,
+                latest_turn: 0,
+                recent_peak_level: 0,
             });
             shared.state.event_in_flow(if mqtt {
                 format!("设备 {device_id} 已常连在线（MQTT，唤醒后语音走加密 UDP）")
@@ -471,6 +474,7 @@ pub(crate) async fn serve_session(
         {
             map.remove(&device_id);
         }
+        shared.close_bench_window_for_session(&device_id, &session_id, "设备断开");
         shared.state.close(&session_id);
         shared
             .registry
@@ -511,6 +515,8 @@ pub(crate) async fn serve_session(
             .fail_if_pending(&device_id, "设备连接已断开，画面未回传".into());
     }
     session.finish_timing("disconnected");
+    // VC1：设备断开时立即关闭该会话绑定的测试时间窗并写入事件，防止状态残留
+    shared.close_bench_window_for_session(&device_id, &session_id, "设备断开");
     session.last_verified_person = None;
     session.carried_photo = None;
     session.listen.paused = None;

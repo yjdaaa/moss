@@ -32,8 +32,12 @@ impl<'a> Session<'a> {
                     .debug_corrected_asr
                     .clone()
                     .unwrap_or_else(|| raw_text.clone());
-                // VB1：采集真实小智语音轮次（16 kHz 单声道 WAV + 元数据）；模拟轮次或关闭时直接跳过，绝不进过程记录或声纹。
-                if !turn.simulated
+                // VB1 + VC3 #7：采集真实麦克风上行语音（16 kHz 单声道 WAV + 元数据），包含整体测试时间窗内的外放录音；
+                // VA 文字直通注入与 VC2 数字音频对照注入绝不落盘，且绝不进诊断包、过程记录或声纹。
+                let mut corpus_date = None;
+                let mut corpus_turn_id = None;
+                let allow_corpus_save = turn.injected_text.is_none() && !turn.digital_audio;
+                if allow_corpus_save
                     && let Some(corpus) = self
                         .shared
                         .config
@@ -42,6 +46,10 @@ impl<'a> Session<'a> {
                         .filter(|store| store.is_enabled())
                     && let Some((pcm, sample_rate)) = turn.corpus_audio.take()
                 {
+                    let date_str = crate::asr_corpus::local_date_from_ms(at_ms);
+                    let turn_key = crate::asr_corpus::sanitize_turn_id(self.session_id, turn_no);
+                    corpus_date = Some(date_str);
+                    corpus_turn_id = Some(turn_key);
                     let asr_model = self
                         .conversation
                         .as_ref()
@@ -69,6 +77,7 @@ impl<'a> Session<'a> {
                         turn: turn_no,
                         captured_at_ms: at_ms,
                         simulated: false,
+                        bench_window: turn.bench_window,
                         pcm,
                         sample_rate,
                         raw_text: raw_text.clone(),
@@ -151,6 +160,7 @@ impl<'a> Session<'a> {
                                 truncated: false,
                                 tools_dropped: 0,
                                 simulated: turn.simulated,
+                                bench_window: turn.bench_window,
                             },
                             captured_epoch,
                         )
@@ -166,12 +176,22 @@ impl<'a> Session<'a> {
                     }
                 }
 
+                let simulated_label = if turn.bench_window {
+                    Some("模拟（整体测试）".to_owned())
+                } else if turn.simulated {
+                    Some("模拟".to_owned())
+                } else {
+                    None
+                };
                 self.shared.state.upsert_turn_detail(crate::TurnDetail {
                     turn_id: format!("{}:{turn_no}", self.session_id),
                     device_id: self.device_id.into(),
                     session_id: self.session_id.into(),
                     turn: turn_no,
                     simulated: turn.simulated,
+                    bench_window: turn.bench_window,
+                    simulated_label,
+                    digital_audio: turn.digital_audio,
                     status: outcome.into(),
                     outcome: outcome.into(),
                     route: route.into(),
@@ -190,6 +210,12 @@ impl<'a> Session<'a> {
                     error: turn.last_error.clone(),
                     started_at_ms: turn.started_at_ms,
                     finished_at_ms: Some(at_ms),
+                    speech_began_at_ms: turn.speech_began_at_ms,
+                    speech_end_at_ms: turn.speech_end_at_ms,
+                    first_audio_frame_at_ms: turn.first_audio_frame_at_ms,
+                    peak_uplink_level: turn.peak_uplink_level,
+                    corpus_date,
+                    corpus_turn_id,
                 });
             }
         }
@@ -302,7 +328,52 @@ impl<'a> Session<'a> {
             pending_goodbye: None,
             pending_corpus_interims: Vec::new(),
             pending_fast_stop_pcm: None,
+            recent_uplink_levels: VecDeque::new(),
+            pending_speech_began_at_ms: None,
+            pending_speech_end_at_ms: None,
+            pending_peak_uplink_level: None,
+            digital_feed: None,
+            pending_digital_ack: None,
+            next_turn_is_digital: false,
         })
+    }
+
+    /// VC2/VC3 记录上行音频帧音量（0..=100）：同时维护最近 3 秒滑动峰值与本轮拾音峰值。
+    pub(super) fn record_uplink_level(&mut self, raw_level: u8) {
+        let level = raw_level.min(100);
+        let now = Instant::now();
+        self.recent_uplink_levels.push_back((now, level));
+        while self
+            .recent_uplink_levels
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > Duration::from_secs(3))
+        {
+            self.recent_uplink_levels.pop_front();
+        }
+        let peak = self
+            .recent_uplink_levels
+            .iter()
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(level);
+        if let Phase::Listening(listening) = &mut self.phase {
+            listening.peak_uplink_level = listening.peak_uplink_level.max(level);
+        }
+        self.shared
+            .state
+            .set_recent_peak_level(self.session_id, peak);
+        self.set_level(level);
+    }
+
+    pub(super) fn cancel_digital_feed(&mut self, reason: &str) {
+        self.digital_feed = None;
+        self.next_turn_is_digital = false;
+        if let Some(tx) = self.pending_digital_ack.take() {
+            let _ = tx.send(Err(crate::InjectTurnError::conflict(
+                "inject_audio_cancelled",
+                reason,
+            )));
+        }
     }
 
     fn sync_pulse(&self) {
@@ -604,17 +675,48 @@ impl<'a> Session<'a> {
             // 加工结束播报与副屏 HUD 用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
             let job_deadline = self.notices.next_job_poll;
             let report_deadline = self.background_report_deadline(socket);
+            let bench_window_deadline = self.shared.bench_window_deadline_for(self.device_id);
+            let digital_feed_deadline = self.digital_feed.as_ref().map(|f| f.next_at);
             // 按顺序检查（biased）：对话任务的事件先于它发出的设备工具调用处理，设备看到的顺序与任务一致
             // （先 stt 再 tools/call）；设备消息先于播放定时器，打断不被积压的播放拍延迟。
             let result = tokio::select! {
                 biased;
                 _ = shutdown.changed() => return "内置语音服务已停止".into(),
+                _ = self.shared.bench_window_changed.notified() => {
+                    self.shared.sync_bench_windows();
+                    if self.digital_feed.is_some()
+                        && !self.shared.is_bench_window_active(self.device_id)
+                    {
+                        self.cancel_digital_feed("测试时间窗已关闭，数字音频注入中止");
+                    }
+                    Ok(())
+                },
+                _ = async {
+                    match bench_window_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.shared.sync_bench_windows();
+                    if self.digital_feed.is_some()
+                        && !self.shared.is_bench_window_active(self.device_id)
+                    {
+                        self.cancel_digital_feed("测试时间窗已到期关闭，数字音频注入中止");
+                    }
+                    Ok(())
+                },
                 frame = async {
                     match self.vad_worker.as_mut() {
                         Some(worker) => worker.next().await,
                         None => std::future::pending().await,
                     }
                 } => self.on_vad_result(socket, frame).await,
+                _ = async {
+                    match digital_feed_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.tick_digital_feed(socket).await,
                 event = next_turn_event(&mut self.turn) => self.on_turn_event(socket, event).await,
                 interim = next_listening_interim(&mut self.phase) => self.on_interim(socket, interim).await,
                 incoming = socket.recv() => match incoming {
