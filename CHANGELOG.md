@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 加固语音中心“一键复制 AI 全自动调试提示词”的安全红线、3 轮调优边界、覆盖率披露与费用收尾提醒（2026-11-27）
+
+- **现象**：原有全自动调试提示词对前提未满足的暂停边界、不可触碰的安全门禁文件、自动改代码轮次上限、标准语料与网上样本的覆盖率区分、拉取快更冲突止损、云端 ASR 费用及收尾关开关约束不够明确。
+- **根因与修复**：`frontend/src/voiceState/aiBench.js`（`buildAiBenchPrompt`、`aiBenchChecklistView`、`LOCAL_ASR_BENCH_MODEL_IDS`）保留既有安全约束并新增 5 项硬规则：① 前提未满足暂停指引用户，严禁改 `settings.json`/数据库/令牌绕过及修改 `sim_guard.rs`/测试时间窗/`TurnGate`/停止快路径/鉴权/主窗口 ACL 与真实激光动作；② 调优上限 3 轮、每轮单项、记录前后指标、未变好撤回、禁改测评脚本与测试、先 `--affected` 后 `--finish`、本地提交不推送；③ 动态前提分开展示“标准语料已录 X / 13 句”与“网上样本 N 条”（未知写“未知”），汇报开头列出覆盖率；④ 先 `git pull` 再 `--finish` 并提示重启 MOSS，冲突/失败停下贴最后 30 行；⑤ `asr-bench.mjs` 经 `--models` 先只测本地模型并提示云端费用，结尾补“收尾”关开关提醒；同步 `n142`（含后期雕刻机联调安全待办）与 `README.md`。
+- **验证**：`node scripts/verify.mjs --finish` 通过（前端单测 430 项、脚本 89 项、浏览器 20 个文件，已快更）；另有 `frontend/tests/voiceState.test.mjs` 定向单测，实机全自动联调流程未执行（`unverified`）。
+- **关联**：`frontend/src/voiceState/aiBench.js`、`frontend/tests/voiceState.test.mjs`、`docs/integration/revisions/native-voice-spec.md`、`scripts/voice-bench/README.md`。
+
 ### 修复网上真人语音来源区分、联网下载合规约束、轮换分批与测试期间禁播音乐（2026-11-27）
 
 - **现象**：`recordings/online/` 下的网上真人语音被混标为 `human-recording` 且允许缺许可信息的 `.txt` 样本；缺少联网下载许可/限量约束与条数轮换上限，超长测试未按会话复核自动分批，且随机网上句子可能在测试时间窗内触发播歌或设备指令。

@@ -5,6 +5,79 @@
 
 import { debugInjectStateView } from "./devices.js";
 
+/** 与 `scripts/voice-bench/asr-bench.mjs` 的 `LOCAL_ASR_CATALOG` 对齐的本地识别模型 ID 清单（传给 `--models` 可只测已安装本地模型、跳过计费云端模型）。 */
+export const LOCAL_ASR_BENCH_MODEL_IDS = [
+  "sense_voice",
+  "sense_voice_2025",
+  "x_asr_streaming",
+  "qwen3_asr_0_6b",
+  "firered_asr2_ctc",
+];
+
+function resolveLocalAsrBenchModelsArg(status) {
+  const localModels = Array.isArray(status?.local?.models) ? status.local.models : [];
+  const installedIds = localModels
+    .filter((m) => m?.kind === "asr" && m?.installed === true && LOCAL_ASR_BENCH_MODEL_IDS.includes(m?.id))
+    .map((m) => m.id);
+  const chosen = installedIds.length > 0 ? installedIds : LOCAL_ASR_BENCH_MODEL_IDS;
+  return chosen.join(",");
+}
+
+function summarizeBenchRecordingCoverage(benchRec, corpusCount) {
+  if (!benchRec || typeof benchRec !== "object") {
+    return {
+      standardRecordedCount: null,
+      onlineSampleCount: null,
+      userSpeakers: [],
+    };
+  }
+  const speakers = Array.isArray(benchRec.speakers) ? benchRec.speakers : [];
+  const userSpeakers = speakers.filter((s) => {
+    const name = String(s?.speaker || "").trim().toLowerCase();
+    const dir = String(s?.speaker_dir || "").trim().toLowerCase();
+    return name !== "online" && dir !== "online";
+  });
+  const totalRecordings = Number.isFinite(Number(benchRec.total_recordings))
+    ? Math.max(0, Number(benchRec.total_recordings))
+    : null;
+  const completeSpeakerCount = Number.isFinite(Number(benchRec.complete_speaker_count))
+    ? Math.max(0, Number(benchRec.complete_speaker_count))
+    : 0;
+
+  let standardRecordedCount = null;
+  if (Number.isFinite(benchRec.standard_recorded_count)) {
+    standardRecordedCount = Math.min(corpusCount, Math.max(0, Number(benchRec.standard_recorded_count)));
+  } else if (userSpeakers.length > 0) {
+    standardRecordedCount = Math.min(
+      corpusCount,
+      Math.max(0, ...userSpeakers.map((s) => Number(s?.recorded_count) || 0)),
+    );
+  } else if (completeSpeakerCount > 0) {
+    standardRecordedCount = corpusCount;
+  } else if (totalRecordings === 0) {
+    standardRecordedCount = 0;
+  }
+
+  let onlineSampleCount = null;
+  if (Number.isFinite(benchRec.online_count)) {
+    onlineSampleCount = Math.max(0, Number(benchRec.online_count));
+  } else if (totalRecordings === 0) {
+    onlineSampleCount = 0;
+  } else if (
+    totalRecordings !== null &&
+    completeSpeakerCount > 0 &&
+    totalRecordings === completeSpeakerCount * corpusCount
+  ) {
+    onlineSampleCount = 0;
+  }
+
+  return {
+    standardRecordedCount,
+    onlineSampleCount,
+    userSpeakers,
+  };
+}
+
 function sanitizeDeviceIdForPrompt(raw) {
   const s = String(raw || "").trim();
   if (!s || s.length > 64) return "";
@@ -68,13 +141,14 @@ export function aiBenchChecklistView(status) {
   const benchRec =
     status?.bench_recordings && typeof status.bench_recordings === "object"
       ? status.bench_recordings
-      : {};
-  const corpusCount = Number(benchRec.corpus_count) || 13;
-  const totalRecordings = Number(benchRec.total_recordings) || 0;
-  const speakerCount = Number(benchRec.speaker_count) || 0;
-  const completeSpeakerCount = Number(benchRec.complete_speaker_count) || 0;
-  const benchSpeakers = Array.isArray(benchRec.speakers) ? benchRec.speakers : [];
+      : null;
+  const corpusCount = Number(benchRec?.corpus_count) || 13;
+  const totalRecordings = Number(benchRec?.total_recordings) || 0;
+  const speakerCount = Number(benchRec?.speaker_count) || 0;
+  const completeSpeakerCount = Number(benchRec?.complete_speaker_count) || 0;
+  const benchSpeakers = Array.isArray(benchRec?.speakers) ? benchRec.speakers : [];
   const recordingsReady = completeSpeakerCount > 0;
+  const coverage = summarizeBenchRecordingCoverage(benchRec, corpusCount);
 
   const items = [
     {
@@ -150,6 +224,8 @@ export function aiBenchChecklistView(status) {
     completeSpeakerCount,
     benchSpeakers,
     recordingsReady,
+    standardRecordedCount: coverage.standardRecordedCount,
+    onlineSampleCount: coverage.onlineSampleCount,
   };
 }
 
@@ -212,6 +288,8 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     return stripSecretsAndPaths(prompt);
   }
 
+  const localModelsArg = resolveLocalAsrBenchModelsArg(status);
+
   if (kind === "asr") {
     const corpusLine =
       view.labeledCount > 0
@@ -226,33 +304,40 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
       "- 识别录音与标注仅用于离线测评，严禁进入诊断包或声纹识别。",
       "",
       "## 前提检查",
-      `1. ${corpusLine}`,
-      "2. 如代码有更新，先同步代码并运行 `node scripts/verify.mjs --finish`。",
+      "1. 先执行 `git pull` 拉取最新代码，再运行 `node scripts/verify.mjs --finish` 快更本机桌面程序并提示用户重启 MOSS；拉取冲突或验证失败时停下汇报失败项和最后 30 行输出，不要自行解决合并冲突或强行继续；",
+      `2. ${corpusLine}`,
       "",
-      "## 运行命令",
+      "## 运行命令（默认先只测本地模型，避免重复云端计费）",
       "```bash",
-      "node scripts/voice-bench/asr-bench.mjs --noise-levels clean,fan,pump",
+      `node scripts/voice-bench/asr-bench.mjs --models ${localModelsArg} --noise-levels clean,fan,pump`,
       "```",
-      "- 脚本自动扫描 `<runtime>/logs/process-trace/`（完整过程记录中带真值标记的 `voice-files/*-user.wav`）与 `<runtime>/asr-corpus/`，并按音源（`live_mic` 小智实时说话 vs `e2e_playback` 整体测试外放录音）分组统计。",
+      "- 脚本自动扫描 `<runtime>/logs/process-trace/`（完整过程记录中带真值标记的 `voice-files/*-user.wav`）与 `<runtime>/asr-corpus/`，并按语音来源（网上真人 / 我的录音 / 小智实时说话 / 数字直通）分组统计；",
+      "- **云端费用提醒**：已配置的云端识别模型会产生调用费用，最多各测一轮（`--models cloud`），或者先在汇报里征求用户同意后再测。",
       "",
       "## 归档位置与回传内容",
       "- 归档输出目录：运行目录相对路径 `<runtime>/voice-bench/asr-<run-id>/`；",
-      "- 请读取并回传：`report.md`（含小智实时说话 vs 整体测试外放录音分组字错率、命令词召回与误报、最差 30 条）与 `suggestions.json`。",
+      "- 请读取并回传：`report.md`（含按来源分组字错率、命令词召回与误报、最差 30 条）与 `suggestions.json`。",
       "",
       "## 修改原则",
       "- `suggestions.json` 里的热词、同音纠错和数字规范化候选不要自动应用，须逐条人工/AI 复核并确认不触碰停止/退出命令词后再改代码并补测试；",
-      "- 不要修改语料来让测试通过。",
+      "- 不得修改测评脚本（`scripts/voice-bench/*`）的判定阈值、语料、断言或报告逻辑来让结果变好看。",
     ].join("\n");
     return stripSecretsAndPaths(prompt);
   }
 
-  // 默认主推：一键全自动联调与调试（AI 自动从网上准备真人语音并缓存复用 → 文字直通快检 → 真小智外放全链路 → 离线识别横评 → 自动改代码复测）
+  // 默认主推：一键全自动联调与调试（先拉代码快更 → 准备真人素材 → 文字直通快检 → 真小智外放全链路 → 本地离线识别横评 → 有边界的改代码复测与收尾）
+  const stdText =
+    view.standardRecordedCount === null
+      ? `未知 / ${view.corpusCount}`
+      : `${view.standardRecordedCount} / ${view.corpusCount}`;
+  const onlineText =
+    view.onlineSampleCount === null ? "未知" : `${view.onlineSampleCount} 条`;
   const recordingPrereq = view.recordingsReady
-    ? `本机 \`<runtime>/voice-bench/recordings/\` 已缓存 ${view.completeSpeakerCount} 位说话人的完整真人语音（共 ${view.totalRecordings} 条）；**直接复用现有缓存开测，严禁重复下载或让用户重复开口录制**。`
-    : `当前本机已缓存 ${view.totalRecordings} 条真人语音（标准语料共 ${view.corpusCount} 句）。**无需让用户自己对着麦克风说话**：请 AI 先检查 \`<runtime>/voice-bench/recordings/\`，若为空或尚未覆盖全部语料，**由 AI 自主从网上公开中文真人语音集下载真人发音样本并缓存到 \`<runtime>/voice-bench/recordings/online/\` 长期复用**（用户在 App「录制测试语料」里至少录完一位说话人的全部语料也可直接复用；绝不用 TTS 合成音充当真人语音）。`;
+    ? `当前本机素材状态：标准语料已录 ${stdText} 句（${view.completeSpeakerCount} 位说话人已录齐），网上样本 ${onlineText}；**直接复用现有缓存开测，严禁重复下载或让用户重复开口录制**。`
+    : `当前本机素材状态：标准语料已录 ${stdText} 句，网上样本 ${onlineText}。**无需先让用户自己对着麦克风说话**：请 AI 先检查 \`<runtime>/voice-bench/recordings/\`，若为空或素材不足，**由 AI 自主从网上公开中文真人语音集下载真人发音样本并缓存到 \`<runtime>/voice-bench/recordings/online/\` 长期复用**（如需覆盖 13 句工作室标准术语与意图句，可在 App「录制测试语料」里至少录完一位说话人的全部语料；绝不用 TTS 合成音充当真人语音）。`;
 
   const manualPrereqs = [
-    "把小智放在离电脑喇叭 30–50 cm 处，调至合适电脑音量并避免麦克风被遮挡。",
+    "把小智放在离电脑喇叭 30–50 cm 处，调至合适电脑音量并避免麦克风被遮挡（由用户在现场完成）。",
     debugPrereq,
     devicePrereq,
     recordingPrereq,
@@ -266,20 +351,26 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
   const maxOnlineArg = ` --max-online ${maxOnline}`;
 
   const prompt = [
-    "# 任务：真小智一键全自动联调与调优（AI 自动准备网上真人语音缓存 → 文字直通快检 → 真机外放全链路 → 离线识别横评 → 自动改代码闭环）",
+    "# 任务：真小智一键全自动联调与调优（拉取快更 → 准备真人语音 → 文字直通快检 → 真机外放全链路 → 离线识别横评 → 有边界调优与收尾）",
     "",
-    "## 仓库与规则约束",
+    "## 仓库与规则约束（硬红线，绝不可违反）",
     "- 严格遵守仓库 `AGENTS.md` 与 `docs/developer/safety.md` §4.6 / §4.7；",
-    "- 不执行 `git push`，不绕过或放宽安全门禁（所有测试必须在测试时间窗内执行，物理动作全程锁定，结束时务必关闭窗口）；",
-    "- 严禁打印、记录或外传调试令牌、API 密钥、设备 token 或本机绝对路径（路径一律用 `<runtime>/...` 相对说明）。",
+    "- **前提未满足必须暂停**：开启“允许本机 AI 调试注入”、把小智放到喇叭旁、唤醒小智，这些只能由用户在界面或现场完成。脚本预检发现未满足时（无令牌、无在线设备、校准失败），AI 必须暂停，明确告诉用户具体缺哪一步、怎么做，等用户确认后再继续；",
+    "- **严禁绕过开关与门禁**：严禁通过修改 `settings.json`、数据库、令牌文件或任何运行目录文件来开启开关、伪造令牌或改变设备状态；",
+    "- **严禁修改安全门禁相关代码**：严禁修改 `crates/moss-voice-server/src/sim_guard.rs`、测试时间窗（`crates/moss-voice-server/src/debug_api.rs` 的 bench window 部分）、`TurnGate`、停止和急停快路径、调试入口的鉴权以及主窗口 ACL；",
+    "- **严禁触碰真实激光机动作**：严禁让真实激光机运动、出光或发送任务，目前的联调范围只到“生成预览”；所有外放测试必须在测试时间窗内执行，物理动作全程锁定，结束时务必关闭窗口；",
+    "- **不推送、不泄露**：可本地提交（遵守 `AGENTS.md` 提交格式），绝不执行 `git push`；严禁打印、记录或外传调试令牌、API 密钥、设备 token 或本机绝对路径（路径一律用 `<runtime>/...` 相对说明）。",
     "",
-    "## 前提检查与代码快更",
-    "1. 如本机代码有更新，先运行 `node scripts/verify.mjs --finish` 完成验证并快更本机桌面程序；",
-    ...manualPrereqs.map((line, i) => `${i + 2}. ${line}`),
+    "## 第零步：拉取最新代码、快更并核对前提",
+    "1. 先执行 `git pull` 拉取最新代码；",
+    "2. 再运行 `node scripts/verify.mjs --finish` 完成验证并快更本机桌面程序，并提示用户重启 MOSS；",
+    "3. **失败即停**：若 `git pull` 出现冲突或 `--finish` 验证失败，立刻停下汇报失败项和最后 30 行输出，不要强行继续，也不要自行解决合并冲突；",
+    ...manualPrereqs.map((line, i) => `${i + 4}. ${line}`),
+    "- 再次确认：上述开关、摆放距离与唤醒只能由用户完成；脚本预检报无令牌、无在线设备或校准失败时必须暂停并指导用户处理，不得私改运行目录配置或令牌文件。",
     "",
-    "## 全自动四步调试流程（请 AI 按顺序自主执行，无需用户手动干预）",
+    "## 全自动四步调试流程（前提全部就绪后按顺序执行）",
     "",
-    "### 第一步：准备真人语音素材（有本机缓存直接复用，缺素材时 AI 自动按许可与限量从网上拉取并永久缓存）",
+    "### 第一步：准备真人语音素材（有本机缓存直接复用，缺素材时 AI 按许可与限量从网上拉取并永久缓存）",
     "- 先检查 `<runtime>/voice-bench/recordings/` 下是否已有 `.wav` 真人录音文件：",
     "  - **若已有真人语音缓存，直接复用，严禁每次测试重复下载或要求用户开口说话**；",
     "  - **若目录为空或素材不足**，由 AI 自主从网上公开中文真人语音数据集补充真实人声（**必须是真人发音，严禁用系统 `say` 或本地/云端 TTS 合成音冒充**），并严格遵守以下联网下载约束：",
@@ -289,6 +380,7 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "    - **必填元数据（4 字段缺一不可）**：`<runtime>/voice-bench/recordings/online/<id>.json` 必须包含 `text`、`dataset`、`license`、`source_url`（例如 `{\"text\":\"对应的中文原话\",\"dataset\":\"AISHELL-1\",\"license\":\"Apache-2.0\",\"source_url\":\"https://...\"}`）；缺少许可或数据集信息的条目会被脚本直接跳过并列进“被跳过素材”。",
     "    - **不进仓库**：下载的数据只存在本机运行目录 `<runtime>/voice-bench/recordings/online/`，绝不加入仓库，也不提交。",
     "    - **优先挑合适的句子**：优先选和工作室场景相近的短句（3–15 秒）；不选像指令的句子（播放音乐、调音量、调亮度、静音、关机、重启、停、退下、开始等，脚本也会自动过滤并记入“被跳过素材”）。",
+    "- **素材覆盖率说明（必须如实认知）**：网上公开语音是随机句子，覆盖不了 13 句工作室标准语料（椴木、切缝、走边框等术语，以及意图和工具类句子）。用户没录的标准语料，在外放测试中会被跳过；这些语料的后半段由第二步“文字直通”覆盖。",
     "",
     "### 第二步：先跑“文字直通”快检识别后半段（跳过麦克风，毫秒级排查后半段逻辑）",
     "```bash",
@@ -306,20 +398,36 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "- 若初测发现识别错字、吞首字或抢话，请 AI **自主追加运行** `--compare-digital`（同份真人录音走服务端数字注入对照，量化麦克风与房间损耗）以及 `--noise fan --noise-gain 0.22`（叠加排风扇背景噪声）定位根因；",
     "- 默认不把小智麦克风历史录音当作外放素材；仅在确需补充时显式加 `--include-device-corpus`（报告会标明“二次录制”）。",
     "",
-    "### 第四步：跑“离线识别（ASR）多模型横评”并自动改代码复测闭环",
+    "### 第四步：跑“离线识别（ASR）离线测评”（默认先只测本地模型，控制云端费用）",
     "```bash",
-    "node scripts/voice-bench/asr-bench.mjs --noise-levels clean,fan,pump",
+    `node scripts/voice-bench/asr-bench.mjs --models ${localModelsArg} --noise-levels clean,fan,pump`,
     "```",
-    "- 自动扫描 `<runtime>/logs/process-trace/` 中带真值标记的录音（含刚跑完的 `e2e_playback` 外放回采与日常 `live_mic` 真人说话），横评各识别模型在安静 / 排风扇 / 气泵下的字错率（CER）、命令词召回与误报。",
+    "- 默认通过 `--models` 先只测已安装的本地识别模型，自动扫描 `<runtime>/logs/process-trace/` 中带真值标记的录音（含刚跑完的 `e2e_playback` 外放回采与日常 `live_mic` 真人说话），横评安静 / 排风扇 / 气泵下的字错率（CER）、命令词召回与误报；",
+    "- **云端费用提醒**：已配置的云端识别模型会产生调用费用，最多各测一轮（`--models cloud`），或者先在汇报里征求用户同意后再测。",
     "",
-    "## 归档读取、调优与红线要求",
+    "## 归档读取、调优边界与汇报要求",
+    "- **汇报开头必须先给出素材覆盖率**（如实列出，不可省略）：",
+    "  - 标准语料 `X / 13` 句有真人录音（说话人：…）；",
+    "  - 网上真人样本 `N` 条（数据集：…，许可：…）；",
+    "  - 工作室术语识别：已覆盖 / 未覆盖（未覆盖时，建议用户在 App「录制测试语料」里录一遍）。",
     "- 请汇总回传上述三步的归档报告摘要：",
-    "  1. `<runtime>/voice-bench/e2e-<run-id>/report.md`、`summary.json`、`turns.jsonl`、`audio-manifest.json` 与 `timeline.txt`（4 环节通过率、按说话人统计、抢话/吞首字/高 CER 轮次、数字对照损耗）；",
+    "  1. `<runtime>/voice-bench/e2e-<run-id>/report.md`、`summary.json`、`turns.jsonl`、`audio-manifest.json` 与 `timeline.txt`（4 环节通过率、按语音来源与说话人统计、被跳过素材、抢话/吞首字/高 CER 轮次、数字对照损耗）；",
     "  2. `<runtime>/voice-bench/<run-id>/report.md`（文字直通后半段耗时与门禁结果）；",
     "  3. `<runtime>/voice-bench/asr-<run-id>/report.md` 与 `suggestions.json`（多模型 × 噪声字错率对比与纠错候选词）。",
-    "- **自主改代码与复测**：直接根据报告修改代码（例如 `PREROLL_MS`、`BASE_SILENCE_MS`、`UNFINISHED_HOLD_WINDOW`、同音纠错表、热词或路由逻辑），改完运行 `node scripts/verify.mjs --finish` 快更并重跑上述测试验证直至通过；",
-    "- `suggestions.json` 里的候选不要自动盲目应用，须逐条复核并遵守命令词保护规则后才可写入代码并补测试；",
-    "- 不要修改语料来让测试通过。",
+    "- **自动改代码与复测边界（严格遵守）**：",
+    "  1. **最多 3 轮**修改和复测；",
+    "  2. **每轮只改一个参数或一处逻辑**（例如 `PREROLL_MS`、`BASE_SILENCE_MS`、`UNFINISHED_HOLD_WINDOW`、同音纠错表、热词或路由逻辑），并在汇报里记录：改了什么、为什么改、改前和改后的关键指标（对应环节的通过率、CER、延迟等）；",
+    "  3. **指标没有变好或者变差时，撤回这一轮改动**；",
+    "  4. **禁止作弊**：不得修改测评脚本（`scripts/voice-bench/*`）的判定阈值、语料、断言或报告逻辑来让结果变好看，也不得删除或放宽仓库中的任何测试；不要修改语料来让测试通过；",
+    "  5. `suggestions.json` 里的候选不要自动盲目应用，须逐条复核并遵守命令词保护规则后才可写入代码并补测试；",
+    "  6. **分级验证**：每轮改完先跑 `node scripts/verify.mjs --affected --fmt-write`，全部修改完成后再跑一次 `node scripts/verify.mjs --finish`；",
+    "  7. **提交边界**：改动可以本地提交（遵守 `AGENTS.md` 的 `<类型>: <中文结论>` 提交格式），但**绝不推送**（不执行 `git push`）；",
+    "  8. **最终汇报必须包含**：素材覆盖率、每一轮的改动与指标变化、仍未解决的问题、建议用户决定的事项。",
+    "",
+    "## 收尾",
+    "1. 确认测试时间窗已关闭（设备不再处于“整体测试中（物理动作已锁定）”状态）；",
+    "2. 提醒用户到桌面端「语音中心 › 记录与诊断 › AI 联调与测试」关闭“允许本机 AI 调试注入”开关，关闭后本机令牌立即失效；",
+    "3. 如果测试期间开启了完整过程记录，提醒用户按需到「语音中心 › 记录与诊断 › 对话记录与排障」关闭。",
   ].join("\n");
 
   return stripSecretsAndPaths(prompt);

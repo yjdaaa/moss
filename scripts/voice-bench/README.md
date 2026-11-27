@@ -80,7 +80,7 @@ node scripts/voice-bench/asr-bench.mjs
 | `--corpus-dir <path>` | 显式指定单一已标注语料目录（传入时仅扫描该目录） | 同时扫描 `<runtime>/asr-corpus` 与 `<runtime>/logs/process-trace`（自动读取自定义过程记录目录） |
 | `--runtime-dir <path>` | MOSS 运行目录（用于发现已安装本地模型、云端配置与写出归档） | 系统默认运行目录 |
 | `--noise-levels <list>` | 噪声档位（复用 `chain_clips.py`，经 `python3 -I` 混噪）：`0`/`clean` 安静、`888`/`fan`/`machine` 排风扇气泵持续噪声、`999`/`pump`/`burst` 气泵咔嗒敲击突发噪声 | `0,888,999` |
-| `--models <list>` | 指定要测的模型 ID（逗号分隔），如 `sense_voice,qwen3_asr_0_6b,cloud` | 自动测试全部已安装本地 ASR 模型及已配置的云端 ASR |
+| `--models <list>` | 指定要测的模型 ID（逗号分隔），如仅测本地模型传 `sense_voice,sense_voice_2025,x_asr_streaming,qwen3_asr_0_6b,firered_asr2_ctc`；测云端加 `cloud`（云端调用会产生费用，建议先只测本地，云端按需最多测一轮） | 自动测试全部已安装本地 ASR 模型及已配置的云端 ASR |
 | `--helper <path>` | `moss-voice-local` 可执行文件路径 | 自动探测 |
 | `--out-dir <path>` | 显式指定归档输出目录 | `<runtime>/voice-bench/asr-<run-id>/` |
 
