@@ -1510,3 +1510,129 @@ fn vc1_bench_window_enforces_chat_mode_revocation_host_and_session_binding_on_re
 
     server.stop();
 }
+
+/// VE4：测试时间窗内的真实音频轮次禁止调用 `play_music`（防止网上随机语料触发多分钟播歌干扰后续测试），
+/// 且关闭测试时间窗后的普通真人轮次恢复允许播放音乐。
+#[test]
+fn ve4_bench_window_blocks_play_music_and_restores_after_close() {
+    let tools = Arc::new(SimTestTools::default());
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("今天天气真不错放首歌听".into()),
+            Ok("请帮我放首歌".into()),
+        ])),
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            // 第 1 轮（测试时间窗内）：大模型尝试调 play_music -> 必须被 sim_guard 拒绝
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "c-music-1",
+                    "play_music",
+                    r#"{"random":true}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["整体测试期间暂不播放音乐。"]),
+            // 第 2 轮（关闭测试时间窗后）：大模型调 play_music -> 必须放行触达 ToolExecutor
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "c-music-2",
+                    "play_music",
+                    r#"{"random":true}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["好的，开始为你播放音乐。"]),
+        ])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        tools.clone(),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let mut device = chat_device(&server, &registry, 1);
+    wait_until("设备上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+
+    // 1. 开启调试入口并打开测试时间窗，跑一轮真实音频：play_music 必须被拦且不进入 ToolExecutor
+    let now = crate::unix_now();
+    server
+        .enable_debug_api(
+            0,
+            "ve4-music-token-0123456789abcdef0123456789abcdef".into(),
+            now,
+            now + 3600,
+            None,
+        )
+        .unwrap();
+    server.open_bench_window(DEVICE, 10).unwrap();
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("时间窗内第 1 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .iter()
+            .any(|d| d.turn == 1 && d.status == "done")
+    });
+
+    assert!(
+        tools.calls.lock().unwrap().is_empty(),
+        "测试时间窗内 play_music 绝不能触达 ToolExecutor"
+    );
+    let t1 = server
+        .turn_details_for_device(DEVICE, 5)
+        .into_iter()
+        .find(|d| d.turn == 1)
+        .unwrap();
+    assert!(t1.bench_window && t1.simulated);
+    assert_eq!(t1.tools.len(), 1);
+    assert_eq!(t1.tools[0].name, "play_music");
+    assert!(t1.tools[0].blocked);
+    assert!(
+        t1.tools[0]
+            .block_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("整体测试期间不播放音乐以免干扰后续测试")),
+        "拒绝原因须如实记录：{:?}",
+        t1.tools[0].block_reason
+    );
+
+    // 2. 关闭测试时间窗，跑普通真人轮次：play_music 应恢复正常放行
+    assert!(server.close_bench_window(DEVICE, "测试结束"));
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("关窗后第 2 轮完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .iter()
+            .any(|d| d.turn == 2 && d.status == "done")
+    });
+    let executed = tools.calls.lock().unwrap().clone();
+    assert_eq!(executed.len(), 1, "关窗后的普通轮次 play_music 应正常执行");
+    assert_eq!(executed[0].0, "play_music");
+
+    server.stop();
+}

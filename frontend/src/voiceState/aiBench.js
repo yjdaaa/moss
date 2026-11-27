@@ -258,6 +258,13 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     recordingPrereq,
   ];
 
+  const rawMaxOnline = options?.maxOnline;
+  const maxOnline =
+    rawMaxOnline !== undefined && Number.isInteger(Number(rawMaxOnline)) && Number(rawMaxOnline) >= 0
+      ? Number(rawMaxOnline)
+      : 20;
+  const maxOnlineArg = ` --max-online ${maxOnline}`;
+
   const prompt = [
     "# 任务：真小智一键全自动联调与调优（AI 自动准备网上真人语音缓存 → 文字直通快检 → 真机外放全链路 → 离线识别横评 → 自动改代码闭环）",
     "",
@@ -272,11 +279,16 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "",
     "## 全自动四步调试流程（请 AI 按顺序自主执行，无需用户手动干预）",
     "",
-    "### 第一步：准备真人语音素材（有本机缓存直接复用，缺素材时 AI 自动从网上拉取并永久缓存）",
+    "### 第一步：准备真人语音素材（有本机缓存直接复用，缺素材时 AI 自动按许可与限量从网上拉取并永久缓存）",
     "- 先检查 `<runtime>/voice-bench/recordings/` 下是否已有 `.wav` 真人录音文件：",
     "  - **若已有真人语音缓存，直接复用，严禁每次测试重复下载或要求用户开口说话**；",
-    "  - **若目录为空或素材不足**，由 AI 自主从网上公开中文真人语音数据集中下载真实人声（例如 GitHub `k2-fsa/sherpa-onnx` 测试中文真声、Hugging Face / ModelScope 上的 AISHELL / Mozilla Common Voice 中文真人短句；**必须是真人发音，严禁用系统 `say` 或本地/云端 TTS 合成音冒充**）；",
-    "  - 用 `ffmpeg` / `afconvert` / `python3` 统一转为 **`16 kHz`、单声道、16-bit PCM WAV**，存入 `<runtime>/voice-bench/recordings/online/<id>.wav`，并写入同名 `<id>.json`（`{\"text\":\"对应的中文原话\",\"speaker\":\"网上真人样本\"}`）或同名 `<id>.txt`（第一行写中文原话）。脚本会自动加载这些真人语音并长期缓存复用。",
+    "  - **若目录为空或素材不足**，由 AI 自主从网上公开中文真人语音数据集补充真实人声（**必须是真人发音，严禁用系统 `say` 或本地/云端 TTS 合成音冒充**），并严格遵守以下联网下载约束：",
+    "    - **许可证**：只使用明确允许使用的公开数据，例如 Mozilla Common Voice 中文（CC0）、AISHELL-1（Apache-2.0）、`k2-fsa/sherpa-onnx` 仓库自带的测试音频（遵循仓库许可）；**不得使用标注“非商用”或“禁止演绎”的数据**；需要登录、申请或同意条款才能下载的数据集，直接跳过并在汇报里说明，不得绕过。",
+    "    - **限量**：单次补充不超过 200 条，总计不超过 300 MB。",
+    "    - **只拿需要的文件**：只下载音频和对应的文字。下载内容放在单独的临时目录里，**不运行下载得到的任何脚本或程序**，用 `ffmpeg` / `afconvert` / `python3` 转为 `16 kHz`、单声道、16-bit PCM WAV 后，只把 `.wav` 和同名 `.json` 放进 `<runtime>/voice-bench/recordings/online/`。",
+    "    - **必填元数据（4 字段缺一不可）**：`<runtime>/voice-bench/recordings/online/<id>.json` 必须包含 `text`、`dataset`、`license`、`source_url`（例如 `{\"text\":\"对应的中文原话\",\"dataset\":\"AISHELL-1\",\"license\":\"Apache-2.0\",\"source_url\":\"https://...\"}`）；缺少许可或数据集信息的条目会被脚本直接跳过并列进“被跳过素材”。",
+    "    - **不进仓库**：下载的数据只存在本机运行目录 `<runtime>/voice-bench/recordings/online/`，绝不加入仓库，也不提交。",
+    "    - **优先挑合适的句子**：优先选和工作室场景相近的短句（3–15 秒）；不选像指令的句子（播放音乐、调音量、调亮度、静音、关机、重启、停、退下、开始等，脚本也会自动过滤并记入“被跳过素材”）。",
     "",
     "### 第二步：先跑“文字直通”快检识别后半段（跳过麦克风，毫秒级排查后半段逻辑）",
     "```bash",
@@ -286,10 +298,11 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "",
     "### 第三步：跑“真小智喇叭外放”全链路整体测试（真喇叭外放 → 真麦克风 → 4 环节归因）",
     "```bash",
-    `node scripts/voice-bench/xiaozhi-e2e.mjs${targetArg}${safeSpeaker} --max-minutes 30${digitalArg}${noiseArg}`,
+    `node scripts/voice-bench/xiaozhi-e2e.mjs${targetArg}${safeSpeaker}${maxOnlineArg} --max-minutes 30${digitalArg}${noiseArg}`,
     "```",
-    "- 声音素材默认从 `<runtime>/voice-bench/recordings/` 读取（全部说话人轮流；加 `--speaker <标签>` 可指定某一位说话人或 `online`）；",
-    "- 运行期间脚本会自动开启完整过程记录（`logs/process-trace/<日期>/`），在记录中显式标记 4 种音源（`live_mic` 小智实时说话 / `e2e_playback` 整体测试外放录音 / `digital_inject` 数字录音直通 / `text_inject` 文字直通），并把外放标准原话自动写入过程记录；",
+    "- 来源按目录自动区分：`recordings/online/` 一律标为 `online-human`（网上真人，受 `--max-online 20` 上限与 `.rotation.json` 轮换控制，`--max-online 0` 表示不用网上语音），用户自录目录标为 `human-recording`（我的录音）；网上语音指标只反映通用识别能力，不代表用户本人识别效果；",
+    "- 若预计总时长超过 `--max-minutes`，脚本会自动分批并批间关闭/重开测试时间窗且复核设备会话一致（绝不延长单窗超过 60 分钟上限）；加 `--speaker <标签>` 可指定某一位说话人或 `online`；",
+    "- 运行期间脚本会自动开启完整过程记录（`logs/process-trace/<日期>/`），在记录与 `.label.json` 中显式标记音源（`live_mic` / `e2e_playback` / `digital_inject` / `text_inject`）与素材来源（`audio_origin`: `online-human` / `human-recording` 及 `dataset` / `license`）；",
     "- 若初测发现识别错字、吞首字或抢话，请 AI **自主追加运行** `--compare-digital`（同份真人录音走服务端数字注入对照，量化麦克风与房间损耗）以及 `--noise fan --noise-gain 0.22`（叠加排风扇背景噪声）定位根因；",
     "- 默认不把小智麦克风历史录音当作外放素材；仅在确需补充时显式加 `--include-device-corpus`（报告会标明“二次录制”）。",
     "",

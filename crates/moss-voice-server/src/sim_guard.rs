@@ -168,7 +168,8 @@ pub fn check_simulated_tool(
             Err("模拟轮次禁止执行本机 Agent 或系统命令".into())
         }
         "agent_run_list" | "agent_run_detail" => Ok(()),
-        "get_weather" | "get_news" | "web_search" | "search_rag" | "play_music"
+        "play_music" => Err("整体测试期间不播放音乐以免干扰后续测试".into()),
+        "get_weather" | "get_news" | "web_search" | "search_rag"
         | "end_conversation" | "stay_silent" => Ok(()),
         "voice_persona_tool" => Err("模拟轮次不允许修改说话角色设置".into()),
         // 3. 第三方 MCP 工具：仅放行用户在设置中明确标为可信只读的工具，其余一律拒绝（绝不进入桌面审批）
@@ -423,6 +424,14 @@ mod tests {
             check_simulated_tool("voice_persona_tool", None, r#"{"persona":"moss"}"#, false)
                 .is_err(),
             "修改说话角色须命中显式拒绝分支"
+        );
+
+        // VE4：测试时间窗与模拟轮次禁止播放音乐，避免多分钟播歌干扰后续串行测试
+        let music_err =
+            check_simulated_tool("play_music", None, r#"{"random":true}"#, false).unwrap_err();
+        assert!(
+            music_err.contains("整体测试期间不播放音乐以免干扰后续测试"),
+            "play_music 拒绝原因须明确：{music_err}"
         );
     }
 }

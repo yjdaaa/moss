@@ -95,7 +95,7 @@ node scripts/voice-bench/asr-bench.mjs
 **安全规则**：
 - 同音纠错候选严禁把任何内容映射成停止/退出等命令词，也不允许改写命令词本身；违规候选直接丢弃并在报告里注明。
 - 所有候选只写入 `suggestions.json`，脚本绝不自动修改代码或 `settings.json`；是否采纳由人或 AI 复核并补测试决定。
-- 若语料中包含不同音源（`live_mic` 小智实时说话、`e2e_playback` 整体测试外放录音、`digital_inject` 数字录音直通），报告会按 `input_source` 分组展示指标，避免外放回采、数字直通与现场真人原声混淆。
+- 若语料中包含不同语音来源，报告按“网上真人（`online-human`）/ 我的录音（`human-recording`）/ 小智实时说话（`live_mic`）/ 数字直通（`digital_inject`）”分组统计，并注明网上语音的指标只反映通用识别能力、不代表用户本人的识别效果。
 - 脚本退出前打印归档目录路径；未找到任何已标注语料时提示先开采集与标注，并返回非 `0` 状态码。
 
 ---
@@ -114,10 +114,14 @@ node scripts/voice-bench/asr-bench.mjs
 3. 将小智摆放在距离电脑喇叭 **30–50 cm** 处，调至适中音量（避免过小拾不到音或过大爆音）。
 4. 确认本机播放器可用：macOS 用 `afplay`、Windows 用 PowerShell `System.Media.SoundPlayer`、Linux 用 `paplay` 或 `aplay`。
 
-## 声音来源规则（VD1 / VD3：只用真人录音）
+## 声音来源规则（VD1 / VD3 / VE1–VE4：只用真人录音，严格区分网上真人与用户自录）
 
 - **绝不使用合成声音**：已彻底移除本地 TTS 与系统朗读（`say` / `System.Speech` / `espeak`），不保留回退开关。
-- **默认素材目录**：`<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.wav`（电脑麦克风直录真人语音）。未指定 `--speaker` 时按已录制说话人轮流覆盖各句；传入 `--speaker <标签>` 时只使用该说话人。
+- **来源判定按目录**：
+  - 用户自录目录 `<runtime>/voice-bench/recordings/<speaker>/`（非 `online`）：标为 `source_type: "human-recording"`（支持 `.json` 或 `.txt` 原话回退）；未指定 `--speaker` 时按已录制说话人轮流覆盖各句；
+  - 网上真人目录 `<runtime>/voice-bench/recordings/online/`：一律标为 `source_type: "online-human"`（不看 `speaker` 字段），同名 `.json` **必须**包含 `text`、`dataset`、`license`、`source_url`（禁止仅用 `.txt`，缺少许可/数据集信息或命中“播放/放首歌/音量/亮度/静音/关机/重启/停/退下/开始”等疑似指令句的条目一律跳过并在报告“被跳过素材”列出）。
+- **联网下载合规约束（VE2）**：仅限公开允许使用的数据（如 Mozilla Common Voice 中文 CC0、AISHELL-1 Apache-2.0、`sherpa-onnx` 测试音频），禁用“非商用 / 禁止演绎”，遇登录/申请/条款限制直接跳过不得绕过；单次 ≤200 条、总计 ≤300 MB；先在独立临时目录下载音文且不运行任何下载脚本或程序，转换后仅把 16 kHz WAV 与 `.json` 放进运行目录 `recordings/online/`，绝不加入仓库或提交。
+- **网上样本上限、轮换与自动分批（VE3）**：默认 `--max-online 20`（`0` 表示不用网上语音），位置保存在 `<runtime>/voice-bench/recordings/online/.rotation.json` 每次轮换抽样。开测前保守估算每句耗时，若超过 `--max-minutes` 则打印预估时长并自动分批正常关窗/重开，每批重开前复核仍为同一设备会话（会话变更即中止，绝不延长单窗超过 60 分钟上限）。
 - **缺录音处理**：
   - 某句语料没有可用的真人录音时，脚本跳过该句，并在终端输出与 `report.md` 的 **“缺少真人录音的语料（已跳过）”** 列出清单，提示前往 App 录制；
   - 所有语料都没有真人录音时，脚本不打开测试时间窗，直接提示前往 App 录制并以非 `0` 状态码退出。
@@ -126,7 +130,7 @@ node scripts/voice-bench/asr-bench.mjs
 ## 运行方式
 
 ```bash
-node scripts/voice-bench/xiaozhi-e2e.mjs
+node scripts/voice-bench/xiaozhi-e2e.mjs --max-online 20 --max-minutes 30
 ```
 
 ### 常用参数
@@ -135,10 +139,11 @@ node scripts/voice-bench/xiaozhi-e2e.mjs
 | --- | --- | --- |
 | `--corpus <path>` | 指定整体测试语料 JSON 文件 | `scripts/voice-bench/e2e-corpus.json` |
 | `--device <device_id>` | 指定目标小智设备编号 | 自动选第一台在线设备 |
-| `--speaker <标签>` | 只使用指定说话人的真人录音（例如 `我`、`家人 A`） | 全部已录制说话人轮流 |
+| `--speaker <标签>` | 只使用指定说话人的真人录音（例如 `我`、`家人 A`、`online`） | 全部已录制说话人轮流 |
 | `--recordings-dir <path>` | 指定真人录音目录 | `<runtime>/voice-bench/recordings` |
+| `--max-online <n>` | 单次测试最多抽取的 `recordings/online/` 网上真人语音条数（`0` 表示禁用网上语音，按 `.rotation.json` 轮换） | `20` |
 | `--include-device-corpus` | 显式允许使用 `<runtime>/asr-corpus` 手工标注录音补充（报告标明“二次录制”） | 关闭 |
-| `--max-minutes <1..60>` | 测试时间窗最长锁定时长（分钟） | `30`（硬上限 `60`） |
+| `--max-minutes <1..60>` | 单个测试时间窗最长锁定时长（分钟）；预估总时长超出时自动分批并批间关窗重开 | `30`（硬上限 `60`） |
 | `--noise <fan\|pump\|burst>` | 外放期间叠加低音量循环背景噪声（经 `python3 -I` 复用 `chain_clips.py`） | 关闭 |
 | `--noise-gain <0..1>` | 背景噪声增益 | `0.22` |
 | `--compare-digital` | 在时间窗内用同一份真人录音追加服务端数字 PCM 对照注入，逐句量化麦克风与房间 CER 损失 | 关闭 |
@@ -152,7 +157,7 @@ node scripts/voice-bench/xiaozhi-e2e.mjs
 
 ## 安全锁、校准与串行执行
 
-- **测试时间窗（VC1）**：开跑前自动调用 `POST /debug/v1/bench-window` 锁定该设备，期间包括真实麦克风拾音在内的**所有轮次**一律走 `simulated = true`（`sim_guard` 拦截物理/外部工具、有加工任务时不发 `0x18`、不写长期记忆、对话记录标“模拟（整体测试）”）；桌面“已连接设备”显示“整体测试中（物理动作已锁定）”与“立即结束测试”按钮。无论正常结束还是异常中断，脚本都在 `finally` 中关闭时间窗、停掉背景噪声并恢复 `ProcessTrace` 原状。
+- **测试时间窗（VC1 / VE4）**：开跑前自动调用 `POST /debug/v1/bench-window` 锁定该设备，期间包括真实麦克风拾音在内的**所有轮次**一律走 `simulated = true`（`sim_guard` 拦截物理/外部工具及 `play_music` 防止播歌干扰后续串行测试、有加工任务时不发 `0x18`、不写长期记忆、对话记录标“模拟（整体测试）”）；桌面“已连接设备”显示“整体测试中（物理动作已锁定）”与“立即结束测试”按钮。无论正常结束还是异常中断，脚本都在 `finally` 中关闭时间窗、停掉背景噪声并恢复 `ProcessTrace` 原状。
 - **开跑前校准**：选用第一条可用真人录音外放校准，读取该设备的 `recent_peak_level` 与识别结果；若识别不到或电平明显过低/过高，打印“把小智放到离喇叭 30–50 cm、调高或调低电脑音量”并以非 `0` 状态码退出。
 - **严格串行**：只在设备处于 `listening` 且连续安静 1 秒后开始外放；外放结束后等待 `thinking` → `speaking` → 回到 `listening` 且安静 1 秒再放下一句，确保外放与小智播报零重叠。
 
@@ -160,13 +165,13 @@ node scripts/voice-bench/xiaozhi-e2e.mjs
 
 每次运行在 `<runtime>/voice-bench/e2e-<run-id>/` 生成 6 个全脱敏文件（不含密钥、令牌与本机绝对路径）：
 
-- `turns.jsonl`：每轮一行 4 环节归因（拾音判停：外放/服务端时刻、首字被吞、抢话、判停延迟；识别纠偏：原文/纠偏文本与双 CER、可选数字对照损益；意图工具：路径、工具与预期命中、门禁拦截；合成播放：外放结束到首声/播完耗时、首包、欠载卡顿）及说话人标签；
-- `timeline.jsonl` / `timeline.txt`：本次时间窗内的 `ProcessTrace` 片段；
-- `report.md`：总览表、**按说话人分组统计表**、**缺少真人录音的语料清单**、4 个环节各自最差项置顶诊断表，以及按严重程度排序的“建议优先调整的环节”（附对应代码位置与参数名，如 `PREROLL_MS`、`BASE_SILENCE_MS`、`conversation.rs` 纠错表、热词等）；
-- `summary.json`：各环节通过率、按说话人指标 `by_speaker`、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
-- `audio-manifest.json`：外放音频清单（仅文件名、说话人标签、来源类型与时长，绝不复制用户原始录音）。
+- `turns.jsonl`：每轮一行 4 环节归因及 `source_type`、`audio_origin`、`dataset`、`license`、说话人标签与批号；
+- `timeline.jsonl` / `timeline.txt`：本次时间窗内的 `ProcessTrace` 片段，附外放轮次的素材来源（`online-human` / `human-recording`、`dataset`、`license`）说明；
+- `report.md`：总览表、**按语音来源分组统计表（网上真人 / 我的录音 / 小智实时说话 / 数字直通，并注明网上语音只反映通用识别能力）**、**按说话人分组统计表**、**被跳过素材表**、**缺少真人录音的语料清单**、4 个环节各自最差项置顶诊断表，以及按严重程度排序的“建议优先调整的环节”；
+- `summary.json`：各环节通过率、按来源指标 `by_source`、按说话人指标 `by_speaker`、被跳过素材 `skipped_assets`、网上轮换与分批摘要（`online_rotation` / `batch_plan`）、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
+- `audio-manifest.json`：外放音频清单（含 `source_type`、`audio_origin`、`dataset`、`license`、`source_url` 与 `skipped_assets`，绝不复制用户原始录音）。
 
-若开启了完整过程记录（默认开跑期间自动打开）或独立的 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会按对应录音文件名自动生成 `<录音前缀>.label.json`（不覆盖已有标注，正确文字 = 外放原句，`input_source: "e2e_playback"`、`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
+若开启了完整过程记录（默认开跑期间自动打开）或独立的 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会按对应录音文件名自动生成 `<录音前缀>.label.json`（不覆盖已有标注，正确文字 = 外放原句，`input_source: "e2e_playback"`、`audio_origin: "online-human" | "human-recording"`、`dataset` / `license`、`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
 
 ## 语料编写规范
 

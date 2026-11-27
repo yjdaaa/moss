@@ -1,25 +1,130 @@
-// VD1 / VD3 真小智整体测试真人录音素材加载与跨平台外放模块：
+// VD1 / VD3 / VE1 / VE3 / VE4 真小智整体测试真人录音素材加载与跨平台外放模块：
 // - 只使用真人录音，绝不调用本地 TTS 或系统朗读（say / System.Speech / espeak）；
-// - 默认从 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}` 读取经电脑麦克风录制的真人素材；
-// - 支持按全部说话人轮流使用，或通过 `--speaker <标签>` 指定一位说话人；
+// - 来源判定严格按目录：
+//   - `<runtime>/voice-bench/recordings/online/` 下的样本一律标为 `source_type: "online-human"`，
+//     同名 `.json` 必须包含 `text`、`dataset`、`license`、`source_url`（禁止仅用 `.txt`），
+//     并过滤掉疑似指令句、受 `--max-online` 上限与 `.rotation.json` 轮换约束；
+//   - `<runtime>/voice-bench/recordings/<speaker>/`（非 `online`）下为用户自录语音，标为 `source_type: "human-recording"`（允许 `.txt` 回退）；
 // - VB 的 `<runtime>/asr-corpus` 默认不作为外放素材（经小智麦克风采集，再外放会被染色两次），
 //   仅在显式开启 `--include-device-corpus` 时作为“二次录制”素材补充，并在报告中明确标注；
 // - 跨平台播放：macOS `afplay`、Windows PowerShell `System.Media.SoundPlayer`、Linux `paplay`/`aplay`；
 // - 背景噪声：复用 `asr_noise_mix.py` / `chain_clips.py`（经 `python3 -I`）生成 16 kHz 循环噪声 WAV。
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadLabeledCorpus, normalizeForCer, readWavPcm16 } from "./asr-bench.mjs";
+import {
+  PROTECTED_COMMAND_WORDS,
+  classifyCommand,
+  loadLabeledCorpus,
+  normalizeForCer,
+  readWavPcm16,
+} from "./asr-bench.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const NOISE_MIX_SCRIPT = join(SCRIPT_DIR, "asr_noise_mix.py");
 export const TARGET_SAMPLE_RATE = 16_000;
 export const BENCH_RECORDINGS_DIR_REL = "voice-bench/recordings";
+export const ONLINE_DIR_NAME = "online";
+export const ONLINE_ROTATION_FILE = ".rotation.json";
+export const DEFAULT_MAX_ONLINE = 20;
+export const ONLINE_REQUIRED_META_FIELDS = ["text", "dataset", "license", "source_url"];
 export const RECORDING_APP_HINT =
   "请打开 MOSS 桌面端「语音中心 › 记录与诊断 › AI 联调与测试 › 录制测试语料」录制真人录音后再运行整体测试。";
+
+/** VE4 网上真人语音疑似指令词表（在 `classifyCommand` 与 `PROTECTED_COMMAND_WORDS` 基础上追加媒体/设备/激光控制指令词）。 */
+const ONLINE_COMMAND_KEYWORDS = [
+  "播放",
+  "放首歌",
+  "放一首歌",
+  "放音乐",
+  "来首歌",
+  "听首歌",
+  "切歌",
+  "下一首",
+  "上一首",
+  "音量",
+  "声音调大",
+  "声音调小",
+  "大声点",
+  "小声点",
+  "亮度",
+  "调亮",
+  "调暗",
+  "静音",
+  "关机",
+  "重启",
+  "恢复出厂",
+  "重新配网",
+  "升级固件",
+  "开始雕刻",
+  "开始切割",
+  "直接雕刻",
+  "直接切割",
+  "确认发送",
+  "确认开始",
+  "走边框",
+  "机械回零",
+  "回零",
+  "回原点",
+  "解除锁定",
+  "急停",
+  "停机",
+  "关掉激光",
+  "退下",
+  "关闭对话",
+  "结束对话",
+  "打开灯",
+  "关掉灯",
+  "开灯",
+  "关灯",
+  "打开空调",
+  "关闭空调",
+  "执行命令",
+];
+
+const ONLINE_COMMAND_PREFIXES = ["开始", "确认", "停止", "暂停", "取消", "退出"];
+
+/**
+ * VE4 判断网上真人语音原话是否属于疑似指令句（可能触发放音乐、调音量/亮度、停止/退出或设备控制）。
+ * 返回 `{ blocked: boolean, reason: string }`。
+ */
+export function isOnlineCommandLikeText(text) {
+  const raw = String(text || "").trim();
+  const norm = normalizeForCer(raw).join("");
+  if (!norm) {
+    return { blocked: false, reason: "" };
+  }
+  const cmdKind = classifyCommand(raw);
+  if (cmdKind !== null) {
+    return { blocked: true, reason: `命中${cmdKind === "stop" ? "停止" : "退出"}快路径命令` };
+  }
+  if (PROTECTED_COMMAND_WORDS.has(norm)) {
+    return { blocked: true, reason: `命中受保护命令词「${norm}」` };
+  }
+  const hitKeyword = ONLINE_COMMAND_KEYWORDS.find((kw) => norm.includes(kw));
+  if (hitKeyword) {
+    return { blocked: true, reason: `包含指令关键词「${hitKeyword}」` };
+  }
+  const hitPrefix = ONLINE_COMMAND_PREFIXES.find((prefix) => norm.startsWith(prefix));
+  if (hitPrefix) {
+    return { blocked: true, reason: `以控制命令「${hitPrefix}」开头` };
+  }
+  return { blocked: false, reason: "" };
+}
 
 export function wavDurationMs(wavPath) {
   const { pcm, sampleRate } = readWavPcm16(wavPath);
@@ -192,15 +297,76 @@ export function startBackgroundNoise({
   };
 }
 
-/** 扫描 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}` 中的真人录音。 */
-export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) {
+/** 读取 `<recordingsDir>/online/.rotation.json` 轮换游标（拒绝符号链接）。 */
+export function loadOnlineRotation(onlineDir) {
+  const rotPath = join(onlineDir, ONLINE_ROTATION_FILE);
+  if (!existsSync(rotPath)) return { cursor: 0, last_ids: [] };
+  try {
+    if (lstatSync(onlineDir).isSymbolicLink() || lstatSync(rotPath).isSymbolicLink()) {
+      return { cursor: 0, last_ids: [] };
+    }
+    const parsed = JSON.parse(readFileSync(rotPath, "utf8")) || {};
+    const cursor = Number.isInteger(parsed.cursor) && parsed.cursor >= 0 ? parsed.cursor : 0;
+    const lastIds = Array.isArray(parsed.last_ids) ? parsed.last_ids.map(String) : [];
+    return { cursor, last_ids: lastIds };
+  } catch {
+    return { cursor: 0, last_ids: [] };
+  }
+}
+
+/** 原子保存 `<recordingsDir>/online/.rotation.json` 轮换游标（0600，拒绝符号链接）。 */
+export function saveOnlineRotation(onlineDir, { cursor, totalPool, lastIds = [] }) {
+  if (!existsSync(onlineDir)) return false;
+  if (lstatSync(onlineDir).isSymbolicLink()) return false;
+  const rotPath = join(onlineDir, ONLINE_ROTATION_FILE);
+  if (existsSync(rotPath) && lstatSync(rotPath).isSymbolicLink()) return false;
+  const payload = {
+    cursor: Math.max(0, Number(cursor) || 0),
+    total_pool: Math.max(0, Number(totalPool) || 0),
+    last_ids: lastIds.map(String),
+    updated_at: new Date().toISOString(),
+  };
+  const tmpPath = join(onlineDir, `.rotation.tmp.${process.pid}.${randomBytes(6).toString("hex")}`);
+  try {
+    writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameSync(tmpPath, rotPath);
+    return true;
+  } catch {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+}
+
+/**
+ * 扫描 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}` 中的真人录音：
+ * - `online/` 子目录一律标为 `source_type: "online-human"`（不看 `speaker` 填写值），
+ *   同名 `.json` 必须包含 `text`、`dataset`、`license`、`source_url`，禁止 `.txt` 回退，并过滤疑似指令句；
+ * - 其他子目录均为用户自录语音，标为 `source_type: "human-recording"`（允许 `.txt` 回退）。
+ */
+export function loadBenchRecordings(recordingsDir, { speakerFilter = "", maxOnline = DEFAULT_MAX_ONLINE } = {}) {
   const root = resolve(recordingsDir);
   if (!existsSync(root) || !statSync(root).isDirectory()) {
-    return { recordings: [], speakers: [] };
+    return {
+      recordings: [],
+      userRecordings: [],
+      onlineRecordings: [],
+      speakers: [],
+      skippedAssets: [],
+      onlineDir: join(root, ONLINE_DIR_NAME),
+    };
   }
   const filter = String(speakerFilter || "").trim();
+  const onlineDisabled = Number(maxOnline) === 0;
   const recordings = [];
+  const userRecordings = [];
+  const onlineRecordings = [];
+  const skippedAssets = [];
   const allSpeakers = new Set();
+  let resolvedOnlineDir = join(root, ONLINE_DIR_NAME);
 
   const speakerEntries = readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
@@ -208,7 +374,13 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
 
   for (const dirEntry of speakerEntries) {
     const speakerDirName = dirEntry.name;
+    const isOnlineDir = speakerDirName.toLowerCase() === ONLINE_DIR_NAME;
     const speakerPath = join(root, speakerDirName);
+    if (isOnlineDir) {
+      resolvedOnlineDir = speakerPath;
+      if (onlineDisabled) continue;
+    }
+
     const files = readdirSync(speakerPath, { withFileTypes: true })
       .filter((f) => f.isFile() && !f.isSymbolicLink() && f.name.endsWith(".wav"))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -216,17 +388,136 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
     for (const fileEntry of files) {
       const corpusId = fileEntry.name.slice(0, -4);
       const wavPath = join(speakerPath, fileEntry.name);
+      const filename = `${speakerDirName}/${fileEntry.name}`;
       const jsonPath = join(speakerPath, `${corpusId}.json`);
       const txtPath = join(speakerPath, `${corpusId}.txt`);
+
+      if (isOnlineDir) {
+        const hasJson = existsSync(jsonPath) && !lstatSync(jsonPath).isSymbolicLink();
+        const hasTxt = existsSync(txtPath) && !lstatSync(txtPath).isSymbolicLink();
+        if (!hasJson) {
+          skippedAssets.push({
+            id: corpusId,
+            filename,
+            source_type: "online-human",
+            text: "",
+            reason: hasTxt
+              ? "online/ 目录禁止仅使用 .txt（缺少包含 text、dataset、license、source_url 的同名 .json）"
+              : "online/ 目录缺少同名 .json 元数据（须含 text、dataset、license、source_url）",
+          });
+          continue;
+        }
+        let meta = null;
+        try {
+          meta = JSON.parse(readFileSync(jsonPath, "utf8"));
+        } catch {
+          skippedAssets.push({
+            id: corpusId,
+            filename,
+            source_type: "online-human",
+            text: "",
+            reason: "online/ 同名 .json 解析失败，已跳过",
+          });
+          continue;
+        }
+        if (!meta || typeof meta !== "object") {
+          skippedAssets.push({
+            id: corpusId,
+            filename,
+            source_type: "online-human",
+            text: "",
+            reason: "online/ 同名 .json 内容不是合法对象，已跳过",
+          });
+          continue;
+        }
+        const missingFields = ONLINE_REQUIRED_META_FIELDS.filter(
+          (field) => typeof meta[field] !== "string" || !meta[field].trim(),
+        );
+        if (missingFields.length > 0) {
+          skippedAssets.push({
+            id: corpusId,
+            filename,
+            source_type: "online-human",
+            text: String(meta.text || "").trim(),
+            reason: `online/ 元数据缺少必填字段（${missingFields.join("、")}），不予加载`,
+          });
+          continue;
+        }
+        const text = meta.text.trim();
+        const dataset = meta.dataset.trim();
+        const license = meta.license.trim();
+        const sourceUrl = meta.source_url.trim();
+
+        const cmdCheck = isOnlineCommandLikeText(text);
+        if (cmdCheck.blocked) {
+          skippedAssets.push({
+            id: corpusId,
+            filename,
+            source_type: "online-human",
+            dataset,
+            license,
+            text,
+            reason: `网上语音包含疑似指令句（${cmdCheck.reason}），已过滤以防误触发控制`,
+          });
+          continue;
+        }
+
+        const speaker = String(meta.speaker || dataset || "网上真人").trim() || "网上真人";
+        allSpeakers.add(speaker);
+        if (
+          filter &&
+          speaker !== filter &&
+          speakerDirName !== filter &&
+          filter !== "online-human" &&
+          dataset !== filter
+        ) {
+          continue;
+        }
+
+        let durationMs = Number(meta.duration_ms) || 0;
+        if (!durationMs) {
+          try {
+            durationMs = wavDurationMs(wavPath);
+          } catch {
+            durationMs = 0;
+          }
+        }
+        const rec = {
+          source_type: "online-human",
+          audio_origin: "online-human",
+          is_online: true,
+          speaker,
+          speaker_dir: speakerDirName,
+          corpus_id: corpusId,
+          wav_path: wavPath,
+          filename,
+          text,
+          dataset,
+          license,
+          source_url: sourceUrl,
+          label: String(meta.label || "").trim(),
+          key_terms: Array.isArray(meta.key_terms) ? meta.key_terms : [],
+          tags: Array.isArray(meta.tags) ? meta.tags : [],
+          duration_ms: durationMs,
+          peak_level: Number(meta.peak_level) || 0,
+          rms_level: Number(meta.rms_level) || 0,
+          recorded_at_ms: Number(meta.recorded_at_ms) || 0,
+        };
+        onlineRecordings.push(rec);
+        recordings.push(rec);
+        continue;
+      }
+
+      // 用户自录目录：保持 `human-recording`，允许 `.txt` 回退
       let meta = {};
-      if (existsSync(jsonPath)) {
+      if (existsSync(jsonPath) && !lstatSync(jsonPath).isSymbolicLink()) {
         try {
           meta = JSON.parse(readFileSync(jsonPath, "utf8")) || {};
         } catch {
           meta = {};
         }
       }
-      if (!String(meta.text || "").trim() && existsSync(txtPath)) {
+      if (!String(meta.text || "").trim() && existsSync(txtPath) && !lstatSync(txtPath).isSymbolicLink()) {
         try {
           const txtLine = readFileSync(txtPath, "utf8")
             .split(/\r?\n/)
@@ -239,7 +530,7 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
       }
       const speaker = String(meta.speaker || speakerDirName).trim() || speakerDirName;
       allSpeakers.add(speaker);
-      if (filter && speaker !== filter && speakerDirName !== filter) continue;
+      if (filter && speaker !== filter && speakerDirName !== filter && filter !== "human-recording") continue;
 
       let durationMs = Number(meta.duration_ms) || 0;
       if (!durationMs) {
@@ -249,13 +540,19 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
           durationMs = 0;
         }
       }
-      recordings.push({
+      const rec = {
+        source_type: "human-recording",
+        audio_origin: "human-recording",
+        is_online: false,
         speaker,
         speaker_dir: speakerDirName,
         corpus_id: corpusId,
         wav_path: wavPath,
-        filename: `${speakerDirName}/${fileEntry.name}`,
+        filename,
         text: String(meta.text || "").trim(),
+        dataset: null,
+        license: null,
+        source_url: null,
         label: String(meta.label || "").trim(),
         key_terms: Array.isArray(meta.key_terms) ? meta.key_terms : [],
         tags: Array.isArray(meta.tags) ? meta.tags : [],
@@ -263,13 +560,50 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
         peak_level: Number(meta.peak_level) || 0,
         rms_level: Number(meta.rms_level) || 0,
         recorded_at_ms: Number(meta.recorded_at_ms) || 0,
-      });
+      };
+      userRecordings.push(rec);
+      recordings.push(rec);
     }
   }
 
   return {
     recordings,
+    userRecordings,
+    onlineRecordings,
     speakers: [...allSpeakers].sort((a, b) => a.localeCompare(b, "zh-CN")),
+    skippedAssets,
+    onlineDir: resolvedOnlineDir,
+  };
+}
+
+function buildRecordingAsset(chosen) {
+  const isOnline = chosen.source_type === "online-human" || chosen.is_online === true;
+  const sourceType = isOnline ? "online-human" : "human-recording";
+  const label = isOnline
+    ? `网上真人（${chosen.dataset || chosen.speaker}）`
+    : `我的录音（${chosen.speaker}）`;
+  return {
+    wavPath: chosen.wav_path,
+    filename: chosen.filename,
+    source_type: sourceType,
+    audio_origin: sourceType,
+    speaker: chosen.speaker,
+    secondary_recording: false,
+    dataset: isOnline ? chosen.dataset || null : null,
+    license: isOnline ? chosen.license || null : null,
+    source_url: isOnline ? chosen.source_url || null : null,
+    voice_profile: {
+      source: sourceType,
+      audio_origin: sourceType,
+      speaker: chosen.speaker,
+      corpus_id: chosen.corpus_id,
+      ...(isOnline && chosen.dataset ? { dataset: chosen.dataset } : {}),
+      ...(isOnline && chosen.license ? { license: chosen.license } : {}),
+      ...(isOnline && chosen.source_url ? { source_url: chosen.source_url } : {}),
+      peak_level: chosen.peak_level,
+      label,
+    },
+    duration_ms: chosen.duration_ms || wavDurationMs(chosen.wav_path),
   };
 }
 
@@ -298,12 +632,12 @@ function findMatchingDeviceCorpusSample(deviceSamples, spec, usedIds) {
 }
 
 /**
- * VD1 / VD3 准备整体测试真人录音素材（绝不使用本地 TTS 或系统朗读）：
- * 1. 默认仅从 `<runtime>/voice-bench/recordings/` 读取电脑麦克风录制的真人素材；
- *    - 指定 `speaker` 时只用该说话人；
- *    - 未指定时按说话人轮流覆盖每句语料；
- * 2. 某句没有真人录音时记入 `missingTurns` 并跳过（不合成）；
- * 3. `includeDeviceCorpus` 为 `true` 时，才允许用 `<runtime>/asr-corpus` 中用户手工标注的录音补充缺失句及附加组，并显式标为 `secondary_recording: true`（“二次录制”）。
+ * VD1 / VD3 / VE1 / VE3 / VE4 准备整体测试真人录音素材（绝不使用本地 TTS 或系统朗读）：
+ * 1. 用户自录语音（`recordings/<speaker>/`，非 `online`）标为 `human-recording`；
+ * 2. 网上真人语音（`recordings/online/`）一律标为 `online-human`，强制校验 `text/dataset/license/source_url`，
+ *    过滤疑似指令句，并按 `maxOnline`（默认 20，0 表示不用）与 `.rotation.json` 轮换抽取；
+ * 3. 标准语料优先匹配用户自录语音，其次匹配本轮抽中的网上真人语音，缺失记入 `missingTurns`；
+ * 4. `includeDeviceCorpus` 为 `true` 时才允许用 `<runtime>/asr-corpus` 补充并显式标为 `secondary_recording: true`。
  */
 export async function prepareVoiceAssets({
   turns,
@@ -313,14 +647,58 @@ export async function prepareVoiceAssets({
   corpusDir = "",
   speaker = "",
   includeDeviceCorpus = false,
+  maxOnline = DEFAULT_MAX_ONLINE,
+  persistRotation = true,
 }) {
   const resolvedRecordingsDir = resolve(recordingsDir || join(runtimeDir, BENCH_RECORDINGS_DIR_REL));
   const resolvedCorpusDir = resolve(corpusDir || join(runtimeDir, "asr-corpus"));
   const speakerFilter = String(speaker || "").trim();
+  const parsedMaxOnline =
+    maxOnline === undefined || maxOnline === null ? DEFAULT_MAX_ONLINE : Math.max(0, Math.floor(Number(maxOnline) || 0));
 
-  const { recordings, speakers: availableSpeakers } = loadBenchRecordings(resolvedRecordingsDir, {
+  const {
+    userRecordings,
+    onlineRecordings,
+    speakers: availableSpeakers,
+    skippedAssets,
+    onlineDir,
+  } = loadBenchRecordings(resolvedRecordingsDir, {
     speakerFilter,
+    maxOnline: parsedMaxOnline,
   });
+
+  // VE3：对 `online/` 有效池按 `.rotation.json` 轮换抽取至多 `maxOnline` 条，避免每次重复测同一批
+  const sortedOnlinePool = [...onlineRecordings].sort((a, b) => a.corpus_id.localeCompare(b.corpus_id));
+  const rotationBefore = loadOnlineRotation(onlineDir);
+  let selectedOnline = [];
+  let cursorBefore = 0;
+  let cursorAfter = rotationBefore.cursor;
+  if (parsedMaxOnline > 0 && sortedOnlinePool.length > 0) {
+    const total = sortedOnlinePool.length;
+    cursorBefore = ((rotationBefore.cursor % total) + total) % total;
+    const take = Math.min(parsedMaxOnline, total);
+    for (let k = 0; k < take; k += 1) {
+      selectedOnline.push(sortedOnlinePool[(cursorBefore + k) % total]);
+    }
+    cursorAfter = (cursorBefore + take) % total;
+  }
+  const onlineRotation = {
+    onlineDir,
+    maxOnline: parsedMaxOnline,
+    totalPool: sortedOnlinePool.length,
+    selectedCount: selectedOnline.length,
+    cursorBefore,
+    cursorAfter,
+    selectedIds: selectedOnline.map((r) => r.corpus_id),
+    persisted: false,
+  };
+  if (persistRotation && selectedOnline.length > 0) {
+    onlineRotation.persisted = saveOnlineRotation(onlineDir, {
+      cursor: cursorAfter,
+      totalPool: sortedOnlinePool.length,
+      lastIds: onlineRotation.selectedIds,
+    });
+  }
 
   // 仅当显式开启 --include-device-corpus 时才加载小智麦克风采集的 asr-corpus（排除 e2e-playback 防二次套娃）
   const deviceSamples = includeDeviceCorpus
@@ -330,46 +708,53 @@ export async function prepareVoiceAssets({
   const preparedTurns = [];
   const missingTurns = [];
   const usedDeviceCorpusIds = new Set();
-  const matchedRecordingCorpusIds = new Set();
-  const matchedRecordingNormTexts = new Set();
+  const matchedUserCorpusIds = new Set();
+  const matchedUserNormTexts = new Set();
+  const matchedOnlineCorpusIds = new Set();
+  const matchedOnlineNormTexts = new Set();
   const speakersUsed = new Set();
   let roundRobinCursor = 0;
 
   for (let i = 0; i < turns.length; i += 1) {
     const spec = turns[i];
     const targetNorm = normalizeForCer(spec.text).join("");
-    let candidates = recordings.filter((r) => r.corpus_id === spec.id);
+
+    // 优先匹配用户自录语音，其次匹配本轮抽中的网上真人语音
+    let candidates = userRecordings.filter((r) => r.corpus_id === spec.id);
     if (candidates.length === 0 && targetNorm) {
-      candidates = recordings.filter((r) => normalizeForCer(r.text).join("") === targetNorm);
+      candidates = userRecordings.filter((r) => normalizeForCer(r.text).join("") === targetNorm);
+    }
+    let matchedFromOnline = false;
+    if (candidates.length === 0 && selectedOnline.length > 0) {
+      candidates = selectedOnline.filter((r) => r.corpus_id === spec.id);
+      if (candidates.length === 0 && targetNorm) {
+        candidates = selectedOnline.filter((r) => normalizeForCer(r.text).join("") === targetNorm);
+      }
+      matchedFromOnline = candidates.length > 0;
     }
 
     if (candidates.length > 0) {
       for (const c of candidates) {
-        matchedRecordingCorpusIds.add(c.corpus_id);
-        const cn = normalizeForCer(c.text).join("");
-        if (cn) matchedRecordingNormTexts.add(cn);
+        if (matchedFromOnline) {
+          matchedOnlineCorpusIds.add(c.corpus_id);
+          const cn = normalizeForCer(c.text).join("");
+          if (cn) matchedOnlineNormTexts.add(cn);
+        } else {
+          matchedUserCorpusIds.add(c.corpus_id);
+          const cn = normalizeForCer(c.text).join("");
+          if (cn) matchedUserNormTexts.add(cn);
+        }
       }
-      if (targetNorm) matchedRecordingNormTexts.add(targetNorm);
+      if (targetNorm) {
+        if (matchedFromOnline) matchedOnlineNormTexts.add(targetNorm);
+        else matchedUserNormTexts.add(targetNorm);
+      }
       const chosen = candidates[roundRobinCursor % candidates.length];
       roundRobinCursor += 1;
       speakersUsed.add(chosen.speaker);
       preparedTurns.push({
         spec,
-        asset: {
-          wavPath: chosen.wav_path,
-          filename: chosen.filename,
-          source_type: "human-recording",
-          speaker: chosen.speaker,
-          secondary_recording: false,
-          voice_profile: {
-            source: "human-recording",
-            speaker: chosen.speaker,
-            corpus_id: chosen.corpus_id,
-            peak_level: chosen.peak_level,
-            label: `真人录音（${chosen.speaker}）`,
-          },
-          duration_ms: chosen.duration_ms || wavDurationMs(chosen.wav_path),
-        },
+        asset: buildRecordingAsset(chosen),
       });
       continue;
     }
@@ -386,10 +771,15 @@ export async function prepareVoiceAssets({
             wavPath: matched.wav_path,
             filename: basename(matched.wav_path),
             source_type: "device-corpus-secondary",
+            audio_origin: "device-corpus-secondary",
             speaker: secondarySpeaker,
             secondary_recording: true,
+            dataset: null,
+            license: null,
+            source_url: null,
             voice_profile: {
               source: "device-corpus-secondary",
+              audio_origin: "device-corpus-secondary",
               speaker: secondarySpeaker,
               secondary_recording: true,
               corpus_id: matched.id,
@@ -409,52 +799,58 @@ export async function prepareVoiceAssets({
     });
   }
 
-  // 支持 AI 从网上公开真人语音集下载并缓存在 `<runtime>/voice-bench/recordings/<speaker>/` 下的自由句子（带 .json 或 .txt 原文）
-  const freeformGroups = new Map();
-  for (const rec of recordings) {
+  // 用户自录目录中未匹配到固定语料的自由句子（source_type: "human-recording"）
+  const freeformUserGroups = new Map();
+  for (const rec of userRecordings) {
     if (!rec.text) continue;
     const recNorm = normalizeForCer(rec.text).join("");
-    if (matchedRecordingCorpusIds.has(rec.corpus_id)) continue;
-    if (recNorm && matchedRecordingNormTexts.has(recNorm)) continue;
-    if (!freeformGroups.has(rec.corpus_id)) {
-      freeformGroups.set(rec.corpus_id, []);
+    if (matchedUserCorpusIds.has(rec.corpus_id)) continue;
+    if (recNorm && matchedUserNormTexts.has(recNorm)) continue;
+    if (!freeformUserGroups.has(rec.corpus_id)) {
+      freeformUserGroups.set(rec.corpus_id, []);
     }
-    freeformGroups.get(rec.corpus_id).push(rec);
+    freeformUserGroups.get(rec.corpus_id).push(rec);
   }
-  if (freeformGroups.size > 0) {
+  const freeformItems = [];
+  for (const [corpusId, group] of freeformUserGroups.entries()) {
+    const chosen = group[roundRobinCursor % group.length];
+    roundRobinCursor += 1;
+    speakersUsed.add(chosen.speaker);
+    freeformItems.push({
+      spec: {
+        id: corpusId,
+        label: chosen.label || `我的录音 · ${corpusId}`,
+        group: "我的录音",
+        text: chosen.text,
+        ...(chosen.key_terms?.length ? { key_terms: chosen.key_terms } : {}),
+        ...(chosen.tags?.length ? { tags: chosen.tags } : {}),
+      },
+      asset: buildRecordingAsset(chosen),
+    });
+  }
+
+  // 本轮轮换抽中的网上真人语音自由句子（source_type: "online-human"）
+  for (const chosen of selectedOnline) {
+    const recNorm = normalizeForCer(chosen.text).join("");
+    if (matchedOnlineCorpusIds.has(chosen.corpus_id)) continue;
+    if (recNorm && matchedOnlineNormTexts.has(recNorm)) continue;
+    speakersUsed.add(chosen.speaker);
+    freeformItems.push({
+      spec: {
+        id: chosen.corpus_id,
+        label: chosen.label || `网上真人 · ${chosen.dataset} · ${chosen.corpus_id}`,
+        group: "网上真人",
+        text: chosen.text,
+        ...(chosen.key_terms?.length ? { key_terms: chosen.key_terms } : {}),
+        ...(chosen.tags?.length ? { tags: chosen.tags } : {}),
+      },
+      asset: buildRecordingAsset(chosen),
+    });
+  }
+
+  if (freeformItems.length > 0) {
     const exitIdx = preparedTurns.findIndex((item) => item.spec.expect_route === "fast_exit");
     const insertAt = exitIdx >= 0 ? exitIdx : preparedTurns.length;
-    const freeformItems = [];
-    for (const [corpusId, group] of freeformGroups.entries()) {
-      const chosen = group[roundRobinCursor % group.length];
-      roundRobinCursor += 1;
-      speakersUsed.add(chosen.speaker);
-      freeformItems.push({
-        spec: {
-          id: corpusId,
-          label: chosen.label || `真人语音样本 · ${corpusId}`,
-          group: "真人语音样本",
-          text: chosen.text,
-          ...(chosen.key_terms?.length ? { key_terms: chosen.key_terms } : {}),
-          ...(chosen.tags?.length ? { tags: chosen.tags } : {}),
-        },
-        asset: {
-          wavPath: chosen.wav_path,
-          filename: chosen.filename,
-          source_type: "human-recording",
-          speaker: chosen.speaker,
-          secondary_recording: false,
-          voice_profile: {
-            source: "human-recording",
-            speaker: chosen.speaker,
-            corpus_id: chosen.corpus_id,
-            peak_level: chosen.peak_level,
-            label: `真人录音（${chosen.speaker}）`,
-          },
-          duration_ms: chosen.duration_ms || wavDurationMs(chosen.wav_path),
-        },
-      });
-    }
     preparedTurns.splice(insertAt, 0, ...freeformItems);
   }
 
@@ -478,10 +874,15 @@ export async function prepareVoiceAssets({
           wavPath: sample.wav_path,
           filename: basename(sample.wav_path),
           source_type: "device-corpus-secondary",
+          audio_origin: "device-corpus-secondary",
           speaker: secondarySpeaker,
           secondary_recording: true,
+          dataset: null,
+          license: null,
+          source_url: null,
           voice_profile: {
             source: "device-corpus-secondary",
+            audio_origin: "device-corpus-secondary",
             speaker: secondarySpeaker,
             secondary_recording: true,
             corpus_id: sample.id,
@@ -494,18 +895,27 @@ export async function prepareVoiceAssets({
     }
   }
 
-  // 校准同样只用真人录音（优先匹配校准文本对应的录音，否则取第一条可用真人录音及其原文）
+  // 校准同样只用真人录音（优先用户自录语音，其次网上真人语音，最后二次录制）
   let calibrationAsset = null;
   let calibrationEffectiveText = calibrationText;
   if (calibrationText && preparedTurns.length > 0) {
     const calNorm = normalizeForCer(calibrationText).join("");
-    const exactTurn = preparedTurns.find(
+    const exactUserTurn = preparedTurns.find(
       (item) =>
-        !item.asset.secondary_recording &&
+        item.asset.source_type === "human-recording" &&
+        (normalizeForCer(item.spec.text).join("") === calNorm || item.spec.id === "status_fast_read"),
+    );
+    const exactOnlineTurn = preparedTurns.find(
+      (item) =>
+        item.asset.source_type === "online-human" &&
         (normalizeForCer(item.spec.text).join("") === calNorm || item.spec.id === "status_fast_read"),
     );
     const fallbackTurn =
-      exactTurn || preparedTurns.find((item) => !item.asset.secondary_recording) || preparedTurns[0];
+      exactUserTurn ||
+      preparedTurns.find((item) => item.asset.source_type === "human-recording") ||
+      exactOnlineTurn ||
+      preparedTurns.find((item) => item.asset.source_type === "online-human") ||
+      preparedTurns[0];
     if (fallbackTurn) {
       calibrationAsset = fallbackTurn.asset;
       calibrationEffectiveText = fallbackTurn.spec.text || calibrationText;
@@ -517,6 +927,8 @@ export async function prepareVoiceAssets({
     calibrationEffectiveText,
     preparedTurns,
     missingTurns,
+    skippedAssets,
+    onlineRotation,
     speakersUsed: [...speakersUsed],
     availableSpeakers,
     recordingsDir: resolvedRecordingsDir,

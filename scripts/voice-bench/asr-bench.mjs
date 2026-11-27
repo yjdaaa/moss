@@ -586,6 +586,20 @@ export function loadLabeledCorpus(corpusDir, traceDir = null) {
         const inputSource = String(
           label?.input_source || (labelSource === "e2e-playback" || meta?.bench_window ? "e2e_playback" : "live_mic"),
         );
+        const rawOrigin = String(
+          label?.audio_origin ||
+            label?.voice_profile?.audio_origin ||
+            label?.voice_profile?.source ||
+            "",
+        ).trim();
+        const audioOrigin =
+          rawOrigin === "online-human" ||
+          rawOrigin === "human-recording" ||
+          rawOrigin === "device-corpus-secondary"
+            ? rawOrigin
+            : null;
+        const dataset = String(label?.dataset || label?.voice_profile?.dataset || "").trim() || null;
+        const license = String(label?.license || label?.voice_profile?.license || "").trim() || null;
         samples.push({
           id: `${date || "corpus"}/${turnId}`,
           date,
@@ -595,6 +609,9 @@ export function loadLabeledCorpus(corpusDir, traceDir = null) {
           tags: Array.isArray(label?.tags) ? label.tags.map(String) : [],
           label_source: labelSource,
           input_source: inputSource,
+          audio_origin: audioOrigin,
+          dataset,
+          license,
           voice_profile: label?.voice_profile ?? null,
           bench_window: Boolean(meta?.bench_window || inputSource === "e2e_playback"),
           original_raw_text: String(meta?.raw_text ?? label?.raw_text ?? ""),
@@ -1292,11 +1309,25 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     return grouped;
   };
 
+  const resolveVoiceSourceGroup = (row) => {
+    const inputSource = String(row.input_source || (row.label_source === "e2e-playback" ? "e2e_playback" : "live_mic"));
+    if (inputSource === "digital_inject") return "digital_inject";
+    const origin = String(
+      row.audio_origin || row.voice_profile?.audio_origin || row.voice_profile?.source || "",
+    ).trim();
+    if (origin === "online-human") return "online-human";
+    if (origin === "human-recording") return "human-recording";
+    if (origin === "device-corpus-secondary") return "device-corpus-secondary";
+    if (inputSource === "e2e_playback") return "human-recording";
+    return "live_mic";
+  };
+
   const byLabelSource = summarizeGroups((row) => String(row.label_source || "manual"), "label_source");
   const byInputSource = summarizeGroups(
     (row) => String(row.input_source || (row.label_source === "e2e-playback" ? "e2e_playback" : "live_mic")),
     "input_source",
   );
+  const byAudioOrigin = summarizeGroups(resolveVoiceSourceGroup, "audio_origin");
 
   return {
     summaryRows,
@@ -1307,6 +1338,7 @@ export function analyzeResultsAndSuggestions(rows, { terms = DEFAULT_WORKSHOP_TE
     suggestions,
     byLabelSource,
     byInputSource,
+    byAudioOrigin,
   };
 }
 
@@ -1392,6 +1424,51 @@ function renderMarkdownReport(runId, sampleCount, analysis) {
       for (const r of group.summaryRows) {
         lines.push(
           `| ${inputSourceTitle(group.input_source)} | ${group.sample_count} | ${r.model_label} | ${noiseLabel(
+            r.noise_level,
+          )} | ${r.errors || 0} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
+        );
+      }
+    }
+  }
+
+  const audioOriginEntries = Object.values(analysis.byAudioOrigin || {});
+  const hasOnlineHuman = audioOriginEntries.some((g) => g.audio_origin === "online-human");
+  const hasDiverseOrigin =
+    hasOnlineHuman ||
+    audioOriginEntries.length > 1 ||
+    audioOriginEntries.some((g) => g.audio_origin !== "live_mic");
+  if (hasDiverseOrigin) {
+    const originOrder = {
+      "online-human": 1,
+      "human-recording": 2,
+      live_mic: 3,
+      digital_inject: 4,
+      "device-corpus-secondary": 5,
+    };
+    const originTitle = (src) =>
+      ({
+        "online-human": "网上真人（online-human）",
+        "human-recording": "我的录音（human-recording）",
+        live_mic: "小智实时说话（live_mic）",
+        digital_inject: "数字直通（digital_inject）",
+        "device-corpus-secondary": "设备录音（二次录制）",
+      })[src] || src;
+    lines.push(
+      "",
+      "## 1.7 按语音来源分组统计（网上真人 / 我的录音 / 小智实时说话 / 数字直通）",
+      "",
+      ...(hasOnlineHuman
+        ? ["> **说明**：网上语音的指标只反映通用识别能力，不代表用户本人的识别效果。", ""]
+        : []),
+      "| 语音来源 | 样本数 | 模型 | 噪声档位 | 失败数 | 字错率 (CER) | 最终延迟 P50 / P90 |",
+      "| --- | ---: | --- | --- | ---: | ---: | ---: |",
+    );
+    for (const group of audioOriginEntries.sort(
+      (a, b) => (originOrder[a.audio_origin] || 99) - (originOrder[b.audio_origin] || 99),
+    )) {
+      for (const r of group.summaryRows) {
+        lines.push(
+          `| ${originTitle(group.audio_origin)} | ${group.sample_count} | ${r.model_label} | ${noiseLabel(
             r.noise_level,
           )} | ${r.errors || 0} | ${pctText(r.cer)} | ${msText(r.final_p50_ms)} / ${msText(r.final_p90_ms)} |`,
         );
@@ -1601,6 +1678,9 @@ export async function runAsrBench(options = {}) {
               tags: sample.tags,
               label_source: sample.label_source || "manual",
               input_source: sample.input_source || (sample.label_source === "e2e-playback" ? "e2e_playback" : "live_mic"),
+              audio_origin: sample.audio_origin ?? null,
+              dataset: sample.dataset ?? null,
+              license: sample.license ?? null,
               voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,
@@ -1623,6 +1703,9 @@ export async function runAsrBench(options = {}) {
               tags: sample.tags,
               label_source: sample.label_source || "manual",
               input_source: sample.input_source || (sample.label_source === "e2e-playback" ? "e2e_playback" : "live_mic"),
+              audio_origin: sample.audio_origin ?? null,
+              dataset: sample.dataset ?? null,
+              license: sample.license ?? null,
               voice_profile: sample.voice_profile ?? null,
               model_id: rec.id,
               model_label: rec.label || rec.id,

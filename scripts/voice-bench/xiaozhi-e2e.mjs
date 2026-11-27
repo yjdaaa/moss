@@ -42,10 +42,12 @@ import {
 import { computeCer, normalizeForCer, readWavPcm16 } from "./asr-bench.mjs";
 import {
   BENCH_RECORDINGS_DIR_REL,
+  DEFAULT_MAX_ONLINE,
   RECORDING_APP_HINT,
   checkPlayerAvailable,
   playWav,
   prepareVoiceAssets,
+  saveOnlineRotation,
   startBackgroundNoise,
 } from "./voice-assets.mjs";
 
@@ -56,6 +58,108 @@ export const DEFAULT_QUIET_MS = 1_000;
 export const DEFAULT_MAX_MINUTES = 30;
 export const EARLY_CUTOFF_TOLERANCE_MS = 50;
 export const DEFAULT_MAX_CER_THRESHOLD = 0.35;
+export const DEFAULT_ESTIMATED_REPLY_MS = 18_000;
+export const DEFAULT_ESTIMATED_INTERVAL_MS = 4_000;
+
+/**
+ * VE3 保守估算单句整体测试耗时（毫秒）= 外放时长 + 预计应答时长 + 间隔；
+ * 若开启 `--compare-digital`，同一句还会追加一次服务端数字对照轮次。
+ */
+export function estimateTurnDurationMs(
+  item,
+  {
+    quietMs = DEFAULT_QUIET_MS,
+    compareDigital = false,
+    estimatedReplyMs = DEFAULT_ESTIMATED_REPLY_MS,
+    estimatedIntervalMs = null,
+  } = {},
+) {
+  const playMs = Math.max(1_000, Number(item?.asset?.duration_ms) || 4_000);
+  const replyMs = Math.max(0, Number(estimatedReplyMs ?? DEFAULT_ESTIMATED_REPLY_MS));
+  const intervalMs =
+    estimatedIntervalMs !== null && estimatedIntervalMs !== undefined
+      ? Math.max(0, Number(estimatedIntervalMs))
+      : Math.max(DEFAULT_ESTIMATED_INTERVAL_MS, Math.max(0, Number(quietMs) || 0) * 2 + 2_000);
+  const singleMs = playMs + replyMs + intervalMs;
+  return Math.round(compareDigital ? singleMs * 2 : singleMs);
+}
+
+/**
+ * VE3 开测前估算总时长并按测试时间窗上限自动分批（绝不延长单窗超过 60 分钟硬上限）。
+ */
+export function planE2eBatches(
+  preparedTurns,
+  {
+    maxMinutes = DEFAULT_MAX_MINUTES,
+    quietMs = DEFAULT_QUIET_MS,
+    compareDigital = false,
+    hasCalibration = false,
+    calibrationDurationMs = 4_000,
+    estimatedReplyMs = DEFAULT_ESTIMATED_REPLY_MS,
+    estimatedIntervalMs = null,
+    batchWindowMs = null,
+  } = {},
+) {
+  const clampedMaxMinutes = Math.max(1, Math.min(60, Number(maxMinutes) || DEFAULT_MAX_MINUTES));
+  const hardLimitMs = 60 * 60_000;
+  const windowLimitMs =
+    Number.isFinite(batchWindowMs) && batchWindowMs > 0
+      ? Math.min(Math.round(batchWindowMs), hardLimitMs)
+      : clampedMaxMinutes * 60_000;
+
+  const calibrationEstimateMs = hasCalibration
+    ? estimateTurnDurationMs(
+        { asset: { duration_ms: calibrationDurationMs } },
+        { quietMs, compareDigital: false, estimatedReplyMs, estimatedIntervalMs },
+      )
+    : 0;
+
+  const weighted = preparedTurns.map((item, globalIndex) => ({
+    item,
+    globalIndex,
+    estimatedMs: estimateTurnDurationMs(item, {
+      quietMs,
+      compareDigital: compareDigital && item?.spec?.expect_route !== "fast_exit",
+      estimatedReplyMs,
+      estimatedIntervalMs,
+    }),
+  }));
+
+  const totalEstimatedMs = calibrationEstimateMs + weighted.reduce((sum, w) => sum + w.estimatedMs, 0);
+  const exceedsWindow = totalEstimatedMs > windowLimitMs;
+  if (!exceedsWindow || weighted.length <= 1) {
+    return {
+      totalEstimatedMs,
+      windowLimitMs,
+      maxMinutes: clampedMaxMinutes,
+      exceedsWindow,
+      batches: weighted.length > 0 ? [weighted] : [],
+    };
+  }
+
+  const batches = [];
+  let current = [];
+  let currentMs = calibrationEstimateMs;
+  for (const entry of weighted) {
+    if (current.length > 0 && currentMs + entry.estimatedMs > windowLimitMs) {
+      batches.push(current);
+      current = [entry];
+      currentMs = entry.estimatedMs;
+    } else {
+      current.push(entry);
+      currentMs += entry.estimatedMs;
+    }
+  }
+  if (current.length > 0) batches.push(current);
+
+  return {
+    totalEstimatedMs,
+    windowLimitMs,
+    maxMinutes: clampedMaxMinutes,
+    exceedsWindow: true,
+    batches,
+  };
+}
 
 /** 判断首字是否被吞（原句至少 3 字、识别非空且开头 1~2 字在对齐中缺失）。 */
 export function detectHeadClipping(referenceText, hypothesisText) {
@@ -388,26 +492,288 @@ export function buildPrioritizedRecommendations(turns) {
   return recs;
 }
 
+function resolveTurnSourceType(t) {
+  const raw = String(t?.source_type || t?.audio_origin || t?.audio_source?.source_type || "").trim();
+  if (raw === "online-human" || raw === "human-recording" || raw === "device-corpus-secondary" || raw === "live_mic" || raw === "digital_inject") {
+    return raw;
+  }
+  if (t?.secondary_recording || t?.audio_source?.secondary_recording) return "device-corpus-secondary";
+  return "human-recording";
+}
+
+function sourceTypeLabel(sourceType) {
+  return (
+    {
+      "online-human": "网上真人（online-human）",
+      "human-recording": "我的录音（human-recording）",
+      live_mic: "小智实时说话（live_mic）",
+      digital_inject: "数字直通（digital_inject）",
+      "device-corpus-secondary": "设备录音（二次录制）",
+    }[sourceType] || sourceType
+  );
+}
+
+function formatPlaybackOriginNote(turn) {
+  const src = resolveTurnSourceType(turn);
+  const dataset = turn?.dataset || turn?.audio_source?.dataset || null;
+  const license = turn?.license || turn?.audio_source?.license || null;
+  const speaker = turn?.speaker || turn?.audio_source?.speaker || "";
+  if (src === "online-human") {
+    const metaParts = [dataset ? `数据集=${dataset}` : "", license ? `许可=${license}` : ""].filter(Boolean);
+    return `外放来源：网上真人（online-human${metaParts.length ? `，${metaParts.join("，")}` : ""}）`;
+  }
+  if (src === "device-corpus-secondary") {
+    return "外放来源：设备录音（二次录制）";
+  }
+  return `外放来源：我的录音（human-recording${speaker ? `，说话人=${speaker}` : ""}）`;
+}
+
+function annotatePlaybackTraceTimeline(jsonlLines, txtLines, turns, redactOpts) {
+  const byTurnNo = new Map();
+  for (const t of turns) {
+    const turnNo = Number(t?.detail?.turn || 0);
+    if (turnNo > 0) byTurnNo.set(turnNo, t);
+  }
+  const annotatedTurns = new Set();
+  const nextJsonl = jsonlLines.map((line) => {
+    try {
+      const obj = JSON.parse(line);
+      const turnNo = Number(obj?.turn || 0);
+      const matched = byTurnNo.get(turnNo);
+      if (
+        matched &&
+        (obj?.kind === "user_audio" || obj?.kind === "turn_end" || obj?.data?.input_source === "e2e_playback")
+      ) {
+        annotatedTurns.add(turnNo);
+        const src = resolveTurnSourceType(matched);
+        const dataset = matched.dataset || matched.audio_source?.dataset || null;
+        const license = matched.license || matched.audio_source?.license || null;
+        const note = formatPlaybackOriginNote(matched);
+        const nextObj = {
+          ...obj,
+          data: {
+            ...(obj.data && typeof obj.data === "object" ? obj.data : {}),
+            source_type: src,
+            audio_origin: src,
+            ...(dataset ? { dataset } : {}),
+            ...(license ? { license } : {}),
+            playback_origin_note: note,
+          },
+        };
+        return JSON.stringify(redactValue(nextObj, redactOpts));
+      }
+      return line;
+    } catch {
+      return line;
+    }
+  });
+
+  const txtAnnotatedTurns = new Set();
+  const nextTxt = txtLines.map((line) => {
+    for (const [turnNo, matched] of byTurnNo.entries()) {
+      if (
+        line.includes(`第${turnNo}轮`) &&
+        (line.includes("整体测试外放录音") || line.includes("用户说完"))
+      ) {
+        txtAnnotatedTurns.add(turnNo);
+        const note = formatPlaybackOriginNote(matched);
+        return redactText(`${line} [${note}]`, redactOpts);
+      }
+    }
+    return line;
+  });
+
+  // 若原始 ProcessTrace 尚未落盘对应轮次行（或假服务测试未写过程记录），补充明确的外放轮次来源说明
+  for (const t of turns) {
+    if (t.verdict === "skipped") continue;
+    const turnNo = Number(t?.detail?.turn || 0);
+    const src = resolveTurnSourceType(t);
+    const dataset = t.dataset || t.audio_source?.dataset || null;
+    const license = t.license || t.audio_source?.license || null;
+    const note = formatPlaybackOriginNote(t);
+    if (!turnNo || !annotatedTurns.has(turnNo)) {
+      const event = {
+        at: new Date(t?.detail?.started_at_ms || Date.now()).toISOString(),
+        kind: "e2e_playback_origin",
+        turn: turnNo || t.index,
+        data: {
+          turn_id: t.turn_id || null,
+          corpus_id: t.id,
+          input_source: "e2e_playback",
+          source_type: src,
+          audio_origin: src,
+          speaker: t.speaker || null,
+          ...(dataset ? { dataset } : {}),
+          ...(license ? { license } : {}),
+          playback_origin_note: note,
+        },
+      };
+      nextJsonl.push(JSON.stringify(redactValue(event, redactOpts)));
+    }
+    if (!turnNo || !txtAnnotatedTurns.has(turnNo)) {
+      const stamp = new Date(t?.detail?.started_at_ms || Date.now()).toISOString();
+      nextTxt.push(
+        redactText(
+          `[${stamp}] 整体测试第${turnNo || t.index}轮（${t.id}）[音源：整体测试外放录音 | ${note}]`,
+          redactOpts,
+        ),
+      );
+    }
+  }
+  return { jsonlLines: nextJsonl, txtLines: nextTxt };
+}
+
+function buildSourceStats(turns) {
+  const bySource = new Map();
+  const ensure = (sourceType) => {
+    if (!bySource.has(sourceType)) {
+      bySource.set(sourceType, {
+        source_type: sourceType,
+        label: sourceTypeLabel(sourceType),
+        rows: [],
+        datasets: new Set(),
+        licenses: new Set(),
+      });
+    }
+    return bySource.get(sourceType);
+  };
+
+  for (const t of turns) {
+    const src = resolveTurnSourceType(t);
+    const group = ensure(src);
+    group.rows.push(t);
+    const ds = t.dataset || t.audio_source?.dataset;
+    const lic = t.license || t.audio_source?.license;
+    if (ds) group.datasets.add(ds);
+    if (lic) group.licenses.add(lic);
+  }
+
+  const rate = (num, den) => (den > 0 ? Number((num / den).toFixed(4)) : null);
+  const order = {
+    "online-human": 1,
+    "human-recording": 2,
+    live_mic: 3,
+    digital_inject: 4,
+    "device-corpus-secondary": 5,
+  };
+  const out = [];
+  for (const group of bySource.values()) {
+    const executed = group.rows.filter((r) => r.verdict !== "skipped");
+    const passed = group.rows.filter((r) => r.verdict === "passed");
+    const failed = group.rows.filter((r) => r.verdict === "failed");
+    const skipped = group.rows.filter((r) => r.verdict === "skipped");
+    const withAttr = executed.filter((r) => r.attribution);
+    let refChars = 0;
+    let rawEdits = 0;
+    let corrEdits = 0;
+    for (const r of withAttr) {
+      const len = normalizeForCer(r.attribution.asr_correction.reference_text).length;
+      refChars += len;
+      rawEdits += Math.round(r.attribution.asr_correction.raw_cer * len);
+      corrEdits += Math.round(r.attribution.asr_correction.corrected_cer * len);
+    }
+    const endToFirst = withAttr
+      .map((r) => r.attribution.tts_playback.end_to_first_audio_ms)
+      .filter((v) => typeof v === "number");
+    out.push({
+      source_type: group.source_type,
+      label: group.label,
+      total: group.rows.length,
+      executed: executed.length,
+      passed: passed.length,
+      failed: failed.length,
+      skipped: skipped.length,
+      stage_pass_rates: {
+        capture_endpoint: rate(
+          withAttr.filter((r) => r.attribution.capture_endpoint.passed).length,
+          withAttr.length,
+        ),
+        asr_correction: rate(
+          withAttr.filter((r) => r.attribution.asr_correction.passed).length,
+          withAttr.length,
+        ),
+        intent_tools: rate(
+          withAttr.filter((r) => r.attribution.intent_tools.passed).length,
+          withAttr.length,
+        ),
+        tts_playback: rate(
+          withAttr.filter((r) => r.attribution.tts_playback.passed).length,
+          withAttr.length,
+        ),
+      },
+      raw_cer: refChars > 0 ? Number((rawEdits / refChars).toFixed(4)) : null,
+      corrected_cer: refChars > 0 ? Number((corrEdits / refChars).toFixed(4)) : null,
+      end_to_first_audio_p50_ms: percentile(endToFirst, 50),
+      ...(group.datasets.size > 0 ? { datasets: [...group.datasets].sort() } : {}),
+      ...(group.licenses.size > 0 ? { licenses: [...group.licenses].sort() } : {}),
+    });
+  }
+
+  // 若跑了 --compare-digital，把数字直通对照指标作为独立来源组一并列出
+  const digitalRows = turns.filter((t) => t.attribution?.asr_correction?.digital_control);
+  if (digitalRows.length > 0) {
+    let refChars = 0;
+    let rawEdits = 0;
+    let corrEdits = 0;
+    for (const r of digitalRows) {
+      const len = normalizeForCer(r.attribution.asr_correction.reference_text).length;
+      const d = r.attribution.asr_correction.digital_control;
+      refChars += len;
+      rawEdits += Math.round(d.raw_cer * len);
+      corrEdits += Math.round(d.corrected_cer * len);
+    }
+    out.push({
+      source_type: "digital_inject",
+      label: sourceTypeLabel("digital_inject"),
+      total: digitalRows.length,
+      executed: digitalRows.length,
+      passed: digitalRows.length,
+      failed: 0,
+      skipped: 0,
+      stage_pass_rates: {
+        capture_endpoint: null,
+        asr_correction: null,
+        intent_tools: null,
+        tts_playback: null,
+      },
+      raw_cer: refChars > 0 ? Number((rawEdits / refChars).toFixed(4)) : null,
+      corrected_cer: refChars > 0 ? Number((corrEdits / refChars).toFixed(4)) : null,
+      end_to_first_audio_p50_ms: null,
+    });
+  }
+
+  return out.sort((a, b) => (order[a.source_type] || 99) - (order[b.source_type] || 99));
+}
+
 function buildSpeakerStats(turns) {
   const bySpeaker = new Map();
   for (const t of turns) {
     const speaker = String(t.speaker || t.audio_source?.speaker || "未标注说话人");
-    if (!bySpeaker.has(speaker)) {
-      bySpeaker.set(speaker, {
+    const src = resolveTurnSourceType(t);
+    const key = `${src}::${speaker}`;
+    if (!bySpeaker.has(key)) {
+      bySpeaker.set(key, {
         speaker,
+        source_type: src,
         secondary_recording: Boolean(t.secondary_recording || t.audio_source?.secondary_recording),
+        datasets: new Set(),
+        licenses: new Set(),
         rows: [],
       });
     }
-    const group = bySpeaker.get(speaker);
+    const group = bySpeaker.get(key);
     if (t.secondary_recording || t.audio_source?.secondary_recording) {
       group.secondary_recording = true;
     }
+    const ds = t.dataset || t.audio_source?.dataset;
+    const lic = t.license || t.audio_source?.license;
+    if (ds) group.datasets.add(ds);
+    if (lic) group.licenses.add(lic);
     group.rows.push(t);
   }
   const rate = (num, den) => (den > 0 ? Number((num / den).toFixed(4)) : null);
   const out = [];
-  for (const { speaker, secondary_recording, rows } of bySpeaker.values()) {
+  for (const { speaker, source_type, secondary_recording, datasets, licenses, rows } of bySpeaker.values()) {
     const executed = rows.filter((r) => r.verdict !== "skipped");
     const passed = rows.filter((r) => r.verdict === "passed");
     const failed = rows.filter((r) => r.verdict === "failed");
@@ -428,7 +794,10 @@ function buildSpeakerStats(turns) {
       .filter((v) => typeof v === "number");
     out.push({
       speaker,
+      source_type,
       secondary_recording,
+      ...(datasets.size > 0 ? { datasets: [...datasets].sort() } : {}),
+      ...(licenses.size > 0 ? { licenses: [...licenses].sort() } : {}),
       total: rows.length,
       executed: executed.length,
       passed: passed.length,
@@ -471,7 +840,11 @@ export function buildE2eSummary({
   compareDigital,
   speakerFilter = "",
   includeDeviceCorpus = false,
+  maxOnline = DEFAULT_MAX_ONLINE,
+  onlineRotation = null,
+  batchPlan = null,
   missingTurns = [],
+  skippedAssets = [],
   startedAtMs,
   finishedAtMs,
   calibration,
@@ -545,6 +918,7 @@ export function buildE2eSummary({
   const totalStallMs = withAttr.reduce((s, t) => s + t.attribution.tts_playback.stall_ms, 0);
 
   const bySpeaker = buildSpeakerStats(turns);
+  const bySource = buildSourceStats(turns);
 
   return {
     run_id: runId,
@@ -552,6 +926,17 @@ export function buildE2eSummary({
     corpus: corpusName,
     speaker_filter: speakerFilter || null,
     include_device_corpus: Boolean(includeDeviceCorpus),
+    max_online: maxOnline,
+    online_rotation: onlineRotation
+      ? {
+          total_pool: onlineRotation.totalPool,
+          selected_count: onlineRotation.selectedCount,
+          cursor_before: onlineRotation.cursorBefore,
+          cursor_after: onlineRotation.cursorAfter,
+          selected_ids: onlineRotation.selectedIds,
+        }
+      : null,
+    batch_plan: batchPlan || null,
     noise: noisePreset ? { preset: noisePreset, gain: noiseGain } : null,
     compare_digital: Boolean(compareDigital),
     calibration: calibration || null,
@@ -565,6 +950,7 @@ export function buildE2eSummary({
       failed: failed.length,
       skipped: skipped.length,
       missing_recordings: missingTurns.length,
+      skipped_assets: skippedAssets.length,
     },
     stage_pass_rates: {
       capture_endpoint: rate(capturePass, withAttr.length),
@@ -576,8 +962,10 @@ export function buildE2eSummary({
       raw_cer: overallRawCer,
       corrected_cer: overallCorrectedCer,
     },
+    by_source: bySource,
     by_speaker: bySpeaker,
     missing_turns: missingTurns,
+    skipped_assets: skippedAssets,
     digital_comparison: digitalSummary,
     capture_metrics: {
       early_cutoffs: earlyCutoffs,
@@ -648,6 +1036,42 @@ export function buildE2eReportMarkdown(summary, turns) {
       }${(dc.mic_room_cer_loss * 100).toFixed(1)}pp |`,
     );
   }
+  if (summary.batch_plan && summary.batch_plan.batch_count > 1) {
+    const bp = summary.batch_plan;
+    const estMin = (bp.estimated_duration_ms / 60_000).toFixed(1);
+    lines.push(
+      `| 自动分批执行 | 预估 ${estMin} 分钟 > 单窗上限 ${bp.max_minutes} 分钟，分 ${bp.batch_count} 批（已执行 ${bp.batches_executed} 批${bp.session_aborted ? "，因会话变更中止" : ""}） |`,
+    );
+  }
+
+  if (Array.isArray(summary.by_source) && summary.by_source.length > 0) {
+    const hasOnline = summary.by_source.some((s) => s.source_type === "online-human");
+    lines.push(
+      "",
+      "## 按语音来源分组统计（网上真人 / 我的录音 / 小智实时说话 / 数字直通）",
+      "",
+      ...(hasOnline
+        ? ["> **说明**：网上语音的指标只反映通用识别能力，不代表用户本人的识别效果。", ""]
+        : []),
+      "| 语音来源 | 通过/执行 | 拾音判停 | 识别纠偏 | 意图工具 | 合成播放 | 原 CER | 纠偏 CER | 首帧 P50 | 数据集与许可 |",
+      "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    );
+    for (const src of summary.by_source) {
+      const dsInfo =
+        src.datasets?.length || src.licenses?.length
+          ? `${(src.datasets || []).join("、")}（${(src.licenses || []).join("、")}）`
+          : "—";
+      lines.push(
+        `| ${mdCell(src.label, 28)} | ${src.passed}/${src.executed} | ${pct(
+          src.stage_pass_rates?.capture_endpoint,
+        )} | ${pct(src.stage_pass_rates?.asr_correction)} | ${pct(
+          src.stage_pass_rates?.intent_tools,
+        )} | ${pct(src.stage_pass_rates?.tts_playback)} | ${pct(src.raw_cer)} | ${pct(
+          src.corrected_cer,
+        )} | ${msFmt(src.end_to_first_audio_p50_ms)} | ${mdCell(dsInfo, 36)} |`,
+      );
+    }
+  }
 
   if (Array.isArray(summary.by_speaker) && summary.by_speaker.length > 0) {
     lines.push(
@@ -658,7 +1082,9 @@ export function buildE2eReportMarkdown(summary, turns) {
       "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     );
     for (const sp of summary.by_speaker) {
-      const sourceLabel = sp.secondary_recording ? "设备录音（二次录制）" : "电脑麦克风真人录音";
+      const sourceLabel = sourceTypeLabel(
+        sp.source_type || (sp.secondary_recording ? "device-corpus-secondary" : "human-recording"),
+      );
       lines.push(
         `| ${mdCell(sp.speaker, 20)} | ${sourceLabel} | ${sp.passed}/${sp.executed} | ${pct(
           sp.stage_pass_rates.capture_endpoint,
@@ -667,6 +1093,26 @@ export function buildE2eReportMarkdown(summary, turns) {
         )} | ${pct(sp.stage_pass_rates.tts_playback)} | ${pct(sp.raw_cer)} | ${pct(
           sp.corrected_cer,
         )} | ${msFmt(sp.end_to_first_audio_p50_ms)} |`,
+      );
+    }
+  }
+
+  if (Array.isArray(summary.skipped_assets) && summary.skipped_assets.length > 0) {
+    lines.push(
+      "",
+      "## 被跳过素材",
+      "",
+      `> 以下 ${summary.skipped_assets.length} 条素材因缺少必填许可/数据集元数据、仅使用 .txt 或包含疑似指令词而被跳过：`,
+      "",
+      "| 文件 | 来源 | 原话 | 跳过原因 |",
+      "| --- | --- | --- | --- |",
+    );
+    for (const sk of summary.skipped_assets) {
+      lines.push(
+        `| \`${mdCell(sk.filename || sk.id, 36)}\` | ${sourceTypeLabel(sk.source_type || "online-human")} | ${mdCell(
+          sk.text || "—",
+          36,
+        )} | ${mdCell(sk.reason, 64)} |`,
       );
     }
   }
@@ -1083,9 +1529,19 @@ async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePre
     ...(Array.isArray(spec.tags) ? spec.tags : []),
     ...(noisePreset ? ["有噪声"] : []),
   ].filter((t, idx, arr) => validTags.has(t) && arr.indexOf(t) === idx);
+  const audioOrigin =
+    asset?.audio_origin ||
+    asset?.source_type ||
+    (asset?.secondary_recording ? "device-corpus-secondary" : "human-recording");
+  const dataset = asset?.dataset || asset?.voice_profile?.dataset || null;
+  const license = asset?.license || asset?.voice_profile?.license || null;
   const voiceProfile = {
-    ...(asset?.voice_profile || { source: asset?.source_type || "human-recording" }),
+    ...(asset?.voice_profile || { source: audioOrigin }),
+    source: audioOrigin,
+    audio_origin: audioOrigin,
     ...(asset?.speaker ? { speaker: asset.speaker } : {}),
+    ...(dataset ? { dataset } : {}),
+    ...(license ? { license } : {}),
     ...(asset?.secondary_recording ? { secondary_recording: true } : {}),
     ...(noisePreset ? { noise: noisePreset } : {}),
   };
@@ -1171,6 +1627,10 @@ async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePre
           session_id: detail.session_id || "",
           date: traceDate,
           input_source: "e2e_playback",
+          source_type: audioOrigin,
+          audio_origin: audioOrigin,
+          ...(dataset ? { dataset } : {}),
+          ...(license ? { license } : {}),
           raw_text: rawAsr,
           corrected_text: String(detail.corrected_text || rawAsr).trim(),
           reference_text: spec.text,
@@ -1228,6 +1688,10 @@ async function tryAutoLabelAsrCorpus({ runtimeDir, detail, spec, asset, noisePre
     turn_id: turnIdStr,
     date: dateStr,
     input_source: "e2e_playback",
+    source_type: audioOrigin,
+    audio_origin: audioOrigin,
+    ...(dataset ? { dataset } : {}),
+    ...(license ? { license } : {}),
     reference_text: spec.text,
     verified_correct: cerRes.edits === 0,
     tags,
@@ -1476,6 +1940,11 @@ export async function runXiaozhiE2e(opts = {}) {
 
   const speakerFilter = String(opts.speaker || "").trim();
   const includeDeviceCorpus = Boolean(opts.includeDeviceCorpus);
+  const rawMaxOnline = opts.maxOnline === undefined || opts.maxOnline === null ? DEFAULT_MAX_ONLINE : Number(opts.maxOnline);
+  if (!Number.isInteger(rawMaxOnline) || rawMaxOnline < 0) {
+    throw new Error("--max-online 须为大于等于 0 的整数");
+  }
+  const maxOnline = rawMaxOnline;
   const assetPreparer = opts.prepareVoiceAssetsFn || prepareVoiceAssets;
   const assets = await assetPreparer({
     turns: corpusTurns,
@@ -1485,11 +1954,16 @@ export async function runXiaozhiE2e(opts = {}) {
     corpusDir: resolvedCorpusDir,
     speaker: speakerFilter,
     includeDeviceCorpus,
+    maxOnline,
+    persistRotation: false,
   });
 
   const missingTurns = Array.isArray(assets.missingTurns) ? assets.missingTurns : [];
+  const skippedAssets = Array.isArray(assets.skippedAssets) ? assets.skippedAssets : [];
+  const onlineRotation = assets.onlineRotation || null;
   if (!Array.isArray(assets.preparedTurns) || assets.preparedTurns.length === 0) {
     const missingList = missingTurns.map((m) => `- ${m.id}（${m.label}）：${m.text}`).join("\n");
+    const skippedList = skippedAssets.map((s) => `- ${s.filename || s.id}：${s.reason}`).join("\n");
     const speakerHint = speakerFilter ? `（已指定说话人「${speakerFilter}」）` : "";
     return {
       exitCode: 1,
@@ -1497,10 +1971,12 @@ export async function runXiaozhiE2e(opts = {}) {
       summary: null,
       turns: [],
       missingTurns,
+      skippedAssets,
       errorMessage: [
         `未找到任何可用的真人测试录音${speakerHint}，已终止整体测试（绝不使用合成声音替代）。`,
         RECORDING_APP_HINT,
         missingList ? `缺少真人录音的语料：\n${missingList}` : "",
+        skippedList ? `被跳过的素材：\n${skippedList}` : "",
       ]
         .filter(Boolean)
         .join("\n"),
@@ -1512,7 +1988,30 @@ export async function runXiaozhiE2e(opts = {}) {
       `[xiaozhi-e2e] 缺少真人录音的语料（已跳过 ${missingTurns.length} 句）：${preview}。${RECORDING_APP_HINT}`,
     );
   }
+  if (skippedAssets.length > 0 && opts.logMissing !== false) {
+    const preview = skippedAssets.map((s) => `${s.filename || s.id}（${s.reason}）`).join("；");
+    console.warn(`[xiaozhi-e2e] 已跳过 ${skippedAssets.length} 条不合格或疑似指令的素材：${preview}`);
+  }
   const effectiveCalibrationText = assets.calibrationEffectiveText || calibrationText;
+
+  // VE3：开测前估算总时长，超出测试时间窗上限时打印提示并自动分批（绝不延长单窗超过 60 分钟上限）
+  const hasCalibration = !opts.skipCalibration && Boolean(assets.calibrationAsset);
+  const batchSchedule = planE2eBatches(assets.preparedTurns, {
+    maxMinutes,
+    quietMs,
+    compareDigital,
+    hasCalibration,
+    calibrationDurationMs: assets.calibrationAsset?.duration_ms || 4_000,
+    estimatedReplyMs: opts.estimatedReplyMs,
+    estimatedIntervalMs: opts.estimatedIntervalMs,
+    batchWindowMs: opts.batchWindowMs,
+  });
+  if (batchSchedule.batches.length > 1 && opts.logBatching !== false) {
+    const estMin = (batchSchedule.totalEstimatedMs / 60_000).toFixed(1);
+    console.warn(
+      `[xiaozhi-e2e] 预计总时长约 ${estMin} 分钟（${assets.preparedTurns.length} 句），超过单次测试时间窗上限 ${maxMinutes} 分钟；将自动分为 ${batchSchedule.batches.length} 批执行，每批正常关闭并重开时间窗且重新确认设备会话一致（单窗绝不超过 60 分钟上限）。`,
+    );
+  }
 
   // 2. 打开测试时间窗 + 打开过程记录（全程包裹在 try/finally 与 SIGINT/SIGTERM 钩子，任何异常或中断都必关窗与恢复）
   const startedAtMs = Date.now();
@@ -1525,6 +2024,8 @@ export async function runXiaozhiE2e(opts = {}) {
   let activePlayChild = null;
   let calibrationReport = null;
   let autoLabeledCount = 0;
+  let batchesExecuted = 0;
+  let sessionAborted = false;
   let cleanedUp = false;
   const results = [];
 
@@ -1553,6 +2054,7 @@ export async function runXiaozhiE2e(opts = {}) {
       } catch {
         // 尽力关闭测试时间窗
       }
+      benchWindowOpened = false;
     }
     if (previousTraceEnabled !== null) {
       try {
@@ -1565,363 +2067,481 @@ export async function runXiaozhiE2e(opts = {}) {
   const unregisterSignals = registerSignalCleanup(cleanup);
 
   try {
-    const winRes = await controlBenchWindow(baseUrl, token, {
-      deviceId,
-      action: "open",
-      maxMinutes,
-    });
-    if (!winRes.ok) {
-      return {
-        exitCode: 1,
-        archiveDir: null,
-        summary: null,
-        turns: [],
-        errorMessage: winRes.data?.message || `打开测试时间窗失败（HTTP ${winRes.status}）`,
-      };
-    }
-    benchWindowOpened = true;
-    if (winRes.data?.bench_window?.session_id) {
-      boundSessionId = winRes.data.bench_window.session_id;
-    }
+    let stopAllBatches = false;
+    for (let batchIdx = 0; batchIdx < batchSchedule.batches.length && !stopAllBatches; batchIdx += 1) {
+      const batchEntries = batchSchedule.batches[batchIdx];
 
-    const traceRes = await setProcessTrace(baseUrl, token, true, false);
-    if (traceRes.ok && typeof traceRes.data?.previous_enabled === "boolean") {
-      previousTraceEnabled = traceRes.data.previous_enabled;
-    }
+      // VE3 分批重开前必须重新确认仍是同一次设备会话；若设备断开或会话变更，立即中止不重开时间窗
+      if (batchIdx > 0) {
+        const recheck = await listDebugDevices(baseUrl, token);
+        const recheckDevices = recheck.ok && Array.isArray(recheck.data?.devices) ? recheck.data.devices : [];
+        const currentDev = recheckDevices.find((d) => d.device_id === deviceId);
+        if (!currentDev || !currentDev.session_id || currentDev.session_id !== boundSessionId) {
+          sessionAborted = true;
+          const firstMissing = batchEntries[0];
+          const firstSpec = firstMissing?.item?.spec || {};
+          const firstAsset = firstMissing?.item?.asset || {};
+          const firstSourceType = firstAsset.source_type || "human-recording";
+          results.push({
+            index: (firstMissing?.globalIndex ?? results.length) + 1,
+            id: String(firstSpec.id || `batch_${batchIdx + 1}`),
+            label: firstSpec.label || `第 ${batchIdx + 1} 批会话复核`,
+            text: firstSpec.text || "",
+            speaker: firstAsset.speaker || "未标注说话人",
+            source_type: firstSourceType,
+            audio_origin: firstAsset.audio_origin || firstSourceType,
+            dataset: firstAsset.dataset || null,
+            license: firstAsset.license || null,
+            secondary_recording: Boolean(firstAsset.secondary_recording),
+            batch: batchIdx + 1,
+            verdict: "failed",
+            failure_reason: !currentDev
+              ? `第 ${batchIdx + 1} 批重开测试时间窗前设备 ${deviceId} 已断开连接，已中止后续批次`
+              : `第 ${batchIdx + 1} 批重开测试时间窗前检测到设备会话已变更（原会话 ${boundSessionId}，当前 ${currentDev.session_id}），已中止后续批次`,
+            wall_ms: 0,
+            audio_source: {
+              filename: firstAsset.filename || "",
+              source_type: firstSourceType,
+              audio_origin: firstAsset.audio_origin || firstSourceType,
+              speaker: firstAsset.speaker || "未标注说话人",
+              dataset: firstAsset.dataset || null,
+              license: firstAsset.license || null,
+              source_url: firstAsset.source_url || null,
+              secondary_recording: Boolean(firstAsset.secondary_recording),
+              voice_profile: firstAsset.voice_profile || null,
+              duration_ms: firstAsset.duration_ms || 0,
+            },
+            attribution: null,
+            detail: null,
+          });
+          break;
+        }
+      }
 
-    // 3. 校准（仅在 listening 安静且测试时间窗确认开启时执行）
-    if (!opts.skipCalibration && assets.calibrationAsset) {
-      const calReady = await waitForQuietListening({
-        baseUrl,
-        token,
+      const winRes = await controlBenchWindow(baseUrl, token, {
         deviceId,
-        quietMs,
-        timeoutMs: idleWaitMs,
-        pollIntervalMs,
-        allowIdle: false,
-        ignoreLevel: false,
+        action: "open",
+        maxMinutes,
       });
-      if (!calReady.ready) {
-        return {
-          exitCode: 1,
-          archiveDir: null,
-          summary: null,
-          turns: [],
-          errorMessage: calReady.offline
-            ? `校准前设备 ${deviceId} 断开了连接`
-            : "校准前等待设备进入安静聆听超时，请确认小智已唤醒并处于聆听状态",
-        };
-      }
-      if (!hasActiveBenchWindowForSession(calReady.device, boundSessionId)) {
-        return {
-          exitCode: 1,
-          archiveDir: null,
-          summary: null,
-          turns: [],
-          errorMessage: "校准前检测到测试时间窗已关闭或设备会话已变更，为防止物理动作绕过安全锁，已中止外放",
-        };
-      }
-      const prevTurn = Number(calReady.device?.latest_turn || 0);
-      const calPlay = await playWav(assets.calibrationAsset.wavPath, {
-        player,
-        playWavFn: opts.playWavFn,
-        onSpawn: (c) => {
-          activePlayChild = c;
-        },
-        spec: { id: "calibration", text: effectiveCalibrationText },
-      });
-      const calWait = await waitForAcousticTurnCompletion({
-        baseUrl,
-        token,
-        deviceId,
-        sessionId: calReady.device?.session_id || boundSessionId,
-        prevTurnNumber: prevTurn,
-        playbackEndedAtMs: calPlay.ended_at_ms,
-        quietMs,
-        timeoutMs: Math.min(30_000, turnTimeoutMs),
-        pollIntervalMs,
-        ignoreLevel: false,
-      });
-      calibrationReport = evaluateCalibrationResult({
-        calibrationText: effectiveCalibrationText,
-        result: calWait,
-      });
-      if (!calibrationReport.ok) {
-        return {
-          exitCode: 1,
-          archiveDir: null,
-          summary: null,
-          turns: [],
-          calibration: calibrationReport,
-          errorMessage: calibrationReport.message,
-        };
-      }
-    }
-
-    // 4. 若指定了背景噪声，开始低音量循环外放背景噪声
-    if (noisePreset) {
-      const startNoise = opts.startNoiseFn || startBackgroundNoise;
-      noiseHandle = startNoise({
-        preset: noisePreset,
-        gain: noiseGain,
-        cacheDir: join(runtimeDir, "voice-bench", "noise-cache"),
-        pythonBin: opts.pythonBin || "python3",
-        platform: opts.platform || process.platform,
-        player,
-      });
-      if (noiseHandle) {
-        noiseInfo = {
-          filename: noiseHandle.filename,
-          preset: noiseHandle.preset,
-          gain: noiseHandle.gain,
-        };
-      }
-    }
-
-    // 5. 严格串行逐句执行（每句外放前必须复核测试时间窗仍在打开状态，绝不在无锁状态下外放）
-    for (let i = 0; i < assets.preparedTurns.length; i += 1) {
-      const { spec, asset } = assets.preparedTurns[i];
-      const turnIndex = i + 1;
-      const turnIdLabel = String(spec.id || `turn_${turnIndex}`);
-      const turnStartedAt = Date.now();
-
-      const waitQuiet = await waitForQuietListening({
-        baseUrl,
-        token,
-        deviceId,
-        quietMs,
-        timeoutMs: Math.min(idleWaitMs, 100_000),
-        pollIntervalMs,
-        allowIdle: false,
-        ignoreLevel,
-      });
-
-      const turnSpeaker = asset.speaker || asset.voice_profile?.speaker || "未标注说话人";
-      const turnSecondary = Boolean(asset.secondary_recording || asset.voice_profile?.secondary_recording);
-      const audioSourceMeta = {
-        filename: asset.filename,
-        source_type: asset.source_type,
-        speaker: turnSpeaker,
-        secondary_recording: turnSecondary,
-        voice_profile: asset.voice_profile,
-        duration_ms: asset.duration_ms,
-      };
-
-      if (spec.require_idle_laser && waitQuiet.payload?.active_laser_job === true) {
+      if (!winRes.ok) {
+        if (batchIdx === 0) {
+          return {
+            exitCode: 1,
+            archiveDir: null,
+            summary: null,
+            turns: [],
+            errorMessage: winRes.data?.message || `打开测试时间窗失败（HTTP ${winRes.status}）`,
+          };
+        }
+        sessionAborted = true;
         results.push({
-          index: turnIndex,
-          id: turnIdLabel,
-          label: spec.label || turnIdLabel,
-          text: spec.text,
-          speaker: turnSpeaker,
-          secondary_recording: turnSecondary,
-          verdict: "skipped",
-          skip_reason: "检测到激光加工任务正在运行，跳过停止快路径测试",
-          wall_ms: Date.now() - turnStartedAt,
-          audio_source: audioSourceMeta,
-          attribution: null,
-          detail: null,
-        });
-        continue;
-      }
-
-      if (!waitQuiet.ready) {
-        results.push({
-          index: turnIndex,
-          id: turnIdLabel,
-          label: spec.label || turnIdLabel,
-          text: spec.text,
-          speaker: turnSpeaker,
-          secondary_recording: turnSecondary,
+          index: (batchEntries[0]?.globalIndex ?? results.length) + 1,
+          id: String(batchEntries[0]?.item?.spec?.id || `batch_${batchIdx + 1}`),
+          label: `第 ${batchIdx + 1} 批开启时间窗`,
+          text: batchEntries[0]?.item?.spec?.text || "",
+          speaker: batchEntries[0]?.item?.asset?.speaker || "未标注说话人",
+          source_type: batchEntries[0]?.item?.asset?.source_type || "human-recording",
+          audio_origin: batchEntries[0]?.item?.asset?.audio_origin || "human-recording",
+          dataset: batchEntries[0]?.item?.asset?.dataset || null,
+          license: batchEntries[0]?.item?.asset?.license || null,
+          secondary_recording: Boolean(batchEntries[0]?.item?.asset?.secondary_recording),
+          batch: batchIdx + 1,
           verdict: "failed",
-          failure_reason: waitQuiet.offline
-            ? "设备已断开连接"
-            : `等待设备进入 listening 且安静 ${quietMs} ms 超时`,
-          wall_ms: Date.now() - turnStartedAt,
-          audio_source: audioSourceMeta,
-          attribution: null,
-          detail: null,
-        });
-        continue;
-      }
-
-      if (!hasActiveBenchWindowForSession(waitQuiet.device, boundSessionId)) {
-        results.push({
-          index: turnIndex,
-          id: turnIdLabel,
-          label: spec.label || turnIdLabel,
-          text: spec.text,
-          speaker: turnSpeaker,
-          secondary_recording: turnSecondary,
-          verdict: "failed",
-          failure_reason: "测试时间窗已关闭、过期或设备会话已变更，已中止后续外放以防物理动作绕过安全锁",
-          wall_ms: Date.now() - turnStartedAt,
-          audio_source: audioSourceMeta,
+          failure_reason: winRes.data?.message || `第 ${batchIdx + 1} 批重开测试时间窗失败（HTTP ${winRes.status}）`,
+          wall_ms: 0,
+          audio_source: null,
           attribution: null,
           detail: null,
         });
         break;
       }
-
-      const prevTurn = Number(waitQuiet.device?.latest_turn || 0);
-      const playback = await playWav(asset.wavPath, {
-        player,
-        playWavFn: opts.playWavFn,
-        onSpawn: (c) => {
-          activePlayChild = c;
-        },
-        spec,
-        asset,
-        index: turnIndex,
-      });
-
-      const waitDone = await waitForAcousticTurnCompletion({
-        baseUrl,
-        token,
-        deviceId,
-        sessionId: waitQuiet.device?.session_id || boundSessionId,
-        prevTurnNumber: prevTurn,
-        playbackEndedAtMs: playback.ended_at_ms,
-        quietMs,
-        timeoutMs: turnTimeoutMs,
-        pollIntervalMs,
-        expectExit: spec.expect_route === "fast_exit",
-        ignoreLevel,
-      });
-
-      const wallMs = Date.now() - turnStartedAt;
-      if (waitDone.timedOut) {
+      benchWindowOpened = true;
+      const openedSessionId = winRes.data?.bench_window?.session_id || "";
+      if (batchIdx === 0) {
+        if (openedSessionId) boundSessionId = openedSessionId;
+      } else if (openedSessionId && boundSessionId && openedSessionId !== boundSessionId) {
+        sessionAborted = true;
+        await controlBenchWindow(baseUrl, token, { deviceId, action: "close" });
+        benchWindowOpened = false;
         results.push({
-          index: turnIndex,
-          id: turnIdLabel,
-          label: spec.label || turnIdLabel,
-          text: spec.text,
-          speaker: turnSpeaker,
-          secondary_recording: turnSecondary,
-          turn_id: waitDone.turnId,
+          index: (batchEntries[0]?.globalIndex ?? results.length) + 1,
+          id: String(batchEntries[0]?.item?.spec?.id || `batch_${batchIdx + 1}`),
+          label: `第 ${batchIdx + 1} 批会话复核`,
+          text: batchEntries[0]?.item?.spec?.text || "",
+          speaker: batchEntries[0]?.item?.asset?.speaker || "未标注说话人",
+          source_type: batchEntries[0]?.item?.asset?.source_type || "human-recording",
+          audio_origin: batchEntries[0]?.item?.asset?.audio_origin || "human-recording",
+          dataset: batchEntries[0]?.item?.asset?.dataset || null,
+          license: batchEntries[0]?.item?.asset?.license || null,
+          secondary_recording: Boolean(batchEntries[0]?.item?.asset?.secondary_recording),
+          batch: batchIdx + 1,
           verdict: "failed",
-          failure_reason: `本轮在 ${turnTimeoutMs} ms 内未完成并回到安静聆听（超时）`,
-          wall_ms: wallMs,
-          audio_source: audioSourceMeta,
-          attribution: waitDone.detail
-            ? buildTurnAttribution({
-                spec,
-                playback,
-                detail: waitDone.detail,
-                observedPhases: waitDone.observedPhases,
-                overlapDetected: waitDone.overlapDetected,
-              })
-            : null,
-          detail: waitDone.detail,
+          failure_reason: `第 ${batchIdx + 1} 批打开时间窗后会话已变更（原 ${boundSessionId}，现 ${openedSessionId}），已立即关窗中止`,
+          wall_ms: 0,
+          audio_source: null,
+          attribution: null,
+          detail: null,
         });
-        continue;
+        break;
       }
+      batchesExecuted += 1;
 
-      // VC3 #7：自动回写 asr-corpus 标注
-      const labeled = await tryAutoLabelAsrCorpus({
-        runtimeDir,
-        detail: waitDone.detail,
-        spec,
-        asset,
-        noisePreset,
-      });
-      if (labeled) autoLabeledCount += 1;
+      if (batchIdx === 0) {
+        const traceRes = await setProcessTrace(baseUrl, token, true, false);
+        if (traceRes.ok && typeof traceRes.data?.previous_enabled === "boolean") {
+          previousTraceEnabled = traceRes.data.previous_enabled;
+        }
 
-      // VC2 可选数字注入对照（退出词跳过，否则会话已关闭）
-      let digitalDetail = null;
-      let digitalError = null;
-      let benchWindowLostDuringDigital = false;
-      if (compareDigital && spec.expect_route !== "fast_exit" && waitDone.detail?.route !== "fast_exit") {
-        const digitalRes = await runDigitalControlTurn({
-          baseUrl,
-          token,
-          deviceId,
-          wavPath: asset.wavPath,
-          turnTimeoutMs,
-          pollIntervalMs,
-          quietMs,
-          ignoreLevel,
-        });
-        if (digitalRes.detail) digitalDetail = digitalRes.detail;
-        if (digitalRes.error) {
-          digitalError = digitalRes.error;
-          if (digitalRes.code === "bench_window_required" || digitalRes.status === 403) {
-            benchWindowLostDuringDigital = true;
+        // 3. 校准（仅在第一批、listening 安静且测试时间窗确认开启时执行）
+        if (hasCalibration) {
+          const calReady = await waitForQuietListening({
+            baseUrl,
+            token,
+            deviceId,
+            quietMs,
+            timeoutMs: idleWaitMs,
+            pollIntervalMs,
+            allowIdle: false,
+            ignoreLevel: false,
+          });
+          if (!calReady.ready) {
+            return {
+              exitCode: 1,
+              archiveDir: null,
+              summary: null,
+              turns: [],
+              errorMessage: calReady.offline
+                ? `校准前设备 ${deviceId} 断开了连接`
+                : "校准前等待设备进入安静聆听超时，请确认小智已唤醒并处于聆听状态",
+            };
+          }
+          if (!hasActiveBenchWindowForSession(calReady.device, boundSessionId)) {
+            return {
+              exitCode: 1,
+              archiveDir: null,
+              summary: null,
+              turns: [],
+              errorMessage: "校准前检测到测试时间窗已关闭或设备会话已变更，为防止物理动作绕过安全锁，已中止外放",
+            };
+          }
+          const prevTurn = Number(calReady.device?.latest_turn || 0);
+          const calPlay = await playWav(assets.calibrationAsset.wavPath, {
+            player,
+            playWavFn: opts.playWavFn,
+            onSpawn: (c) => {
+              activePlayChild = c;
+            },
+            spec: { id: "calibration", text: effectiveCalibrationText },
+          });
+          const calWait = await waitForAcousticTurnCompletion({
+            baseUrl,
+            token,
+            deviceId,
+            sessionId: calReady.device?.session_id || boundSessionId,
+            prevTurnNumber: prevTurn,
+            playbackEndedAtMs: calPlay.ended_at_ms,
+            quietMs,
+            timeoutMs: Math.min(30_000, turnTimeoutMs),
+            pollIntervalMs,
+            ignoreLevel: false,
+          });
+          calibrationReport = evaluateCalibrationResult({
+            calibrationText: effectiveCalibrationText,
+            result: calWait,
+          });
+          if (!calibrationReport.ok) {
+            return {
+              exitCode: 1,
+              archiveDir: null,
+              summary: null,
+              turns: [],
+              calibration: calibrationReport,
+              errorMessage: calibrationReport.message,
+            };
+          }
+        }
+
+        // VE3：通过校准准备开测后才持久化 `.rotation.json`，确保下次从新位置继续轮换
+        if (onlineRotation && onlineRotation.selectedCount > 0 && !onlineRotation.persisted) {
+          onlineRotation.persisted = saveOnlineRotation(onlineRotation.onlineDir, {
+            cursor: onlineRotation.cursorAfter,
+            totalPool: onlineRotation.totalPool,
+            lastIds: onlineRotation.selectedIds,
+          });
+        }
+
+        // 4. 若指定了背景噪声，开始低音量循环外放背景噪声
+        if (noisePreset) {
+          const startNoise = opts.startNoiseFn || startBackgroundNoise;
+          noiseHandle = startNoise({
+            preset: noisePreset,
+            gain: noiseGain,
+            cacheDir: join(runtimeDir, "voice-bench", "noise-cache"),
+            pythonBin: opts.pythonBin || "python3",
+            platform: opts.platform || process.platform,
+            player,
+          });
+          if (noiseHandle) {
+            noiseInfo = {
+              filename: noiseHandle.filename,
+              preset: noiseHandle.preset,
+              gain: noiseHandle.gain,
+            };
           }
         }
       }
 
-      const attribution = buildTurnAttribution({
-        spec,
-        playback,
-        detail: waitDone.detail,
-        digitalDetail,
-        observedPhases: waitDone.observedPhases,
-        overlapDetected: waitDone.overlapDetected,
-      });
-      if (digitalError) {
-        attribution.asr_correction.digital_control_error = digitalError;
-      }
-      if (waitDone.extraTurnsCount > 0) {
-        attribution.capture_endpoint.extra_turns_triggered = waitDone.extraTurnsCount;
-      }
-      const stageFailures = [];
-      if (benchWindowLostDuringDigital) {
-        stageFailures.push(`数字对照检测到测试时间窗已关闭（${digitalError}），已中止后续外放`);
-      }
-      if (!attribution.capture_endpoint.passed) {
-        const flags = [];
-        if (attribution.capture_endpoint.overlap_detected) flags.push("外放与播报重叠");
-        if (attribution.capture_endpoint.early_cutoff) flags.push("抢话");
-        if (attribution.capture_endpoint.head_clipped) flags.push("首字被吞");
-        if (!attribution.asr_correction.raw_asr) flags.push("未识别出文字");
-        stageFailures.push(`拾音判停异常（${flags.join("、") || "未通过"}）`);
-      }
-      if (!attribution.asr_correction.passed) {
-        stageFailures.push(
-          `识别纠偏未达标（纠偏后 CER ${(attribution.asr_correction.corrected_cer * 100).toFixed(1)}%${
-            attribution.asr_correction.key_terms_missed.length
-              ? `，漏认：${attribution.asr_correction.key_terms_missed.join("、")}`
-              : ""
-          }）`,
-        );
-      }
-      if (!attribution.intent_tools.passed) {
-        const reasons = [];
-        if (!attribution.intent_tools.route_matched) {
-          reasons.push(`路由期望 ${attribution.intent_tools.expect_route} 实际 ${attribution.intent_tools.route}`);
+      // 5. 严格串行逐句执行（每句外放前必须复核测试时间窗仍在打开状态，绝不在无锁状态下外放）
+      for (const entry of batchEntries) {
+        const { spec, asset } = entry.item;
+        const turnIndex = entry.globalIndex + 1;
+        const turnIdLabel = String(spec.id || `turn_${turnIndex}`);
+        const turnStartedAt = Date.now();
+
+        const waitQuiet = await waitForQuietListening({
+          baseUrl,
+          token,
+          deviceId,
+          quietMs,
+          timeoutMs: Math.min(idleWaitMs, 100_000),
+          pollIntervalMs,
+          allowIdle: false,
+          ignoreLevel,
+        });
+
+        const turnSpeaker = asset.speaker || asset.voice_profile?.speaker || "未标注说话人";
+        const turnSecondary = Boolean(asset.secondary_recording || asset.voice_profile?.secondary_recording);
+        const turnSourceType =
+          asset.source_type || (turnSecondary ? "device-corpus-secondary" : "human-recording");
+        const turnAudioOrigin = asset.audio_origin || turnSourceType;
+        const turnDataset = asset.dataset || asset.voice_profile?.dataset || null;
+        const turnLicense = asset.license || asset.voice_profile?.license || null;
+        const turnSourceUrl = asset.source_url || asset.voice_profile?.source_url || null;
+        const audioSourceMeta = {
+          filename: asset.filename,
+          source_type: turnSourceType,
+          audio_origin: turnAudioOrigin,
+          speaker: turnSpeaker,
+          dataset: turnDataset,
+          license: turnLicense,
+          source_url: turnSourceUrl,
+          secondary_recording: turnSecondary,
+          voice_profile: asset.voice_profile,
+          duration_ms: asset.duration_ms,
+        };
+        const commonTurnFields = {
+          index: turnIndex,
+          id: turnIdLabel,
+          label: spec.label || turnIdLabel,
+          text: spec.text,
+          speaker: turnSpeaker,
+          source_type: turnSourceType,
+          audio_origin: turnAudioOrigin,
+          dataset: turnDataset,
+          license: turnLicense,
+          secondary_recording: turnSecondary,
+          batch: batchIdx + 1,
+          audio_source: audioSourceMeta,
+        };
+
+        if (spec.require_idle_laser && waitQuiet.payload?.active_laser_job === true) {
+          results.push({
+            ...commonTurnFields,
+            verdict: "skipped",
+            skip_reason: "检测到激光加工任务正在运行，跳过停止快路径测试",
+            wall_ms: Date.now() - turnStartedAt,
+            attribution: null,
+            detail: null,
+          });
+          continue;
         }
-        if (!attribution.intent_tools.tool_matched) {
-          reasons.push(`未命中工具 ${attribution.intent_tools.expect_tool}`);
+
+        if (!waitQuiet.ready) {
+          results.push({
+            ...commonTurnFields,
+            verdict: "failed",
+            failure_reason: waitQuiet.offline
+              ? "设备已断开连接"
+              : `等待设备进入 listening 且安静 ${quietMs} ms 超时`,
+            wall_ms: Date.now() - turnStartedAt,
+            attribution: null,
+            detail: null,
+          });
+          continue;
         }
-        if (!attribution.intent_tools.gate_matched) reasons.push("模拟门禁未触发拒绝");
-        if (attribution.intent_tools.error) reasons.push(attribution.intent_tools.error);
-        stageFailures.push(`意图工具异常（${reasons.join("；") || "未通过"}）`);
-      }
-      if (!attribution.tts_playback.passed) {
-        stageFailures.push(
-          `合成播放异常（卡顿 ${attribution.tts_playback.stall_ms} ms，帧数 ${attribution.tts_playback.frames}）`,
-        );
+
+        if (!hasActiveBenchWindowForSession(waitQuiet.device, boundSessionId)) {
+          results.push({
+            ...commonTurnFields,
+            verdict: "failed",
+            failure_reason: "测试时间窗已关闭、过期或设备会话已变更，已中止后续外放以防物理动作绕过安全锁",
+            wall_ms: Date.now() - turnStartedAt,
+            attribution: null,
+            detail: null,
+          });
+          stopAllBatches = true;
+          break;
+        }
+
+        const prevTurn = Number(waitQuiet.device?.latest_turn || 0);
+        const playback = await playWav(asset.wavPath, {
+          player,
+          playWavFn: opts.playWavFn,
+          onSpawn: (c) => {
+            activePlayChild = c;
+          },
+          spec,
+          asset,
+          index: turnIndex,
+          batch: batchIdx + 1,
+        });
+
+        const waitDone = await waitForAcousticTurnCompletion({
+          baseUrl,
+          token,
+          deviceId,
+          sessionId: waitQuiet.device?.session_id || boundSessionId,
+          prevTurnNumber: prevTurn,
+          playbackEndedAtMs: playback.ended_at_ms,
+          quietMs,
+          timeoutMs: turnTimeoutMs,
+          pollIntervalMs,
+          expectExit: spec.expect_route === "fast_exit",
+          ignoreLevel,
+        });
+
+        const wallMs = Date.now() - turnStartedAt;
+        if (waitDone.timedOut) {
+          results.push({
+            ...commonTurnFields,
+            turn_id: waitDone.turnId,
+            verdict: "failed",
+            failure_reason: `本轮在 ${turnTimeoutMs} ms 内未完成并回到安静聆听（超时）`,
+            wall_ms: wallMs,
+            attribution: waitDone.detail
+              ? buildTurnAttribution({
+                  spec,
+                  playback,
+                  detail: waitDone.detail,
+                  observedPhases: waitDone.observedPhases,
+                  overlapDetected: waitDone.overlapDetected,
+                })
+              : null,
+            detail: waitDone.detail,
+          });
+          continue;
+        }
+
+        // VC3 #7 + VE1：自动回写含 audio_origin / dataset / license 的 .label.json
+        const labeled = await tryAutoLabelAsrCorpus({
+          runtimeDir,
+          detail: waitDone.detail,
+          spec,
+          asset,
+          noisePreset,
+        });
+        if (labeled) autoLabeledCount += 1;
+
+        // VC2 可选数字注入对照（退出词跳过，否则会话已关闭）
+        let digitalDetail = null;
+        let digitalError = null;
+        let benchWindowLostDuringDigital = false;
+        if (compareDigital && spec.expect_route !== "fast_exit" && waitDone.detail?.route !== "fast_exit") {
+          const digitalRes = await runDigitalControlTurn({
+            baseUrl,
+            token,
+            deviceId,
+            wavPath: asset.wavPath,
+            turnTimeoutMs,
+            pollIntervalMs,
+            quietMs,
+            ignoreLevel,
+          });
+          if (digitalRes.detail) digitalDetail = digitalRes.detail;
+          if (digitalRes.error) {
+            digitalError = digitalRes.error;
+            if (digitalRes.code === "bench_window_required" || digitalRes.status === 403) {
+              benchWindowLostDuringDigital = true;
+            }
+          }
+        }
+
+        const attribution = buildTurnAttribution({
+          spec,
+          playback,
+          detail: waitDone.detail,
+          digitalDetail,
+          observedPhases: waitDone.observedPhases,
+          overlapDetected: waitDone.overlapDetected,
+        });
+        if (digitalError) {
+          attribution.asr_correction.digital_control_error = digitalError;
+        }
+        if (waitDone.extraTurnsCount > 0) {
+          attribution.capture_endpoint.extra_turns_triggered = waitDone.extraTurnsCount;
+        }
+        const stageFailures = [];
+        if (benchWindowLostDuringDigital) {
+          stageFailures.push(`数字对照检测到测试时间窗已关闭（${digitalError}），已中止后续外放`);
+        }
+        if (!attribution.capture_endpoint.passed) {
+          const flags = [];
+          if (attribution.capture_endpoint.overlap_detected) flags.push("外放与播报重叠");
+          if (attribution.capture_endpoint.early_cutoff) flags.push("抢话");
+          if (attribution.capture_endpoint.head_clipped) flags.push("首字被吞");
+          if (!attribution.asr_correction.raw_asr) flags.push("未识别出文字");
+          stageFailures.push(`拾音判停异常（${flags.join("、") || "未通过"}）`);
+        }
+        if (!attribution.asr_correction.passed) {
+          stageFailures.push(
+            `识别纠偏未达标（纠偏后 CER ${(attribution.asr_correction.corrected_cer * 100).toFixed(1)}%${
+              attribution.asr_correction.key_terms_missed.length
+                ? `，漏认：${attribution.asr_correction.key_terms_missed.join("、")}`
+                : ""
+            }）`,
+          );
+        }
+        if (!attribution.intent_tools.passed) {
+          const reasons = [];
+          if (!attribution.intent_tools.route_matched) {
+            reasons.push(`路由期望 ${attribution.intent_tools.expect_route} 实际 ${attribution.intent_tools.route}`);
+          }
+          if (!attribution.intent_tools.tool_matched) {
+            reasons.push(`未命中工具 ${attribution.intent_tools.expect_tool}`);
+          }
+          if (!attribution.intent_tools.gate_matched) reasons.push("模拟门禁未触发拒绝");
+          if (attribution.intent_tools.error) reasons.push(attribution.intent_tools.error);
+          stageFailures.push(`意图工具异常（${reasons.join("；") || "未通过"}）`);
+        }
+        if (!attribution.tts_playback.passed) {
+          stageFailures.push(
+            `合成播放异常（卡顿 ${attribution.tts_playback.stall_ms} ms，帧数 ${attribution.tts_playback.frames}）`,
+          );
+        }
+
+        results.push({
+          ...commonTurnFields,
+          turn_id: waitDone.turnId,
+          verdict: stageFailures.length === 0 ? "passed" : "failed",
+          failure_reason: stageFailures.length ? stageFailures.join("；") : undefined,
+          wall_ms: wallMs,
+          auto_labeled: labeled,
+          attribution,
+          detail: waitDone.detail,
+        });
+        if (benchWindowLostDuringDigital) {
+          stopAllBatches = true;
+          break;
+        }
       }
 
-      results.push({
-        index: turnIndex,
-        id: turnIdLabel,
-        label: spec.label || turnIdLabel,
-        text: spec.text,
-        speaker: turnSpeaker,
-        secondary_recording: turnSecondary,
-        turn_id: waitDone.turnId,
-        verdict: stageFailures.length === 0 ? "passed" : "failed",
-        failure_reason: stageFailures.length ? stageFailures.join("；") : undefined,
-        wall_ms: wallMs,
-        auto_labeled: labeled,
-        audio_source: audioSourceMeta,
-        attribution,
-        detail: waitDone.detail,
-      });
-      if (benchWindowLostDuringDigital) {
-        break;
+      // 批结束正常关闭本批测试时间窗（下一批将先复核会话再重开新时间窗）
+      if (benchWindowOpened) {
+        try {
+          await controlBenchWindow(baseUrl, token, { deviceId, action: "close" });
+        } finally {
+          benchWindowOpened = false;
+        }
       }
     }
   } finally {
@@ -1932,6 +2552,15 @@ export async function runXiaozhiE2e(opts = {}) {
   // 6. 归档到 `<runtime>/voice-bench/e2e-<run-id>/`（全量脱敏，不复制用户录音）
   const finishedAtMs = Date.now();
   const redactedTurns = results.map((row) => redactValue(row, redactOpts));
+  const batchPlanSummary = {
+    estimated_duration_ms: batchSchedule.totalEstimatedMs,
+    window_limit_ms: batchSchedule.windowLimitMs,
+    max_minutes: batchSchedule.maxMinutes,
+    exceeds_window: batchSchedule.exceedsWindow,
+    batch_count: batchSchedule.batches.length,
+    batches_executed: batchesExecuted,
+    session_aborted: sessionAborted,
+  };
   const summary = redactValue(
     buildE2eSummary({
       runId,
@@ -1942,7 +2571,11 @@ export async function runXiaozhiE2e(opts = {}) {
       compareDigital,
       speakerFilter,
       includeDeviceCorpus,
+      maxOnline,
+      onlineRotation,
+      batchPlan: batchPlanSummary,
       missingTurns,
+      skippedAssets,
       startedAtMs,
       finishedAtMs,
       calibration: calibrationReport,
@@ -1954,13 +2587,17 @@ export async function runXiaozhiE2e(opts = {}) {
   const reportMd = redactText(buildE2eReportMarkdown(summary, redactedTurns), redactOpts);
   const audioManifest = redactValue(
     {
-      note: "仅记录外放真人录音的文件名、说话人标签与来源类型，绝不复制用户原始录音文件。",
+      note: "仅记录外放真人录音的文件名、说话人标签、来源类型与公开数据集许可信息，绝不复制用户原始录音文件。",
       noise: noiseInfo,
       calibration: assets.calibrationAsset
         ? {
             filename: assets.calibrationAsset.filename,
             source_type: assets.calibrationAsset.source_type,
+            audio_origin: assets.calibrationAsset.audio_origin || assets.calibrationAsset.source_type,
             speaker: assets.calibrationAsset.speaker || null,
+            dataset: assets.calibrationAsset.dataset || null,
+            license: assets.calibrationAsset.license || null,
+            source_url: assets.calibrationAsset.source_url || null,
             secondary_recording: Boolean(assets.calibrationAsset.secondary_recording),
             voice_profile: assets.calibrationAsset.voice_profile,
             duration_ms: assets.calibrationAsset.duration_ms,
@@ -1971,17 +2608,28 @@ export async function runXiaozhiE2e(opts = {}) {
         id: spec.id || `turn_${idx + 1}`,
         filename: asset.filename,
         source_type: asset.source_type,
+        audio_origin: asset.audio_origin || asset.source_type,
         speaker: asset.speaker || null,
+        dataset: asset.dataset || null,
+        license: asset.license || null,
+        source_url: asset.source_url || null,
         secondary_recording: Boolean(asset.secondary_recording),
         voice_profile: asset.voice_profile,
         duration_ms: asset.duration_ms,
       })),
       missing_turns: missingTurns,
+      skipped_assets: skippedAssets,
     },
     redactOpts,
   );
 
-  const { jsonlLines, txtLines } = sliceProcessTrace(traceDir, startedAtMs, finishedAtMs, redactOpts);
+  const rawTimeline = sliceProcessTrace(traceDir, startedAtMs, finishedAtMs, redactOpts);
+  const { jsonlLines, txtLines } = annotatePlaybackTraceTimeline(
+    rawTimeline.jsonlLines,
+    rawTimeline.txtLines,
+    redactedTurns,
+    redactOpts,
+  );
   mkdirSync(archiveDir, { recursive: true });
   writeFileSync(
     join(archiveDir, "turns.jsonl"),
@@ -1997,7 +2645,7 @@ export async function runXiaozhiE2e(opts = {}) {
     "utf8",
   );
 
-  const exitCode = summary.counts.failed > 0 ? 1 : 0;
+  const exitCode = summary.counts.failed > 0 || sessionAborted ? 1 : 0;
   return { exitCode, archiveDir, summary, turns: redactedTurns, audioManifest, errorMessage: null };
 }
 
@@ -2008,6 +2656,7 @@ export function parseE2eArgs(argv) {
     speaker: "",
     recordingsDir: null,
     includeDeviceCorpus: false,
+    maxOnline: DEFAULT_MAX_ONLINE,
     runtimeDir: null,
     url: null,
     tokenFile: null,
@@ -2031,6 +2680,7 @@ export function parseE2eArgs(argv) {
     else if (a === "--speaker") opts.speaker = argv[++i] || "";
     else if (a === "--recordings-dir") opts.recordingsDir = argv[++i];
     else if (a === "--include-device-corpus") opts.includeDeviceCorpus = true;
+    else if (a === "--max-online") opts.maxOnline = Number(argv[++i]);
     else if (a === "--runtime-dir") opts.runtimeDir = argv[++i];
     else if (a === "--url") opts.url = argv[++i];
     else if (a === "--token-file") opts.tokenFile = argv[++i];
@@ -2047,6 +2697,9 @@ export function parseE2eArgs(argv) {
     else if (a === "--python") opts.pythonBin = argv[++i];
     else if (a === "--help" || a === "-h") opts.help = true;
     else throw new Error(`未知参数：${a}`);
+  }
+  if (!Number.isInteger(opts.maxOnline) || opts.maxOnline < 0) {
+    throw new Error("--max-online 须为大于等于 0 的整数");
   }
   if (!Number.isFinite(opts.maxMinutes) || opts.maxMinutes < 1 || opts.maxMinutes > 60) {
     throw new Error("--max-minutes 须为 1 ~ 60 分钟");
@@ -2065,7 +2718,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     const opts = parseE2eArgs(process.argv.slice(2));
     if (opts.help) {
       console.log(
-        "用法: node scripts/voice-bench/xiaozhi-e2e.mjs [--corpus <path>] [--device <id>] [--speaker <标签>] [--recordings-dir <path>] [--include-device-corpus] [--max-minutes 30] [--noise fan|pump|burst] [--noise-gain 0.22] [--compare-digital] [--runtime-dir <path>] [--url http://127.0.0.1:<port>] [--out-dir <path>]",
+        "用法: node scripts/voice-bench/xiaozhi-e2e.mjs [--corpus <path>] [--device <id>] [--speaker <标签>] [--recordings-dir <path>] [--max-online 20] [--include-device-corpus] [--max-minutes 30] [--noise fan|pump|burst] [--noise-gain 0.22] [--compare-digital] [--runtime-dir <path>] [--url http://127.0.0.1:<port>] [--out-dir <path>]",
       );
       process.exit(0);
     }

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复网上真人语音来源区分、联网下载合规约束、轮换分批与测试期间禁播音乐（2026-11-27）
+
+- **现象**：`recordings/online/` 下的网上真人语音被混标为 `human-recording` 且允许缺许可信息的 `.txt` 样本；缺少联网下载许可/限量约束与条数轮换上限，超长测试未按会话复核自动分批，且随机网上句子可能在测试时间窗内触发播歌或设备指令。
+- **根因与修复**：`voice-assets.mjs` 按目录将 `recordings/online/` 一律标为 `online-human`（不看 `speaker`），强制校验 `.json` 含 `text/dataset/license/source_url`（禁用 `.txt` 回退）并过滤停止/退出/播放音乐/音量/亮度/静音/关机/重启等疑似指令句；`xiaozhi-e2e.mjs` 与 `asr-bench.mjs` 将 `source_type/audio_origin/dataset/license` 透传至 `turns.jsonl`、`audio-manifest.json`、`.label.json` 与过程记录，按四类语音来源分组统计并注明网上语音仅反映通用识别能力；新增 `--max-online`（默认 20，`.rotation.json` 轮换）与超时自动分批（批间关窗重开并复核同一会话，单窗不超 60 分钟）；`sim_guard` 在模拟与时间窗轮次拒绝 `play_music`；`aiBench.js` 补齐联网下载许可、200 条/300 MB 限量、临时目录、不运行脚本与不提交仓库约束并同步文档（技术书 n141）。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1611 项、前端单测 430 项、脚本 89 项、浏览器 20 个文件，已快更）；另有定向单测（覆盖 `sim_guard`、`simulated_inject`、`xiaozhi-e2e.test.mjs`、`asr-bench.test.mjs`、`voiceState.test.mjs`），真小智外放与联网下载实测未执行（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{sim_guard.rs,tests/chat/simulated_inject.rs}`、`scripts/voice-bench/{voice-assets.mjs,xiaozhi-e2e.mjs,asr-bench.mjs,README.md}`、`frontend/src/voiceState/aiBench.js`、`scripts/tests/xiaozhi-e2e.test.mjs`、`frontend/tests/voiceState.test.mjs`、`docs/integration/revisions/native-voice-spec.md`、`docs/developer/safety.md`。
+
 ### 修复真小智模拟联调、测试时间窗、识别语料及测评脚本安全与契约审查问题（2026-11-27）
 
 - **现象**：模拟停止快路径活动任务探测遇 `unknown`/失败时误放行急停，`sim_guard` 漏拦材料库写库与数字型布尔参数；调试入口缺少 `Host` 白名单与请求体前鉴权，时间窗未严格绑定会话且跨插话/续话/快停边界可能脱锁；语料与录音存储存在软链/权限/锁竞态及过程记录带前缀文件名配对失效；评测脚本缺逐句时间窗复核、Windows 播放命令未走环境变量且异常管道可能悬空。

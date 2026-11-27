@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +51,7 @@ function startFakeE2eServer({
   onAcousticTurn,
   onDigitalTurn = null,
 }) {
+  let currentSessionId = sessionId;
   const benchActions = [];
   const traceCalls = [];
   let traceEnabled = false;
@@ -84,18 +85,18 @@ function startFakeE2eServer({
         JSON.stringify({
           mode: "chat",
           active_laser_job: false,
-          bench_windows: benchWindowOpen ? [{ device_id: deviceId, session_id: sessionId, active: true }] : [],
+          bench_windows: benchWindowOpen ? [{ device_id: deviceId, session_id: currentSessionId, active: true }] : [],
           devices: [
             {
               device_id: deviceId,
-              session_id: sessionId,
+              session_id: currentSessionId,
               state: deviceState,
               level: deviceLevel,
               recent_peak_level: recentPeak,
               latest_turn: latestTurn,
-              latest_turn_id: latestTurn > 0 ? `${sessionId}:${latestTurn}` : null,
+              latest_turn_id: latestTurn > 0 ? `${currentSessionId}:${latestTurn}` : null,
               bench_window: benchWindowOpen
-                ? { device_id: deviceId, session_id: sessionId, active: true, max_minutes: 30 }
+                ? { device_id: deviceId, session_id: currentSessionId, active: true, max_minutes: 30 }
                 : null,
             },
           ],
@@ -115,7 +116,7 @@ function startFakeE2eServer({
             action: "open",
             bench_window: {
               device_id: deviceId,
-              session_id: sessionId,
+              session_id: currentSessionId,
               active: true,
               max_minutes: body.max_minutes ?? 30,
             },
@@ -338,6 +339,9 @@ function startFakeE2eServer({
         traceCalls,
         get overlapObserved() {
           return overlapObserved;
+        },
+        setSessionId(nextId) {
+          currentSessionId = nextId;
         },
         simulateAcousticPlayback,
         close: () => new Promise((done) => server.close(done)),
@@ -931,27 +935,392 @@ test("审查回归：时间窗中途关闭立即中止不外放、服务端时�
   }
 });
 
-test("VD4/n140 支持 AI 从网上下载并缓存在 recordings/online/ 的任意真人 WAV（带 .txt 或 .json 原话）直接开跑整体测试", async () => {
-  const { prepareVoiceAssets } = await import("../voice-bench/voice-assets.mjs");
-  const runtimeDir = mkdtempSync(join(tmpdir(), "moss-online-human-wav-"));
+test("VE1/VE3/VE4 网上真人语音按目录标为 online-human、强制 4 字段元数据禁 .txt、过滤指令句、上限轮换与超时分批复核会话", async () => {
+  const { isOnlineCommandLikeText, prepareVoiceAssets } = await import("../voice-bench/voice-assets.mjs");
+  const { planE2eBatches } = await import("../voice-bench/xiaozhi-e2e.mjs");
+
+  const writeOnlineClip = (runtimeDir, id, meta) => {
+    const dir = join(runtimeDir, "voice-bench", "recordings", "online");
+    mkdirSync(dir, { recursive: true });
+    makeSyntheticWav(join(dir, `${id}.wav`), 0.8, 440);
+    if (meta !== null) {
+      writeFileSync(join(dir, `${id}.json`), JSON.stringify(meta), "utf8");
+    }
+  };
+
+  // 1. 指令句过滤规则：停止/退出/播放音乐/音量/亮度/静音/关机/重启一律拦截，日常句放行
+  for (const bad of ["停", "退下", "请播放一首轻音乐", "帮我放首歌吧", "把音量调大一点", "调高屏幕亮度", "现在静音", "帮我关机", "重启一下小智", "开始雕刻"]) {
+    assert.equal(isOnlineCommandLikeText(bad).blocked, true, `疑似指令句必须被过滤：${bad}`);
+  }
+  assert.equal(isOnlineCommandLikeText("今天北京天气晴朗适合出门散步").blocked, false);
+  assert.equal(isOnlineCommandLikeText("三毫米椴木一般用什么速度雕刻").blocked, false);
+
+  // 2. VE1 目录判定 + 元数据校验 + .txt 仅用户目录回退 + 指令句过滤 + VE3 --max-online 上限与 .rotation.json 轮换
+  const runtimeDir = mkdtempSync(join(tmpdir(), "moss-ve1-online-"));
   try {
     const onlineDir = join(runtimeDir, "voice-bench", "recordings", "online");
     mkdirSync(onlineDir, { recursive: true });
-    makeSyntheticWav(join(onlineDir, "sherpa_clip_01.wav"), 0.8, 440);
-    writeFileSync(join(onlineDir, "sherpa_clip_01.txt"), "今天激光机的状态怎么样\n", "utf8");
 
-    const assets = await prepareVoiceAssets({
-      turns: [{ id: "status_fast_read", label: "状态快查", text: "帮我看看激光机现在什么状态" }],
-      calibrationText: "帮我看看激光机现在什么状态",
-      runtimeDir,
+    // 2a. online/ 仅有 .txt -> 必须跳过
+    makeSyntheticWav(join(onlineDir, "txt_only.wav"), 0.8, 440);
+    writeFileSync(join(onlineDir, "txt_only.txt"), "今天天气真好\n", "utf8");
+
+    // 2b. online/ 缺少 license / dataset / source_url -> 全部跳过
+    writeOnlineClip(runtimeDir, "no_license", {
+      text: "杭州西湖风景很美",
+      dataset: "AISHELL-1",
+      source_url: "https://www.openslr.org/33/",
     });
-    assert.equal(assets.preparedTurns.length, 1, "即使未录制固定 13 句，也应自动加载网上真人 WAV 样本");
-    assert.equal(assets.preparedTurns[0].spec.id, "sherpa_clip_01");
-    assert.equal(assets.preparedTurns[0].spec.text, "今天激光机的状态怎么样");
-    assert.equal(assets.preparedTurns[0].asset.source_type, "human-recording");
-    assert.equal(assets.preparedTurns[0].asset.secondary_recording, false);
-    assert.ok(assets.calibrationAsset, "校准同样自动使用第一条网上真人语音样本");
+    writeOnlineClip(runtimeDir, "no_dataset", {
+      text: "春天来了草长莺飞",
+      license: "Apache-2.0",
+      source_url: "https://www.openslr.org/33/",
+    });
+    writeOnlineClip(runtimeDir, "no_url", {
+      text: "秋天落叶铺满街道",
+      dataset: "AISHELL-1",
+      license: "Apache-2.0",
+    });
+
+    // 2c. online/ 包含指令句 -> 过滤并进入 skippedAssets
+    writeOnlineClip(runtimeDir, "cmd_music", {
+      text: "帮我放首歌听听吧",
+      dataset: "AISHELL-1",
+      license: "Apache-2.0",
+      source_url: "https://www.openslr.org/33/",
+    });
+    writeOnlineClip(runtimeDir, "cmd_vol", {
+      text: "请把音量调大一点",
+      dataset: "AISHELL-1",
+      license: "Apache-2.0",
+      source_url: "https://www.openslr.org/33/",
+    });
+
+    // 2d. online/ 4 条合规样本（故意把 speaker 写成 "我"，验证来源仍强制按目录标为 online-human）
+    const validTexts = [
+      "今天北京天气晴朗适合散步",
+      "周末打算去公园看看银杏树",
+      "三毫米椴木适合用来做书签",
+      "下午茶喝了一杯清香绿茶",
+    ];
+    validTexts.forEach((text, idx) => {
+      writeOnlineClip(runtimeDir, `ok_0${idx + 1}`, {
+        text,
+        speaker: "我", // 故意填成用户标签，必须仍被目录判定为 online-human
+        dataset: "AISHELL-1",
+        license: "Apache-2.0",
+        source_url: "https://www.openslr.org/33/",
+      });
+    });
+
+    // 2e. 用户自录目录允许 .txt 回退，且标为 human-recording
+    const userDir = join(runtimeDir, "voice-bench", "recordings", "我");
+    mkdirSync(userDir, { recursive: true });
+    makeSyntheticWav(join(userDir, "user_txt_clip.wav"), 0.8, 480);
+    writeFileSync(join(userDir, "user_txt_clip.txt"), "帮我查一下激光机状态\n", "utf8");
+
+    // 验证 --max-online 0 完全不加载网上语音
+    const zeroOnline = await prepareVoiceAssets({
+      turns: [{ id: "status_fast_read", label: "状态", text: "激光机现在什么状态" }],
+      calibrationText: "激光机现在什么状态",
+      runtimeDir,
+      maxOnline: 0,
+    });
+    assert.equal(
+      zeroOnline.preparedTurns.some((t) => t.asset.source_type === "online-human"),
+      false,
+      "--max-online 0 时绝不应加载 online/ 语音",
+    );
+    assert.equal(zeroOnline.preparedTurns.length, 1);
+    assert.equal(zeroOnline.preparedTurns[0].spec.id, "user_txt_clip");
+    assert.equal(zeroOnline.preparedTurns[0].asset.source_type, "human-recording");
+
+    // 第 1 次抽样（maxOnline=2）：应抽 ok_01, ok_02，跳过 6 条不合格/指令句，并写 .rotation.json
+    const run1 = await prepareVoiceAssets({
+      turns: [{ id: "status_fast_read", label: "状态", text: "激光机现在什么状态" }],
+      calibrationText: "激光机现在什么状态",
+      runtimeDir,
+      maxOnline: 2,
+    });
+    assert.equal(run1.skippedAssets.length, 6, `应跳过 6 条不合格或指令素材：${JSON.stringify(run1.skippedAssets)}`);
+    const online1 = run1.preparedTurns.filter((t) => t.asset.source_type === "online-human");
+    const user1 = run1.preparedTurns.filter((t) => t.asset.source_type === "human-recording");
+    assert.equal(user1.length, 1);
+    assert.deepEqual(
+      online1.map((t) => t.spec.id),
+      ["ok_01", "ok_02"],
+    );
+    for (const item of online1) {
+      assert.equal(item.asset.source_type, "online-human", "online/ 目录无论 speaker 写什么都必须标为 online-human");
+      assert.equal(item.asset.audio_origin, "online-human");
+      assert.equal(item.asset.dataset, "AISHELL-1");
+      assert.equal(item.asset.license, "Apache-2.0");
+      assert.equal(item.asset.source_url, "https://www.openslr.org/33/");
+    }
+    const rotFile = join(onlineDir, ".rotation.json");
+    assert.ok(existsSync(rotFile), "轮换游标 .rotation.json 必须落盘");
+    assert.equal(JSON.parse(readFileSync(rotFile, "utf8")).cursor, 2);
+
+    // 第 2 次抽样（maxOnline=2）：必须轮换到 ok_03, ok_04，不测同一批
+    const run2 = await prepareVoiceAssets({
+      turns: [{ id: "status_fast_read", label: "状态", text: "激光机现在什么状态" }],
+      calibrationText: "激光机现在什么状态",
+      runtimeDir,
+      maxOnline: 2,
+    });
+    const online2 = run2.preparedTurns.filter((t) => t.asset.source_type === "online-human");
+    assert.deepEqual(
+      online2.map((t) => t.spec.id),
+      ["ok_03", "ok_04"],
+    );
+    assert.equal(JSON.parse(readFileSync(rotFile, "utf8")).cursor, 0);
+
+    // CLI 参数校验
+    assert.equal(parseE2eArgs([]).maxOnline, 20);
+    assert.equal(parseE2eArgs(["--max-online", "0"]).maxOnline, 0);
+    assert.equal(parseE2eArgs(["--max-online", "15"]).maxOnline, 15);
+    assert.throws(() => parseE2eArgs(["--max-online", "-1"]), /--max-online/);
+
+    // 3. VE3 自动分批规划：单窗上限绝不超过 60 分钟
+    const plan = planE2eBatches(
+      Array.from({ length: 5 }, (_, idx) => ({
+        spec: { id: `p_${idx + 1}`, text: `句子${idx + 1}` },
+        asset: { duration_ms: 4_000 },
+      })),
+      { maxMinutes: 60, batchWindowMs: 55_000, estimatedReplyMs: 18_000, estimatedIntervalMs: 4_000, hasCalibration: false },
+    );
+    assert.equal(plan.exceedsWindow, true);
+    assert.equal(plan.maxMinutes, 60);
+    assert.equal(plan.batches.length, 3);
+    assert.deepEqual(
+      plan.batches.map((b) => b.length),
+      [2, 2, 1],
+    );
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
+  }
+
+  // 4. 端到端集成验证：VE1 全链路透传（turns.jsonl / audio-manifest.json / .label.json / timeline / report.md / asr-bench）+ VE3 超窗分批 & 会话变更中止
+  const token = "ve-e2e-full-token-0123456789abcdef0123456789abcdef";
+  const e2eRuntime = setupRuntimeWithToken("moss-ve-e2e-", token);
+  const corpusPath = join(e2eRuntime, "ve-corpus.json");
+  writeFileSync(
+    corpusPath,
+    JSON.stringify({
+      name: "ve-mixed",
+      turns: [{ id: "status_fast_read", label: "我的自录状态", text: "激光机现在什么状态" }],
+    }),
+    "utf8",
+  );
+  writeHumanRecording(e2eRuntime, "我", "status_fast_read", "激光机现在什么状态", 440);
+  writeOnlineClip(e2eRuntime, "online_01", {
+    text: "今天北京天气晴朗适合出门",
+    speaker: "网上样本",
+    dataset: "CommonVoice-zh",
+    license: "CC0-1.0",
+    source_url: "https://commonvoice.mozilla.org/",
+  });
+  writeOnlineClip(e2eRuntime, "online_02", {
+    text: "周末想去工坊做一块木牌",
+    speaker: "网上样本",
+    dataset: "AISHELL-1",
+    license: "Apache-2.0",
+    source_url: "https://www.openslr.org/33/",
+  });
+  // 放入 1 条缺 license 与 1 条放歌指令句，验证报告“被跳过素材”
+  writeOnlineClip(e2eRuntime, "online_bad_lic", {
+    text: "缺少许可信息的句子",
+    dataset: "Unknown",
+    source_url: "https://example.test/",
+  });
+  writeOnlineClip(e2eRuntime, "online_bad_cmd", {
+    text: "请播放音乐放松一下",
+    dataset: "AISHELL-1",
+    license: "Apache-2.0",
+    source_url: "https://www.openslr.org/33/",
+  });
+
+  const fakeServer = await startFakeE2eServer({
+    token,
+    runtimeDir: e2eRuntime,
+    onAcousticTurn: ({ spec }) => ({
+      raw_asr: spec.text,
+      corrected_asr: spec.text,
+      route: "llm",
+      peak_uplink_level: 50,
+      writeCorpus: true,
+    }),
+    onDigitalTurn: ({ turnNo }) => ({
+      raw_asr: turnNo <= 2 ? "激光机现在什么状态" : "今天北京天气晴朗适合出门",
+    }),
+  });
+
+  try {
+    // 4a. 触发自动分批（3 句分 2 批，每批独立 open/close 时间窗且会话一致）
+    const batchedRes = await runXiaozhiE2e({
+      runtimeDir: e2eRuntime,
+      url: fakeServer.url,
+      corpus: corpusPath,
+      maxOnline: 2,
+      maxMinutes: 10,
+      batchWindowMs: 55_000,
+      estimatedReplyMs: 18_000,
+      estimatedIntervalMs: 4_000,
+      compareDigital: true,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      logMissing: false,
+      logBatching: false,
+      playWavFn: async (_wavPath, { spec }) => {
+        const started = Date.now();
+        await new Promise((r) => setTimeout(r, 25));
+        const ended = Date.now();
+        fakeServer.simulateAcousticPlayback({ spec, playbackStartedAtMs: started, playbackEndedAtMs: ended });
+        return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+      },
+    });
+
+    assert.equal(batchedRes.exitCode, 0, `预期分批整体测试通过：${batchedRes.errorMessage || JSON.stringify(batchedRes.summary?.failed_turns)}`);
+    assert.ok(batchedRes.summary.batch_plan.batch_count >= 2, "超过单窗预算必须自动分批");
+    assert.equal(batchedRes.summary.batch_plan.batches_executed, batchedRes.summary.batch_plan.batch_count);
+    assert.equal(batchedRes.summary.batch_plan.session_aborted, false);
+    const openCount = fakeServer.benchActions.filter((a) => a.action === "open").length;
+    const closeCount = fakeServer.benchActions.filter((a) => a.action === "close").length;
+    assert.equal(openCount, batchedRes.summary.batch_plan.batch_count, "每批必须单独打开新的测试时间窗");
+    assert.equal(closeCount, openCount, "每批结束后必须正常关闭时间窗");
+    assert.ok(
+      fakeServer.benchActions.filter((a) => a.action === "open").every((a) => a.max_minutes <= 60),
+      "单窗绝不能超过 60 分钟上限",
+    );
+
+    // 验证 turns.jsonl、audio-manifest.json、timeline、summary.json、report.md 与 .label.json 全链路透传
+    const turnLines = readFileSync(join(batchedRes.archiveDir, "turns.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const userTurn = turnLines.find((t) => t.id === "status_fast_read");
+    const onlineTurn = turnLines.find((t) => t.id === "online_01");
+    assert.equal(userTurn.source_type, "human-recording");
+    assert.equal(userTurn.audio_origin, "human-recording");
+    assert.equal(onlineTurn.source_type, "online-human");
+    assert.equal(onlineTurn.audio_origin, "online-human");
+    assert.equal(onlineTurn.dataset, "CommonVoice-zh");
+    assert.equal(onlineTurn.license, "CC0-1.0");
+
+    const manifest = JSON.parse(readFileSync(join(batchedRes.archiveDir, "audio-manifest.json"), "utf8"));
+    const onlineManifestItem = manifest.items.find((i) => i.id === "online_01");
+    assert.equal(onlineManifestItem.source_type, "online-human");
+    assert.equal(onlineManifestItem.dataset, "CommonVoice-zh");
+    assert.equal(onlineManifestItem.license, "CC0-1.0");
+    assert.equal(manifest.skipped_assets.length, 2);
+
+    const timelineJsonl = readFileSync(join(batchedRes.archiveDir, "timeline.jsonl"), "utf8");
+    const timelineTxt = readFileSync(join(batchedRes.archiveDir, "timeline.txt"), "utf8");
+    assert.ok(timelineJsonl.includes("online-human") && timelineJsonl.includes("CommonVoice-zh") && timelineJsonl.includes("CC0-1.0"));
+    assert.ok(timelineTxt.includes("网上真人") && timelineTxt.includes("CommonVoice-zh") && timelineTxt.includes("我的录音"));
+
+    assert.ok(batchedRes.summary.by_source.some((s) => s.source_type === "online-human"));
+    assert.ok(batchedRes.summary.by_source.some((s) => s.source_type === "human-recording"));
+    assert.ok(batchedRes.summary.by_source.some((s) => s.source_type === "digital_inject"));
+    assert.equal(batchedRes.summary.skipped_assets.length, 2);
+
+    const reportMd = readFileSync(join(batchedRes.archiveDir, "report.md"), "utf8");
+    assert.ok(reportMd.includes("按语音来源分组统计"));
+    assert.ok(reportMd.includes("网上语音的指标只反映通用识别能力，不代表用户本人的识别效果"));
+    assert.ok(reportMd.includes("被跳过素材"));
+    assert.ok(reportMd.includes("online_bad_lic"));
+    assert.ok(reportMd.includes("online_bad_cmd"));
+
+    // 检查自动回写的 .label.json 带 audio_origin / dataset / license，并供 asr-bench.mjs 按 4 类来源分组统计
+    const corpusDay = join(e2eRuntime, "asr-corpus", "2026-11-27");
+    const labelFiles = readdirSync(corpusDay).filter((f) => f.endsWith(".label.json"));
+    const labels = labelFiles.map((f) => JSON.parse(readFileSync(join(corpusDay, f), "utf8")));
+    assert.ok(
+      labels.some((l) => l.audio_origin === "online-human" && l.dataset === "CommonVoice-zh" && l.license === "CC0-1.0"),
+      ".label.json 必须包含 audio_origin=online-human 与 dataset/license",
+    );
+    assert.ok(
+      labels.some((l) => l.audio_origin === "human-recording"),
+      ".label.json 必须包含 audio_origin=human-recording",
+    );
+
+    // 补充 live_mic 与 digital_inject 样本跑 asr-bench.mjs，验证四类来源完整分组与免责说明
+    makeSyntheticWav(join(corpusDay, "live-t1.wav"), 0.5, 440);
+    writeFileSync(join(corpusDay, "live-t1.json"), JSON.stringify({ turn_id: "live-t1", date: "2026-11-27", simulated: false }), "utf8");
+    writeFileSync(
+      join(corpusDay, "live-t1.label.json"),
+      JSON.stringify({ turn_id: "live-t1", date: "2026-11-27", input_source: "live_mic", reference_text: "三毫米椴木" }),
+      "utf8",
+    );
+    makeSyntheticWav(join(corpusDay, "dig-t1.wav"), 0.5, 440);
+    writeFileSync(join(corpusDay, "dig-t1.json"), JSON.stringify({ turn_id: "dig-t1", date: "2026-11-27", simulated: false }), "utf8");
+    writeFileSync(
+      join(corpusDay, "dig-t1.label.json"),
+      JSON.stringify({ turn_id: "dig-t1", date: "2026-11-27", input_source: "digital_inject", reference_text: "三毫米椴木" }),
+      "utf8",
+    );
+    const asrRes = await runAsrBench({
+      runtimeDir: e2eRuntime,
+      noiseLevels: [0],
+      mixNoiseFn: async () => new Map(),
+      recognizers: [
+        {
+          id: "fake_asr",
+          label: "假模型",
+          async transcribe(_w, { sample }) {
+            return { text: sample.reference_text, firstInterimMs: 40, finalMs: 100 };
+          },
+        },
+      ],
+    });
+    assert.equal(asrRes.exitCode, 0);
+    assert.ok(asrRes.analysis.byAudioOrigin["online-human"]);
+    assert.ok(asrRes.analysis.byAudioOrigin["human-recording"]);
+    assert.ok(asrRes.analysis.byAudioOrigin.live_mic);
+    assert.ok(asrRes.analysis.byAudioOrigin.digital_inject);
+    const asrReport = readFileSync(join(asrRes.archiveDir, "report.md"), "utf8");
+    assert.ok(asrReport.includes("按语音来源分组统计（网上真人 / 我的录音 / 小智实时说话 / 数字直通）"));
+    assert.ok(asrReport.includes("网上语音的指标只反映通用识别能力，不代表用户本人的识别效果"));
+
+    // 4b. VE3 分批重开前若设备会话已变更，必须立即中止且绝不重开第 2 批时间窗
+    fakeServer.benchActions.length = 0;
+    let playedInSessionAbort = 0;
+    const abortRes = await runXiaozhiE2e({
+      runtimeDir: e2eRuntime,
+      url: fakeServer.url,
+      corpus: corpusPath,
+      maxOnline: 2,
+      maxMinutes: 10,
+      batchWindowMs: 30_000,
+      estimatedReplyMs: 18_000,
+      estimatedIntervalMs: 4_000,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      logMissing: false,
+      logBatching: false,
+      playWavFn: async (_wavPath, { spec }) => {
+        playedInSessionAbort += 1;
+        const started = Date.now();
+        await new Promise((r) => setTimeout(r, 25));
+        const ended = Date.now();
+        fakeServer.simulateAcousticPlayback({ spec, playbackStartedAtMs: started, playbackEndedAtMs: ended });
+        // 第 1 批完成后模拟设备重连换了新 session_id
+        setTimeout(() => fakeServer.setSessionId("sess-e2e-reconnected-2"), 45);
+        return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+      },
+    });
+    assert.equal(abortRes.exitCode, 1, "分批期间设备会话变更必须中止并返回非 0 状态码");
+    assert.equal(abortRes.summary.batch_plan.session_aborted, true);
+    assert.equal(playedInSessionAbort, 1, "会话变更后不得播放第 2 批语料");
+    assert.deepEqual(
+      fakeServer.benchActions.map((a) => a.action),
+      ["open", "close"],
+      "第 2 批检测到会话变更前绝不能重开测试时间窗",
+    );
+  } finally {
+    await fakeServer.close();
+    rmSync(e2eRuntime, { recursive: true, force: true });
   }
 });

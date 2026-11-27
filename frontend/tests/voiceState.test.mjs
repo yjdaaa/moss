@@ -2764,6 +2764,20 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(e2ePrompt, /suggestions\.json.*不要自动.*应用/s);
   assert.match(e2ePrompt, /不要修改语料来让测试通过/);
   assert.doesNotMatch(e2ePrompt, /System\.Speech|回退到系统自带朗读/);
+  // VE1 / VE2 / VE3：网上真人语音 4 字段元数据、无 .txt 回退、许可证/限量/临时目录/不进仓库与 --max-online 20
+  assert.match(e2ePrompt, /`text`、`dataset`、`license`、`source_url`/);
+  assert.doesNotMatch(e2ePrompt, /或同名.*\.txt|<id>\.txt/);
+  assert.match(e2ePrompt, /Mozilla Common Voice/);
+  assert.match(e2ePrompt, /AISHELL-1/);
+  assert.match(e2ePrompt, /非商用/);
+  assert.match(e2ePrompt, /禁止演绎/);
+  assert.match(e2ePrompt, /需要登录、申请或同意条款.*跳过/s);
+  assert.match(e2ePrompt, /不超过 200 条/);
+  assert.match(e2ePrompt, /不超过 300 MB/);
+  assert.match(e2ePrompt, /临时目录/);
+  assert.match(e2ePrompt, /不运行下载得到的任何脚本或程序/);
+  assert.match(e2ePrompt, /绝不加入仓库，也不提交/);
+  assert.match(e2ePrompt, /--max-online 20/);
   assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
   assert.ok(!e2ePrompt.includes(fakeSecret), "提示词绝不能包含密钥");
   assert.ok(!/\/Users\/|\/home\/|[A-Z]:\\Users\\/i.test(e2ePrompt), "提示词绝不能包含本机绝对路径");
