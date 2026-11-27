@@ -217,12 +217,24 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
       const corpusId = fileEntry.name.slice(0, -4);
       const wavPath = join(speakerPath, fileEntry.name);
       const jsonPath = join(speakerPath, `${corpusId}.json`);
+      const txtPath = join(speakerPath, `${corpusId}.txt`);
       let meta = {};
       if (existsSync(jsonPath)) {
         try {
           meta = JSON.parse(readFileSync(jsonPath, "utf8")) || {};
         } catch {
           meta = {};
+        }
+      }
+      if (!String(meta.text || "").trim() && existsSync(txtPath)) {
+        try {
+          const txtLine = readFileSync(txtPath, "utf8")
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .find(Boolean);
+          if (txtLine) meta.text = txtLine;
+        } catch {
+          // 忽略无法读取的 .txt
         }
       }
       const speaker = String(meta.speaker || speakerDirName).trim() || speakerDirName;
@@ -244,6 +256,9 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "" } = {}) 
         wav_path: wavPath,
         filename: `${speakerDirName}/${fileEntry.name}`,
         text: String(meta.text || "").trim(),
+        label: String(meta.label || "").trim(),
+        key_terms: Array.isArray(meta.key_terms) ? meta.key_terms : [],
+        tags: Array.isArray(meta.tags) ? meta.tags : [],
         duration_ms: durationMs,
         peak_level: Number(meta.peak_level) || 0,
         rms_level: Number(meta.rms_level) || 0,
@@ -315,6 +330,8 @@ export async function prepareVoiceAssets({
   const preparedTurns = [];
   const missingTurns = [];
   const usedDeviceCorpusIds = new Set();
+  const matchedRecordingCorpusIds = new Set();
+  const matchedRecordingNormTexts = new Set();
   const speakersUsed = new Set();
   let roundRobinCursor = 0;
 
@@ -327,6 +344,12 @@ export async function prepareVoiceAssets({
     }
 
     if (candidates.length > 0) {
+      for (const c of candidates) {
+        matchedRecordingCorpusIds.add(c.corpus_id);
+        const cn = normalizeForCer(c.text).join("");
+        if (cn) matchedRecordingNormTexts.add(cn);
+      }
+      if (targetNorm) matchedRecordingNormTexts.add(targetNorm);
       const chosen = candidates[roundRobinCursor % candidates.length];
       roundRobinCursor += 1;
       speakersUsed.add(chosen.speaker);
@@ -384,6 +407,55 @@ export async function prepareVoiceAssets({
       label: String(spec.label || spec.id || `第 ${i + 1} 句`),
       text: String(spec.text || ""),
     });
+  }
+
+  // 支持 AI 从网上公开真人语音集下载并缓存在 `<runtime>/voice-bench/recordings/<speaker>/` 下的自由句子（带 .json 或 .txt 原文）
+  const freeformGroups = new Map();
+  for (const rec of recordings) {
+    if (!rec.text) continue;
+    const recNorm = normalizeForCer(rec.text).join("");
+    if (matchedRecordingCorpusIds.has(rec.corpus_id)) continue;
+    if (recNorm && matchedRecordingNormTexts.has(recNorm)) continue;
+    if (!freeformGroups.has(rec.corpus_id)) {
+      freeformGroups.set(rec.corpus_id, []);
+    }
+    freeformGroups.get(rec.corpus_id).push(rec);
+  }
+  if (freeformGroups.size > 0) {
+    const exitIdx = preparedTurns.findIndex((item) => item.spec.expect_route === "fast_exit");
+    const insertAt = exitIdx >= 0 ? exitIdx : preparedTurns.length;
+    const freeformItems = [];
+    for (const [corpusId, group] of freeformGroups.entries()) {
+      const chosen = group[roundRobinCursor % group.length];
+      roundRobinCursor += 1;
+      speakersUsed.add(chosen.speaker);
+      freeformItems.push({
+        spec: {
+          id: corpusId,
+          label: chosen.label || `真人语音样本 · ${corpusId}`,
+          group: "真人语音样本",
+          text: chosen.text,
+          ...(chosen.key_terms?.length ? { key_terms: chosen.key_terms } : {}),
+          ...(chosen.tags?.length ? { tags: chosen.tags } : {}),
+        },
+        asset: {
+          wavPath: chosen.wav_path,
+          filename: chosen.filename,
+          source_type: "human-recording",
+          speaker: chosen.speaker,
+          secondary_recording: false,
+          voice_profile: {
+            source: "human-recording",
+            speaker: chosen.speaker,
+            corpus_id: chosen.corpus_id,
+            peak_level: chosen.peak_level,
+            label: `真人录音（${chosen.speaker}）`,
+          },
+          duration_ms: chosen.duration_ms || wavDurationMs(chosen.wav_path),
+        },
+      });
+    }
+    preparedTurns.splice(insertAt, 0, ...freeformItems);
   }
 
   // 显式开启 --include-device-corpus 时，把剩余未匹配的设备录音追加到退出词之前，统一标明“二次录制”

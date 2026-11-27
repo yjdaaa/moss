@@ -930,3 +930,28 @@ test("审查回归：时间窗中途关闭立即中止不外放、服务端时�
     rmSync(runtimeDir, { recursive: true, force: true });
   }
 });
+
+test("VD4/n140 支持 AI 从网上下载并缓存在 recordings/online/ 的任意真人 WAV（带 .txt 或 .json 原话）直接开跑整体测试", async () => {
+  const { prepareVoiceAssets } = await import("../voice-bench/voice-assets.mjs");
+  const runtimeDir = mkdtempSync(join(tmpdir(), "moss-online-human-wav-"));
+  try {
+    const onlineDir = join(runtimeDir, "voice-bench", "recordings", "online");
+    mkdirSync(onlineDir, { recursive: true });
+    makeSyntheticWav(join(onlineDir, "sherpa_clip_01.wav"), 0.8, 440);
+    writeFileSync(join(onlineDir, "sherpa_clip_01.txt"), "今天激光机的状态怎么样\n", "utf8");
+
+    const assets = await prepareVoiceAssets({
+      turns: [{ id: "status_fast_read", label: "状态快查", text: "帮我看看激光机现在什么状态" }],
+      calibrationText: "帮我看看激光机现在什么状态",
+      runtimeDir,
+    });
+    assert.equal(assets.preparedTurns.length, 1, "即使未录制固定 13 句，也应自动加载网上真人 WAV 样本");
+    assert.equal(assets.preparedTurns[0].spec.id, "sherpa_clip_01");
+    assert.equal(assets.preparedTurns[0].spec.text, "今天激光机的状态怎么样");
+    assert.equal(assets.preparedTurns[0].asset.source_type, "human-recording");
+    assert.equal(assets.preparedTurns[0].asset.secondary_recording, false);
+    assert.ok(assets.calibrationAsset, "校准同样自动使用第一条网上真人语音样本");
+  } finally {
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});

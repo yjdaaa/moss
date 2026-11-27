@@ -2743,19 +2743,25 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).key, "text_inject");
   assert.equal(voiceInputSourceView({ simulated: true, bench_window: false }).text, "文字直通（无音频）");
 
-  // 3. VD4 提示词包含真人录音前提、30–50 cm、关键命令与红线要求，且绝不含合成音回退或令牌/密钥/本机绝对路径
+  // 3. VD4 一键全自动提示词包含网上真人语音自动准备与缓存复用、30–50 cm、四步关键命令（文字直通+整体外放+离线识别）与红线要求，且绝不含合成音回退或令牌/密钥/本机绝对路径
   const e2ePromptCold = buildAiBenchPrompt(coldStatus, "e2e");
   assert.match(e2ePromptCold, /录制测试语料/);
   assert.match(e2ePromptCold, /至少录完一位说话人的全部语料/);
+  assert.match(e2ePromptCold, /由 AI 自主从网上公开中文真人语音/);
+  assert.match(e2ePromptCold, /live-xiaozhi-debug\.mjs/);
+  assert.match(e2ePromptCold, /xiaozhi-e2e\.mjs/);
+  assert.match(e2ePromptCold, /asr-bench\.mjs/);
 
   const e2ePrompt = buildAiBenchPrompt({ ...readyStatus, extra: fakeSecret }, "e2e");
   assert.match(e2ePrompt, /xiaozhi-e2e\.mjs/);
+  assert.match(e2ePrompt, /live-xiaozhi-debug\.mjs/);
+  assert.match(e2ePrompt, /asr-bench\.mjs/);
   assert.match(e2ePrompt, /--device aa:bb:cc:11:22:33/);
   assert.match(e2ePrompt, /--speaker/);
   assert.match(e2ePrompt, /AGENTS\.md/);
   assert.match(e2ePrompt, /node scripts\/verify\.mjs --finish/);
   assert.match(e2ePrompt, /30–50 cm/);
-  assert.match(e2ePrompt, /suggestions\.json.*不要自动应用/s);
+  assert.match(e2ePrompt, /suggestions\.json.*不要自动.*应用/s);
   assert.match(e2ePrompt, /不要修改语料来让测试通过/);
   assert.doesNotMatch(e2ePrompt, /System\.Speech|回退到系统自带朗读/);
   assert.ok(!e2ePrompt.includes(fakeToken), "提示词绝不能包含调试令牌");
@@ -2780,7 +2786,7 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(asrPrompt, /8 条已标注/);
   assert.ok(!asrPrompt.includes(fakeToken));
 
-  // 4. VD6 组件源码守卫：测试时间窗标记与“立即结束测试”按钮、AI 联调与测试五块顺序、对话记录“模拟（整体测试）”
+  // 4. VD6 组件源码守卫：测试时间窗标记与“立即结束测试”按钮、AI 联调与测试四块顺序与唯一主按钮、对话记录“模拟（整体测试）”
   const devicesPanelSrc = readFileSync(
     new URL("../src/components/voice-builtin/BuiltinDevicesPanel.jsx", import.meta.url),
     "utf8",
@@ -2793,9 +2799,8 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
     new URL("../src/components/voice-builtin/AiBenchAssistantCard.jsx", import.meta.url),
     "utf8",
   );
-  assert.match(assistantSrc, /复制 AI 整体测试提示词/);
-  assert.match(assistantSrc, /复制文字直通提示词/);
-  assert.match(assistantSrc, /复制识别测评提示词/);
+  assert.match(assistantSrc, /一键复制 AI 全自动调试提示词/);
+  assert.match(assistantSrc, /id="voice-bench-recordings-fold"/);
   assert.match(assistantSrc, /buildAiBenchPrompt\(/);
   assert.match(assistantSrc, /aiBenchChecklistView\(/);
   const idxChecklist = assistantSrc.indexOf('id="voice-ai-bench-checklist"');

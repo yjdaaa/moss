@@ -1854,22 +1854,38 @@ button.conn-pill:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid var(--ob-line);
   background: var(--ob-well);
 }
-.ai-bench-prompt-btns,
-.ai-bench-prompt-opts {
+.ai-bench-prompt-main {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
+  gap: 10px 16px;
 }
-.ai-bench-prompt-opts {
+.ai-bench-copy-hero.ai-bench-copy-hero {
+  height: 36px;
+  padding: 0 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.ai-bench-prompt-desc {
+  flex: 1 1 320px;
   font-size: 12.5px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--ob-line);
+  line-height: 1.55;
+}
+.ai-bench-optional-fold > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ob-ink-2);
 }
 .ai-bench-flash {
   animation: ai-bench-pulse 1.3s ease;
