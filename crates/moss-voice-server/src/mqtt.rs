@@ -337,6 +337,9 @@ async fn read_loop(mut ctx: ReaderCtx) {
                         {
                             ctx.hub.close(&channel);
                         }
+                        ctx.shared
+                            .state
+                            .set_audio_channel_open(&ctx.session_id, false);
                     }
                     _ => {}
                 }
@@ -374,6 +377,9 @@ fn on_hello(ctx: &ReaderCtx, text: &str) {
             if let Some(previous) = ctx.audio.lock().unwrap_or_else(|p| p.into_inner()).take() {
                 ctx.hub.close(&previous);
             }
+            ctx.shared
+                .state
+                .set_audio_channel_open(&ctx.session_id, false);
             ctx.shared.state.event(
                 EventRecord::error(
                     DiagCategory::Audio,
@@ -392,6 +398,9 @@ fn on_hello(ctx: &ReaderCtx, text: &str) {
     if let Some(previous) = previous {
         ctx.hub.close(&previous);
     }
+    ctx.shared
+        .state
+        .set_audio_channel_open(&ctx.session_id, true);
     let reply = json!({
         "type": "hello",
         "transport": "udp",

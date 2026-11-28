@@ -50,6 +50,37 @@ pub struct BenchWindowView {
     pub max_minutes: u32,
 }
 
+/// VC1 / n146 测试时间窗关闭原因类别（只读返回给调试入口，区分设备断开与用户/超时/策略终止）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchWindowCloseReason {
+    /// 桌面“立即结束测试”按钮手动终止。
+    UserStopped,
+    /// 测试脚本主动调用关闭接口（`POST /debug/v1/bench-window` `action: "close"`）。
+    ScriptClosed,
+    /// 设备连接断开（含退出语料关闭 WebSocket 或被新会话替换）。
+    DeviceDisconnected,
+    /// 设备授权已撤销。
+    DeviceRevoked,
+    /// 设备已从列表移除。
+    DeviceRemoved,
+    /// 时间窗到达 `max_minutes` 最长时长自动关闭。
+    Expired,
+    /// 调试开关关闭。
+    DebugDisabled,
+    /// 调试令牌满 24 小时失效。
+    TokenExpired,
+}
+
+/// VC1 / n146 单台设备最近一次测试时间窗关闭记录（只读）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchWindowCloseRecord {
+    pub device_id: String,
+    pub session_id: String,
+    pub reason: BenchWindowCloseReason,
+    pub closed_at: u64,
+}
+
 #[derive(Debug, Clone)]
 struct BenchWindowEntry {
     device_id: String,
@@ -71,12 +102,31 @@ impl BenchWindowEntry {
             max_minutes: self.max_minutes,
         }
     }
+
+    fn to_close_record(
+        &self,
+        reason: BenchWindowCloseReason,
+        closed_at: u64,
+    ) -> BenchWindowCloseRecord {
+        BenchWindowCloseRecord {
+            device_id: self.device_id.clone(),
+            session_id: self.session_id.clone(),
+            reason,
+            closed_at,
+        }
+    }
 }
 
-/// VC1 按设备维度管理的测试时间窗状态存储。
+#[derive(Debug, Default)]
+struct BenchWindowStoreInner {
+    entries: BTreeMap<String, BenchWindowEntry>,
+    last_closed: BTreeMap<String, BenchWindowCloseRecord>,
+}
+
+/// VC1 按设备维度管理的测试时间窗状态存储（含每台设备最近一次关窗原因记录）。
 #[derive(Clone)]
 pub struct BenchWindowStore {
-    entries: Arc<Mutex<BTreeMap<String, BenchWindowEntry>>>,
+    inner: Arc<Mutex<BenchWindowStoreInner>>,
     now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
@@ -89,7 +139,7 @@ impl Default for BenchWindowStore {
 impl BenchWindowStore {
     pub fn new() -> Self {
         Self {
-            entries: Arc::new(Mutex::new(BTreeMap::new())),
+            inner: Arc::new(Mutex::new(BenchWindowStoreInner::default())),
             now_fn: Arc::new(crate::unix_now),
         }
     }
@@ -97,7 +147,7 @@ impl BenchWindowStore {
     #[cfg(test)]
     pub fn with_clock(now_fn: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(BTreeMap::new())),
+            inner: Arc::new(Mutex::new(BenchWindowStoreInner::default())),
             now_fn,
         }
     }
@@ -136,40 +186,78 @@ impl BenchWindowStore {
             deadline: Instant::now() + ttl,
         };
         let view = entry.to_view(true);
-        if let Ok(mut guard) = self.entries.lock() {
-            guard.insert(device_id.to_owned(), entry);
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.entries.insert(device_id.to_owned(), entry);
         }
         view
     }
 
-    pub fn close(&self, device_id: &str) -> Option<BenchWindowView> {
-        self.entries
-            .lock()
-            .ok()?
-            .remove(device_id)
-            .map(|e| e.to_view(false))
+    /// 开窗竞态回滚：窗口并未真正对外生效，仅撤销活动条目而不覆盖最近一次关窗记录。
+    pub fn rollback_if_session(&self, device_id: &str, session_id: &str) -> bool {
+        let Ok(mut guard) = self.inner.lock() else {
+            return false;
+        };
+        if guard
+            .entries
+            .get(device_id)
+            .is_some_and(|e| e.session_id == session_id)
+        {
+            guard.entries.remove(device_id);
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn close_if_session(&self, device_id: &str, session_id: &str) -> Option<BenchWindowView> {
-        let mut guard = self.entries.lock().ok()?;
+    pub fn close(
+        &self,
+        device_id: &str,
+        reason: BenchWindowCloseReason,
+    ) -> Option<BenchWindowView> {
+        let now = (self.now_fn)();
+        let mut guard = self.inner.lock().ok()?;
+        let entry = guard.entries.remove(device_id)?;
+        guard
+            .last_closed
+            .insert(device_id.to_owned(), entry.to_close_record(reason, now));
+        Some(entry.to_view(false))
+    }
+
+    pub fn close_if_session(
+        &self,
+        device_id: &str,
+        session_id: &str,
+        reason: BenchWindowCloseReason,
+    ) -> Option<BenchWindowView> {
+        let now = (self.now_fn)();
+        let mut guard = self.inner.lock().ok()?;
         let matches = guard
+            .entries
             .get(device_id)
             .is_some_and(|e| e.session_id == session_id);
         if matches {
-            guard.remove(device_id).map(|e| e.to_view(false))
+            let entry = guard.entries.remove(device_id)?;
+            guard
+                .last_closed
+                .insert(device_id.to_owned(), entry.to_close_record(reason, now));
+            Some(entry.to_view(false))
         } else {
             None
         }
     }
 
-    pub fn close_all(&self) -> Vec<BenchWindowView> {
-        let Ok(mut guard) = self.entries.lock() else {
+    pub fn close_all(&self, reason: BenchWindowCloseReason) -> Vec<BenchWindowView> {
+        let now = (self.now_fn)();
+        let Ok(mut guard) = self.inner.lock() else {
             return Vec::new();
         };
-        let keys: Vec<String> = guard.keys().cloned().collect();
+        let keys: Vec<String> = guard.entries.keys().cloned().collect();
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            if let Some(entry) = guard.remove(&key) {
+            if let Some(entry) = guard.entries.remove(&key) {
+                guard
+                    .last_closed
+                    .insert(key, entry.to_close_record(reason, now));
                 out.push(entry.to_view(false));
             }
         }
@@ -179,10 +267,11 @@ impl BenchWindowStore {
     pub fn expire_due(&self) -> Vec<BenchWindowView> {
         let now = (self.now_fn)();
         let now_inst = Instant::now();
-        let Ok(mut guard) = self.entries.lock() else {
+        let Ok(mut guard) = self.inner.lock() else {
             return Vec::new();
         };
         let expired_keys: Vec<String> = guard
+            .entries
             .iter()
             .filter_map(|(k, e)| {
                 (now >= e.expires_at || now_inst >= e.deadline).then_some(k.clone())
@@ -190,7 +279,11 @@ impl BenchWindowStore {
             .collect();
         let mut out = Vec::with_capacity(expired_keys.len());
         for key in expired_keys {
-            if let Some(entry) = guard.remove(&key) {
+            if let Some(entry) = guard.entries.remove(&key) {
+                guard.last_closed.insert(
+                    key,
+                    entry.to_close_record(BenchWindowCloseReason::Expired, now),
+                );
                 out.push(entry.to_view(false));
             }
         }
@@ -200,43 +293,52 @@ impl BenchWindowStore {
     pub fn active_for(&self, device_id: &str) -> Option<BenchWindowView> {
         let now = (self.now_fn)();
         let now_inst = Instant::now();
-        let guard = self.entries.lock().ok()?;
-        let entry = guard.get(device_id)?;
+        let guard = self.inner.lock().ok()?;
+        let entry = guard.entries.get(device_id)?;
         (now < entry.expires_at && now_inst < entry.deadline).then(|| entry.to_view(true))
     }
 
     pub fn active_for_session(&self, device_id: &str, session_id: &str) -> Option<BenchWindowView> {
         let now = (self.now_fn)();
         let now_inst = Instant::now();
-        let guard = self.entries.lock().ok()?;
-        let entry = guard.get(device_id)?;
+        let guard = self.inner.lock().ok()?;
+        let entry = guard.entries.get(device_id)?;
         (entry.session_id == session_id && now < entry.expires_at && now_inst < entry.deadline)
             .then(|| entry.to_view(true))
     }
 
     pub fn next_deadline_for_session(&self, device_id: &str, session_id: &str) -> Option<Instant> {
-        let guard = self.entries.lock().ok()?;
-        let entry = guard.get(device_id)?;
+        let guard = self.inner.lock().ok()?;
+        let entry = guard.entries.get(device_id)?;
         (entry.session_id == session_id).then_some(entry.deadline)
     }
 
-    pub fn prune_inactive<F>(&self, mut is_session_active: F) -> Vec<BenchWindowView>
+    pub fn prune_inactive<F>(
+        &self,
+        mut close_reason_for_inactive: F,
+    ) -> Vec<(BenchWindowView, BenchWindowCloseReason)>
     where
-        F: FnMut(&str, &str) -> bool,
+        F: FnMut(&str, &str) -> Option<BenchWindowCloseReason>,
     {
-        let Ok(mut guard) = self.entries.lock() else {
+        let now = (self.now_fn)();
+        let Ok(mut guard) = self.inner.lock() else {
             return Vec::new();
         };
-        let stale_keys: Vec<String> = guard
+        let stale_keys: Vec<(String, BenchWindowCloseReason)> = guard
+            .entries
             .iter()
             .filter_map(|(dev, entry)| {
-                (!is_session_active(dev, &entry.session_id)).then_some(dev.clone())
+                close_reason_for_inactive(dev, &entry.session_id)
+                    .map(|reason| (dev.clone(), reason))
             })
             .collect();
         let mut out = Vec::with_capacity(stale_keys.len());
-        for key in stale_keys {
-            if let Some(entry) = guard.remove(&key) {
-                out.push(entry.to_view(false));
+        for (key, reason) in stale_keys {
+            if let Some(entry) = guard.entries.remove(&key) {
+                guard
+                    .last_closed
+                    .insert(key, entry.to_close_record(reason, now));
+                out.push((entry.to_view(false), reason));
             }
         }
         out
@@ -245,15 +347,30 @@ impl BenchWindowStore {
     pub fn list_active(&self) -> Vec<BenchWindowView> {
         let now = (self.now_fn)();
         let now_inst = Instant::now();
-        self.entries
+        self.inner
             .lock()
             .map(|guard| {
                 guard
+                    .entries
                     .values()
                     .filter(|e| now < e.expires_at && now_inst < e.deadline)
                     .map(|e| e.to_view(true))
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    pub fn last_closed_for(&self, device_id: &str) -> Option<BenchWindowCloseRecord> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.last_closed.get(device_id).cloned())
+    }
+
+    pub fn list_last_closed(&self) -> BTreeMap<String, BenchWindowCloseRecord> {
+        self.inner
+            .lock()
+            .map(|guard| guard.last_closed.clone())
             .unwrap_or_default()
     }
 }
@@ -564,12 +681,16 @@ const DEBUG_JSON_BODY_LIMIT: usize = 64 * 1024;
 const DEBUG_AUDIO_BODY_LIMIT: usize = 2_400_000;
 const DEBUG_MAX_CONCURRENT_REQUESTS: usize = 16;
 
+/// n146 未推送自定义唤醒词时的默认官方唤醒词。
+pub const DEFAULT_WAKE_WORD: &str = "你好小智";
+
 #[derive(Clone)]
 pub(crate) struct DebugApiState {
     pub shared: Arc<Shared>,
     pub gate: Arc<DebugApiGate>,
     pub trace_control: Option<Arc<dyn ProcessTraceControl>>,
     pub active_laser_job: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub wake_word_for_device: Option<Arc<dyn Fn(Option<&str>) -> String + Send + Sync>>,
 }
 
 async fn debug_auth_and_limit_middleware(
@@ -648,20 +769,52 @@ fn json_error(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
+fn normalize_wake_word_or_default(raw: String) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        DEFAULT_WAKE_WORD.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 async fn list_devices(State(state): State<DebugApiState>) -> Response {
     let sessions = state.shared.active_device_sessions();
     let bench_windows = state.shared.bench_windows.list_active();
+    let bench_window_last_closed = state.shared.bench_windows.list_last_closed();
     let active_laser_job = match state.active_laser_job.clone() {
         Some(probe) => tokio::task::spawn_blocking(move || probe())
             .await
             .unwrap_or(true),
         None => false,
     };
+    let device_ids: Vec<String> = sessions.iter().map(|s| s.device_id.clone()).collect();
+    let (default_wake_word, per_device_wake_words) = match state.wake_word_for_device.clone() {
+        Some(probe) => tokio::task::spawn_blocking(move || {
+            let global = normalize_wake_word_or_default(probe(None));
+            let per_dev: BTreeMap<String, String> = device_ids
+                .into_iter()
+                .map(|id| {
+                    let word = normalize_wake_word_or_default(probe(Some(&id)));
+                    (id, word)
+                })
+                .collect();
+            (global, per_dev)
+        })
+        .await
+        .unwrap_or_else(|_| (DEFAULT_WAKE_WORD.to_owned(), BTreeMap::new())),
+        None => (DEFAULT_WAKE_WORD.to_owned(), BTreeMap::new()),
+    };
     let devices: Vec<Value> = sessions
         .into_iter()
         .map(|s| {
             let latest_turn_id =
                 (s.latest_turn > 0).then(|| format!("{}:{}", s.session_id, s.latest_turn));
+            let wake_word = per_device_wake_words
+                .get(&s.device_id)
+                .cloned()
+                .unwrap_or_else(|| default_wake_word.clone());
+            let last_closed = bench_window_last_closed.get(&s.device_id);
             json!({
                 "device_id": s.device_id,
                 "session_id": s.session_id,
@@ -671,7 +824,10 @@ async fn list_devices(State(state): State<DebugApiState>) -> Response {
                 "latest_turn": s.latest_turn,
                 "latest_turn_id": latest_turn_id,
                 "bench_window": s.bench_window,
+                "bench_window_last_closed": last_closed,
                 "transport": s.transport,
+                "audio_channel_open": s.audio_channel_open,
+                "wake_word": wake_word,
                 "connected_at": s.connected_at,
                 "device_mcp_enabled": s.device_mcp_enabled,
                 "device_tools_ready": s.device_tools_ready,
@@ -686,7 +842,9 @@ async fn list_devices(State(state): State<DebugApiState>) -> Response {
         Json(json!({
             "mode": state.shared.config.mode,
             "active_laser_job": active_laser_job,
+            "wake_word": default_wake_word,
             "bench_windows": bench_windows,
+            "bench_window_last_closed": bench_window_last_closed,
             "devices": devices,
         })),
     )
@@ -793,7 +951,11 @@ async fn control_bench_window(
             }
         }
     } else {
-        let closed = state.shared.close_bench_window(device_id, "脚本主动关闭");
+        let closed = state.shared.close_bench_window(
+            device_id,
+            BenchWindowCloseReason::ScriptClosed,
+            "脚本主动关闭",
+        );
         (
             StatusCode::OK,
             Json(json!({
@@ -1195,18 +1357,120 @@ mod tests {
         assert!(store.active_for("dev-1").is_some());
 
         // 不同 session_id 不能误关当前会话的窗口，且 active_for_session 严格隔离会话
-        assert!(store.close_if_session("dev-1", "sess-other").is_none());
+        assert!(
+            store
+                .close_if_session(
+                    "dev-1",
+                    "sess-other",
+                    BenchWindowCloseReason::DeviceDisconnected
+                )
+                .is_none()
+        );
+        assert!(store.last_closed_for("dev-1").is_none());
         assert!(store.active_for("dev-1").is_some());
         assert!(store.active_for_session("dev-1", "sess-1").is_some());
         assert!(store.active_for_session("dev-1", "sess-other").is_none());
 
-        // 到达最长时长后自动到期清理
+        // 到达最长时长后自动到期清理并记录原因 expired
         clock.store(10_000 + 30 * 60, Ordering::Release);
         assert!(store.active_for("dev-1").is_none());
         let expired = store.expire_due();
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].device_id, "dev-1");
         assert!(store.list_active().is_empty());
+        let last = store.last_closed_for("dev-1").expect("应记录到期关窗");
+        assert_eq!(last.session_id, "sess-1");
+        assert_eq!(last.reason, BenchWindowCloseReason::Expired);
+        assert_eq!(last.closed_at, 10_000 + 30 * 60);
+
+        // 用户手动结束后，后续同一会话断开的 close_if_session 不得覆盖 user_stopped
+        clock.store(20_000, Ordering::Release);
+        store.open("dev-1", "sess-2", 15);
+        clock.store(20_120, Ordering::Release);
+        assert!(
+            store
+                .close("dev-1", BenchWindowCloseReason::UserStopped)
+                .is_some()
+        );
+        assert!(
+            store
+                .close_if_session(
+                    "dev-1",
+                    "sess-2",
+                    BenchWindowCloseReason::DeviceDisconnected
+                )
+                .is_none()
+        );
+        let last_user = store.last_closed_for("dev-1").unwrap();
+        assert_eq!(last_user.session_id, "sess-2");
+        assert_eq!(last_user.reason, BenchWindowCloseReason::UserStopped);
+        assert_eq!(last_user.closed_at, 20_120);
+
+        // 各关窗路径：script_closed / device_disconnected / debug_disabled / token_expired / device_revoked
+        clock.store(21_000, Ordering::Release);
+        store.open("dev-1", "sess-3", 10);
+        assert!(
+            store
+                .close("dev-1", BenchWindowCloseReason::ScriptClosed)
+                .is_some()
+        );
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::ScriptClosed
+        );
+
+        store.open("dev-1", "sess-4", 10);
+        assert!(
+            store
+                .close_if_session(
+                    "dev-1",
+                    "sess-4",
+                    BenchWindowCloseReason::DeviceDisconnected
+                )
+                .is_some()
+        );
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::DeviceDisconnected
+        );
+
+        store.open("dev-1", "sess-5", 10);
+        let pruned = store.prune_inactive(|_, _| Some(BenchWindowCloseReason::DeviceRevoked));
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].1, BenchWindowCloseReason::DeviceRevoked);
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::DeviceRevoked
+        );
+
+        store.open("dev-1", "sess-6", 10);
+        assert_eq!(
+            store.close_all(BenchWindowCloseReason::DebugDisabled).len(),
+            1
+        );
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::DebugDisabled
+        );
+
+        store.open("dev-1", "sess-7", 10);
+        assert_eq!(
+            store.close_all(BenchWindowCloseReason::TokenExpired).len(),
+            1
+        );
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::TokenExpired
+        );
+
+        // rollback_if_session 撤销未生效窗口时不得覆盖前一次关窗原因
+        store.open("dev-1", "sess-8", 10);
+        assert!(store.rollback_if_session("dev-1", "sess-8"));
+        assert_eq!(
+            store.last_closed_for("dev-1").unwrap().reason,
+            BenchWindowCloseReason::TokenExpired
+        );
+        assert_eq!(store.last_closed_for("dev-1").unwrap().session_id, "sess-7");
 
         // base64 解码校验：正常填充、非法字符与超长拦截
         assert_eq!(decode_base64("AAECAw==", 16).unwrap(), vec![0, 1, 2, 3]);

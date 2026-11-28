@@ -499,8 +499,205 @@ test("VA4 工具断言回归：设备工具就绪但被剪空未调用时判失�
     assert.equal(res.summary.audio_channel_closed_turns, 1);
     const report = readFileSync(join(res.archiveDir, "report.md"), "utf8");
     assert.ok(report.includes("常连待机态"), "report.md 须明确提示待机无声原因");
+    assert.ok(!report.includes("请先唤醒小智"), "report.md 绝不能再提示让用户手动唤醒小智");
   } finally {
     await fake.close();
     rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test("n146 文字直通在常连待机（audio_channel_open=false）时先用唤醒词录音自动唤醒，缺录音或无播放器时优雅降级", async () => {
+  const makeWav = (filePath) => {
+    const numSamples = 8000;
+    const dataSize = numSamples * 2;
+    const buf = Buffer.alloc(44 + dataSize);
+    buf.write("RIFF", 0);
+    buf.writeUInt32LE(36 + dataSize, 4);
+    buf.write("WAVEfmt ", 8);
+    buf.writeUInt32LE(16, 16);
+    buf.writeUInt16LE(1, 20);
+    buf.writeUInt16LE(1, 22);
+    buf.writeUInt32LE(16000, 24);
+    buf.writeUInt32LE(32000, 28);
+    buf.writeUInt16LE(2, 32);
+    buf.writeUInt16LE(16, 34);
+    buf.write("data", 36);
+    buf.writeUInt32LE(dataSize, 40);
+    for (let i = 0; i < numSamples; i += 1) {
+      buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / 16000) * 10000), 44 + i * 2);
+    }
+    writeFileSync(filePath, buf);
+  };
+
+  // 1. 常连待机 + 有网上唤醒词录音（完整 4 字段）+ 本机能外放 -> 先外放唤醒打开音频通道，再注入文字
+  const runtimeWake = mkdtempSync(join(tmpdir(), "moss-n146-live-wake-"));
+  const debugToken = "fake_debug_token_n146_live_wake_1234567890abcdef";
+  const onlineDir = join(runtimeWake, "voice-bench", "recordings", "online");
+  mkdirSync(onlineDir, { recursive: true });
+  makeWav(join(onlineDir, "wake_dabai.wav"));
+  writeFileSync(
+    join(onlineDir, "wake_dabai.json"),
+    JSON.stringify({
+      text: "你好大白",
+      dataset: "AISHELL-1",
+      license: "Apache-2.0",
+      source_url: "https://example.invalid/wake_dabai",
+    }),
+    "utf8",
+  );
+
+  const liveDevice = {
+    device_id: "aa:bb:cc:99:88:77",
+    session_id: "sess-mqtt-wake",
+    state: "idle",
+    level: 0,
+    transport: "mqtt",
+    audio_channel_open: false,
+    wake_word: "你好大白",
+  };
+  let injectedWhileAudioOpen = false;
+  const fakeWake = await startFakeDebugServer({
+    token: debugToken,
+    devices: [liveDevice],
+    turnBehavior: ({ deviceId, turnId, turn, text }) => {
+      injectedWhileAudioOpen = liveDevice.audio_channel_open === true;
+      return {
+        turn_id: turnId,
+        device_id: deviceId,
+        session_id: liveDevice.session_id,
+        turn,
+        simulated: true,
+        audio_channel_open: liveDevice.audio_channel_open,
+        status: "done",
+        outcome: "done",
+        route: "fast_read",
+        injected_text: text,
+        corrected_text: text,
+        stages_ms: { turn_end: 60 },
+        tools: [],
+        reply: "激光机当前空闲。",
+        spoken: "激光机当前空闲。",
+        playback: { frames: 8, underruns: 0, stall_ms: 0 },
+        device_online: true,
+        device_state: "listening",
+        device_level: 0,
+      };
+    },
+  });
+  try {
+    mkdirSync(join(runtimeWake, "debug"), { recursive: true });
+    writeFileSync(join(runtimeWake, "debug", "voice-debug.token"), debugToken, "utf8");
+    const corpusFile = join(runtimeWake, "corpus.json");
+    writeFileSync(
+      corpusFile,
+      JSON.stringify({ name: "wake-inject", turns: [{ id: "t1", label: "状态快查", text: "激光机现在什么状态" }] }),
+      "utf8",
+    );
+    const playedWavs = [];
+    const res = await runLiveDebugBench({
+      runtimeDir: runtimeWake,
+      url: fakeWake.baseUrl,
+      corpus: corpusFile,
+      pollIntervalMs: 20,
+      wakeTimeoutMs: 500,
+      playWavFn: async (wavPath, { spec }) => {
+        playedWavs.push({ wavPath, text: spec.text });
+        liveDevice.audio_channel_open = true;
+        liveDevice.state = "listening";
+        return { started_at_ms: Date.now(), ended_at_ms: Date.now() + 15, duration_ms: 15 };
+      },
+    });
+    assert.equal(res.exitCode, 0);
+    assert.equal(playedWavs.length, 1, "常连待机态注入前须先外放唤醒词录音");
+    assert.equal(playedWavs[0].text, "你好大白");
+    assert.equal(injectedWhileAudioOpen, true, "文字注入必须在音频通道打开后进行");
+    assert.equal(res.summary.audio_channel_closed_turns, 0);
+    assert.equal(res.summary.wake_word, "你好大白");
+    assert.equal(res.summary.wake_summary.succeeded, 1);
+    assert.equal(res.summary.wake_events[0].source_type, "online-human");
+    assert.equal(res.summary.wake_events[0].recording, "online/wake_dabai.wav");
+    const report = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+    assert.ok(report.includes("## 自动唤醒记录"), report);
+    assert.ok(report.includes("online/wake_dabai.wav"), report);
+    assert.ok(!report.includes("请先唤醒小智"), report);
+  } finally {
+    await fakeWake.close();
+    rmSync(runtimeWake, { recursive: true, force: true });
+  }
+
+  // 2. 常连待机 + 缺唤醒词录音 或 本机不能外放 -> 降级为仅服务端验证并在报告写明原因
+  for (const mode of ["missing_wake", "no_player"]) {
+    const runtimeDeg = mkdtempSync(join(tmpdir(), `moss-n146-deg-${mode}-`));
+    if (mode === "no_player") {
+      const spDir = join(runtimeDeg, "voice-bench", "recordings", "我");
+      mkdirSync(spDir, { recursive: true });
+      makeWav(join(spDir, "wake_word.wav"));
+      writeFileSync(join(spDir, "wake_word.json"), JSON.stringify({ text: "你好小智", speaker: "我" }), "utf8");
+    }
+    const degDevice = {
+      device_id: "aa:bb:cc:99:88:66",
+      session_id: "sess-mqtt-deg",
+      state: "idle",
+      level: 0,
+      transport: "mqtt",
+      audio_channel_open: false,
+      wake_word: "你好小智",
+    };
+    const fakeDeg = await startFakeDebugServer({
+      token: debugToken,
+      devices: [degDevice],
+      turnBehavior: ({ deviceId, turnId, turn, text }) => ({
+        turn_id: turnId,
+        device_id: deviceId,
+        session_id: degDevice.session_id,
+        turn,
+        simulated: true,
+        audio_channel_open: false,
+        status: "done",
+        outcome: "done",
+        route: "fast_read",
+        injected_text: text,
+        corrected_text: text,
+        stages_ms: { turn_end: 50 },
+        tools: [],
+        reply: "激光机当前空闲。",
+        spoken: "激光机当前空闲。",
+        playback: { frames: 6, underruns: 0, stall_ms: 0 },
+        device_online: true,
+        device_state: "idle",
+        device_level: 0,
+      }),
+    });
+    try {
+      mkdirSync(join(runtimeDeg, "debug"), { recursive: true });
+      writeFileSync(join(runtimeDeg, "debug", "voice-debug.token"), debugToken, "utf8");
+      const corpusFile = join(runtimeDeg, "corpus.json");
+      writeFileSync(
+        corpusFile,
+        JSON.stringify({ name: "deg-case", turns: [{ id: "t1", label: "状态快查", text: "激光机现在什么状态" }] }),
+        "utf8",
+      );
+      const res = await runLiveDebugBench({
+        runtimeDir: runtimeDeg,
+        url: fakeDeg.baseUrl,
+        corpus: corpusFile,
+        pollIntervalMs: 20,
+        disableAudioPlayback: mode === "no_player",
+        playWavFn: mode === "no_player" ? undefined : async () => ({ started_at_ms: 0, ended_at_ms: 10, duration_ms: 10 }),
+      });
+      assert.equal(res.exitCode, 0, `${mode} 降级仅服务端验证仍应通过`);
+      assert.equal(res.summary.audio_channel_closed_turns, 1);
+      assert.equal(res.summary.wake_summary.failed, 1);
+      const report = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+      assert.ok(report.includes("已降级为仅服务端验证"), report);
+      assert.ok(
+        report.includes(mode === "missing_wake" ? "缺唤醒词录音" : "无可用音频外放程序"),
+        `报告应写明 ${mode} 降级原因：${report}`,
+      );
+      assert.ok(!report.includes("请先唤醒小智"), "降级说明绝不能要求用户手动唤醒");
+    } finally {
+      await fakeDeg.close();
+      rmSync(runtimeDeg, { recursive: true, force: true });
+    }
   }
 });

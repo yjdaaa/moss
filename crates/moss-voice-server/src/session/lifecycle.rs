@@ -663,6 +663,9 @@ impl<'a> Session<'a> {
         self.phase = Phase::Idle;
         self.set_state("idle");
         socket.end_audio(self.session_id, notify);
+        self.shared
+            .state
+            .set_audio_channel_open(self.session_id, socket.audio_open());
         if self.permission.load(std::sync::atomic::Ordering::Acquire) {
             self.conversation_closed();
         }
@@ -933,14 +936,15 @@ impl<'a> Session<'a> {
                 return reason;
             }
             self.sync_trace_turn();
-            self.deliver_background(socket);
-            if let Err(reason) = self.deliver_due_timers(socket).await {
-                return reason;
-            }
-            // n71 常连模式：这一轮对话该结束了（再见说完、用户说退出、空闲到期）
+            // n71 / n146 常连模式：先处理退出收尾（发 goodbye、关语音通道），绝不让后台播报或计时提醒
+            // 抢在 goodbye 前开启新语音轮次或把到点提醒吞掉；通道关闭后再让计时提醒按待机屏幕 Alert 投递。
             if let Some(reason) = self.pending_goodbye.take()
                 && let Err(reason) = self.end_conversation(socket, &reason, true).await
             {
+                return reason;
+            }
+            self.deliver_background(socket);
+            if let Err(reason) = self.deliver_due_timers(socket).await {
                 return reason;
             }
         }

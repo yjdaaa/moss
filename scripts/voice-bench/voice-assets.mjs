@@ -34,6 +34,7 @@ import {
   normalizeForCer,
   readWavPcm16,
 } from "./asr-bench.mjs";
+import { listDebugDevices, mdCell, sleep } from "./bench-common.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const NOISE_MIX_SCRIPT = join(SCRIPT_DIR, "asr_noise_mix.py");
@@ -42,9 +43,22 @@ export const BENCH_RECORDINGS_DIR_REL = "voice-bench/recordings";
 export const ONLINE_DIR_NAME = "online";
 export const ONLINE_ROTATION_FILE = ".rotation.json";
 export const DEFAULT_MAX_ONLINE = 20;
+export const DEFAULT_WAKE_WORD = "你好小智";
+export const DEFAULT_WAKE_TIMEOUT_MS = 15_000;
+export const DEFAULT_WAKE_RETRIES = 2;
 export const ONLINE_REQUIRED_META_FIELDS = ["text", "dataset", "license", "source_url"];
 export const RECORDING_APP_HINT =
   "请打开 MOSS 桌面端「语音中心 › 记录与诊断 › AI 联调与测试 › 录制测试语料」录制真人录音后再运行整体测试。";
+
+/** 判断语料条目是否为唤醒词用途（不计入 13 句标准语料，也不当作普通对话轮次执行）。 */
+export function isWakeCorpusItem(item) {
+  return Boolean(item && (String(item.purpose || "").trim().toLowerCase() === "wake" || item.id === "wake_word"));
+}
+
+/** 归一化唤醒词文本（去标点空白、英文转小写），用于匹配本机或网上唤醒词真人录音。 */
+export function normalizeWakeText(text) {
+  return normalizeForCer(String(text || "")).join("");
+}
 
 /** VE4 网上真人语音疑似指令词表（在 `classifyCommand` 与 `PROTECTED_COMMAND_WORDS` 基础上追加媒体/设备/激光控制指令词）。 */
 const ONLINE_COMMAND_KEYWORDS = [
@@ -494,6 +508,7 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "", maxOnli
           speaker,
           speaker_dir: speakerDirName,
           corpus_id: corpusId,
+          purpose: String(meta.purpose || "").trim(),
           wav_path: wavPath,
           filename,
           text,
@@ -552,6 +567,7 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "", maxOnli
         speaker,
         speaker_dir: speakerDirName,
         corpus_id: corpusId,
+        purpose: String(meta.purpose || "").trim(),
         wav_path: wavPath,
         filename,
         text: String(meta.text || "").trim(),
@@ -579,6 +595,387 @@ export function loadBenchRecordings(recordingsDir, { speakerFilter = "", maxOnli
     skippedAssets,
     onlineDir: resolvedOnlineDir,
   };
+}
+
+/**
+ * 单独扫描 `recordings/online/` 中带完整 4 字段 `.json` 的唤醒词候选（不经指令过滤误伤自定义唤醒词，
+ * 但严格执行 VE1 4 字段 `text`/`dataset`/`license`/`source_url` 校验与禁 `.txt` 规则）。
+ */
+function loadOnlineWakeCandidates(recordingsDir) {
+  const root = resolve(recordingsDir);
+  if (!existsSync(root) || !statSync(root).isDirectory()) return [];
+  const entries = readdirSync(root, { withFileTypes: true }).filter(
+    (entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.toLowerCase() === ONLINE_DIR_NAME,
+  );
+  if (entries.length === 0) return [];
+  const speakerDirName = entries[0].name;
+  const onlineDir = join(root, speakerDirName);
+  const files = readdirSync(onlineDir, { withFileTypes: true })
+    .filter((f) => f.isFile() && !f.isSymbolicLink() && f.name.endsWith(".wav"))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const out = [];
+  for (const fileEntry of files) {
+    const corpusId = fileEntry.name.slice(0, -4);
+    const wavPath = join(onlineDir, fileEntry.name);
+    const jsonPath = join(onlineDir, `${corpusId}.json`);
+    if (!existsSync(jsonPath) || lstatSync(jsonPath).isSymbolicLink()) continue;
+    let meta = null;
+    try {
+      meta = JSON.parse(readFileSync(jsonPath, "utf8"));
+    } catch {
+      continue;
+    }
+    if (!meta || typeof meta !== "object") continue;
+    const valid = ONLINE_REQUIRED_META_FIELDS.every(
+      (field) => typeof meta[field] === "string" && meta[field].trim().length > 0,
+    );
+    if (!valid) continue;
+    let durationMs = Number(meta.duration_ms) || 0;
+    if (!durationMs) {
+      try {
+        durationMs = wavDurationMs(wavPath);
+      } catch {
+        durationMs = 0;
+      }
+    }
+    const dataset = meta.dataset.trim();
+    const speaker = String(meta.speaker || dataset || "网上真人").trim() || "网上真人";
+    out.push({
+      source_type: "online-human",
+      audio_origin: "online-human",
+      is_online: true,
+      speaker,
+      speaker_dir: speakerDirName,
+      corpus_id: corpusId,
+      purpose: String(meta.purpose || "").trim(),
+      wav_path: wavPath,
+      filename: `${speakerDirName}/${fileEntry.name}`,
+      text: meta.text.trim(),
+      dataset,
+      license: meta.license.trim(),
+      source_url: meta.source_url.trim(),
+      label: String(meta.label || "").trim(),
+      key_terms: [],
+      tags: [],
+      duration_ms: durationMs,
+      peak_level: Number(meta.peak_level) || 0,
+      rms_level: Number(meta.rms_level) || 0,
+      recorded_at_ms: Number(meta.recorded_at_ms) || 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * n146 按优先级解析当前唤醒词的真人录音（绝不使用合成声音）：
+ * 1. 本机录制的唤醒词录音（`<runtime>/voice-bench/recordings/<speaker>/`，非 `online/`），内容匹配当前唤醒词；
+ * 2. 网上公开真人语音（`<runtime>/voice-bench/recordings/online/`），内容匹配当前唤醒词且满足 `.json` 4 字段许可规则；
+ * 3. 都没有时返回 `ok: false` 及明确的「缺唤醒词录音」提示。
+ */
+export function resolveWakeWordAsset({
+  wakeWord = DEFAULT_WAKE_WORD,
+  runtimeDir = "",
+  recordingsDir = "",
+  speaker = "",
+} = {}) {
+  const effectiveWakeWord = String(wakeWord || "").trim() || DEFAULT_WAKE_WORD;
+  const targetNorm = normalizeWakeText(effectiveWakeWord);
+  const resolvedRecordingsDir = resolve(recordingsDir || join(runtimeDir, BENCH_RECORDINGS_DIR_REL));
+  const preferredSpeaker = String(speaker || "").trim();
+
+  // 优先级 ①：本机自录真人唤醒词录音
+  const { userRecordings } = loadBenchRecordings(resolvedRecordingsDir, {
+    speakerFilter: "",
+    maxOnline: 0,
+  });
+  const localMatches = userRecordings
+    .filter((rec) => {
+      const recNorm = normalizeWakeText(rec.text);
+      return Boolean(targetNorm && recNorm && recNorm === targetNorm);
+    })
+    .sort((a, b) => {
+      const aSpeakerHit = preferredSpeaker && (a.speaker === preferredSpeaker || a.speaker_dir === preferredSpeaker) ? 0 : 1;
+      const bSpeakerHit = preferredSpeaker && (b.speaker === preferredSpeaker || b.speaker_dir === preferredSpeaker) ? 0 : 1;
+      if (aSpeakerHit !== bSpeakerHit) return aSpeakerHit - bSpeakerHit;
+      const aWakeId = a.corpus_id === "wake_word" || a.purpose === "wake" ? 0 : 1;
+      const bWakeId = b.corpus_id === "wake_word" || b.purpose === "wake" ? 0 : 1;
+      if (aWakeId !== bWakeId) return aWakeId - bWakeId;
+      return a.filename.localeCompare(b.filename, "zh-CN");
+    });
+
+  if (localMatches.length > 0) {
+    return {
+      ok: true,
+      wakeWord: effectiveWakeWord,
+      wakeSource: "local-recording",
+      asset: buildRecordingAsset(localMatches[0]),
+      code: null,
+      missingReason: "",
+    };
+  }
+
+  // 优先级 ②：网上公开真人语音（recordings/online/，严格校验 4 字段 .json）
+  const onlineMatches = loadOnlineWakeCandidates(resolvedRecordingsDir)
+    .filter((rec) => {
+      const recNorm = normalizeWakeText(rec.text);
+      return Boolean(targetNorm && recNorm && recNorm === targetNorm);
+    })
+    .sort((a, b) => {
+      const aWakeId = a.corpus_id === "wake_word" || a.purpose === "wake" ? 0 : 1;
+      const bWakeId = b.corpus_id === "wake_word" || b.purpose === "wake" ? 0 : 1;
+      if (aWakeId !== bWakeId) return aWakeId - bWakeId;
+      return a.filename.localeCompare(b.filename, "zh-CN");
+    });
+
+  if (onlineMatches.length > 0) {
+    return {
+      ok: true,
+      wakeWord: effectiveWakeWord,
+      wakeSource: "online-human",
+      asset: buildRecordingAsset(onlineMatches[0]),
+      code: null,
+      missingReason: "",
+    };
+  }
+
+  // 优先级 ③：均缺失，明确报告「缺唤醒词录音」
+  return {
+    ok: false,
+    wakeWord: effectiveWakeWord,
+    wakeSource: null,
+    asset: null,
+    code: "missing_wake_word_recording",
+    missingReason: `缺唤醒词录音：未在本机录音（voice-bench/recordings/<说话人>/）或 recordings/online/ 中找到内容为「${effectiveWakeWord}」的真人录音。请先在 recordings/online/ 放入内容为该唤醒词、且带完整 .json（text/dataset/license/source_url）的公开真人语音；找不到再请用户在 App「录制测试语料」录一次唤醒词（录一次长期复用）。`,
+  };
+}
+
+/**
+ * n146 外放唤醒词真人录音并等待小智进入目标就绪态（`listening` 或 `audio_open`），按超时与重试规则执行并产出结构化唤醒记录。
+ */
+export async function attemptAutoWake({
+  baseUrl,
+  token,
+  deviceId = "",
+  wakeWord = DEFAULT_WAKE_WORD,
+  wakeAsset = null,
+  missingReason = "",
+  trigger = "standby",
+  player = null,
+  playWavFn = null,
+  waitFor = "listening",
+  wakeTimeoutMs = DEFAULT_WAKE_TIMEOUT_MS,
+  wakeRetries = DEFAULT_WAKE_RETRIES,
+  pollIntervalMs = 250,
+  onSpawn = null,
+  listDevicesFn = listDebugDevices,
+  sleepFn = sleep,
+} = {}) {
+  const startedAt = Date.now();
+  const effectiveWakeWord = String(wakeWord || "").trim() || DEFAULT_WAKE_WORD;
+  const maxRetries = Math.max(1, Math.floor(Number(wakeRetries) || DEFAULT_WAKE_RETRIES));
+  const timeoutMs = Math.max(200, Math.floor(Number(wakeTimeoutMs) || DEFAULT_WAKE_TIMEOUT_MS));
+  const baseEvent = {
+    at: new Date(startedAt).toISOString(),
+    trigger,
+    wake_word: effectiveWakeWord,
+    recording: wakeAsset?.filename || null,
+    source_type: wakeAsset?.source_type || null,
+    audio_origin: wakeAsset?.audio_origin || wakeAsset?.source_type || null,
+    speaker: wakeAsset?.speaker || null,
+    dataset: wakeAsset?.dataset || null,
+    license: wakeAsset?.license || null,
+    attempts: 0,
+    success: false,
+    elapsed_ms: 0,
+    session_id_after: null,
+    error: null,
+  };
+
+  if (!wakeAsset) {
+    const error = missingReason || `缺唤醒词录音（唤醒词「${effectiveWakeWord}」）`;
+    return {
+      ok: false,
+      missing: true,
+      noPlayer: false,
+      code: "missing_wake_word_recording",
+      error,
+      device: null,
+      sessionId: "",
+      event: { ...baseEvent, elapsed_ms: Date.now() - startedAt, error },
+    };
+  }
+
+  if (typeof playWavFn !== "function" && !player) {
+    const error = "本机无可用音频外放程序，无法自动外放唤醒词录音";
+    return {
+      ok: false,
+      missing: false,
+      noPlayer: true,
+      code: "no_audio_player",
+      error,
+      device: null,
+      sessionId: "",
+      event: { ...baseEvent, elapsed_ms: Date.now() - startedAt, error },
+    };
+  }
+
+  const isTargetReady = (dev) => {
+    if (!dev) return false;
+    if (waitFor === "audio_open") {
+      const channelOpen = dev.transport === "mqtt" ? dev.audio_channel_open === true : dev.audio_channel_open !== false;
+      return channelOpen && (dev.state === "listening" || dev.state === "idle");
+    }
+    return dev.audio_channel_open !== false && dev.state === "listening";
+  };
+
+  let lastError = "";
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    try {
+      await playWav(wakeAsset.wavPath, {
+        player,
+        playWavFn,
+        onSpawn,
+        spec: { id: "wake_word", purpose: "wake", text: effectiveWakeWord },
+        asset: wakeAsset,
+        trigger,
+        attempt,
+      });
+    } catch (err) {
+      lastError = err?.message || "外放唤醒词录音失败";
+      if (attempt < maxRetries) {
+        await sleepFn(Math.min(500, Math.max(50, pollIntervalMs * 2)));
+        continue;
+      }
+      const error = `唤醒失败：外放唤醒词「${effectiveWakeWord}」出错（${lastError}）`;
+      return {
+        ok: false,
+        missing: false,
+        noPlayer: false,
+        code: "wake_failed",
+        error,
+        device: null,
+        sessionId: "",
+        event: {
+          ...baseEvent,
+          attempts: attempt,
+          elapsed_ms: Date.now() - startedAt,
+          error,
+        },
+      };
+    }
+
+    const attemptDeadline = Date.now() + timeoutMs;
+    while (Date.now() <= attemptDeadline) {
+      const res = await listDevicesFn(baseUrl, token);
+      if (res.ok && res.data) {
+        const devices = Array.isArray(res.data.devices) ? res.data.devices : [];
+        const dev = deviceId
+          ? devices.find((d) => d.device_id === deviceId) || null
+          : devices[0] || null;
+        if (isTargetReady(dev)) {
+          return {
+            ok: true,
+            missing: false,
+            noPlayer: false,
+            code: null,
+            error: null,
+            device: dev,
+            sessionId: dev.session_id || "",
+            event: {
+              ...baseEvent,
+              attempts: attempt,
+              success: true,
+              elapsed_ms: Date.now() - startedAt,
+              session_id_after: dev.session_id || null,
+              error: null,
+            },
+          };
+        }
+      }
+      await sleepFn(pollIntervalMs);
+    }
+
+    if (attempt < maxRetries) {
+      await sleepFn(Math.min(500, Math.max(50, pollIntervalMs * 2)));
+    }
+  }
+
+  const targetDesc = waitFor === "audio_open" ? "打开音频通道" : "进入聆听状态";
+  const error = `唤醒失败：外放唤醒词「${effectiveWakeWord}」（${wakeAsset.filename}）${maxRetries} 次后小智仍未${targetDesc}`;
+  return {
+    ok: false,
+    missing: false,
+    noPlayer: false,
+    code: "wake_failed",
+    error,
+    device: null,
+    sessionId: "",
+    event: {
+      ...baseEvent,
+      attempts: maxRetries,
+      success: false,
+      elapsed_ms: Date.now() - startedAt,
+      error,
+    },
+  };
+}
+
+/** 统计唤醒事件汇总（供 summary.json 使用）。 */
+export function summarizeWakeEvents(wakeEvents = []) {
+  const list = Array.isArray(wakeEvents) ? wakeEvents : [];
+  const succeeded = list.filter((e) => e?.success === true).length;
+  const failed = list.filter((e) => e?.success !== true).length;
+  return {
+    total: list.length,
+    succeeded,
+    failed,
+  };
+}
+
+const WAKE_TRIGGER_LABELS = {
+  offline_initial: "开测前（设备离线）",
+  standby_initial: "开测前（设备待机）",
+  standby: "常连待机",
+  post_exit: "退出语料后复醒",
+  pre_turn: "轮次前（设备待机）",
+};
+
+function wakeSourceDisplay(ev) {
+  if (!ev?.recording) return "—";
+  if (ev.source_type === "online-human") {
+    const meta = [ev.dataset ? `数据集=${ev.dataset}` : "", ev.license ? `许可=${ev.license}` : ""]
+      .filter(Boolean)
+      .join("，");
+    return `\`${ev.recording}\`（网上真人${meta ? `，${meta}` : ""}）`;
+  }
+  return `\`${ev.recording}\`（本机录音${ev.speaker ? `，说话人=${ev.speaker}` : ""}）`;
+}
+
+/** 渲染「自动唤醒记录」Markdown 表格片段（供 xiaozhi-e2e 与 live-xiaozhi-debug 共用）。 */
+export function renderWakeEventsMarkdown(wakeEvents = [], wakeWord = DEFAULT_WAKE_WORD) {
+  const list = Array.isArray(wakeEvents) ? wakeEvents : [];
+  if (list.length === 0) return [];
+  const lines = [
+    "",
+    "## 自动唤醒记录",
+    "",
+    `- **当前唤醒词**：\`${wakeWord || DEFAULT_WAKE_WORD}\``,
+    "",
+    "| # | 触发时机 | 唤醒词 | 录音与来源 | 结果 | 尝试次数 | 耗时 | 备注 |",
+    "| ---: | --- | --- | --- | --- | ---: | ---: | --- |",
+  ];
+  list.forEach((ev, idx) => {
+    const triggerLabel = WAKE_TRIGGER_LABELS[ev.trigger] || ev.trigger || "—";
+    const status = ev.success ? "成功" : "失败";
+    const elapsed = typeof ev.elapsed_ms === "number" ? `${ev.elapsed_ms} ms` : "—";
+    lines.push(
+      `| ${idx + 1} | ${mdCell(triggerLabel, 24)} | ${mdCell(ev.wake_word || wakeWord, 16)} | ${mdCell(
+        wakeSourceDisplay(ev),
+        52,
+      )} | ${status} | ${ev.attempts ?? 0} | ${elapsed} | ${mdCell(ev.error || "—", 48)} |`,
+    );
+  });
+  return lines;
 }
 
 function buildRecordingAsset(chosen) {
@@ -647,6 +1044,7 @@ function findMatchingDeviceCorpusSample(deviceSamples, spec, usedIds) {
 export async function prepareVoiceAssets({
   turns,
   calibrationText = "",
+  wakeWord = "",
   runtimeDir,
   recordingsDir = "",
   corpusDir = "",
@@ -660,10 +1058,22 @@ export async function prepareVoiceAssets({
   const speakerFilter = String(speaker || "").trim();
   const parsedMaxOnline =
     maxOnline === undefined || maxOnline === null ? DEFAULT_MAX_ONLINE : Math.max(0, Math.floor(Number(maxOnline) || 0));
+  const wakeNorm = wakeWord ? normalizeWakeText(wakeWord) : "";
+  const isWakeRecording = (rec) => {
+    if (!rec) return false;
+    if (rec.corpus_id === "wake_word" || String(rec.purpose || "").trim().toLowerCase() === "wake") {
+      return true;
+    }
+    if (wakeNorm && normalizeWakeText(rec.text) === wakeNorm) {
+      return true;
+    }
+    return false;
+  };
+  const standardTurns = (Array.isArray(turns) ? turns : []).filter((spec) => !isWakeCorpusItem(spec));
 
   const {
-    userRecordings,
-    onlineRecordings,
+    userRecordings: rawUserRecordings,
+    onlineRecordings: rawOnlineRecordings,
     speakers: availableSpeakers,
     skippedAssets,
     onlineDir,
@@ -671,6 +1081,8 @@ export async function prepareVoiceAssets({
     speakerFilter,
     maxOnline: parsedMaxOnline,
   });
+  const userRecordings = rawUserRecordings.filter((r) => !isWakeRecording(r));
+  const onlineRecordings = rawOnlineRecordings.filter((r) => !isWakeRecording(r));
 
   // VE3：对 `online/` 有效池按 `.rotation.json` 轮换抽取至多 `maxOnline` 条，避免每次重复测同一批
   const sortedOnlinePool = [...onlineRecordings].sort((a, b) => a.corpus_id.localeCompare(b.corpus_id));
@@ -720,8 +1132,8 @@ export async function prepareVoiceAssets({
   const speakersUsed = new Set();
   let roundRobinCursor = 0;
 
-  for (let i = 0; i < turns.length; i += 1) {
-    const spec = turns[i];
+  for (let i = 0; i < standardTurns.length; i += 1) {
+    const spec = standardTurns[i];
     const targetNorm = normalizeForCer(spec.text).join("");
 
     // 优先匹配用户自录语音，其次匹配本轮抽中的网上真人语音

@@ -9,7 +9,8 @@
    - MOSS 仅在 `127.0.0.1` 开放受限调试入口（默认端口 `18009`，被占用时自动顺延并记录在 `<runtime>/debug/voice-debug.json`）；
    - 在运行目录生成 `<runtime>/debug/voice-debug.token`（权限 `0600`），关闭开关或开启满 24 小时自动作废；
    - 所有模拟轮次强制带模拟标记，工具执行入口硬拦截发送雕刻、移动、回零、解锁、倍率、家居控制、本机 Agent 与固件/唤醒词推送，且绝不写入长期记忆或人物资料。
-3. 唤醒真小智（喊“你好小智”或按对话键），或开启常连模式让小智在线。
+3. 确认小智已开机并配网连入 MOSS（常规 WebSocket 待机或常连 MQTT 模式均可；测试脚本会在需要时自动外放唤醒词真人录音唤醒，不再要求每次人工喊唤醒词）。
+4. （可选）如需让常连待机态（`audio_channel_open: false`）的小智真机播报回复，请准备好对应当前唤醒词的真人录音（本机 App「录制测试语料」首条或 `recordings/online/` 下的公开真人片段）且保持本机播放器可用；无播放器、缺唤醒录音或唤醒失败时，脚本自动降级为仅服务端验证并在报告写明原因。
 
 ## 运行方式
 
@@ -23,6 +24,10 @@ node scripts/voice-bench/live-xiaozhi-debug.mjs
 | --- | --- | --- |
 | `--corpus <path>` | 指定语料 JSON 文件 | `scripts/voice-bench/live-corpus.json` |
 | `--device <device_id>` | 指定目标小智设备编号 | 自动选第一台在线设备 |
+| `--speaker <标签>` | 指定自动唤醒优先使用的本机说话人录音标签 | 自动按全部已录制说话人查找 |
+| `--recordings-dir <path>` | 指定真人录音目录（用于查找唤醒词录音） | `<runtime>/voice-bench/recordings` |
+| `--wake-timeout-ms <ms>` | 单次自动唤醒等待音频通道打开的超时 | `12000` |
+| `--wake-retries <n>` | 自动唤醒最大重试次数 | `2` |
 | `--runtime-dir <path>` | 指定 MOSS 运行目录（用于读取令牌、过程记录与写出归档） | 系统默认运行目录 |
 | `--url http://127.0.0.1:<port>` | 显式指定本机调试入口地址（仅接受回环地址） | 读取 `<runtime>/debug/voice-debug.json` 或 `http://127.0.0.1:18009` |
 | `--token-file <path>` | 显式指定令牌文件路径 | `<runtime>/debug/voice-debug.token` |
@@ -48,12 +53,12 @@ node scripts/voice-bench/live-xiaozhi-debug.mjs
 - `turns.jsonl`：每轮一行完整明细（注入与纠偏文字、路径、阶段耗时、工具与参数、门禁拒绝、回复全文与已播文本、播放欠载与卡顿时长）；
 - `timeline.jsonl`：本次运行时间窗内的 `ProcessTrace` 机器可读片段；
 - `timeline.txt`：本次运行时间窗内的 `ProcessTrace` 中文时间线片段；
-- `report.md`：人类与 AI 均可直接阅读的逐轮诊断表；
-- `summary.json`：通过/失败/跳过计数、各阶段 P50/P90 耗时、失败轮次列表与门禁命中数。
+- `report.md`：人类与 AI 均可直接阅读的逐轮诊断表、自动唤醒记录（所用录音、来源、成功/失败、耗时）及常连待机降级原因（如有）；
+- `summary.json`：通过/失败/跳过计数、各阶段 P50/P90 耗时、失败轮次列表、门禁命中数，以及 `wake_word` / `wake_summary` / `wake_events` / `wake_degraded_reason`。
 
 脚本退出前会在标准输出打印归档目录路径。
 - 退出码 `0`：全部执行轮次通过；
-- 退出码非 `0`：没有在线设备（输出“请先唤醒小智（喊‘你好小智’或按对话键），或开启常连模式”）、令牌无效/过期，或存在失败/超时轮次。
+- 退出码非 `0`：没有在线设备且自动唤醒未成功（或缺唤醒词录音 / 唤醒失败）、令牌无效/过期，或存在失败/超时轮次。
 
 ---
 
@@ -110,13 +115,18 @@ node scripts/voice-bench/asr-bench.mjs
    - 在 **“录制测试语料”** 中至少录完一位说话人的全部语料（使用电脑麦克风录制 16 kHz 单声道 WAV，存放在本机 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}`，支持多位说话人标签，不进诊断包、不用于声纹）；
    - 勾选 **“允许本机 AI 调试注入”** 并完成二次确认；
    - （可选推荐）在下方 **“对话记录与排障”** 勾选 **“同时保存完整过程记录与原始录音”**，整体测试会自动为外放录音回写 `input_source: "e2e_playback"` 与 `label_source: "e2e-playback"`（带说话人标签）。
-2. 唤醒真小智（喊“你好小智”或按对话键），或开启常连模式让设备保持在线。
+2. 确认小智已开机并连入 MOSS（常规待机或常连待机均可）：脚本自动从 `/debug/v1/devices` 读取当前生效唤醒词（自定义唤醒词或默认“你好小智”），当设备不在聆听态、常连未开音频通道或上一句说完退出词回到待机时，自动外放真人唤醒词录音唤醒设备，不再提示人工喊唤醒词。
 3. 将小智摆放在距离电脑喇叭 **30–50 cm** 处，调至适中音量（避免过小拾不到音或过大爆音）。
 4. 确认本机播放器可用：macOS 用 `afplay`、Windows 用 PowerShell `System.Media.SoundPlayer`、Linux 用 `paplay` 或 `aplay`。
 
-## 声音来源规则（VD1 / VD3 / VE1–VE4：只用真人录音，严格区分网上真人与用户自录）
+## 声音来源与自动唤醒规则（VD1 / VD3 / VE1–VE4 / n146：只用真人录音，严格区分网上真人与用户自录）
 
 - **绝不使用合成声音**：已彻底移除本地 TTS 与系统朗读（`say` / `System.Speech` / `espeak`），不保留回退开关。
+- **自动唤醒录音选择顺序（n146）**：
+  1. 优先用本机录制的唤醒词录音（`<runtime>/voice-bench/recordings/<speaker>/`，支持在 App「录制测试语料」首条 `wake_word` 录制一次后长期复用；该条目带 `purpose: "wake"`、文本跟随当前唤醒词且不计入 13 句标准语料覆盖率）；
+  2. 本机没有时，从 `<runtime>/voice-bench/recordings/online/` 寻找文本正好等于当前唤醒词的公开真人语音（同样必须具备完整 `text` / `dataset` / `license` / `source_url` 4 字段 `.json`，且不计入普通测试句池）；
+  3. 两者都没有时，明确报“缺唤醒词录音”（提示 AI 先按 ② 从公开中文真人语音集查找，找不到再请用户在 App 录一次）。唤醒重试用尽未进入聆听态时，明确报“唤醒失败”并非 `0` 退出。
+  - 每当执行完退出类语料（如“退下”“再见”）后，下一句前会自动等设备回到待机并用唤醒词录音再次唤醒；若 WebSocket 断连重连换了新 `session_id`，脚本仅在旧时间窗明确因 `device_disconnected` 关闭且属于上一轮绑定 `session_id` 时重开时间窗，且 `max_minutes` 传整轮剩余分钟（自首次开窗算起向上取整，至少 1；剩余为 0 或检测到 `user_stopped` / `expired` / 其他关窗原因时立即停止后续外放，并在报告写明“用户已结束测试 / 时间窗到期”）。
 - **来源判定按目录**：
   - 用户自录目录 `<runtime>/voice-bench/recordings/<speaker>/`（非 `online`）：标为 `source_type: "human-recording"`（支持 `.json` 或 `.txt` 原话回退）；未指定 `--speaker` 时按已录制说话人轮流覆盖各句；
   - 网上真人目录 `<runtime>/voice-bench/recordings/online/`：一律标为 `source_type: "online-human"`（不看 `speaker` 字段），同名 `.json` **必须**包含 `text`、`dataset`、`license`、`source_url`（禁止仅用 `.txt`，缺少许可/数据集信息或命中“播放/放首歌/音量/亮度/静音/关机/重启/停/退下/开始”等疑似指令句的条目一律跳过并在报告“被跳过素材”列出）。
@@ -148,6 +158,8 @@ node scripts/voice-bench/xiaozhi-e2e.mjs --max-online 20 --max-minutes 30
 | `--noise-gain <0..1>` | 背景噪声增益 | `0.22` |
 | `--compare-digital` | 在时间窗内用同一份真人录音追加服务端数字 PCM 对照注入，逐句量化麦克风与房间 CER 损失 | 关闭 |
 | `--turn-timeout-ms <ms>` | 单句等待上限（超时记失败并继续下一句） | `90000` |
+| `--wake-timeout-ms <ms>` | 单次自动唤醒等待设备进入聆听的超时 | `12000` |
+| `--wake-retries <n>` | 自动唤醒最大重试次数 | `2` |
 | `--quiet-ms <ms>` | 外放前/后要求设备处于 `listening` 且安静的时长 | `1000` |
 | `--runtime-dir <path>` | 指定 MOSS 运行目录 | 系统默认运行目录 |
 | `--url http://127.0.0.1:<port>` | 显式指定本机调试入口地址（仅回环） | 自动读取 `<runtime>/debug/voice-debug.json` |
@@ -167,9 +179,9 @@ node scripts/voice-bench/xiaozhi-e2e.mjs --max-online 20 --max-minutes 30
 
 - `turns.jsonl`：每轮一行 4 环节归因及 `source_type`、`audio_origin`、`dataset`、`license`、说话人标签与批号；
 - `timeline.jsonl` / `timeline.txt`：本次时间窗内的 `ProcessTrace` 片段，附外放轮次的素材来源（`online-human` / `human-recording`、`dataset`、`license`）说明；
-- `report.md`：总览表、**按语音来源分组统计表（网上真人 / 我的录音 / 小智实时说话 / 数字直通，并注明网上语音只反映通用识别能力）**、**按说话人分组统计表**、**被跳过素材表**、**缺少真人录音的语料清单**、4 个环节各自最差项置顶诊断表，以及按严重程度排序的“建议优先调整的环节”；
-- `summary.json`：各环节通过率、按来源指标 `by_source`、按说话人指标 `by_speaker`、被跳过素材 `skipped_assets`、网上轮换与分批摘要（`online_rotation` / `batch_plan`）、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
-- `audio-manifest.json`：外放音频清单（含 `source_type`、`audio_origin`、`dataset`、`license`、`source_url` 与 `skipped_assets`，绝不复制用户原始录音）。
+- `report.md`：总览表、**自动唤醒记录表（触发时机、所用录音、来源、成功/失败、耗时与原因）**、**按语音来源分组统计表（网上真人 / 我的录音 / 小智实时说话 / 数字直通，并注明网上语音只反映通用识别能力）**、**按说话人分组统计表**、**被跳过素材表**、**缺少真人录音的语料清单**、4 个环节各自最差项置顶诊断表，以及按严重程度排序的“建议优先调整的环节”；
+- `summary.json`：各环节通过率、`wake_word` / `wake_summary` / `wake_events`、按来源指标 `by_source`、按说话人指标 `by_speaker`、被跳过素材 `skipped_assets`、网上轮换与分批摘要（`online_rotation` / `batch_plan`）、缺失语料 `missing_turns`、P50/P90 耗时、平均 CER 与数字对照差值；
+- `audio-manifest.json`：外放音频清单（含 `source_type`、`audio_origin`、`dataset`、`license`、`source_url`、`skipped_assets` 以及 `wake_word` / `wake_asset` / `wake_events`，绝不复制用户原始录音）。
 
 若开启了完整过程记录（默认开跑期间自动打开）或独立的 `asr-corpus` 采集，外放经真麦克风保存的每条录音都会按对应录音文件名自动生成 `<录音前缀>.label.json`（不覆盖已有标注，正确文字 = 外放原句，`input_source: "e2e_playback"`、`audio_origin: "online-human" | "human-recording"`、`dataset` / `license`、`label_source: "e2e-playback"` 及说话人信息）；`--compare-digital` 数字对照注入绝不写入 `asr-corpus`。
 

@@ -688,7 +688,7 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 
 | 路径 | 方法 | 请求体 / 参数 | 响应与错误 |
 |---|---|---|---|
-| `/debug/v1/devices` | GET | 无 | 200 `{mode, active_laser_job, bench_windows:[{device_id, session_id, active, opened_at, expires_at, max_minutes}], devices:[{device_id, session_id, state, level, recent_peak_level, latest_turn, latest_turn_id, bench_window, transport, connected_at, device_mcp_enabled, device_tools_ready, device_tools_count, screen_monochrome}]}`（`opened_at`/`expires_at` 为 Unix 秒时间戳） |
+| `/debug/v1/devices` | GET | 无 | 200 `{mode, active_laser_job, wake_word, bench_windows:[{device_id, session_id, active, opened_at, expires_at, max_minutes}], bench_window_last_closed:{[device_id]:{device_id, session_id, reason, closed_at}}, devices:[{device_id, session_id, state, audio_channel_open, wake_word, level, recent_peak_level, latest_turn, latest_turn_id, bench_window, bench_window_last_closed, transport, connected_at, device_mcp_enabled, device_tools_ready, device_tools_count, screen_monochrome}]}`（`opened_at`/`expires_at`/`closed_at` 为 Unix 秒时间戳；顶层与单台设备只读 `wake_word` 取自 MOSS 当前唤醒词偏好或默认“你好小智”，`audio_channel_open` 反映当前会话语音音频通道是否打开，`bench_window_last_closed` 只读记录每台设备最近一次测试时间窗关闭原因 `user_stopped` / `script_closed` / `device_disconnected` / `device_revoked` / `device_removed` / `expired` / `debug_disabled` / `token_expired`） |
 | `/debug/v1/devices/{device_id}/turns` | GET | 查询参数 `limit?`（默认 20，限 1..=50） | 200 `{device_id, turns:[TurnDetail...]}`，按轮次倒序返回该设备近期完整明细 |
 | `/debug/v1/bench-window` | POST | `{device_id, action:"open"\|"close", max_minutes?}`（或布尔 `open`；`max_minutes` 默认 30、限 1..=60） | 打开或关闭该设备的整体测试时间窗：开启返回 200 `{device_id, action:"open", bench_window:{device_id, session_id, active, opened_at, expires_at, max_minutes}}`（离线 404 `device_offline`、撤销 403 `device_revoked`、回声模式 409 `echo_mode`、非法时长 400 `invalid_max_minutes`）；关闭返回 200 `{device_id, action:"close", closed, bench_window:null}`。时间窗严格绑定 `(device_id, session_id)`，窗内该设备全部真实音频轮次强制按 `simulated=true` 处理，到期/断连/重连/关开关/令牌过期自动关闭 |
 | `/debug/v1/devices/{device_id}/inject` | POST | `{text: string}` | 强制以 `simulated = true` 注入到该在线会话并先下发 `stt` 字幕；成功 202 `{turn_id, device_id, session_id, turn, simulated:true}`；空文本或超长 400 `invalid_text`，离线 404 `device_offline`，已撤销 403 `device_revoked`，回声模式 409 `echo_mode`，正在对话/播放/拾音/数字注入中 409 `device_busy`（绝不打断进行中对话） |
@@ -717,12 +717,12 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 
 无 HTTP 接口；仅通过敏感 Tauri 命令 `voice_bench_recordings_manage({input})` 提供，只授权给 `capabilities/voice-private-main.json` 的桌面主窗口，入口校验 `require_private_settings_window(&window)?`（不在 `default.json`）。`input.action` 取值：
 
-- `"status"` / `"list"`：返回 `{recordings_dir_rel:"voice-bench/recordings", corpus_name, corpus_count, corpus_items[], total_recordings, speaker_count, complete_speaker_count, complete_speakers[], speakers[], recordings[]}`（`corpus_items` 来自内置 `scripts/voice-bench/e2e-corpus.json`，不回传本机绝对路径）；
+- `"status"` / `"list"`：返回 `{recordings_dir_rel:"voice-bench/recordings", corpus_name, corpus_count, wake_word, wake_word_recorded, online_count, corpus_items[], total_recordings, speaker_count, complete_speaker_count, complete_speakers[], speakers[], recordings[]}`（`corpus_items` 来自内置 `scripts/voice-bench/e2e-corpus.json`，其中 `purpose: "wake"` 的首条 `wake_word` 文本动态跟随 MOSS 当前生效唤醒词且不计入 13 句标准语料 `corpus_count` 与说话人完备计数；不回传本机绝对路径）；
 - `"save"`：`{speaker, corpus_id, text?, audio_wav_base64}`（校验说话人标签与语料编号无路径穿越，解码并线性重采样至 16 kHz 单声道 WAV，校验时长 0.5–15 秒、电平不过低、无削顶，不通过返回 400 `bench_recording_quality_failed`；原子写入 `<runtime>/voice-bench/recordings/<speaker>/<corpus-id>.{wav,json}`）；
 - `"audio"`：`{speaker, corpus_id}`（返回 `{speaker, corpus_id, sample_rate:16000, duration_ms, audio_data_url}`）；
 - `"delete"`：`{speaker, corpus_id}`（删除单条录音与元数据）；`"delete_speaker"`：`{speaker, confirmed: true}`；`"clear"`：`{confirmed: true}`（清空全部测试录音，缺少 `confirmed: true` 返回 400 `confirmation_required`）。
 
-`voice_builtin_status` 附带无录音、无绝对路径的摘要 `bench_recordings{recordings_dir_rel, corpus_count, total_recordings, speaker_count, complete_speaker_count, speakers[]}`；`diagnostics_bundle()` 严禁包含任何测试录音或说话人元数据，并在 `excluded` 显式列出“本机整体测试真人录音与元数据”。
+`voice_builtin_status` 附带无录音、无绝对路径的摘要 `bench_recordings{recordings_dir_rel, corpus_count, wake_word, wake_word_recorded, online_count, total_recordings, speaker_count, complete_speaker_count, speakers[]}`；`diagnostics_bundle()` 严禁包含任何测试录音或说话人元数据，并在 `excluded` 显式列出“本机整体测试真人录音与元数据”。
 
 ## 6. 黄金样本生成要求（阶段 1）
 

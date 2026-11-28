@@ -1621,7 +1621,11 @@ fn ve4_bench_window_blocks_play_music_and_restores_after_close() {
     );
 
     // 2. 关闭测试时间窗，跑普通真人轮次：play_music 应恢复正常放行
-    assert!(server.close_bench_window(DEVICE, "测试结束"));
+    assert!(server.close_bench_window(
+        DEVICE,
+        crate::BenchWindowCloseReason::UserStopped,
+        "测试结束",
+    ));
     speak_manual(&mut device, 1, 500);
     let _ = collect_items(&mut device);
     wait_until("关窗后第 2 轮完成", || {
@@ -1818,5 +1822,250 @@ fn simulated_preview_auto_cancels_workflow_while_real_turn_keeps_it() {
         assert_eq!(recorded[2].1["action"], "preview");
     }
 
+    server.stop();
+}
+
+/// n146 调试接口只读字段：`GET /debug/v1/devices` 返回当前生效唤醒词（顶层与按设备）及音频通道状态 `audio_channel_open`。
+#[test]
+fn debug_api_devices_exposes_readonly_wake_word_and_audio_channel_open() {
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            wake_word_for_device: Some(Arc::new(|dev| match dev {
+                Some(id) if id == DEVICE => "你好 MOSS".into(),
+                _ => "你好小智".into(),
+            })),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let now = crate::unix_now();
+    let token = "tok_n146_wake_word_check_0123456789abcdef";
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    // 1. 无在线设备时也返回顶层只读 wake_word
+    let empty: Value = client
+        .get(format!("{base}/debug/v1/devices"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(empty["wake_word"], "你好小智");
+    assert_eq!(empty["devices"].as_array().unwrap().len(), 0);
+
+    // 2. WebSocket 设备上线后返回每台设备生效唤醒词与 audio_channel_open=true
+    let _device = chat_device(&server, &registry, 1);
+    wait_until("设备上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    let online: Value = client
+        .get(format!("{base}/debug/v1/devices"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(online["wake_word"], "你好小智");
+    let dev = &online["devices"][0];
+    assert_eq!(dev["device_id"], DEVICE);
+    assert_eq!(dev["wake_word"], "你好 MOSS");
+    assert_eq!(dev["audio_channel_open"], true);
+
+    server.stop();
+}
+
+/// n146 返工回归：验证各测试时间窗关窗路径（user_stopped / script_closed / device_disconnected / expired / debug_disabled / device_removed）
+/// 在 `BenchWindowStore` 与 `GET /debug/v1/devices` 的只读返回（含 session_id 与 closed_at），
+/// 且用户手动结束后设备随后断开不得覆盖 `user_stopped`。
+#[test]
+fn bench_window_last_closed_tracks_all_close_reasons_on_debug_api() {
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let now = crate::unix_now();
+    let token = "tok_n146_close_reason_0123456789abcdef01";
+    let port = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let fetch_devices = |tok: &str| -> Value {
+        client
+            .get(format!("{base}/debug/v1/devices"))
+            .header("Authorization", format!("Bearer {tok}"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+
+    // 1. 设备上线并开窗 -> 脚本通过 HTTP 关闭 => script_closed
+    let dev1 = chat_device(&server, &registry, 1);
+    wait_until("dev1 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    let s1 = server.active_device_sessions()[0].session_id.clone();
+    server.open_bench_window(DEVICE, 10).unwrap();
+    let close_resp = client
+        .post(format!("{base}/debug/v1/bench-window"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "device_id": DEVICE, "action": "close" }))
+        .send()
+        .unwrap();
+    assert_eq!(close_resp.status(), 200);
+    let d1 = fetch_devices(token);
+    assert_eq!(
+        d1["devices"][0]["bench_window_last_closed"]["reason"],
+        "script_closed"
+    );
+    assert_eq!(
+        d1["devices"][0]["bench_window_last_closed"]["session_id"],
+        s1
+    );
+    assert!(
+        d1["devices"][0]["bench_window_last_closed"]["closed_at"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert_eq!(
+        d1["bench_window_last_closed"][DEVICE]["reason"],
+        "script_closed"
+    );
+
+    // 2. 再次开窗 -> 桌面用户点“立即结束测试”（user_stopped）-> 随后设备断开：必须保留 user_stopped
+    server.open_bench_window(DEVICE, 10).unwrap();
+    assert!(server.close_bench_window(
+        DEVICE,
+        crate::BenchWindowCloseReason::UserStopped,
+        "桌面手动结束",
+    ));
+    drop(dev1);
+    wait_until("dev1 离线", || server.active_device_sessions().is_empty());
+    let after_user_stop = fetch_devices(token);
+    assert_eq!(
+        after_user_stop["bench_window_last_closed"][DEVICE]["reason"],
+        "user_stopped"
+    );
+    assert_eq!(
+        after_user_stop["bench_window_last_closed"][DEVICE]["session_id"],
+        s1
+    );
+
+    // 3. 新会话上线开窗 -> 直接断开 => device_disconnected，再重连上线后在 devices[0] 可见
+    let dev2 = chat_device(&server, &registry, 1);
+    wait_until("dev2 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    let s2 = server.active_device_sessions()[0].session_id.clone();
+    assert_ne!(s2, s1);
+    server.open_bench_window(DEVICE, 10).unwrap();
+    drop(dev2);
+    wait_until("dev2 离线", || server.active_device_sessions().is_empty());
+
+    let dev3 = chat_device(&server, &registry, 1);
+    wait_until("dev3 上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+    let s3 = server.active_device_sessions()[0].session_id.clone();
+    let d3 = fetch_devices(token);
+    assert_eq!(d3["devices"][0]["session_id"], s3);
+    assert_eq!(
+        d3["devices"][0]["bench_window_last_closed"]["reason"],
+        "device_disconnected"
+    );
+    assert_eq!(
+        d3["devices"][0]["bench_window_last_closed"]["session_id"],
+        s2
+    );
+
+    // 4. 短时间窗到期 => expired
+    server
+        .shared
+        .open_bench_window_for_test(DEVICE, Duration::from_millis(60))
+        .unwrap();
+    wait_until("短时间窗到期", || server.bench_windows().is_empty());
+    let d3_exp = fetch_devices(token);
+    assert_eq!(
+        d3_exp["devices"][0]["bench_window_last_closed"]["reason"],
+        "expired"
+    );
+    assert_eq!(
+        d3_exp["devices"][0]["bench_window_last_closed"]["session_id"],
+        s3
+    );
+
+    // 5. 关闭调试开关 => debug_disabled（再重新打开开关可在内存查到）
+    server.open_bench_window(DEVICE, 10).unwrap();
+    server.disable_debug_api();
+    let last_disabled = server
+        .bench_window_last_closed(DEVICE)
+        .expect("应记录 debug_disabled");
+    assert_eq!(
+        last_disabled.reason,
+        crate::BenchWindowCloseReason::DebugDisabled
+    );
+    assert_eq!(last_disabled.session_id, s3);
+
+    // 6. 移除设备 => device_removed
+    let _ = server
+        .enable_debug_api(0, token.into(), now, now + 3600, None)
+        .unwrap();
+    server.open_bench_window(DEVICE, 10).unwrap();
+    server.clear_device_state(DEVICE);
+    let last_removed = server
+        .bench_window_last_closed(DEVICE)
+        .expect("应记录 device_removed");
+    assert_eq!(
+        last_removed.reason,
+        crate::BenchWindowCloseReason::DeviceRemoved
+    );
+    assert_eq!(last_removed.session_id, s3);
+
+    drop(dev3);
     server.stop();
 }

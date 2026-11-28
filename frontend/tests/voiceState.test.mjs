@@ -2764,11 +2764,14 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(e2ePrompt, /AGENTS\.md/);
   assert.match(e2ePrompt, /docs\/developer\/safety\.md.*§4\.6 \/ §4\.7/);
   assert.doesNotMatch(e2ePrompt, /sim_guard\.rs|PREROLL_MS|System\.Speech|或同名.*\.txt|<id>\.txt/);
-  // 前提由用户完成、预检不满足暂停、仅到生成预览、git pull + --finish
+  // 前提由用户完成、预检不满足暂停、自动唤醒（不要求用户手动喊）、仅到生成预览、git pull + --finish
   assert.match(e2ePrompt, /git pull/);
   assert.match(e2ePrompt, /node scripts\/verify\.mjs --finish/);
   assert.match(e2ePrompt, /由用户完成/);
   assert.match(e2ePrompt, /暂停/);
+  assert.match(e2ePrompt, /脚本会用唤醒词录音自动唤醒/);
+  assert.match(e2ePrompt, /缺唤醒录音时先找网上真人语音.*录一次/);
+  assert.doesNotMatch(e2ePrompt, /请先唤醒小智|与唤醒由用户完成|需用户唤醒/);
   assert.match(e2ePrompt, /30–50 cm/);
   assert.match(e2ePrompt, /生成预览/);
   assert.match(e2ePrompt, /不要测试激光雕刻机/);
@@ -2846,6 +2849,8 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
 
   const textPrompt = buildAiBenchPrompt(readyStatus, "text");
   assert.match(textPrompt, /live-xiaozhi-debug\.mjs/);
+  assert.match(textPrompt, /唤醒词录音自动唤醒/);
+  assert.doesNotMatch(textPrompt, /请先唤醒小智|开关与设备唤醒由用户完成/);
   assert.match(textPrompt, /不要测试激光雕刻机/);
   assert.ok(textPrompt.length < 500, `精简后的文字直通提示词应明显缩短，当前 ${textPrompt.length} 字符`);
   assert.ok(!textPrompt.includes(fakeToken));
@@ -2996,6 +3001,36 @@ test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/
   assert.equal(okDraftGuide.progressText, "已录 1 / 2");
   assert.equal(okDraftGuide.canSave, true);
   assert.equal(okDraftGuide.canPreview, true);
+
+  // 5b. n146 唤醒词条目独立标注、动态匹配当前唤醒词文本，不计入 13 句标准语料进度
+  const corpusWithWake = [
+    { id: "wake_word", purpose: "wake", label: "唤醒词（自动唤醒用）", text: "你好大白" },
+    ...corpus,
+  ];
+  const wakeOnlyGuide = benchRecordingGuideState({
+    corpusItems: corpusWithWake,
+    recordings: [{ speaker: "我", corpus_id: "wake_word", text: "你好大白", duration_ms: 900, peak_level: 35 }],
+    speaker: "我",
+    currentIndex: 0,
+  });
+  assert.equal(wakeOnlyGuide.totalCount, 2, "唤醒词条目不计入标准语料总数");
+  assert.equal(wakeOnlyGuide.itemCount, 3);
+  assert.equal(wakeOnlyGuide.recordedCount, 0, "只录唤醒词时标准语料已录数仍为 0");
+  assert.equal(wakeOnlyGuide.progressText, "已录 0 / 2");
+  assert.equal(wakeOnlyGuide.hasWakeItem, true);
+  assert.equal(wakeOnlyGuide.wakeRecorded, true);
+  assert.equal(wakeOnlyGuide.isCurrentWakeWord, true);
+  assert.equal(
+    wakeOnlyGuide.expectBadges.some((b) => b.key === "wake" && b.text.includes("不计入 13 句标准语料")),
+    true,
+  );
+  const staleWakeGuide = benchRecordingGuideState({
+    corpusItems: corpusWithWake,
+    recordings: [{ speaker: "我", corpus_id: "wake_word", text: "你好小智", duration_ms: 900, peak_level: 35 }],
+    speaker: "我",
+    currentIndex: 0,
+  });
+  assert.equal(staleWakeGuide.wakeRecorded, false, "唤醒词变更后旧文本录音不再视为已录");
 
   // 6. 权限拒绝提示覆盖 macOS / Windows / Linux
   const deniedErr = Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });

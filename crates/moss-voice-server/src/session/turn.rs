@@ -21,6 +21,7 @@ impl<'a> Session<'a> {
         self.listen.barge_resumed = false;
         let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
         let is_text_inject = matches!(&input, TurnInput::Text { .. });
+        let initial_close = matches!(&input, TurnInput::Say { close: true, .. });
         let latched_bench_window = std::mem::take(&mut self.pending_bench_window);
         let in_bench_window = kind == TurnKind::Answer
             && (latched_bench_window
@@ -368,7 +369,7 @@ impl<'a> Session<'a> {
             resampler: None,
             audio_started: false,
             done: false,
-            close: false,
+            close: initial_close,
             listen_after: None,
             tools_started: false,
             tts_started_at: None,
@@ -1117,7 +1118,7 @@ impl<'a> Session<'a> {
                     return Ok(());
                 };
                 turn.done = true;
-                turn.close = close;
+                turn.close |= close;
                 turn.pending_messages = messages;
                 if turn.audio_started {
                     // 播完剩余音频后由 tick 收尾；若此前仍在等待启动缓冲则立即唤醒首帧

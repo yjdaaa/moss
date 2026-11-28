@@ -971,3 +971,79 @@ fn idle_session_says_goodbye_then_closes() {
             .any(|event| event.text.contains("没有对话，已说再见"))
     );
 }
+
+/// n146 回归：WebSocket 唤醒后的正常自动模式语音对话，分别经 fast_exit（“再见”）与大模型 `end_conversation` 工具退出，
+/// 均严格按 stt → tts start → 句字幕/音频帧 → tts stop → 关连接收尾，服务端会话清空。
+#[test]
+fn ws_awake_normal_voice_exit_via_fast_exit_and_end_conversation_closes_cleanly() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([Round::Reply {
+            deltas: vec![],
+            calls: vec![ToolCall::new(
+                "exit-1",
+                "end_conversation",
+                r#"{"farewell":"好的，有需要再叫我。"}"#,
+            )],
+            delay_ms: 0,
+        }])),
+        ..Default::default()
+    };
+    let (server, registry, fakes) =
+        start_chat(llm, &["再见", "我先去忙了"], Duration::from_secs(60));
+    let goodbye = ConversationSettings::default().goodbye;
+
+    // 1. fast_exit：唤醒后自动拾音模式说“再见”
+    let mut dev1 = chat_device(&server, &registry, 1);
+    send_json(
+        &mut dev1,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut pcm = tone(UP, 300.0, 500, 8000.0);
+    pcm.extend(silence(UP, 600));
+    send_audio(&mut dev1, 1, &uplink(&pcm));
+    let items1 = collect_items(&mut dev1);
+    assert!(
+        items1.iter().any(|i| matches!(i, Item::Frame)),
+        "fast_exit 须播报再见音频"
+    );
+    assert_eq!(
+        texts(&items1),
+        vec![
+            "听:再见".to_owned(),
+            "tts:start".into(),
+            format!("句:{goodbye}"),
+            "tts:stop".into()
+        ]
+    );
+    expect_closed(&mut dev1);
+    wait_until("WS fast_exit 会话已清理", || {
+        server.status().sessions.is_empty()
+    });
+    assert!(fakes.llm.seen.lock().unwrap().is_empty());
+
+    // 2. end_conversation 工具：再次唤醒后说非固定退出词，由大模型调用 end_conversation
+    let mut dev2 = chat_device(&server, &registry, 1);
+    send_json(
+        &mut dev2,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    send_audio(&mut dev2, 1, &uplink(&pcm));
+    let items2 = collect_items(&mut dev2);
+    assert!(
+        items2.iter().any(|i| matches!(i, Item::Frame)),
+        "end_conversation 须播报道别音频"
+    );
+    assert_eq!(
+        texts(&items2),
+        vec![
+            "听:我先去忙了".to_owned(),
+            "tts:start".into(),
+            "句:好的，有需要再叫我。".into(),
+            "tts:stop".into()
+        ]
+    );
+    expect_closed(&mut dev2);
+    wait_until("WS end_conversation 会话已清理", || {
+        server.status().sessions.is_empty()
+    });
+}

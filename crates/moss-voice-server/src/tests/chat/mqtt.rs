@@ -976,3 +976,315 @@ fn mqtt_idle_text_inject_skips_device_tts_and_goodbye_so_device_stays_idle() {
     assert_eq!(server.status().sessions[0].state, "idle");
     server.stop();
 }
+
+/// n146 回归：常连 MQTT 唤醒状态下正常语音对话说“再见”（fast_exit）以及大模型调用 `end_conversation` 工具，
+/// 均严格按 stt → tts start → 句字幕 → tts stop → goodbye（session_id 与 hello 一致）收尾；
+/// 退出后迟到的 listen start 不会让会话回到 listening，服务端状态保持 idle 且 audio_channel_open=false。
+#[test]
+fn mqtt_awake_voice_exit_returns_to_standby_and_ignores_late_listen_start() {
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr {
+            replies: Mutex::new(VecDeque::from([
+                Ok("再见".to_owned()),
+                Ok("我先忙别的去了".to_owned()),
+            ])),
+            ..Default::default()
+        }),
+        Arc::new(FakeLlm {
+            rounds: Mutex::new(VecDeque::from([Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "exit-mqtt-1",
+                    "end_conversation",
+                    r#"{"farewell":"好的，先退下了。"}"#,
+                )],
+                delay_ms: 0,
+            }])),
+            ..Default::default()
+        }),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 60,
+            idle_timeout: Duration::from_secs(60),
+            mqtt: Some(crate::MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("常连模式已开启");
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    let init = device.read_mcp();
+    device.reply_mcp(
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(device.read_mcp()["method"], "notifications/initialized");
+    let list = device.read_mcp();
+    device.reply_mcp(&list["id"], serde_json::json!({"tools": []}));
+    wait_until("常连初始待机状态 audio_channel_open=false", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.state == "idle" && !s.audio_channel_open)
+    });
+
+    let goodbye_text = ConversationSettings::default().goodbye;
+    let cases = [
+        ("再见", goodbye_text.as_str(), "fast_exit"),
+        ("我先忙别的去了", "好的，先退下了。", "end_conversation"),
+    ];
+    for (expected_stt, expected_farewell, label) in cases {
+        device.publish(&serde_json::json!({
+            "type": "hello", "version": 3, "transport": "udp",
+            "features": {"mcp": true},
+            "audio_params": {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
+        }));
+        let hello = loop {
+            let v = device.read_json();
+            if v["type"] == "hello" {
+                break v;
+            }
+        };
+        let session_id = hello["session_id"].as_str().unwrap().to_owned();
+        wait_until("唤醒后 audio_channel_open=true", || {
+            server
+                .active_device_sessions()
+                .iter()
+                .any(|s| s.session_id == session_id && s.audio_channel_open)
+        });
+        let mut voice = UdpVoice::open(&hello);
+        device.publish(&serde_json::json!({
+            "session_id": session_id, "type": "listen", "state": "start", "mode": "manual"
+        }));
+        wait_until("进入拾音态", || {
+            server
+                .active_device_sessions()
+                .iter()
+                .any(|s| s.session_id == session_id && s.state == "listening")
+        });
+        let uplink_frames = uplink(&tone(UP, 300.0, 400, 8000.0));
+        voice.send(&uplink_frames);
+        wait_until("上行音频到达", || {
+            server
+                .active_device_sessions()
+                .iter()
+                .any(|s| s.session_id == session_id && s.level > 0)
+        });
+        device.publish(&serde_json::json!({
+            "session_id": session_id, "type": "listen", "state": "stop"
+        }));
+
+        let mut seq = Vec::new();
+        let goodbye = loop {
+            let v = device.read_json();
+            match (v["type"].as_str(), v["state"].as_str()) {
+                (Some("stt"), _) => seq.push(format!("stt:{}", v["text"].as_str().unwrap_or(""))),
+                (Some("tts"), Some("start")) => seq.push("tts:start".into()),
+                (Some("tts"), Some("sentence_start")) => {
+                    seq.push(format!("sentence:{}", v["text"].as_str().unwrap_or("")))
+                }
+                (Some("tts"), Some("stop")) => seq.push("tts:stop".into()),
+                (Some("goodbye"), _) => {
+                    seq.push("goodbye".into());
+                    break v;
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(
+            seq,
+            vec![
+                format!("stt:{expected_stt}"),
+                "tts:start".into(),
+                format!("sentence:{expected_farewell}"),
+                "tts:stop".into(),
+                "goodbye".into(),
+            ],
+            "{label} 下发顺序必须严格为 stt → tts start → 句 → tts stop → goodbye"
+        );
+        assert_eq!(
+            goodbye["session_id"].as_str(),
+            Some(session_id.as_str()),
+            "{label} goodbye.session_id 必须与 hello.session_id 一致"
+        );
+        wait_until(
+            "goodbye 后回到 idle 且 audio_channel_open=false",
+            || {
+                server.active_device_sessions().iter().any(|s| {
+                    s.session_id == session_id && s.state == "idle" && !s.audio_channel_open
+                })
+            },
+        );
+
+        // 模拟设备在收到 goodbye 前发出的迟到 listen start + detect：均须忽略，不得回到 listening
+        device.publish(&serde_json::json!({
+            "session_id": session_id, "type": "listen", "state": "start", "mode": "auto"
+        }));
+        device.publish(&serde_json::json!({
+            "session_id": session_id, "type": "listen", "state": "detect", "text": "你好小智"
+        }));
+        device.publish(&serde_json::json!({"type": "ping"}));
+        loop {
+            let msg = device.read_json();
+            assert_ne!(msg["type"], "tts", "{label} 退出后迟到消息绝不能触发 tts");
+            if msg["type"] == "pong" {
+                break;
+            }
+        }
+        let s = &server.active_device_sessions()[0];
+        assert_eq!(s.state, "idle", "{label} 迟到 listen start 后仍应为 idle");
+        assert!(
+            !s.audio_channel_open,
+            "{label} 迟到 listen start 后音频通道仍应关闭"
+        );
+    }
+    server.stop();
+}
+
+/// n146 回归：MQTT 退出轮播完再见时若有已到点计时提醒排队，`pending_goodbye` 必须先发 `goodbye` 关语音通道，
+/// 不能让 `deliver_due_timers` 抢在 `goodbye` 前开启语音轮次导致提醒被吞；通道关后提醒改走待机 `alert` 送达。
+#[test]
+fn mqtt_exit_sends_goodbye_before_due_timer_and_delivers_timer_as_standby_alert() {
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr {
+            replies: Mutex::new(VecDeque::from([Ok("再见".to_owned())])),
+            ..Default::default()
+        }),
+        Arc::new(FakeLlm::default()),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 60,
+            idle_timeout: Duration::from_secs(60),
+            mqtt: Some(crate::MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("常连模式已开启");
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    let init = device.read_mcp();
+    device.reply_mcp(
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(device.read_mcp()["method"], "notifications/initialized");
+    let list = device.read_mcp();
+    device.reply_mcp(&list["id"], serde_json::json!({"tools": []}));
+
+    device.publish(&serde_json::json!({
+        "type": "hello", "version": 3, "transport": "udp",
+        "features": {"mcp": true},
+        "audio_params": {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
+    }));
+    let hello = loop {
+        let v = device.read_json();
+        if v["type"] == "hello" {
+            break v;
+        }
+    };
+    let session_id = hello["session_id"].as_str().unwrap().to_owned();
+    let mut voice = UdpVoice::open(&hello);
+    device.publish(&serde_json::json!({
+        "session_id": session_id, "type": "listen", "state": "start", "mode": "manual"
+    }));
+    wait_until("进入拾音态", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == "listening")
+    });
+    voice.send(&uplink(&tone(UP, 300.0, 400, 8000.0)));
+    wait_until("上行音频到达", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.session_id == session_id && s.level > 0)
+    });
+    device.publish(&serde_json::json!({
+        "session_id": session_id, "type": "listen", "state": "stop"
+    }));
+
+    // 等退出轮开始播“好的，再见”时投递一个已到点计时提醒，验证它不会抢在 goodbye 前开语音轮次或被吞掉
+    loop {
+        let v = device.read_json();
+        if v["type"] == "tts" && v["state"] == "start" {
+            break;
+        }
+    }
+    server
+        .device_request(
+            DEVICE,
+            crate::DeviceRequest::TimerReminder {
+                id: "timer-exit-race-1".into(),
+                speech: "提醒：检查木料".into(),
+            },
+        )
+        .unwrap();
+
+    let mut events_after_start = Vec::new();
+    let alert = loop {
+        let v = device.read_json();
+        match (v["type"].as_str(), v["state"].as_str()) {
+            (Some("tts"), Some("start")) => events_after_start.push("tts:start".to_owned()),
+            (Some("tts"), Some("stop")) => events_after_start.push("tts:stop".to_owned()),
+            (Some("goodbye"), _) => {
+                assert_eq!(v["session_id"].as_str(), Some(session_id.as_str()));
+                events_after_start.push("goodbye".to_owned());
+            }
+            (Some("alert"), _) => {
+                events_after_start.push("alert".to_owned());
+                break v;
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        events_after_start,
+        vec!["tts:stop", "goodbye", "alert"],
+        "tts:stop 后必须紧跟 goodbye，不能抢开第二轮 tts，随后以待机 alert 投递到点提醒"
+    );
+    assert_eq!(alert["status"], "计时提醒");
+    assert_eq!(alert["message"], "提醒：检查木料");
+    let s = &server.active_device_sessions()[0];
+    assert_eq!(s.state, "idle");
+    assert!(!s.audio_channel_open);
+    server.stop();
+}

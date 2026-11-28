@@ -235,10 +235,24 @@ const EXPECT_TOOL_LABELS = {
   "self.screen.set_brightness": "调节屏幕亮度",
 };
 
-/** 提炼单条测试语料的预期考核点胶囊（考核词、预期路由、预期工具、安全门禁、空闲约束）。 */
+/** 判断语料条目是否为唤醒词用途（不计入 13 句标准语料覆盖率）。 */
+export function isWakeCorpusItem(item) {
+  return Boolean(item && (String(item.purpose || "").trim().toLowerCase() === "wake" || item.id === "wake_word"));
+}
+
+function normalizeWakeCompareText(text) {
+  return String(text || "")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .toLowerCase();
+}
+
+/** 提炼单条测试语料的预期考核点胶囊（唤醒用途、考核词、预期路由、预期工具、安全门禁、空闲约束）。 */
 export function formatCorpusExpectBadges(item) {
   if (!item || typeof item !== "object") return [];
   const badges = [];
+  if (isWakeCorpusItem(item)) {
+    badges.push({ key: "wake", tone: "info", text: "自动唤醒用（不计入 13 句标准语料）" });
+  }
   const keyTerms = Array.isArray(item.key_terms)
     ? item.key_terms.map((t) => String(t || "").trim()).filter(Boolean)
     : [];
@@ -316,24 +330,36 @@ export function benchRecordingGuideState({
   draft = null,
 }) {
   const items = Array.isArray(corpusItems) ? corpusItems : [];
-  const totalCount = items.length;
-  const safeIndex = totalCount > 0 ? Math.max(0, Math.min(totalCount - 1, Number(currentIndex) || 0)) : 0;
-  const currentItem = totalCount > 0 ? items[safeIndex] : null;
+  const standardItems = items.filter((item) => !isWakeCorpusItem(item));
+  const wakeItem = items.find((item) => isWakeCorpusItem(item)) || null;
+  const itemCount = items.length;
+  const totalCount = standardItems.length;
+  const safeIndex = itemCount > 0 ? Math.max(0, Math.min(itemCount - 1, Number(currentIndex) || 0)) : 0;
+  const currentItem = itemCount > 0 ? items[safeIndex] : null;
+  const isCurrentWakeWord = isWakeCorpusItem(currentItem);
+  const currentStandardPosition =
+    currentItem && !isCurrentWakeWord ? standardItems.findIndex((it) => it.id === currentItem.id) + 1 : 0;
   const speakerCheck = validateSpeakerLabel(speaker);
 
   const byCorpusId = new Map();
   if (speakerCheck.ok) {
     for (const rec of Array.isArray(recordings) ? recordings : []) {
       if (rec && rec.speaker === speakerCheck.speaker && rec.corpus_id) {
+        if (wakeItem && rec.corpus_id === wakeItem.id && wakeItem.text && rec.text) {
+          if (normalizeWakeCompareText(rec.text) !== normalizeWakeCompareText(wakeItem.text)) {
+            continue;
+          }
+        }
         byCorpusId.set(rec.corpus_id, rec);
       }
     }
   }
 
   let recordedCount = 0;
-  for (const item of items) {
+  for (const item of standardItems) {
     if (byCorpusId.has(item.id)) recordedCount += 1;
   }
+  const wakeRecorded = Boolean(wakeItem && byCorpusId.has(wakeItem.id));
 
   const currentSaved = currentItem ? byCorpusId.get(currentItem.id) || null : null;
   const busy = recording || openingMic || saving;
@@ -345,8 +371,13 @@ export function benchRecordingGuideState({
     speakerValid: speakerCheck.ok,
     speakerError: speakerCheck.error,
     speaker: speakerCheck.speaker,
+    itemCount,
     totalCount,
     recordedCount,
+    hasWakeItem: Boolean(wakeItem),
+    wakeRecorded,
+    isCurrentWakeWord,
+    currentStandardPosition,
     complete: totalCount > 0 && recordedCount >= totalCount,
     progressText: `已录 ${recordedCount} / ${totalCount}`,
     currentIndex: safeIndex,
@@ -360,7 +391,7 @@ export function benchRecordingGuideState({
     canRetry: speakerCheck.ok && Boolean(currentItem) && !busy && Boolean(draft || currentSaved),
     canPreview: !recording && !openingMic && Boolean(draft?.wavDataUrl || currentSaved),
     canSave: speakerCheck.ok && Boolean(currentItem) && !busy && draftOk,
-    canNext: totalCount > 1 && !busy && safeIndex < totalCount - 1,
-    nextIndex: totalCount > 0 ? Math.min(totalCount - 1, safeIndex + 1) : 0,
+    canNext: itemCount > 1 && !busy && safeIndex < itemCount - 1,
+    nextIndex: itemCount > 0 ? Math.min(itemCount - 1, safeIndex + 1) : 0,
   };
 }

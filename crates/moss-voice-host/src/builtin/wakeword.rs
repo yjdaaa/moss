@@ -193,6 +193,50 @@ impl BuiltinVoice {
             })
     }
 
+    /// n146：查询某台设备或全局当前生效的唤醒词（只读）。
+    /// - 指定 `device_id` 时：仅当该设备已推送自定义唤醒词（`wake_target == "custom"`）返回当前保存的自定义唤醒词，否则返回官方默认“你好小智”；
+    /// - 未指定 `device_id` 时：优先看在线设备、再看已配置设备偏好，只要存在采用自定义唤醒词的设备即返回该自定义唤醒词，否则返回“你好小智”。
+    pub(super) fn effective_wake_word(&self, device_id: Option<&str>) -> String {
+        let default_word = moss_voice_server::debug_api::DEFAULT_WAKE_WORD.to_owned();
+        let settings = moss_voice::settings::load(&self.settings_file());
+        let prefs = &settings.builtin_device_prefs;
+        if let Some(dev_id) = device_id.map(str::trim).filter(|s| !s.is_empty()) {
+            return if prefs.get(dev_id).and_then(|p| p.wake_target.as_deref()) == Some("custom") {
+                self.wakeword_word().text
+            } else {
+                default_word
+            };
+        }
+        let online_ids: Vec<String> = self
+            .server
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().map(|server| {
+                    server
+                        .active_device_sessions()
+                        .into_iter()
+                        .map(|s| s.device_id)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        let use_custom = if !online_ids.is_empty() {
+            online_ids
+                .iter()
+                .any(|id| prefs.get(id).and_then(|p| p.wake_target.as_deref()) == Some("custom"))
+        } else {
+            prefs
+                .values()
+                .any(|p| p.wake_target.as_deref() == Some("custom"))
+        };
+        if use_custom {
+            self.wakeword_word().text
+        } else {
+            default_word
+        }
+    }
+
     fn wakeword_base(&self) -> Option<Vec<u8>> {
         std::fs::read(self.wakeword_dir().join("base-assets.bin")).ok()
     }
@@ -642,6 +686,7 @@ impl BuiltinVoice {
                 .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
                 let raw=serde_json::to_vec(&serde_json::json!({"text":word.text,"command":word.command,"threshold":word.threshold})).map_err(|_|internal("保存唤醒词失败"))?;
                 self.wakeword_write("settings.json", &raw)?;
+                self.invalidate_status_probe_cache();
             }
             "clear_base" => {
                 if input["confirmed"].as_bool() != Some(true) {
@@ -682,6 +727,7 @@ impl BuiltinVoice {
                     "custom"
                 };
                 let size = self.push_device_assets(device_id, target_name, with_screen)?;
+                self.invalidate_status_probe_cache();
                 let mut status = self.wakeword_status()?;
                 status["pushed"] = serde_json::json!({"device_id":device_id,"size":size,"target":input["target"],"screen_pack":with_screen});
                 return Ok(status);

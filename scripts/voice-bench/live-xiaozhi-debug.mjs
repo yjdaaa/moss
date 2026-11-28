@@ -31,6 +31,17 @@ import {
   sliceProcessTrace,
   writeTimelineFiles,
 } from "./bench-common.mjs";
+import {
+  BENCH_RECORDINGS_DIR_REL,
+  DEFAULT_WAKE_RETRIES,
+  DEFAULT_WAKE_TIMEOUT_MS,
+  DEFAULT_WAKE_WORD,
+  attemptAutoWake,
+  detectPlayer,
+  renderWakeEventsMarkdown,
+  resolveWakeWordAsset,
+  summarizeWakeEvents,
+} from "./voice-assets.mjs";
 
 export {
   DEFAULT_DEBUG_PORT,
@@ -57,8 +68,18 @@ const STAGE_KEYS = [
   "turn_end",
 ];
 
-/** 汇总统计（P50/P90 耗时、失败轮次、模拟门禁命中数、播放卡顿汇总）。 */
-export function buildSummary({ runId, deviceId, corpusName, startedAtMs, finishedAtMs, turns }) {
+/** 汇总统计（P50/P90 耗时、失败轮次、模拟门禁命中数、播放卡顿与自动唤醒汇总）。 */
+export function buildSummary({
+  runId,
+  deviceId,
+  corpusName,
+  startedAtMs,
+  finishedAtMs,
+  turns,
+  wakeWord = DEFAULT_WAKE_WORD,
+  wakeEvents = [],
+  wakeDegradedReason = null,
+}) {
   const executed = turns.filter((t) => t.verdict !== "skipped");
   const passed = turns.filter((t) => t.verdict === "passed");
   const failed = turns.filter((t) => t.verdict === "failed");
@@ -103,6 +124,10 @@ export function buildSummary({ runId, deviceId, corpusName, startedAtMs, finishe
     gate_hits: gateHits,
     stop_skipped_count: stopSkipped,
     audio_channel_closed_turns: silentTurns,
+    wake_word: wakeWord || DEFAULT_WAKE_WORD,
+    wake_summary: summarizeWakeEvents(wakeEvents),
+    wake_events: Array.isArray(wakeEvents) ? wakeEvents : [],
+    wake_degraded_reason: wakeDegradedReason || null,
     playback: {
       total_underruns: totalUnderruns,
       total_stall_ms: totalStallMs,
@@ -133,11 +158,19 @@ export function buildReportMarkdown(summary, turns) {
     `- **安全门禁命中**：工具拒绝 ${summary.gate_hits} 次，模拟停止跳过 ${summary.stop_skipped_count} 次`,
     `- **播放卡顿**：欠载 ${summary.playback.total_underruns} 次，累计卡顿 ${summary.playback.total_stall_ms} ms`,
     `- **整轮耗时**：P50 = ${summary.wall_ms.p50_ms ?? "—"} ms，P90 = ${summary.wall_ms.p90_ms ?? "—"} ms`,
-    ...(summary.audio_channel_closed_turns > 0
+    ...(summary.wake_summary && summary.wake_summary.total > 0
       ? [
-          `- **播报通道提示**：有 ${summary.audio_channel_closed_turns} 轮执行时小智处于常连待机态（未唤醒打开 UDP 音频通道），服务端仅完成了对话、工具与合成验证，未向待机设备下发播报（小智无声属正常，也不会误切聆听态）；如需实机听声，请先唤醒小智再运行。`,
+          `- **自动唤醒**：共 ${summary.wake_summary.total} 次（成功 ${summary.wake_summary.succeeded} · 失败 ${summary.wake_summary.failed}，唤醒词「${summary.wake_word || DEFAULT_WAKE_WORD}」）`,
         ]
       : []),
+    ...(summary.audio_channel_closed_turns > 0
+      ? [
+          summary.wake_degraded_reason
+            ? `- **播报通道降级说明**：有 ${summary.audio_channel_closed_turns} 轮执行时小智处于常连待机态（未开 UDP 音频通道），已降级为仅服务端验证（未向设备下发播报，小智无声属正常，也不会误切聆听态）。降级原因：${summary.wake_degraded_reason}`
+            : `- **播报通道降级说明**：有 ${summary.audio_channel_closed_turns} 轮执行时小智处于常连待机态（未开 UDP 音频通道），已降级为仅服务端验证（未向设备下发播报，小智无声属正常，也不会误切聆听态）。`,
+        ]
+      : []),
+    ...renderWakeEventsMarkdown(summary.wake_events, summary.wake_word),
     "",
     "## 阶段耗时汇总（毫秒）",
     "",
@@ -272,11 +305,16 @@ export async function runLiveDebugBench(opts = {}) {
   const turnTimeoutMs = Number(opts.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS);
   const pollIntervalMs = Number(opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
   const idleWaitMs = Number(opts.idleWaitMs ?? DEFAULT_IDLE_WAIT_MS);
+  const wakeTimeoutMs = Number(opts.wakeTimeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS);
+  const wakeRetries = Math.max(1, Math.floor(Number(opts.wakeRetries ?? DEFAULT_WAKE_RETRIES)));
   const corpusPath = resolve(opts.corpus || DEFAULT_CORPUS_PATH);
   const corpusRaw = JSON.parse(readFileSync(corpusPath, "utf8"));
   const corpusName = String(corpusRaw?.name || "custom");
   const corpusTurns = Array.isArray(corpusRaw) ? corpusRaw : Array.isArray(corpusRaw?.turns) ? corpusRaw.turns : [];
   const { runtimeDir, token, baseUrl } = resolveDebugConnection(opts);
+  const resolvedRecordingsDir = opts.recordingsDir
+    ? resolve(opts.recordingsDir)
+    : join(runtimeDir, BENCH_RECORDINGS_DIR_REL);
   const runId = opts.runId || formatRunId();
   const traceDir = opts.traceDir ? resolve(opts.traceDir) : resolveProcessTraceDir(runtimeDir);
   const archiveDir = opts.outDir ? resolve(opts.outDir) : join(runtimeDir, "voice-bench", runId);
@@ -287,6 +325,7 @@ export async function runLiveDebugBench(opts = {}) {
       homedir(),
       process.cwd(),
       dirname(corpusPath),
+      resolvedRecordingsDir,
       traceDir,
       archiveDir,
       opts.tokenFile ? dirname(resolve(opts.tokenFile)) : "",
@@ -296,25 +335,81 @@ export async function runLiveDebugBench(opts = {}) {
     throw new Error(`语料文件不含有效轮次：${redactText(corpusPath, redactOpts)}`);
   }
 
-  // 1. 启动前检查在线设备
+  // 1. 启动前检查在线设备；常连待机态（audio_channel_open: false）且本机能外放时先用唤醒词录音自动唤醒
   const devicesRes = await debugFetch(baseUrl, token, "/debug/v1/devices");
   if (!devicesRes.ok) {
     const msg = devicesRes.data?.message || `查询在线设备失败（HTTP ${devicesRes.status}）`;
     return { exitCode: 1, archiveDir: null, summary: null, turns: [], errorMessage: msg };
   }
   const onlineDevices = Array.isArray(devicesRes.data?.devices) ? devicesRes.data.devices : [];
+  let targetDevice = opts.device
+    ? onlineDevices.find((d) => d.device_id === opts.device) || null
+    : onlineDevices[0] || null;
+
+  const canDetectPlayer =
+    opts.disableAudioPlayback === true
+      ? null
+      : typeof opts.playWavFn === "function"
+        ? { cmd: "injected", kind: "injected" }
+        : typeof opts.detectPlayerFn === "function"
+          ? opts.detectPlayerFn()
+          : detectPlayer(opts.platform || process.platform);
+  const speakerFilter = String(opts.speaker || "").trim();
+  let wakeWord =
+    String(targetDevice?.wake_word || devicesRes.data?.wake_word || "").trim() || DEFAULT_WAKE_WORD;
+  let wakeResolved = resolveWakeWordAsset({
+    wakeWord,
+    runtimeDir,
+    recordingsDir: resolvedRecordingsDir,
+    speaker: speakerFilter,
+  });
+  const wakeEvents = [];
+  let wakeDegradedReason = null;
+
   if (onlineDevices.length === 0) {
-    return {
-      exitCode: 1,
-      archiveDir: null,
-      summary: null,
-      turns: [],
-      errorMessage: NO_ONLINE_DEVICE_MESSAGE,
-    };
+    if (canDetectPlayer && wakeResolved.ok) {
+      const wakeRes = await attemptAutoWake({
+        baseUrl,
+        token,
+        deviceId: opts.device || "",
+        wakeWord,
+        wakeAsset: wakeResolved.asset,
+        missingReason: wakeResolved.missingReason,
+        trigger: "offline_initial",
+        player: canDetectPlayer.kind === "injected" ? null : canDetectPlayer,
+        playWavFn: opts.playWavFn,
+        waitFor: "audio_open",
+        wakeTimeoutMs,
+        wakeRetries,
+        pollIntervalMs,
+      });
+      wakeEvents.push(wakeRes.event);
+      if (wakeRes.ok && wakeRes.device) {
+        targetDevice = wakeRes.device;
+        const devWord = String(targetDevice.wake_word || "").trim();
+        if (devWord) wakeWord = devWord;
+      } else {
+        return {
+          exitCode: 1,
+          archiveDir: null,
+          summary: null,
+          turns: [],
+          wakeEvents,
+          errorMessage: `${NO_ONLINE_DEVICE_MESSAGE}；${wakeRes.error || "唤醒失败"}`,
+        };
+      }
+    } else {
+      return {
+        exitCode: 1,
+        archiveDir: null,
+        summary: null,
+        turns: [],
+        errorMessage: wakeResolved.ok
+          ? NO_ONLINE_DEVICE_MESSAGE
+          : `${NO_ONLINE_DEVICE_MESSAGE}（${wakeResolved.missingReason}）`,
+      };
+    }
   }
-  const targetDevice = opts.device
-    ? onlineDevices.find((d) => d.device_id === opts.device)
-    : onlineDevices[0];
   if (!targetDevice) {
     return {
       exitCode: 1,
@@ -325,6 +420,88 @@ export async function runLiveDebugBench(opts = {}) {
     };
   }
   const deviceId = targetDevice.device_id;
+
+  // n146 常连待机（audio_channel_open: false）：优先外放唤醒词录音唤醒小智让回复真实出声；
+  // 不能外放、缺唤醒词录音或唤醒失败时降级为仅服务端验证并在报告写明原因。
+  const ensureAwakeForInject = async (devSnapshot, trigger) => {
+    if (!devSnapshot || devSnapshot.audio_channel_open !== false) {
+      return devSnapshot;
+    }
+    const devWord = String(devSnapshot.wake_word || "").trim();
+    if (devWord && devWord !== wakeWord) {
+      wakeWord = devWord;
+      wakeResolved = resolveWakeWordAsset({
+        wakeWord,
+        runtimeDir,
+        recordingsDir: resolvedRecordingsDir,
+        speaker: speakerFilter,
+      });
+    }
+    if (!canDetectPlayer) {
+      wakeDegradedReason = "本机无可用音频外放程序，已降级为仅服务端验证";
+      wakeEvents.push({
+        at: new Date().toISOString(),
+        trigger,
+        wake_word: wakeWord,
+        recording: wakeResolved.asset?.filename || null,
+        source_type: wakeResolved.asset?.source_type || null,
+        audio_origin: wakeResolved.asset?.audio_origin || wakeResolved.asset?.source_type || null,
+        speaker: wakeResolved.asset?.speaker || null,
+        dataset: wakeResolved.asset?.dataset || null,
+        license: wakeResolved.asset?.license || null,
+        attempts: 0,
+        success: false,
+        elapsed_ms: 0,
+        session_id_after: devSnapshot.session_id || null,
+        error: wakeDegradedReason,
+      });
+      return devSnapshot;
+    }
+    if (!wakeResolved.ok) {
+      wakeDegradedReason = wakeResolved.missingReason;
+      wakeEvents.push({
+        at: new Date().toISOString(),
+        trigger,
+        wake_word: wakeWord,
+        recording: null,
+        source_type: null,
+        audio_origin: null,
+        speaker: null,
+        dataset: null,
+        license: null,
+        attempts: 0,
+        success: false,
+        elapsed_ms: 0,
+        session_id_after: devSnapshot.session_id || null,
+        error: wakeDegradedReason,
+      });
+      return devSnapshot;
+    }
+    const wakeRes = await attemptAutoWake({
+      baseUrl,
+      token,
+      deviceId,
+      wakeWord,
+      wakeAsset: wakeResolved.asset,
+      missingReason: wakeResolved.missingReason,
+      trigger,
+      player: canDetectPlayer.kind === "injected" ? null : canDetectPlayer,
+      playWavFn: opts.playWavFn,
+      waitFor: "audio_open",
+      wakeTimeoutMs,
+      wakeRetries,
+      pollIntervalMs,
+    });
+    wakeEvents.push(wakeRes.event);
+    if (wakeRes.ok && wakeRes.device) {
+      wakeDegradedReason = null;
+      return wakeRes.device;
+    }
+    wakeDegradedReason = `${wakeRes.error || "自动唤醒失败"}，已降级为仅服务端验证`;
+    return devSnapshot;
+  };
+
+  targetDevice = await ensureAwakeForInject(targetDevice, "standby");
 
   // 2. 开启完整过程记录（并记住原始状态，结束与信号中断必恢复）
   const startedAtMs = Date.now();
@@ -406,6 +583,12 @@ export async function runLiveDebugBench(opts = {}) {
           detail: null,
         });
         continue;
+      }
+
+      const latestDevBeforeInject =
+        (latestDevices?.devices || []).find((d) => d.device_id === deviceId) || null;
+      if (latestDevBeforeInject && latestDevBeforeInject.audio_channel_open === false && !wakeDegradedReason) {
+        await ensureAwakeForInject(latestDevBeforeInject, "post_exit");
       }
 
       // 注入测试文字
@@ -499,6 +682,9 @@ export async function runLiveDebugBench(opts = {}) {
       startedAtMs,
       finishedAtMs,
       turns: redactedTurns,
+      wakeWord,
+      wakeEvents,
+      wakeDegradedReason,
     }),
     redactOpts,
   );
@@ -523,24 +709,32 @@ export function parseArgs(argv) {
   const opts = {
     corpus: null,
     device: null,
+    speaker: "",
+    recordingsDir: null,
     runtimeDir: null,
     url: null,
     tokenFile: null,
     outDir: null,
     turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+    wakeTimeoutMs: DEFAULT_WAKE_TIMEOUT_MS,
+    wakeRetries: DEFAULT_WAKE_RETRIES,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--corpus") opts.corpus = argv[++i];
     else if (a === "--device") opts.device = argv[++i];
+    else if (a === "--speaker") opts.speaker = argv[++i] || "";
+    else if (a === "--recordings-dir") opts.recordingsDir = argv[++i];
     else if (a === "--runtime-dir") opts.runtimeDir = argv[++i];
     else if (a === "--url") opts.url = argv[++i];
     else if (a === "--token-file") opts.tokenFile = argv[++i];
     else if (a === "--out-dir") opts.outDir = argv[++i];
     else if (a === "--turn-timeout-ms") opts.turnTimeoutMs = Number(argv[++i]);
     else if (a === "--poll-interval-ms") opts.pollIntervalMs = Number(argv[++i]);
+    else if (a === "--wake-timeout-ms") opts.wakeTimeoutMs = Number(argv[++i]);
+    else if (a === "--wake-retries") opts.wakeRetries = Number(argv[++i]);
     else if (a === "--help" || a === "-h") opts.help = true;
     else throw new Error(`未知参数：${a}`);
   }

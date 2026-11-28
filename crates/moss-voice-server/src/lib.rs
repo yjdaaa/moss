@@ -66,7 +66,10 @@ pub use conversation::{
     Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
     TurnEndPredictor,
 };
-pub use debug_api::{BenchWindowView, DEFAULT_BENCH_WINDOW_MINUTES, MAX_BENCH_WINDOW_MINUTES};
+pub use debug_api::{
+    BenchWindowCloseReason, BenchWindowCloseRecord, BenchWindowView, DEFAULT_BENCH_WINDOW_MINUTES,
+    MAX_BENCH_WINDOW_MINUTES,
+};
 pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
 pub use jev::{
     DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter,
@@ -255,6 +258,8 @@ pub struct ServerConfig {
     pub mcp_pending_ttl: Duration,
     /// VA2/VA4 可选只读回调：查询当前是否有活跃的激光加工/走边框任务（不引入对 `laser-api` 的 crate 依赖）。
     pub active_laser_job: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// n146 可选只读回调：查询当前生效唤醒词（传 `Some(device_id)` 查该设备唤醒词，`None` 查全局默认；缺省为“你好小智”）。
+    pub wake_word_for_device: Option<Arc<dyn Fn(Option<&str>) -> String + Send + Sync>>,
     /// VA2 #5 本机调试入口的过程记录启停控制（由宿主注入，读写 `settings.json` 与 `ProcessTrace`）。
     pub debug_process_trace: Option<Arc<dyn debug_api::ProcessTraceControl>>,
     /// VB1 识别（ASR）真实录音语料库（默认关闭；模拟轮次不保存，不进诊断包与过程记录）。
@@ -308,6 +313,7 @@ impl Default for ServerConfig {
             eager_device_mcp: false,
             mcp_pending_ttl: session::MCP_PENDING_TTL,
             active_laser_job: None,
+            wake_word_for_device: None,
             debug_process_trace: None,
             asr_corpus: None,
             timers: Arc::new(timer::TimerStore::new()),
@@ -614,41 +620,17 @@ impl Shared {
         self.state.sessions_for_handles(&handles)
     }
 
-    /// VC1 同步检查调试令牌过期、调试开关状态、失活会话与时间窗到期，到期立即恢复普通轮次并记录事件。
+    /// VC1 同步检查调试令牌过期、调试开关状态、时间窗到期与失活会话，到期立即恢复普通轮次并记录原因。
     pub(crate) fn sync_bench_windows(&self) {
         if self.debug_gate.check_expiry() {
-            self.close_all_bench_windows("调试令牌已失效");
+            self.close_all_bench_windows(BenchWindowCloseReason::TokenExpired, "调试令牌已失效");
             return;
         }
-        if !self.debug_gate.snapshot().enabled && !self.bench_windows.list_active().is_empty() {
-            self.close_all_bench_windows("调试开关已关闭");
+        if !self.debug_gate.snapshot().enabled {
+            self.close_all_bench_windows(BenchWindowCloseReason::DebugDisabled, "调试开关已关闭");
             return;
         }
-        let stale = {
-            let active_handles = self.device_requests.lock().ok();
-            self.bench_windows.prune_inactive(|dev, sid| {
-                active_handles.as_ref().is_some_and(|map| {
-                    map.get(dev).is_some_and(|h| {
-                        h.session_id == sid
-                            && h.permission.load(std::sync::atomic::Ordering::Acquire)
-                    })
-                })
-            })
-        };
-        for closed in stale {
-            self.state.set_bench_window(&closed.device_id, None);
-            self.state.event_in_flow(
-                EventRecord::info(
-                    DiagCategory::Config,
-                    format!(
-                        "测试时间窗已关闭（设备断开）：设备 {} 已恢复普通轮次",
-                        closed.device_id
-                    ),
-                )
-                .source(DiagSource::Moss),
-                session::device_flow(&closed.device_id),
-            );
-        }
+        // 先判到期再判失活，避免已到期窗口在设备断开时被误记为 device_disconnected
         for expired in self.bench_windows.expire_due() {
             self.state.set_bench_window(&expired.device_id, None);
             self.state.event_in_flow(
@@ -661,6 +643,42 @@ impl Shared {
                 )
                 .source(DiagSource::Moss),
                 session::device_flow(&expired.device_id),
+            );
+        }
+        let stale = {
+            let active_handles = self.device_requests.lock().ok();
+            self.bench_windows.prune_inactive(|dev, sid| {
+                let Some(map) = active_handles.as_ref() else {
+                    return Some(BenchWindowCloseReason::DeviceDisconnected);
+                };
+                match map.get(dev) {
+                    Some(h)
+                        if h.session_id == sid
+                            && h.permission.load(std::sync::atomic::Ordering::Acquire) =>
+                    {
+                        None
+                    }
+                    Some(h) if h.session_id == sid => Some(BenchWindowCloseReason::DeviceRevoked),
+                    _ => Some(BenchWindowCloseReason::DeviceDisconnected),
+                }
+            })
+        };
+        for (closed, reason_kind) in stale {
+            self.state.set_bench_window(&closed.device_id, None);
+            let label = match reason_kind {
+                BenchWindowCloseReason::DeviceRevoked => "设备授权已撤销",
+                _ => "设备断开",
+            };
+            self.state.event_in_flow(
+                EventRecord::info(
+                    DiagCategory::Config,
+                    format!(
+                        "测试时间窗已关闭（{label}）：设备 {} 已恢复普通轮次",
+                        closed.device_id
+                    ),
+                )
+                .source(DiagSource::Moss),
+                session::device_flow(&closed.device_id),
             );
         }
     }
@@ -760,7 +778,9 @@ impl Shared {
             })
         });
         if !still_active {
-            let _ = self.bench_windows.close_if_session(device_id, &session_id);
+            let _ = self
+                .bench_windows
+                .rollback_if_session(device_id, &session_id);
             return Err(if !allowed.load(std::sync::atomic::Ordering::Acquire) {
                 InjectTurnError::forbidden("设备授权已撤销，无法打开测试时间窗")
             } else {
@@ -810,8 +830,13 @@ impl Shared {
         Ok(view)
     }
 
-    pub(crate) fn close_bench_window(&self, device_id: &str, reason: &str) -> bool {
-        let Some(closed) = self.bench_windows.close(device_id) else {
+    pub(crate) fn close_bench_window(
+        &self,
+        device_id: &str,
+        kind: BenchWindowCloseReason,
+        reason: &str,
+    ) -> bool {
+        let Some(closed) = self.bench_windows.close(device_id, kind) else {
             self.state.set_bench_window(device_id, None);
             return false;
         };
@@ -835,9 +860,13 @@ impl Shared {
         &self,
         device_id: &str,
         session_id: &str,
+        kind: BenchWindowCloseReason,
         reason: &str,
     ) -> bool {
-        let Some(closed) = self.bench_windows.close_if_session(device_id, session_id) else {
+        let Some(closed) = self
+            .bench_windows
+            .close_if_session(device_id, session_id, kind)
+        else {
             return false;
         };
         self.state.set_bench_window(&closed.device_id, None);
@@ -856,8 +885,12 @@ impl Shared {
         true
     }
 
-    pub(crate) fn close_all_bench_windows(&self, reason: &str) -> usize {
-        let closed = self.bench_windows.close_all();
+    pub(crate) fn close_all_bench_windows(
+        &self,
+        kind: BenchWindowCloseReason,
+        reason: &str,
+    ) -> usize {
+        let closed = self.bench_windows.close_all(kind);
         let count = closed.len();
         for view in closed {
             self.state.set_bench_window(&view.device_id, None);
@@ -1514,7 +1547,11 @@ impl VoiceServer {
 
     /// 移除设备时清理服务端内存中绑定该设备的摄像头缓存、待接进对话的照片与待下载唤醒词/画风包（n134）。
     pub fn clear_device_state(&self, device_id: &str) {
-        self.shared.close_bench_window(device_id, "设备已移除");
+        self.shared.close_bench_window(
+            device_id,
+            BenchWindowCloseReason::DeviceRemoved,
+            "设备已移除",
+        );
         self.shared.camera_preview.clear_device(device_id);
         let _ = self.shared.vision_photos.take(device_id);
         self.shared.assets_store.clear_device(device_id);
@@ -1747,14 +1784,25 @@ impl VoiceServer {
     }
 
     /// VC1 立即关闭指定设备的测试时间窗（桌面“立即结束测试”按钮或脚本调用）。
-    pub fn close_bench_window(&self, device_id: &str, reason: &str) -> bool {
-        self.shared.close_bench_window(device_id, reason)
+    pub fn close_bench_window(
+        &self,
+        device_id: &str,
+        kind: BenchWindowCloseReason,
+        reason: &str,
+    ) -> bool {
+        self.shared.close_bench_window(device_id, kind, reason)
     }
 
     /// VC1 当前全部处于打开状态的测试时间窗。
     pub fn bench_windows(&self) -> Vec<BenchWindowView> {
         self.shared.sync_bench_windows();
         self.shared.bench_windows.list_active()
+    }
+
+    /// VC1 / n146 指定设备最近一次关闭测试时间窗的只读记录。
+    pub fn bench_window_last_closed(&self, device_id: &str) -> Option<BenchWindowCloseRecord> {
+        self.shared.sync_bench_windows();
+        self.shared.bench_windows.last_closed_for(device_id)
     }
 
     /// VA2 #4 热启动或更新本机 `127.0.0.1` 调试 HTTP 入口（不断开已连接小智会话）；返回实际监听端口。
@@ -1771,7 +1819,8 @@ impl VoiceServer {
         };
         let shared_for_expiry = self.shared.clone();
         let wrapped_expired: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            shared_for_expiry.close_all_bench_windows("调试令牌已失效");
+            shared_for_expiry
+                .close_all_bench_windows(BenchWindowCloseReason::TokenExpired, "调试令牌已失效");
             if let Some(cb) = on_expired.as_ref() {
                 cb();
             }
@@ -1794,6 +1843,7 @@ impl VoiceServer {
             gate: self.shared.debug_gate.clone(),
             trace_control: self.shared.config.debug_process_trace.clone(),
             active_laser_job: self.shared.config.active_laser_job.clone(),
+            wake_word_for_device: self.shared.config.wake_word_for_device.clone(),
         });
         let events = self.shared.clone();
         runtime.spawn(async move {
@@ -1832,7 +1882,8 @@ impl VoiceServer {
     /// VA2 #4 立即作废令牌、关闭全部测试时间窗并关闭本机调试入口（不断开已连接小智会话）。
     pub fn disable_debug_api(&self) {
         self.shared.debug_gate.disable();
-        self.shared.close_all_bench_windows("调试开关已关闭");
+        self.shared
+            .close_all_bench_windows(BenchWindowCloseReason::DebugDisabled, "调试开关已关闭");
         if let Ok(mut slot) = self.debug_listener.lock()
             && let Some((_, stop_tx)) = slot.take()
         {

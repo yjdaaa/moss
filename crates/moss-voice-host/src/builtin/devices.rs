@@ -394,9 +394,13 @@ impl BuiltinVoice {
                 .server
                 .lock()
                 .map_err(|_| internal("内置语音服务状态锁失败"))?;
-            let closed = server
-                .as_ref()
-                .is_some_and(|s| s.close_bench_window(device_id, "桌面手动结束"));
+            let closed = server.as_ref().is_some_and(|s| {
+                s.close_bench_window(
+                    device_id,
+                    moss_voice_server::BenchWindowCloseReason::UserStopped,
+                    "桌面手动结束",
+                )
+            });
             return Ok(serde_json::json!({
                 "requested": label,
                 "device_id": device_id,

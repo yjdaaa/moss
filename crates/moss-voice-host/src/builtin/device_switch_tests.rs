@@ -2280,6 +2280,94 @@ fn bench_recordings_validates_quality_stores_per_speaker_excludes_diagnostics_an
     assert!(!wav_path.exists());
 }
 
+/// n146 唤醒词条目与动态唤醒词：
+/// 1. `e2e-corpus.json` 含 `wake_word`（`purpose: "wake"`），不计入 13 句标准语料覆盖率；
+/// 2. 唤醒词文本动态跟随 MOSS 当前生效唤醒词（默认“你好小智”，推送自定义后跟随自定义唤醒词）。
+#[test]
+fn bench_recordings_wake_item_follows_effective_wake_word_and_excludes_from_standard_count() {
+    use base64::Engine as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let host = std::sync::Arc::new(
+        laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+    );
+    let builtin = init(Some(host)).0.unwrap();
+
+    let samples: Vec<i16> = (0..16_000)
+        .map(|i| {
+            let phase = 2.0 * std::f32::consts::PI * 440.0 * (i as f32) / 16_000.0;
+            (phase.sin() * 0.4 * 32767.0).round() as i16
+        })
+        .collect();
+    let wav_b64 = base64::engine::general_purpose::STANDARD
+        .encode(moss_voice_providers::wav::encode_wav(&samples, 16_000));
+
+    // 默认未推自定义唤醒词：生效唤醒词为“你好小智”，标准语料数恒为 13，列表含 14 条（含 1 条 wake）
+    let list = builtin
+        .bench_recordings_manage(&serde_json::json!({"action": "list"}))
+        .unwrap();
+    assert_eq!(list["wake_word"], "你好小智");
+    assert_eq!(list["wake_word_recorded"], false);
+    assert_eq!(list["corpus_count"], 13);
+    let items = list["corpus_items"].as_array().unwrap();
+    assert_eq!(items.len(), 14);
+    assert_eq!(items[0]["id"], "wake_word");
+    assert_eq!(items[0]["purpose"], "wake");
+    assert_eq!(items[0]["text"], "你好小智");
+
+    // 仅录唤醒词：不计入 13 句标准语料覆盖率，但 wake_word_recorded 变为 true
+    let saved_wake = builtin
+        .bench_recordings_manage(&serde_json::json!({
+            "action": "save",
+            "speaker": "我",
+            "corpus_id": "wake_word",
+            "audio_wav_base64": wav_b64,
+        }))
+        .unwrap();
+    assert_eq!(saved_wake["saved"]["text"], "你好小智");
+    assert_eq!(saved_wake["corpus_count"], 13);
+    assert_eq!(saved_wake["wake_word_recorded"], true);
+    assert_eq!(saved_wake["speakers"][0]["recorded_count"], 0);
+    assert_eq!(saved_wake["speakers"][0]["corpus_count"], 13);
+    assert_eq!(saved_wake["speakers"][0]["complete"], false);
+
+    // 保存自定义唤醒词并标记设备 dev-custom 已推送自定义唤醒词：按设备与全局动态跟随新唤醒词
+    builtin
+        .wakeword_manage(&serde_json::json!({
+            "action": "save",
+            "text": "你好大白",
+            "command": "ni hao da bai",
+            "threshold": 0.25,
+        }))
+        .unwrap();
+    moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+        s.builtin_device_prefs
+            .entry("dev-custom".into())
+            .or_default()
+            .wake_target = Some("custom".into());
+        s.builtin_device_prefs
+            .entry("dev-default".into())
+            .or_default()
+            .wake_target = Some("default".into());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(builtin.effective_wake_word(Some("dev-custom")), "你好大白");
+    assert_eq!(builtin.effective_wake_word(Some("dev-default")), "你好小智");
+    assert_eq!(builtin.effective_wake_word(Some("dev-unknown")), "你好小智");
+    assert_eq!(builtin.effective_wake_word(None), "你好大白");
+
+    let list_custom = builtin
+        .bench_recordings_manage(&serde_json::json!({"action": "list"}))
+        .unwrap();
+    assert_eq!(list_custom["wake_word"], "你好大白");
+    assert_eq!(list_custom["corpus_items"][0]["text"], "你好大白");
+    assert_eq!(
+        list_custom["wake_word_recorded"], false,
+        "旧录音文本是“你好小智”，切换为“你好大白”后不再视作当前唤醒词已录"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn bench_recordings_rejects_symlinked_parent_dir_on_read_and_delete() {

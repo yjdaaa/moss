@@ -413,7 +413,12 @@ pub(crate) async fn serve_session(
                 .map(|prev| prev.session_id)
             });
             if let Some(prev_sid) = replaced_sid {
-                shared.close_bench_window_for_session(&device_id, &prev_sid, "设备重连");
+                shared.close_bench_window_for_session(
+                    &device_id,
+                    &prev_sid,
+                    crate::BenchWindowCloseReason::DeviceDisconnected,
+                    "设备重连",
+                );
             }
             shared.state.open(SessionView {
                 session_id: session_id.clone(),
@@ -435,6 +440,7 @@ pub(crate) async fn serve_session(
                 screen_height: None,
                 screen_pack: false,
                 transport: transport.into(),
+                audio_channel_open: socket.audio_open(),
                 text_font_size: init_font_size,
                 text_font_bpp: init_font_bpp,
                 bench_window: None,
@@ -480,7 +486,12 @@ pub(crate) async fn serve_session(
         {
             map.remove(&device_id);
         }
-        shared.close_bench_window_for_session(&device_id, &session_id, "设备断开");
+        shared.close_bench_window_for_session(
+            &device_id,
+            &session_id,
+            crate::BenchWindowCloseReason::DeviceDisconnected,
+            "设备断开",
+        );
         shared.state.close(&session_id);
         shared
             .registry
@@ -522,8 +533,18 @@ pub(crate) async fn serve_session(
     }
     session.finish_timing("disconnected");
     session.flush_unplayed_timers("已断开");
-    // VC1：设备断开时立即关闭该会话绑定的测试时间窗并写入事件，防止状态残留
-    shared.close_bench_window_for_session(&device_id, &session_id, "设备断开");
+    // VC1：设备断开或被撤销时立即关闭该会话绑定的测试时间窗并记录原因类别，防止状态残留
+    let close_kind = if permission.load(std::sync::atomic::Ordering::Acquire) {
+        crate::BenchWindowCloseReason::DeviceDisconnected
+    } else {
+        crate::BenchWindowCloseReason::DeviceRevoked
+    };
+    let close_label = if close_kind == crate::BenchWindowCloseReason::DeviceRevoked {
+        "设备授权已撤销"
+    } else {
+        "设备断开"
+    };
+    shared.close_bench_window_for_session(&device_id, &session_id, close_kind, close_label);
     session.last_verified_person = None;
     session.carried_photo = None;
     session.listen.paused = None;

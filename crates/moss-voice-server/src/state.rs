@@ -230,6 +230,9 @@ pub struct SessionView {
     /// n71 连接方式：`websocket`（唤醒时才连）/ `mqtt`（常连模式）。
     #[serde(default)]
     pub transport: String,
+    /// n146 语音音频通道是否已打开（WebSocket 恒为 `true`；常连 MQTT 待机为 `false`，唤醒完成 `hello` 后为 `true`，`goodbye` 后恢复 `false`）。
+    #[serde(default)]
+    pub audio_channel_open: bool,
     /// n81 设备在 `hello` 中上报的文字字库字号与位深（供推送资源包选匹配的内置中文字库）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_font_size: Option<u32>,
@@ -820,6 +823,14 @@ impl LiveState {
         }
     }
 
+    pub fn set_audio_channel_open(&self, session_id: &str, open: bool) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.audio_channel_open = open;
+        }
+    }
+
     pub fn set_bench_window(
         &self,
         device_id: &str,
@@ -1073,6 +1084,7 @@ mod tests {
             screen_height: None,
             screen_pack: false,
             transport: "websocket".into(),
+            audio_channel_open: true,
             text_font_size: None,
             text_font_bpp: None,
             bench_window: None,
@@ -1124,6 +1136,7 @@ mod tests {
             screen_height: None,
             screen_pack: false,
             transport: "websocket".into(),
+            audio_channel_open: true,
             text_font_size: None,
             text_font_bpp: None,
             bench_window: None,

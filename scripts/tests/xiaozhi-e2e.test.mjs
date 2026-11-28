@@ -48,6 +48,12 @@ function startFakeE2eServer({
   runtimeDir,
   deviceId = "aa:bb:cc:dd:ee:01",
   sessionId = "sess-e2e-1",
+  wakeWord = "你好小智",
+  initialState = "listening",
+  initialAudioOpen = true,
+  initialOnline = true,
+  transport = "mqtt",
+  omitTopLevelLastClosed = false,
   onAcousticTurn,
   onDigitalTurn = null,
 }) {
@@ -56,12 +62,30 @@ function startFakeE2eServer({
   const traceCalls = [];
   let traceEnabled = false;
   let benchWindowOpen = false;
-  let deviceState = "listening";
+  let benchWindowSessionId = null;
+  let lastBenchWindowClosed = null;
+  let deviceState = initialState;
+  let audioChannelOpen = initialAudioOpen;
+  let deviceOnline = initialOnline;
   let deviceLevel = 0;
   let recentPeak = 0;
   let latestTurn = 0;
   const turns = new Map();
   let overlapObserved = false;
+
+  function closeBenchWindowInternal(reason, expectedSessionId = null) {
+    if (!benchWindowOpen) return false;
+    if (expectedSessionId && benchWindowSessionId !== expectedSessionId) return false;
+    benchWindowOpen = false;
+    lastBenchWindowClosed = {
+      device_id: deviceId,
+      session_id: benchWindowSessionId || currentSessionId,
+      reason,
+      closed_at: Math.floor(Date.now() / 1000),
+    };
+    benchWindowSessionId = null;
+    return true;
+  }
 
   const server = createServer(async (req, res) => {
     const auth = req.headers.authorization || "";
@@ -85,21 +109,33 @@ function startFakeE2eServer({
         JSON.stringify({
           mode: "chat",
           active_laser_job: false,
+          wake_word: wakeWord,
           bench_windows: benchWindowOpen ? [{ device_id: deviceId, session_id: currentSessionId, active: true }] : [],
-          devices: [
-            {
-              device_id: deviceId,
-              session_id: currentSessionId,
-              state: deviceState,
-              level: deviceLevel,
-              recent_peak_level: recentPeak,
-              latest_turn: latestTurn,
-              latest_turn_id: latestTurn > 0 ? `${currentSessionId}:${latestTurn}` : null,
-              bench_window: benchWindowOpen
-                ? { device_id: deviceId, session_id: currentSessionId, active: true, max_minutes: 30 }
-                : null,
-            },
-          ],
+          ...(omitTopLevelLastClosed
+            ? {}
+            : {
+                bench_window_last_closed: lastBenchWindowClosed ? { [deviceId]: lastBenchWindowClosed } : {},
+              }),
+          devices: deviceOnline
+            ? [
+                {
+                  device_id: deviceId,
+                  session_id: currentSessionId,
+                  transport,
+                  audio_channel_open: audioChannelOpen,
+                  wake_word: wakeWord,
+                  state: deviceState,
+                  level: deviceLevel,
+                  recent_peak_level: recentPeak,
+                  latest_turn: latestTurn,
+                  latest_turn_id: latestTurn > 0 ? `${currentSessionId}:${latestTurn}` : null,
+                  bench_window: benchWindowOpen
+                    ? { device_id: deviceId, session_id: currentSessionId, active: true, max_minutes: 30 }
+                    : null,
+                  bench_window_last_closed: lastBenchWindowClosed,
+                },
+              ]
+            : [],
         }),
       );
       return;
@@ -109,6 +145,7 @@ function startFakeE2eServer({
       benchActions.push({ ...body });
       if (body.action === "open") {
         benchWindowOpen = true;
+        benchWindowSessionId = currentSessionId;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -125,9 +162,9 @@ function startFakeE2eServer({
         return;
       }
       if (body.action === "close") {
-        benchWindowOpen = false;
+        const closed = closeBenchWindowInternal("script_closed");
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ device_id: deviceId, action: "close", closed: true, bench_window: null }));
+        res.end(JSON.stringify({ device_id: deviceId, action: "close", closed, bench_window: null }));
         return;
       }
     }
@@ -229,7 +266,7 @@ function startFakeE2eServer({
     }
     latestTurn += 1;
     const turnNo = latestTurn;
-    const turnId = `${sessionId}:${turnNo}`;
+    const turnId = `${currentSessionId}:${turnNo}`;
     const custom = onAcousticTurn({ spec, turnNo, playbackStartedAtMs, playbackEndedAtMs, runtimeDir }) || {};
     recentPeak = custom.peak_uplink_level ?? 52;
     deviceState = "thinking";
@@ -269,7 +306,7 @@ function startFakeE2eServer({
     turns.set(turnId, {
       turn_id: turnId,
       device_id: deviceId,
-      session_id: sessionId,
+      session_id: currentSessionId,
       turn: turnNo,
       simulated: true,
       bench_window: benchWindowOpen,
@@ -325,7 +362,17 @@ function startFakeE2eServer({
         corpus_date: corpusDate,
         corpus_turn_id: corpusTurnId,
       });
-      deviceState = "listening";
+      if (custom.exitToStandby === "ws_disconnect") {
+        deviceState = "idle";
+        audioChannelOpen = false;
+        deviceOnline = false;
+        closeBenchWindowInternal("device_disconnected", currentSessionId);
+      } else if (custom.exitToStandby === "mqtt_standby") {
+        deviceState = "idle";
+        audioChannelOpen = false;
+      } else {
+        deviceState = "listening";
+      }
       deviceLevel = 0;
     }, 35);
   }
@@ -340,8 +387,22 @@ function startFakeE2eServer({
         get overlapObserved() {
           return overlapObserved;
         },
-        setSessionId(nextId) {
+        setSessionId(nextId, resetTurn = false) {
           currentSessionId = nextId;
+          if (resetTurn) latestTurn = 0;
+        },
+        setDeviceState(nextState) {
+          deviceState = nextState;
+        },
+        setAudioOpen(open) {
+          audioChannelOpen = Boolean(open);
+        },
+        setOnline(online) {
+          deviceOnline = Boolean(online);
+          if (!deviceOnline) closeBenchWindowInternal("device_disconnected", currentSessionId);
+        },
+        closeBenchWindowWithReason(reason) {
+          return closeBenchWindowInternal(reason);
         },
         simulateAcousticPlayback,
         close: () => new Promise((done) => server.close(done)),
@@ -1322,5 +1383,555 @@ test("VE1/VE3/VE4 网上真人语音按目录标为 online-human、强制 4 字�
   } finally {
     await fakeServer.close();
     rmSync(e2eRuntime, { recursive: true, force: true });
+  }
+});
+
+test("n146 唤醒词录音选择顺序（① 本机 → ② 网上 4 字段 → ③ 缺录音报错）、默认语料排除唤醒项与待机/退出后自动唤醒", async () => {
+  const { prepareVoiceAssets, resolveWakeWordAsset } = await import("../voice-bench/voice-assets.mjs");
+  const { DEFAULT_E2E_CORPUS_PATH } = await import("../voice-bench/xiaozhi-e2e.mjs");
+
+  // 1. 唤醒录音解析顺序：本机录音 > 网上 4 字段公开真人语音 > 缺唤醒词录音
+  const resolveRuntime = mkdtempSync(join(tmpdir(), "moss-n146-wake-resolve-"));
+  try {
+    // ③ 均无：明确报缺唤醒词录音
+    const missing = resolveWakeWordAsset({ wakeWord: "你好大白", runtimeDir: resolveRuntime });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.code, "missing_wake_word_recording");
+    assert.ok(missing.missingReason.includes("缺唤醒词录音"), missing.missingReason);
+    assert.ok(missing.missingReason.includes("你好大白"), missing.missingReason);
+
+    // 网上目录仅有 .txt 或缺 license 的条目一律拒绝
+    const onlineDir = join(resolveRuntime, "voice-bench", "recordings", "online");
+    mkdirSync(onlineDir, { recursive: true });
+    makeSyntheticWav(join(onlineDir, "bad_txt.wav"), 0.5, 440);
+    writeFileSync(join(onlineDir, "bad_txt.txt"), "你好大白\n", "utf8");
+    makeSyntheticWav(join(onlineDir, "bad_no_lic.wav"), 0.5, 440);
+    writeFileSync(
+      join(onlineDir, "bad_no_lic.json"),
+      JSON.stringify({ text: "你好大白", dataset: "ds", source_url: "https://example.invalid/a" }),
+      "utf8",
+    );
+    assert.equal(
+      resolveWakeWordAsset({ wakeWord: "你好大白", runtimeDir: resolveRuntime }).ok,
+      false,
+      "缺少完整 4 字段 .json 的 online/ 唤醒语音必须拒绝",
+    );
+
+    // ② 放入完整 4 字段的网上真人唤醒词语音 -> 命中 online-human
+    makeSyntheticWav(join(onlineDir, "wake_dabai.wav"), 0.6, 520);
+    writeFileSync(
+      join(onlineDir, "wake_dabai.json"),
+      JSON.stringify({
+        text: "你好大白",
+        dataset: "CommonVoice-zh",
+        license: "CC0-1.0",
+        source_url: "https://example.invalid/wake_dabai",
+      }),
+      "utf8",
+    );
+    const hitOnline = resolveWakeWordAsset({ wakeWord: "你好大白", runtimeDir: resolveRuntime });
+    assert.equal(hitOnline.ok, true);
+    assert.equal(hitOnline.wakeSource, "online-human");
+    assert.equal(hitOnline.asset.source_type, "online-human");
+    assert.equal(hitOnline.asset.filename, "online/wake_dabai.wav");
+
+    // ① 放一条旧唤醒词的本机录音（不匹配）+ 一条匹配“你好大白”的本机录音 -> 优先命中本机录音
+    writeHumanRecording(resolveRuntime, "我", "old_wake", "你好小智", 420);
+    assert.equal(
+      resolveWakeWordAsset({ wakeWord: "你好大白", runtimeDir: resolveRuntime }).wakeSource,
+      "online-human",
+      "文本不匹配的本机旧唤醒词不得误用",
+    );
+    writeHumanRecording(resolveRuntime, "我", "wake_word", "你好大白", 480);
+    const hitLocal = resolveWakeWordAsset({ wakeWord: "你好大白", runtimeDir: resolveRuntime });
+    assert.equal(hitLocal.ok, true);
+    assert.equal(hitLocal.wakeSource, "local-recording");
+    assert.equal(hitLocal.asset.source_type, "human-recording");
+    assert.equal(hitLocal.asset.filename, "我/wake_word.wav");
+
+    // 默认 e2e-corpus.json 中的唤醒词条目绝不计入 13 句标准语料与 missingTurns
+    const defaultCorpus = JSON.parse(readFileSync(DEFAULT_E2E_CORPUS_PATH, "utf8"));
+    const preparedDefault = await prepareVoiceAssets({
+      turns: defaultCorpus.turns,
+      wakeWord: "你好大白",
+      runtimeDir: resolveRuntime,
+      persistRotation: false,
+    });
+    assert.equal(preparedDefault.missingTurns.length, 13, "唤醒词条目不计入 13 句标准语料缺失计数");
+    assert.equal(
+      preparedDefault.missingTurns.some((m) => m.id === "wake_word"),
+      false,
+      "missingTurns 绝不能出现 wake_word",
+    );
+    assert.equal(
+      preparedDefault.preparedTurns.some((p) => p.spec.id === "wake_word" || p.spec.text === "你好大白"),
+      false,
+      "唤醒词录音绝不能当作普通对话自由句注入",
+    );
+  } finally {
+    rmSync(resolveRuntime, { recursive: true, force: true });
+  }
+
+  // 2. 待机缺唤醒词录音报错 + 唤醒失败报“唤醒失败” + 退出语料后自动再唤醒（含 WS 重连重开时间窗）并写入归档
+  const token = "n146-e2e-wake-token-0123456789abcdef0123456789";
+  const runtimeDir = setupRuntimeWithToken("moss-n146-e2e-", token);
+  const corpusPath = join(runtimeDir, "exit-then-next.json");
+  writeHumanRecording(runtimeDir, "我", "t1", "激光机现在什么状态", 440);
+  writeHumanRecording(runtimeDir, "我", "fast_exit", "退下", 480);
+  writeHumanRecording(runtimeDir, "我", "t3", "三毫米椴木切割功率", 520);
+  writeFileSync(
+    corpusPath,
+    JSON.stringify({
+      name: "n146-exit-rewake",
+      turns: [
+        { id: "wake_word", purpose: "wake", label: "唤醒词", text: "你好小智" },
+        { id: "t1", label: "状态快查", text: "激光机现在什么状态", expect_route: "fast_read" },
+        { id: "fast_exit", label: "结束对话", text: "退下", expect_route: "fast_exit" },
+        { id: "t3", label: "复醒后查询", text: "三毫米椴木切割功率", key_terms: ["椴木"] },
+      ],
+    }),
+    "utf8",
+  );
+
+  // 2a. 待机态缺唤醒词录音 -> 明确报“缺唤醒词录音”且不开时间窗
+  const standbyMissingServer = await startFakeE2eServer({
+    token,
+    runtimeDir,
+    wakeWord: "你好大白",
+    initialState: "idle",
+    initialAudioOpen: false,
+    onAcousticTurn: () => ({ route: "fast_read" }),
+  });
+  try {
+    const missingRes = await runXiaozhiE2e({
+      runtimeDir,
+      url: standbyMissingServer.url,
+      corpus: corpusPath,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      wakeTimeoutMs: 150,
+      wakeRetries: 1,
+      playWavFn: async () => ({ started_at_ms: Date.now(), ended_at_ms: Date.now() + 20, duration_ms: 20 }),
+    });
+    assert.equal(missingRes.exitCode, 1);
+    assert.ok(missingRes.errorMessage.includes("缺唤醒词录音"), missingRes.errorMessage);
+    assert.equal(standbyMissingServer.benchActions.length, 0, "缺唤醒录音前绝不开时间窗");
+  } finally {
+    await standbyMissingServer.close();
+  }
+
+  // 放上匹配“你好大白”的本机唤醒录音
+  writeHumanRecording(runtimeDir, "我", "wake_word", "你好大白", 460);
+
+  // 2b. 设备不响应唤醒 -> 按超时与重试规则报告“唤醒失败”
+  const wakeFailServer = await startFakeE2eServer({
+    token,
+    runtimeDir,
+    wakeWord: "你好大白",
+    initialState: "idle",
+    initialAudioOpen: false,
+    onAcousticTurn: () => ({ route: "fast_read" }),
+  });
+  try {
+    let wakeAttempts = 0;
+    const failRes = await runXiaozhiE2e({
+      runtimeDir,
+      url: wakeFailServer.url,
+      corpus: corpusPath,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      wakeTimeoutMs: 80,
+      wakeRetries: 2,
+      playWavFn: async () => {
+        wakeAttempts += 1;
+        return { started_at_ms: Date.now(), ended_at_ms: Date.now() + 10, duration_ms: 10 };
+      },
+    });
+    assert.equal(failRes.exitCode, 1);
+    assert.equal(wakeAttempts, 2, "应按 wakeRetries 重试 2 次");
+    assert.ok(failRes.errorMessage.includes("唤醒失败"), failRes.errorMessage);
+    assert.ok(!failRes.errorMessage.includes("请先唤醒"), "唤醒失败不得退回让用户手动唤醒");
+  } finally {
+    await wakeFailServer.close();
+  }
+
+  // 2c. 完整流程：待机自动唤醒 -> t1 -> fast_exit（WS 断开回到待机）-> 自动再唤醒（新 session_id 并重开时间窗）-> t3
+  const e2eServer = await startFakeE2eServer({
+    token,
+    runtimeDir,
+    wakeWord: "你好大白",
+    initialState: "idle",
+    initialAudioOpen: false,
+    transport: "websocket",
+    onAcousticTurn: ({ spec }) => {
+      if (spec.id === "t1") {
+        return { raw_asr: "激光机现在什么状态", route: "fast_read", reply: "激光机空闲。" };
+      }
+      if (spec.id === "fast_exit") {
+        return { raw_asr: "退下", route: "fast_exit", reply: "好的，再见。", exitToStandby: "ws_disconnect" };
+      }
+      return { raw_asr: "三毫米椴木切割功率", route: "llm", reply: "建议功率 70%。" };
+    },
+  });
+  try {
+    const playedSeq = [];
+    let wakeCount = 0;
+    const okRes = await runXiaozhiE2e({
+      runtimeDir,
+      url: e2eServer.url,
+      corpus: corpusPath,
+      skipCalibration: true,
+      quietMs: 20,
+      pollIntervalMs: 15,
+      wakeTimeoutMs: 600,
+      wakeRetries: 2,
+      playWavFn: async (_wavPath, { spec }) => {
+        playedSeq.push(spec.id);
+        const started = Date.now();
+        await new Promise((r) => setTimeout(r, 25));
+        const ended = Date.now();
+        if (spec.purpose === "wake") {
+          wakeCount += 1;
+          if (wakeCount >= 2) {
+            e2eServer.setSessionId(`sess-e2e-rewoke-${wakeCount}`, true);
+            e2eServer.setOnline(true);
+          }
+          e2eServer.setAudioOpen(true);
+          e2eServer.setDeviceState("listening");
+          return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+        }
+        e2eServer.simulateAcousticPlayback({ spec, playbackStartedAtMs: started, playbackEndedAtMs: ended });
+        return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+      },
+    });
+    assert.equal(okRes.exitCode, 0, `完整待机唤醒 + 退出复醒应全部通过，错误：${okRes.errorMessage}`);
+    assert.deepEqual(playedSeq, ["wake_word", "t1", "fast_exit", "wake_word", "t3"]);
+    assert.equal(okRes.summary.wake_word, "你好大白");
+    assert.equal(okRes.summary.wake_summary.total, 2);
+    assert.equal(okRes.summary.wake_summary.succeeded, 2);
+    assert.equal(okRes.summary.wake_events[0].trigger, "standby_initial");
+    assert.equal(okRes.summary.wake_events[0].recording, "我/wake_word.wav");
+    assert.equal(okRes.summary.wake_events[0].source_type, "human-recording");
+    assert.equal(okRes.summary.wake_events[1].trigger, "post_exit");
+    assert.equal(okRes.summary.wake_events[1].session_id_after, "sess-e2e-rewoke-2");
+    assert.ok(
+      e2eServer.benchActions.filter((a) => a.action === "open").length >= 2,
+      "退出后 WS 重连产生新会话，必须在播放 t3 前重新打开测试时间窗",
+    );
+    const reportMd = readFileSync(join(okRes.archiveDir, "report.md"), "utf8");
+    assert.ok(reportMd.includes("## 自动唤醒记录"), "report.md 须包含自动唤醒记录");
+    assert.ok(reportMd.includes("退出语料后复醒"), "report.md 须记录退出后自动复醒");
+    assert.ok(reportMd.includes("我/wake_word.wav"), "report.md 须记录所用唤醒录音");
+    const manifest = JSON.parse(readFileSync(join(okRes.archiveDir, "audio-manifest.json"), "utf8"));
+    assert.equal(manifest.wake_word, "你好大白");
+    assert.equal(manifest.wake_events.length, 2);
+  } finally {
+    await e2eServer.close();
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test("n146 返工：退出后仅 device_disconnected 且同会话才重开、用户结束绝不重开、剩余分钟向上取整传递且归零即停", async () => {
+  const {
+    canReopenBenchWindowAfterExit,
+    computeRemainingBenchMinutes,
+    formatBenchWindowStopReason,
+  } = await import("../voice-bench/xiaozhi-e2e.mjs");
+
+  // 1. 纯函数边界：剩余分钟计算与重开条件判定
+  assert.equal(
+    computeRemainingBenchMinutes({ firstOpenedAtMs: 1_000_000, maxMinutes: 10, nowMs: 1_000_000 + 3.2 * 60_000 }),
+    7,
+    "剩余 6.8 分钟应向上取整为 7 分钟",
+  );
+  assert.equal(
+    computeRemainingBenchMinutes({ firstOpenedAtMs: 1_000_000, maxMinutes: 10, nowMs: 1_000_000 + 9.9 * 60_000 }),
+    1,
+    "剩余 0.1 分钟应向上取整为至少 1 分钟",
+  );
+  assert.equal(
+    computeRemainingBenchMinutes({ firstOpenedAtMs: 1_000_000, maxMinutes: 10, nowMs: 1_000_000 + 10 * 60_000 }),
+    0,
+    "耗时达到上限应返回 0，不再续开",
+  );
+  assert.equal(
+    computeRemainingBenchMinutes({ firstOpenedAtMs: 1_000_000, maxMinutes: 10, nowMs: 1_000_000 + 12 * 60_000 }),
+    0,
+  );
+  assert.equal(
+    canReopenBenchWindowAfterExit({
+      lastClosed: { session_id: "s1", reason: "device_disconnected" },
+      boundSessionId: "s1",
+    }),
+    true,
+  );
+  assert.equal(
+    canReopenBenchWindowAfterExit({
+      lastClosed: { session_id: "s1", reason: "user_stopped" },
+      boundSessionId: "s1",
+    }),
+    false,
+  );
+  assert.equal(
+    canReopenBenchWindowAfterExit({
+      lastClosed: { session_id: "s1", reason: "expired" },
+      boundSessionId: "s1",
+    }),
+    false,
+  );
+  assert.equal(
+    canReopenBenchWindowAfterExit({
+      lastClosed: { session_id: "s-other", reason: "device_disconnected" },
+      boundSessionId: "s1",
+    }),
+    false,
+    "非上一轮绑定 session_id 不得重开",
+  );
+  assert.match(formatBenchWindowStopReason({ reason: "user_stopped" }), /用户已结束测试/);
+  assert.match(formatBenchWindowStopReason({ reason: "expired" }), /时间窗到期/);
+  assert.match(formatBenchWindowStopReason(null, { remainingZero: true }), /时间窗到期/);
+
+  const token = "n146-rework-token-0123456789abcdef0123456789abc";
+  const runtimeDir = setupRuntimeWithToken("moss-n146-rework-", token);
+  const corpusPath = join(runtimeDir, "exit-reopen-corpus.json");
+  writeHumanRecording(runtimeDir, "我", "wake_word", "你好小智", 460);
+  writeHumanRecording(runtimeDir, "我", "fast_exit", "退下", 480);
+  writeHumanRecording(runtimeDir, "我", "t2", "三毫米椴木切割功率", 520);
+  writeFileSync(
+    corpusPath,
+    JSON.stringify({
+      name: "n146-rework",
+      turns: [
+        { id: "fast_exit", label: "退出词", text: "退下", expect_route: "fast_exit" },
+        { id: "t2", label: "退出后下一句", text: "三毫米椴木切割功率", key_terms: ["椴木"] },
+      ],
+    }),
+    "utf8",
+  );
+
+  try {
+    // 2a. 用户在退出句播放期间点击“立即结束测试”（user_stopped），随后 WS 断开：绝不重开、不放 t2、汇报写明“用户已结束测试”
+    for (const omitTopLevelLastClosed of [false, true]) {
+      const userStopServer = await startFakeE2eServer({
+        token,
+        runtimeDir,
+        transport: "websocket",
+        omitTopLevelLastClosed,
+        onAcousticTurn: ({ spec }) => {
+          if (spec.id === "fast_exit") {
+            return { raw_asr: "退下", route: "fast_exit", reply: "好的，再见。", exitToStandby: "ws_disconnect" };
+          }
+          return { raw_asr: "三毫米椴木切割功率", route: "llm", reply: "建议功率 70%。" };
+        },
+      });
+      try {
+        const played = [];
+        const res = await runXiaozhiE2e({
+          runtimeDir,
+          url: userStopServer.url,
+          corpus: corpusPath,
+          maxMinutes: 10,
+          skipCalibration: true,
+          quietMs: 20,
+          pollIntervalMs: 15,
+          wakeTimeoutMs: 500,
+          wakeRetries: 1,
+          playWavFn: async (_wavPath, { spec }) => {
+            played.push(spec.id);
+            const started = Date.now();
+            await new Promise((r) => setTimeout(r, 20));
+            const ended = Date.now();
+            if (spec.purpose === "wake") {
+              userStopServer.setSessionId("sess-e2e-after-user-stop", true);
+              userStopServer.setOnline(true);
+              userStopServer.setAudioOpen(true);
+              userStopServer.setDeviceState("listening");
+              return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+            }
+            userStopServer.simulateAcousticPlayback({
+              spec,
+              playbackStartedAtMs: started,
+              playbackEndedAtMs: ended,
+            });
+            // 退出句播放期间用户在桌面点“立即结束测试”，早于 35ms 后的 WS 断开
+            userStopServer.closeBenchWindowWithReason("user_stopped");
+            return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+          },
+        });
+        assert.equal(res.exitCode, 1, "用户结束测试应停止并返回非 0");
+        assert.equal(
+          userStopServer.benchActions.filter((a) => a.action === "open").length,
+          1,
+          `user_stopped 绝不得重开测试时间窗（omitTopLevel=${omitTopLevelLastClosed}）`,
+        );
+        assert.equal(played.includes("t2"), false, "用户结束后绝不得外放后续语料 t2");
+        assert.match(res.summary.stop_reason || "", /用户已结束测试/);
+        assert.match(res.errorMessage || "", /用户已结束测试/);
+        const reportMd = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+        assert.match(reportMd, /用户已结束测试/);
+      } finally {
+        await userStopServer.close();
+      }
+    }
+
+    // 2b. 设备断开（device_disconnected 且匹配上一轮 session_id）时重开，且 max_minutes 传剩余向上取整分钟（10 - 3.2 -> 7）
+    let virtualNow = 10_000_000;
+    const reopenServer = await startFakeE2eServer({
+      token,
+      runtimeDir,
+      transport: "websocket",
+      onAcousticTurn: ({ spec }) => {
+        if (spec.id === "fast_exit") {
+          return { raw_asr: "退下", route: "fast_exit", reply: "好的，再见。", exitToStandby: "ws_disconnect" };
+        }
+        return { raw_asr: "三毫米椴木切割功率", route: "llm", reply: "建议功率 70%。" };
+      },
+    });
+    try {
+      const res = await runXiaozhiE2e({
+        runtimeDir,
+        url: reopenServer.url,
+        corpus: corpusPath,
+        maxMinutes: 10,
+        nowFn: () => virtualNow,
+        skipCalibration: true,
+        quietMs: 20,
+        pollIntervalMs: 15,
+        wakeTimeoutMs: 500,
+        wakeRetries: 1,
+        playWavFn: async (_wavPath, { spec }) => {
+          const started = Date.now();
+          await new Promise((r) => setTimeout(r, 20));
+          const ended = Date.now();
+          if (spec.purpose === "wake") {
+            // 距首次开窗已过 3.2 分钟，剩余 6.8 分钟 -> 向上取整应传 7 分钟
+            virtualNow += Math.round(3.2 * 60_000);
+            reopenServer.setSessionId("sess-e2e-rewoke-rem7", true);
+            reopenServer.setOnline(true);
+            reopenServer.setAudioOpen(true);
+            reopenServer.setDeviceState("listening");
+            return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+          }
+          reopenServer.simulateAcousticPlayback({
+            spec,
+            playbackStartedAtMs: started,
+            playbackEndedAtMs: ended,
+          });
+          return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+        },
+      });
+      assert.equal(res.exitCode, 0, `设备断开且有剩余时长应正常重开并跑完：${res.errorMessage}`);
+      const opens = reopenServer.benchActions.filter((a) => a.action === "open");
+      assert.equal(opens.length, 2, "应在退出重连后重开 1 次");
+      assert.equal(opens[0].max_minutes, 10, "首次开窗传完整 maxMinutes");
+      assert.equal(opens[1].max_minutes, 7, "重开窗口须传整轮剩余分钟（向上取整）");
+    } finally {
+      await reopenServer.close();
+    }
+
+    // 2c. 整轮时间预算耗尽（剩余 0 分钟）-> 不再续开、不放 t2，汇报写明“时间窗到期”
+    let exhaustedNow = 20_000_000;
+    const exhaustedServer = await startFakeE2eServer({
+      token,
+      runtimeDir,
+      transport: "websocket",
+      onAcousticTurn: ({ spec }) => {
+        if (spec.id === "fast_exit") {
+          return { raw_asr: "退下", route: "fast_exit", reply: "好的，再见。", exitToStandby: "ws_disconnect" };
+        }
+        return { raw_asr: "三毫米椴木切割功率", route: "llm", reply: "建议功率 70%。" };
+      },
+    });
+    try {
+      const played = [];
+      const res = await runXiaozhiE2e({
+        runtimeDir,
+        url: exhaustedServer.url,
+        corpus: corpusPath,
+        maxMinutes: 10,
+        nowFn: () => exhaustedNow,
+        skipCalibration: true,
+        quietMs: 20,
+        pollIntervalMs: 15,
+        wakeTimeoutMs: 500,
+        wakeRetries: 1,
+        playWavFn: async (_wavPath, { spec }) => {
+          played.push(spec.id);
+          const started = Date.now();
+          await new Promise((r) => setTimeout(r, 20));
+          const ended = Date.now();
+          exhaustedServer.simulateAcousticPlayback({
+            spec,
+            playbackStartedAtMs: started,
+            playbackEndedAtMs: ended,
+          });
+          // 推进时钟至首次开窗后整 10 分钟（剩余 0）
+          exhaustedNow += 10 * 60_000;
+          return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+        },
+      });
+      assert.equal(res.exitCode, 1);
+      assert.equal(
+        exhaustedServer.benchActions.filter((a) => a.action === "open").length,
+        1,
+        "剩余 0 分钟时绝不得续开时间窗",
+      );
+      assert.deepEqual(played, ["fast_exit"], "剩余 0 分钟时不得唤醒或播放 t2");
+      assert.match(res.summary.stop_reason || "", /时间窗到期/);
+      const reportMd = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+      assert.match(reportMd, /时间窗到期/);
+    } finally {
+      await exhaustedServer.close();
+    }
+
+    // 2d. 旧窗因服务端到期（expired）关闭 -> 不重开、不放 t2，汇报写明“时间窗到期”
+    const expiredServer = await startFakeE2eServer({
+      token,
+      runtimeDir,
+      transport: "websocket",
+      onAcousticTurn: ({ spec }) => {
+        if (spec.id === "fast_exit") {
+          return { raw_asr: "退下", route: "fast_exit", reply: "好的，再见。", exitToStandby: "ws_disconnect" };
+        }
+        return { raw_asr: "三毫米椴木切割功率", route: "llm", reply: "建议功率 70%。" };
+      },
+    });
+    try {
+      const played = [];
+      const res = await runXiaozhiE2e({
+        runtimeDir,
+        url: expiredServer.url,
+        corpus: corpusPath,
+        maxMinutes: 10,
+        skipCalibration: true,
+        quietMs: 20,
+        pollIntervalMs: 15,
+        wakeTimeoutMs: 500,
+        wakeRetries: 1,
+        playWavFn: async (_wavPath, { spec }) => {
+          played.push(spec.id);
+          const started = Date.now();
+          await new Promise((r) => setTimeout(r, 20));
+          const ended = Date.now();
+          expiredServer.simulateAcousticPlayback({
+            spec,
+            playbackStartedAtMs: started,
+            playbackEndedAtMs: ended,
+          });
+          expiredServer.closeBenchWindowWithReason("expired");
+          return { started_at_ms: started, ended_at_ms: ended, duration_ms: ended - started };
+        },
+      });
+      assert.equal(res.exitCode, 1);
+      assert.equal(expiredServer.benchActions.filter((a) => a.action === "open").length, 1);
+      assert.equal(played.includes("t2"), false);
+      assert.match(res.summary.stop_reason || "", /时间窗到期/);
+    } finally {
+      await expiredServer.close();
+    }
+  } finally {
+    rmSync(runtimeDir, { recursive: true, force: true });
   }
 });

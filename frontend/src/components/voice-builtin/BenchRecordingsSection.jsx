@@ -398,18 +398,30 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       const nextIdx = findNextUnrecordedIndex(nextItems, recMap, savedIndex);
       const durSec = ((res?.saved?.duration_ms || 0) / 1000).toFixed(1);
 
+      const savedIsWake = guide.isCurrentWakeWord;
+      const savedPosLabel = savedIsWake
+        ? "唤醒词"
+        : `第 ${guide.currentStandardPosition || savedIndex + 1} 句`;
+      const nextItem = nextItems[nextIdx];
+      const nextIsWake = nextItem && (nextItem.purpose === "wake" || nextItem.id === "wake_word");
+      const nextStdPos =
+        nextItem && !nextIsWake
+          ? nextItems.filter((it) => it.purpose !== "wake" && it.id !== "wake_word").findIndex((it) => it.id === nextItem.id) + 1
+          : 0;
+      const nextPosLabel = nextIsWake ? "唤醒词" : `第 ${nextStdPos || nextIdx + 1} 句`;
+
       if (!allDone && nextIdx !== savedIndex) {
         setCurrentIndex(nextIdx);
         setFeedback({
           tone: "ok",
-          text: `已保存「${guide.speaker}」第 ${savedIndex + 1} 句（${durSec} 秒），已自动跳到第 ${nextIdx + 1} 句。`,
+          text: `已保存「${guide.speaker}」${savedPosLabel}（${durSec} 秒），已自动跳到${nextPosLabel}。`,
         });
       } else {
         setFeedback({
           tone: "ok",
           text: allDone
-            ? `已保存「${guide.speaker}」第 ${savedIndex + 1} 句（${durSec} 秒）· 该说话人全部 ${nextItems.length} 句语料已录齐！`
-            : `已保存「${guide.speaker}」第 ${savedIndex + 1} 句录音（16 kHz 单声道 WAV，${durSec} 秒）。`,
+            ? `已保存「${guide.speaker}」${savedPosLabel}（${durSec} 秒）· 该说话人全部语料已录齐！`
+            : `已保存「${guide.speaker}」${savedPosLabel}录音（16 kHz 单声道 WAV，${durSec} 秒）。`,
         });
       }
       await builtin?.refresh?.();
@@ -491,6 +503,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
   const promptParts = formatCorpusPromptSegments(guide.currentItem);
   const previewSrc = draft?.wavDataUrl || savedAudioUrl;
   const vu = liveMicLevelView(livePeak);
+  let standardSeq = 0;
 
   return (
     <div className="voice-block" id="voice-bench-recordings-box">
@@ -502,6 +515,14 @@ export function BenchRecordingsSection({ builtin, active = true }) {
         >
           {guide.progressText}
         </span>
+        {guide.hasWakeItem && (
+          <span
+            className={`ob-pill ${guide.wakeRecorded ? "ob-pill--ok" : "ob-pill--off"}`}
+            id="voice-bench-wake-progress"
+          >
+            {guide.wakeRecorded ? "唤醒词已录" : "唤醒词未录"}
+          </span>
+        )}
         {data.total_recordings > 0 && (
           <button
             type="button"
@@ -570,7 +591,7 @@ export function BenchRecordingsSection({ builtin, active = true }) {
         </div>
       </div>
 
-      {loading && guide.totalCount === 0 ? (
+      {loading && guide.itemCount === 0 ? (
         <p className="voice-muted">正在加载测试语料列表…</p>
       ) : !guide.currentItem ? (
         <p className="voice-muted">未读到测试语料列表。</p>
@@ -581,11 +602,13 @@ export function BenchRecordingsSection({ builtin, active = true }) {
           tabIndex={0}
           onKeyDown={handleRecorderKeyDown}
         >
-          {/* 句序号三态快捷导航（已录绿边 / 当前高亮 / 未录虚线） */}
+          {/* 句序号三态快捷导航（已录绿边 / 当前高亮 / 未录虚线；唤醒词独立标“唤醒”，不计入 13 句标准语料） */}
           <div className="ai-bench-sentence-nav" role="navigation" aria-label="测试语料句号导航">
             {data.corpus_items.map((item, idx) => {
               const recorded = guide.recordedMap.has(item.id);
               const isCur = idx === guide.currentIndex;
+              const isWake = item.purpose === "wake" || item.id === "wake_word";
+              const pillText = isWake ? "唤醒" : String(++standardSeq);
               return (
                 <button
                   key={item.id}
@@ -595,9 +618,9 @@ export function BenchRecordingsSection({ builtin, active = true }) {
                   }`}
                   disabled={recording || openingMic || saving}
                   onClick={() => selectSentence(idx)}
-                  title={`${idx + 1}. ${item.label}${recorded ? "（已录）" : "（未录）"}`}
+                  title={`${isWake ? "唤醒词" : `第 ${pillText} 句`}. ${item.label}${recorded ? "（已录）" : "（未录）"}`}
                 >
-                  {recorded ? <Check size={11} /> : null} {idx + 1}
+                  {recorded ? <Check size={11} /> : null} {pillText}
                 </button>
               );
             })}
@@ -606,7 +629,9 @@ export function BenchRecordingsSection({ builtin, active = true }) {
           <div className="ai-bench-rec-head">
             <span className="ai-bench-rec-title">
               <b>
-                第 {guide.currentIndex + 1} / {guide.totalCount} 句 · {guide.currentItem.label}
+                {guide.isCurrentWakeWord
+                  ? `唤醒词 · ${guide.currentItem.label}`
+                  : `第 ${guide.currentStandardPosition} / ${guide.totalCount} 句 · ${guide.currentItem.label}`}
               </b>
               {guide.currentSaved ? (
                 <span className="ob-pill ob-pill--ok">

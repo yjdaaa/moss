@@ -554,6 +554,7 @@ impl<'a> Session<'a> {
                 if self.digital_feed.is_some()
                     || self.next_turn_is_digital
                     || self.pending_digital_ack.is_some()
+                    || (self.mqtt && !socket.audio_open())
                 {
                     return Ok(());
                 }
@@ -569,6 +570,7 @@ impl<'a> Session<'a> {
                 if self.digital_feed.is_some()
                     || self.next_turn_is_digital
                     || self.pending_digital_ack.is_some()
+                    || (self.mqtt && !socket.audio_open())
                 {
                     return Ok(());
                 }
@@ -629,6 +631,9 @@ impl<'a> Session<'a> {
                 text_font,
                 ..
             }) => {
+                self.shared
+                    .state
+                    .set_audio_channel_open(self.session_id, socket.audio_open());
                 let cap = features.glyph_push.then_some(text_font).flatten();
                 self.shared.state.set_text_font_spec(
                     self.session_id,

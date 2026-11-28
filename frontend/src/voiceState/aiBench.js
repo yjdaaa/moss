@@ -173,7 +173,7 @@ export function aiBenchChecklistView(status) {
       fixHint:
         onlineDevices.length > 0
           ? "已连上小智，放在离电脑喇叭 30–50 cm 处即可。"
-          : "喊“你好小智”或按小智对话键唤醒，或在“服务”页开启常连模式。",
+          : "小智通电联网即可，建议在“服务”页开启常连模式；联调时脚本会用唤醒词录音自动唤醒。",
       goto: { tab: "devices", group: "builtin-devices" },
     },
     {
@@ -255,7 +255,7 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     : "未开启（需用户在「语音中心 › 记录与诊断 › AI 联调与测试」开启）";
   const deviceStateText =
     view.onlineDevices.length === 0
-      ? "暂无在线小智（需用户唤醒或开启常连模式）"
+      ? "暂无在线小智（建议开启常连模式；脚本会用唤醒词录音自动唤醒）"
       : `已有 ${view.onlineDevices.length} 台小智在线（${view.onlineDevices.join(", ")}）`;
   const localModelsArg = resolveLocalAsrBenchModelsArg(status);
 
@@ -267,14 +267,14 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
       "",
       "## 前提",
       `- 本机状态：调试注入开关${debugStateText}；${deviceStateText}。`,
-      "- 开关与设备唤醒由用户完成；预检不满足时暂停并告知用户缺什么。本次只测小智语音文字直通（只到“生成预览”），不要测试激光雕刻机（不跑 `scripts/laser-bench/*`、不连激光机、不开空跑）。",
+      "- 开关由用户完成，待机时脚本用唤醒词录音自动唤醒（缺录音或不能外放时降级为仅服务端验证，不让用户手动喊）；预检不满足即暂停。只测小智语音（只到“生成预览”），不要测试激光雕刻机（不跑 `scripts/laser-bench/*`、不开空跑）。",
       "",
       "## 运行与归档",
       `- 运行：\`node scripts/voice-bench/live-xiaozhi-debug.mjs${targetArg}\``,
-      "- 归档输出在 `<runtime>/voice-bench/<run-id>/`，参数与格式详见 `scripts/voice-bench/README.md`。",
+      "- 归档在 `<runtime>/voice-bench/<run-id>/`，详见 `scripts/voice-bench/README.md`。",
       "",
       "## 汇报与收尾",
-      "- 汇总各轮路径、耗时、工具与门禁结果及异常项；如有改动，复测验证后再汇报。",
+      "- 汇总路径、耗时、工具与门禁结果及异常项；如有改动，复测后再汇报。",
       "- 收尾提醒用户关闭“允许本机 AI 调试注入”开关。",
     ].join("\n");
     return stripSecretsAndPaths(prompt);
@@ -334,7 +334,7 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "## 前提",
     "- 代码同步：先 `git pull`，再跑 `node scripts/verify.mjs --finish` 快更并提示用户重启 MOSS；遇冲突或验证失败即停，汇报失败项和最后 30 行输出。",
     `- 本机状态：调试注入开关${debugStateText}；${deviceStateText}；素材状态：${materialStatusLine}。`,
-    "- 调试注入开关、小智摆放（离喇叭 30–50 cm）与唤醒由用户完成；预检不满足时暂停并告知缺少项。",
+    "- 开关与小智摆放（30–50 cm）由用户完成；脚本会用唤醒词录音自动唤醒，缺唤醒录音时先找网上真人语音，找不到再请用户在 App「录制测试语料」录一次（长期复用），不让用户每次手动喊；预检不满足时暂停并告知缺少项。",
     "- 范围：只测小智语音（只到“生成预览”），不要测试激光雕刻机（不运行 `scripts/laser-bench/*`、不连激光机、不开激光空跑模式）。",
     "",
     "## 素材",
@@ -350,10 +350,10 @@ export function buildAiBenchPrompt(status, kind = "e2e", options = {}) {
     "",
     "## 流程",
     "如果你支持子代理，按以下角色分工；不支持就由你自己按同样的阶段顺序执行。",
-    "1. 诊断（只测不改）：跑完三个脚本，输出诊断单。按 4 个环节（拾音判停 / 识别纠偏 / 意图工具 / 合成播放）列出问题，按严重程度排序，每条附证据和怀疑的位置。",
-    "2. 对症修复：一次只处理一个问题，交给一个修复子代理，只给它这个问题的证据和相关文件，做最小改动并补测试。",
-    "3. 独立复测：由不参与修复的一方重跑测试；涉及 MOSS 本体改动时，先跑 `node scripts/verify.mjs --finish` 快更并请用户重启 MOSS，确认后核对调试注入开关仍开（未开请重开）再复测，纯脚本或测试改动免快更重启。对比前后指标，变好保留，否则撤回。",
-    "4. 提交前审查：由没参与修复的审查子代理只看 diff，确认后再本地提交。",
+    "1. 诊断（只测不改）：跑完三个脚本，按 4 环节（拾音判停 / 识别纠偏 / 意图工具 / 合成播放）按严重程度排序出诊断单，附证据与怀疑位置。",
+    "2. 对症修复：一次只修一个问题，交修复子代理做最小改动并补测试。",
+    "3. 独立复测：由未参与修复的一方重跑；改了 MOSS 本体先跑 `node scripts/verify.mjs --finish` 快更并请用户重启 MOSS，核对调试注入开关仍开再复测（纯脚本或测试改动免快更重启）。变好保留，否则撤回。",
+    "4. 提交前审查：由未参与修复的审查子代理只看 diff，确认后再本地提交。",
     "",
     "真机测试一次只能跑一个，修复按问题排队进行；不碰真机的离线比较可以并行。最多 3 轮。",
     "",

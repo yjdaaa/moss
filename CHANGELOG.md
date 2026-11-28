@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 说“再见”后两条链路都回到待机；语音联调用唤醒词真人录音自动唤醒小智，测试与正常对话一致（2026-11-28）
+
+- **现象**：常连模式退出瞬间若有到点提醒或后台播报，可能抢在 `goodbye` 前开新一轮；空闲再见可能丢掉关会话标记；测试时小智常在待机里没声音，只能提示用户手动喊唤醒词。
+- **根因与修复**：按内置语音技术书 n146：会话循环先发 `goodbye` 关语音通道再投递提醒与播报，空闲再见保留关会话标记，待机时忽略乱序的 `listen detect / stop`；`/debug/v1/devices` 只读返回 `wake_word`、`audio_channel_open` 与最近一次关窗原因。`xiaozhi-e2e.mjs` 与 `live-xiaozhi-debug.mjs` 在设备待机或说完退出语料后外放唤醒词真人录音（本机录制 → 网上公开真人语音 → 请用户录一次）自动唤醒；退出后换新会话时只在旧窗口因设备断开关闭时按剩余时长重开测试时间窗，用户点“立即结束测试”或到期则停止。录音台新增唤醒词条目（不计入 13 句覆盖率），提示词去掉“请先唤醒小智”。门禁不变。
+- **验证**：`node scripts/verify.mjs --finish` 通过（浏览器测试 20/20，未涉及激光路径不触发 E2E）；新增 WebSocket / 常连正常说再见回待机、退出瞬间到点提醒先 `goodbye` 再屏幕提示、各关窗原因、唤醒录音选择、用户结束不重开与剩余时长等测试。实机外放唤醒成功率与退出后再唤醒时序未验证。
+- **关联**：`crates/moss-voice-server/src/session/{lifecycle,turn,input,connect}.rs`、`crates/moss-voice-server/src/{debug_api,mqtt,state}.rs`、`crates/moss-voice-host/src/builtin/{wakeword,bench_recordings}.rs`、`scripts/voice-bench/{xiaozhi-e2e,live-xiaozhi-debug,voice-assets}.mjs`、`scripts/voice-bench/e2e-corpus.json`、`frontend/src/voiceState/aiBench.js`。
+
 ### 未连接激光机时禁止开启真机空跑，小智语音测试提示词明确不测激光雕刻机（2026-11-28）
 
 - **现象**：未连接激光雕刻机时，桌面端仍可勾选开启「允许 AI 真机空跑测试」并点亮顶栏空跑倒计时；小智语音联调一键提示词未显式禁止运行激光雕刻机测试。

@@ -584,6 +584,7 @@ impl BuiltinVoice {
                 _ => defaults.playback_start_ms,
             };
             let active_job_api = self.host.api_service.clone();
+            let weak_for_wake_word = self.self_weak.clone();
             let debug_trace_control = Arc::new(DesktopProcessTraceControl {
                 settings_file: self.settings_file(),
                 trace: self.host.api_service.process_trace().cloned(),
@@ -626,6 +627,14 @@ impl BuiltinVoice {
                 eager_device_mcp: true,
                 active_laser_job: Some(Arc::new(move || {
                     laser_host::voice_has_active_laser_job(&active_job_api).unwrap_or(true)
+                })),
+                wake_word_for_device: Some(Arc::new(move |device_id| {
+                    weak_for_wake_word
+                        .upgrade()
+                        .map(|builtin| builtin.effective_wake_word(device_id))
+                        .unwrap_or_else(|| {
+                            moss_voice_server::debug_api::DEFAULT_WAKE_WORD.to_owned()
+                        })
                 })),
                 debug_process_trace: Some(debug_trace_control),
                 asr_corpus: Some(self.asr_corpus.clone()),

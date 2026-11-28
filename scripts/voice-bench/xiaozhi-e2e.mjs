@@ -43,12 +43,20 @@ import { computeCer, normalizeForCer, readWavPcm16 } from "./asr-bench.mjs";
 import {
   BENCH_RECORDINGS_DIR_REL,
   DEFAULT_MAX_ONLINE,
+  DEFAULT_WAKE_RETRIES,
+  DEFAULT_WAKE_TIMEOUT_MS,
+  DEFAULT_WAKE_WORD,
   RECORDING_APP_HINT,
+  attemptAutoWake,
   checkPlayerAvailable,
+  isWakeCorpusItem,
   playWav,
   prepareVoiceAssets,
+  renderWakeEventsMarkdown,
+  resolveWakeWordAsset,
   saveOnlineRotation,
   startBackgroundNoise,
+  summarizeWakeEvents,
 } from "./voice-assets.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -845,6 +853,9 @@ export function buildE2eSummary({
   batchPlan = null,
   missingTurns = [],
   skippedAssets = [],
+  wakeWord = DEFAULT_WAKE_WORD,
+  wakeEvents = [],
+  stopReason = null,
   startedAtMs,
   finishedAtMs,
   calibration,
@@ -937,6 +948,10 @@ export function buildE2eSummary({
         }
       : null,
     batch_plan: batchPlan || null,
+    wake_word: wakeWord || DEFAULT_WAKE_WORD,
+    wake_summary: summarizeWakeEvents(wakeEvents),
+    wake_events: Array.isArray(wakeEvents) ? wakeEvents : [],
+    stop_reason: stopReason || null,
     noise: noisePreset ? { preset: noisePreset, gain: noiseGain } : null,
     compare_digital: Boolean(compareDigital),
     calibration: calibration || null,
@@ -1043,6 +1058,16 @@ export function buildE2eReportMarkdown(summary, turns) {
       `| 自动分批执行 | 预估 ${estMin} 分钟 > 单窗上限 ${bp.max_minutes} 分钟，分 ${bp.batch_count} 批（已执行 ${bp.batches_executed} 批${bp.session_aborted ? "，因会话变更中止" : ""}） |`,
     );
   }
+  if (summary.wake_summary && summary.wake_summary.total > 0) {
+    lines.push(
+      `| 自动唤醒 | 共 ${summary.wake_summary.total} 次（成功 ${summary.wake_summary.succeeded} · 失败 ${summary.wake_summary.failed}，唤醒词「${summary.wake_word || DEFAULT_WAKE_WORD}」） |`,
+    );
+  }
+  if (summary.stop_reason) {
+    lines.push(`| 中止原因 | ${mdCell(summary.stop_reason, 96)} |`);
+    lines.push("", `> **测试已提前中止**：${summary.stop_reason}`);
+  }
+  lines.push(...renderWakeEventsMarkdown(summary.wake_events, summary.wake_word));
 
   if (Array.isArray(summary.by_source) && summary.by_source.length > 0) {
     const hasOnline = summary.by_source.some((s) => s.source_type === "online-human");
@@ -1402,7 +1427,7 @@ async function waitForAcousticTurnCompletion({
           .filter(
             (t) =>
               Number(t.turn || 0) > prevTurnNumber &&
-              (!sessionId || t.session_id === sessionId || !dev),
+              (!sessionId || t.session_id === sessionId),
           )
           .sort((a, b) => Number(a.turn || 0) - Number(b.turn || 0));
         if (newerTurns.length > 0 && newerTurns[0]?.turn_id) {
@@ -1428,8 +1453,10 @@ async function waitForAcousticTurnCompletion({
 
     const terminal = Boolean(detail && detail.status && detail.status !== "running");
     if (terminal) {
-      const isExit = expectExit || detail.route === "fast_exit" || !dev;
-      if (isExit && (!dev || dev.state === "idle" || dev.state === "listening")) {
+      const hasEndTool =
+        Array.isArray(detail.tools) && detail.tools.some((t) => t?.name === "end_conversation");
+      const isExit = expectExit || detail.route === "fast_exit" || hasEndTool || !dev;
+      if (isExit && (!dev || dev.audio_channel_open === false || dev.state === "idle" || dev.state === "listening")) {
         return {
           timedOut: false,
           turnId: matchedTurnId,
@@ -1847,13 +1874,79 @@ export function evaluateCalibrationResult({ calibrationText, result }) {
 }
 
 /**
+ * 计算整轮测试自首次开窗以来的剩余时间窗分钟数（向上取整，至少 1；剩余 <= 0 时返回 0，不再续开）。
+ */
+export function computeRemainingBenchMinutes({ firstOpenedAtMs, maxMinutes, nowMs = Date.now() }) {
+  const capped = Math.max(1, Math.min(60, Math.floor(Number(maxMinutes) || 1)));
+  if (!Number.isFinite(firstOpenedAtMs) || firstOpenedAtMs <= 0) {
+    return capped;
+  }
+  const budgetMs = capped * 60_000;
+  const elapsedMs = Math.max(0, Number(nowMs) - firstOpenedAtMs);
+  const remainingMs = budgetMs - elapsedMs;
+  if (remainingMs <= 0) return 0;
+  return Math.max(1, Math.min(60, Math.ceil(remainingMs / 60_000)));
+}
+
+/** 从 `/debug/v1/devices` 响应中提取指定设备最近一次测试时间窗关闭记录（优先设备字段，回退顶层映射）。 */
+export function extractLastBenchWindowClosed(devicesPayload, device, deviceId) {
+  if (device && device.bench_window_last_closed && typeof device.bench_window_last_closed === "object") {
+    return device.bench_window_last_closed;
+  }
+  const map = devicesPayload?.bench_window_last_closed;
+  if (map && typeof map === "object" && deviceId && map[deviceId] && typeof map[deviceId] === "object") {
+    return map[deviceId];
+  }
+  return null;
+}
+
+/** 仅当旧时间窗属于上一轮绑定的 session_id 且因设备断开（device_disconnected）关闭时才允许退出后重开。 */
+export function canReopenBenchWindowAfterExit({ lastClosed, boundSessionId }) {
+  if (!lastClosed || typeof lastClosed !== "object") return false;
+  if (String(lastClosed.reason || "").trim() !== "device_disconnected") return false;
+  if (!boundSessionId || String(lastClosed.session_id || "").trim() !== String(boundSessionId)) {
+    return false;
+  }
+  return true;
+}
+
+/** 将关窗原因类别或整轮时长耗尽转为清晰中文中止说明，供汇报与终端输出。 */
+export function formatBenchWindowStopReason(lastClosed, { remainingZero = false } = {}) {
+  if (remainingZero) {
+    return "时间窗到期：整轮已达到 --max-minutes 时长上限，不再续开测试时间窗，已停止后续外放";
+  }
+  const reason = String(lastClosed?.reason || "").trim();
+  switch (reason) {
+    case "user_stopped":
+      return "用户已结束测试：检测到在 App 手动关闭了测试时间窗，已停止后续外放";
+    case "expired":
+      return "时间窗到期：测试时间窗已到达最长时长，已停止后续外放";
+    case "debug_disabled":
+      return "调试开关已关闭：测试时间窗已终止，已停止后续外放";
+    case "token_expired":
+      return "调试令牌已失效：测试时间窗已终止，已停止后续外放";
+    case "device_revoked":
+      return "设备授权已撤销：测试时间窗已终止，已停止后续外放";
+    case "device_removed":
+      return "设备已移除：测试时间窗已终止，已停止后续外放";
+    case "script_closed":
+      return "测试时间窗已关闭（脚本主动关闭），已停止后续外放";
+    default:
+      return "测试时间窗已关闭（非设备断开或会话不匹配），已停止后续外放";
+  }
+}
+
+/**
  * VC3 真小智整体测试主入口（支持注入假播放器、假素材准备器和假噪声器供单测验证）。
  */
 export async function runXiaozhiE2e(opts = {}) {
+  const nowFn = typeof opts.nowFn === "function" ? opts.nowFn : Date.now;
   const turnTimeoutMs = Number(opts.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS);
   const pollIntervalMs = Number(opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
   const idleWaitMs = Number(opts.idleWaitMs ?? DEFAULT_IDLE_WAIT_MS);
   const quietMs = Number(opts.quietMs ?? DEFAULT_QUIET_MS);
+  const wakeTimeoutMs = Number(opts.wakeTimeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS);
+  const wakeRetries = Math.max(1, Math.floor(Number(opts.wakeRetries ?? DEFAULT_WAKE_RETRIES)));
   const maxMinutes = Math.max(1, Math.min(60, Number(opts.maxMinutes ?? DEFAULT_MAX_MINUTES)));
   const calibrationText = String(opts.calibrationText || DEFAULT_CALIBRATION_TEXT);
   const noisePreset = opts.noise ? String(opts.noise).trim().toLowerCase() : null;
@@ -1863,11 +1956,12 @@ export async function runXiaozhiE2e(opts = {}) {
   const corpusPath = resolve(opts.corpus || DEFAULT_E2E_CORPUS_PATH);
   const corpusRaw = JSON.parse(readFileSync(corpusPath, "utf8"));
   const corpusName = String(corpusRaw?.name || "custom-e2e");
-  const corpusTurns = Array.isArray(corpusRaw)
+  const rawCorpusTurns = Array.isArray(corpusRaw)
     ? corpusRaw
     : Array.isArray(corpusRaw?.turns)
       ? corpusRaw.turns
       : [];
+  const corpusTurns = rawCorpusTurns.filter((spec) => !isWakeCorpusItem(spec));
   // 1. 预检：读取令牌、查在线设备、检查播放器
   const { runtimeDir, token, baseUrl } = resolveDebugConnection(opts);
   const runId = opts.runId || formatRunId("e2e");
@@ -1906,19 +2000,10 @@ export async function runXiaozhiE2e(opts = {}) {
     };
   }
   const onlineDevices = Array.isArray(devicesRes.data?.devices) ? devicesRes.data.devices : [];
-  if (onlineDevices.length === 0) {
-    return {
-      exitCode: 1,
-      archiveDir: null,
-      summary: null,
-      turns: [],
-      errorMessage: NO_ONLINE_DEVICE_MESSAGE,
-    };
-  }
-  const targetDevice = opts.device
-    ? onlineDevices.find((d) => d.device_id === opts.device)
-    : onlineDevices[0];
-  if (!targetDevice) {
+  let targetDevice = opts.device
+    ? onlineDevices.find((d) => d.device_id === opts.device) || null
+    : onlineDevices[0] || null;
+  if (opts.device && !targetDevice && onlineDevices.length > 0) {
     return {
       exitCode: 1,
       archiveDir: null,
@@ -1927,8 +2012,6 @@ export async function runXiaozhiE2e(opts = {}) {
       errorMessage: `指定的设备 ${opts.device} 当前不在线（在线设备：${onlineDevices.map((d) => d.device_id).join(", ")}）`,
     };
   }
-  const deviceId = targetDevice.device_id;
-  const sessionId = targetDevice.session_id || "";
 
   let player = null;
   if (typeof opts.playWavFn !== "function") {
@@ -1945,10 +2028,21 @@ export async function runXiaozhiE2e(opts = {}) {
     throw new Error("--max-online 须为大于等于 0 的整数");
   }
   const maxOnline = rawMaxOnline;
+  let wakeWord =
+    String(targetDevice?.wake_word || devicesRes.data?.wake_word || "").trim() || DEFAULT_WAKE_WORD;
+  let wakeResolved = resolveWakeWordAsset({
+    wakeWord,
+    runtimeDir,
+    recordingsDir: resolvedRecordingsDir,
+    speaker: speakerFilter,
+  });
+  const wakeEvents = [];
+
   const assetPreparer = opts.prepareVoiceAssetsFn || prepareVoiceAssets;
   const assets = await assetPreparer({
     turns: corpusTurns,
     calibrationText: opts.skipCalibration ? "" : calibrationText,
+    wakeWord,
     runtimeDir,
     recordingsDir: resolvedRecordingsDir,
     corpusDir: resolvedCorpusDir,
@@ -1994,6 +2088,52 @@ export async function runXiaozhiE2e(opts = {}) {
   }
   const effectiveCalibrationText = assets.calibrationEffectiveText || calibrationText;
 
+  // n146 开测前自动唤醒：设备未上线（非常连待机）、常连未开音频通道或未处于 listening 时，
+  // 用当前唤醒词真人录音外放自动唤醒并等待进入 listening；绝不改为提示用户手动喊。
+  const needsInitialWake =
+    !targetDevice || targetDevice.audio_channel_open === false || targetDevice.state === "idle";
+  if (needsInitialWake) {
+    const wakeRes = await attemptAutoWake({
+      baseUrl,
+      token,
+      deviceId: opts.device || targetDevice?.device_id || "",
+      wakeWord,
+      wakeAsset: wakeResolved.asset,
+      missingReason: wakeResolved.missingReason,
+      trigger: targetDevice ? "standby_initial" : "offline_initial",
+      player,
+      playWavFn: opts.playWavFn,
+      waitFor: "listening",
+      wakeTimeoutMs,
+      wakeRetries,
+      pollIntervalMs,
+    });
+    wakeEvents.push(wakeRes.event);
+    if (!wakeRes.ok || !wakeRes.device) {
+      return {
+        exitCode: 1,
+        archiveDir: null,
+        summary: null,
+        turns: [],
+        wakeEvents,
+        errorMessage: wakeRes.error || NO_ONLINE_DEVICE_MESSAGE,
+      };
+    }
+    targetDevice = wakeRes.device;
+    const deviceWakeWord = String(targetDevice.wake_word || "").trim();
+    if (deviceWakeWord && deviceWakeWord !== wakeWord) {
+      wakeWord = deviceWakeWord;
+      wakeResolved = resolveWakeWordAsset({
+        wakeWord,
+        runtimeDir,
+        recordingsDir: resolvedRecordingsDir,
+        speaker: speakerFilter,
+      });
+    }
+  }
+  const deviceId = targetDevice.device_id;
+  const sessionId = targetDevice.session_id || "";
+
   // VE3：开测前估算总时长，超出测试时间窗上限时打印提示并自动分批（绝不延长单窗超过 60 分钟上限）
   const hasCalibration = !opts.skipCalibration && Boolean(assets.calibrationAsset);
   const batchSchedule = planE2eBatches(assets.preparedTurns, {
@@ -2017,6 +2157,7 @@ export async function runXiaozhiE2e(opts = {}) {
   const startedAtMs = Date.now();
   const ignoreLevel = Boolean(noisePreset);
   let benchWindowOpened = false;
+  let firstWindowOpenedAtMs = null;
   let boundSessionId = sessionId;
   let previousTraceEnabled = null;
   let noiseHandle = null;
@@ -2026,6 +2167,8 @@ export async function runXiaozhiE2e(opts = {}) {
   let autoLabeledCount = 0;
   let batchesExecuted = 0;
   let sessionAborted = false;
+  let runStopReason = null;
+  let previousWasExit = false;
   let cleanedUp = false;
   const results = [];
 
@@ -2156,6 +2299,9 @@ export async function runXiaozhiE2e(opts = {}) {
         break;
       }
       benchWindowOpened = true;
+      if (firstWindowOpenedAtMs === null) {
+        firstWindowOpenedAtMs = nowFn();
+      }
       const openedSessionId = winRes.data?.bench_window?.session_id || "";
       if (batchIdx === 0) {
         if (openedSessionId) boundSessionId = openedSessionId;
@@ -2212,7 +2358,7 @@ export async function runXiaozhiE2e(opts = {}) {
               turns: [],
               errorMessage: calReady.offline
                 ? `校准前设备 ${deviceId} 断开了连接`
-                : "校准前等待设备进入安静聆听超时，请确认小智已唤醒并处于聆听状态",
+                : "校准前等待设备进入安静聆听超时（请检查喇叭音量与摆放距离 30–50 cm）",
             };
           }
           if (!hasActiveBenchWindowForSession(calReady.device, boundSessionId)) {
@@ -2298,17 +2444,6 @@ export async function runXiaozhiE2e(opts = {}) {
         const turnIdLabel = String(spec.id || `turn_${turnIndex}`);
         const turnStartedAt = Date.now();
 
-        const waitQuiet = await waitForQuietListening({
-          baseUrl,
-          token,
-          deviceId,
-          quietMs,
-          timeoutMs: Math.min(idleWaitMs, 100_000),
-          pollIntervalMs,
-          allowIdle: false,
-          ignoreLevel,
-        });
-
         const turnSpeaker = asset.speaker || asset.voice_profile?.speaker || "未标注说话人";
         const turnSecondary = Boolean(asset.secondary_recording || asset.voice_profile?.secondary_recording);
         const turnSourceType =
@@ -2344,6 +2479,256 @@ export async function runXiaozhiE2e(opts = {}) {
           audio_source: audioSourceMeta,
         };
 
+        // n146 轮次前状态检查：先核对旧测试时间窗是否被用户手动结束/过期/策略关闭，仅在确认安全且允许时自动唤醒
+        let preCheckRes = await listDebugDevices(baseUrl, token);
+        if (!preCheckRes.ok) {
+          benchWindowOpened = false;
+          runStopReason =
+            preCheckRes.data?.message || `查询设备状态失败（HTTP ${preCheckRes.status}），已停止后续外放`;
+          results.push({
+            ...commonTurnFields,
+            verdict: "failed",
+            failure_reason: runStopReason,
+            wall_ms: Date.now() - turnStartedAt,
+            attribution: null,
+            detail: null,
+          });
+          stopAllBatches = true;
+          break;
+        }
+        let preDev = (preCheckRes.data?.devices || []).find((d) => d.device_id === deviceId) || null;
+        if (previousWasExit && preDev && preDev.audio_channel_open !== false && preDev.state !== "idle") {
+          const settleDeadline = Date.now() + Math.min(3_000, idleWaitMs);
+          while (Date.now() <= settleDeadline) {
+            const curClosed = extractLastBenchWindowClosed(preCheckRes.data, preDev, deviceId);
+            if (
+              !hasActiveBenchWindowForSession(preDev, boundSessionId) &&
+              curClosed &&
+              !canReopenBenchWindowAfterExit({ lastClosed: curClosed, boundSessionId })
+            ) {
+              break;
+            }
+            await sleep(pollIntervalMs);
+            preCheckRes = await listDebugDevices(baseUrl, token);
+            if (!preCheckRes.ok) break;
+            preDev = (preCheckRes.data?.devices || []).find((d) => d.device_id === deviceId) || null;
+            if (!preDev || preDev.audio_channel_open === false || preDev.state === "idle") {
+              break;
+            }
+          }
+        }
+        if (!preCheckRes.ok) {
+          benchWindowOpened = false;
+          runStopReason =
+            preCheckRes.data?.message || `查询设备状态失败（HTTP ${preCheckRes.status}），已停止后续外放`;
+          results.push({
+            ...commonTurnFields,
+            verdict: "failed",
+            failure_reason: runStopReason,
+            wall_ms: Date.now() - turnStartedAt,
+            attribution: null,
+            detail: null,
+          });
+          stopAllBatches = true;
+          break;
+        }
+
+        const preWindowActive = hasActiveBenchWindowForSession(preDev, boundSessionId);
+        const preLastClosed = extractLastBenchWindowClosed(preCheckRes.data, preDev, deviceId);
+        if (previousWasExit && !preWindowActive) {
+          // 若旧窗已知因非 device_disconnected（如用户手动结束、时间窗到期等）或非绑定会话关闭，绝不唤醒或重开
+          if (preLastClosed && !canReopenBenchWindowAfterExit({ lastClosed: preLastClosed, boundSessionId })) {
+            benchWindowOpened = false;
+            runStopReason = formatBenchWindowStopReason(preLastClosed);
+            results.push({
+              ...commonTurnFields,
+              verdict: "failed",
+              failure_reason: runStopReason,
+              wall_ms: Date.now() - turnStartedAt,
+              attribution: null,
+              detail: null,
+            });
+            stopAllBatches = true;
+            break;
+          }
+          // 设备仍在线但时间窗已无且缺 device_disconnected 关闭记录 -> 停止，不重开
+          if (!preLastClosed && preDev) {
+            benchWindowOpened = false;
+            runStopReason = formatBenchWindowStopReason(null);
+            results.push({
+              ...commonTurnFields,
+              verdict: "failed",
+              failure_reason: runStopReason,
+              wall_ms: Date.now() - turnStartedAt,
+              attribution: null,
+              detail: null,
+            });
+            stopAllBatches = true;
+            break;
+          }
+          // 整轮时间预算已耗尽（剩余 0 分钟）-> 直接结束测试，不再唤醒续开
+          const preRemainingMinutes = computeRemainingBenchMinutes({
+            firstOpenedAtMs: firstWindowOpenedAtMs,
+            maxMinutes,
+            nowMs: nowFn(),
+          });
+          if (preRemainingMinutes <= 0) {
+            benchWindowOpened = false;
+            runStopReason = formatBenchWindowStopReason(null, { remainingZero: true });
+            results.push({
+              ...commonTurnFields,
+              verdict: "failed",
+              failure_reason: runStopReason,
+              wall_ms: Date.now() - turnStartedAt,
+              attribution: null,
+              detail: null,
+            });
+            stopAllBatches = true;
+            break;
+          }
+        }
+
+        const needTurnWake =
+          previousWasExit ||
+          (preDev &&
+            preWindowActive &&
+            (preDev.audio_channel_open === false || preDev.state === "idle"));
+        if (needTurnWake) {
+          const wasPostExit = previousWasExit;
+          const latestWord = String(preDev?.wake_word || preCheckRes.data?.wake_word || "").trim();
+          if (latestWord && latestWord !== wakeWord) {
+            wakeWord = latestWord;
+            wakeResolved = resolveWakeWordAsset({
+              wakeWord,
+              runtimeDir,
+              recordingsDir: resolvedRecordingsDir,
+              speaker: speakerFilter,
+            });
+          }
+          const wakeRes = await attemptAutoWake({
+            baseUrl,
+            token,
+            deviceId,
+            wakeWord,
+            wakeAsset: wakeResolved.asset,
+            missingReason: wakeResolved.missingReason,
+            trigger: wasPostExit ? "post_exit" : "pre_turn",
+            player,
+            playWavFn: opts.playWavFn,
+            waitFor: "listening",
+            wakeTimeoutMs,
+            wakeRetries,
+            pollIntervalMs,
+            onSpawn: (c) => {
+              activePlayChild = c;
+            },
+          });
+          wakeEvents.push(wakeRes.event);
+          if (!wakeRes.ok || !wakeRes.device) {
+            results.push({
+              ...commonTurnFields,
+              verdict: "failed",
+              failure_reason: wakeRes.error || "唤醒失败",
+              wall_ms: Date.now() - turnStartedAt,
+              attribution: null,
+              detail: null,
+            });
+            stopAllBatches = true;
+            break;
+          }
+          previousWasExit = false;
+          // 仅在旧时间窗明确因 device_disconnected 关闭且属于上一轮绑定 session_id、且整轮剩余分钟 > 0 时才重开
+          const nextSessionId = wakeRes.sessionId || wakeRes.device.session_id || "";
+          if (wasPostExit && nextSessionId && nextSessionId !== boundSessionId) {
+            const postCheckRes = await listDebugDevices(baseUrl, token);
+            if (!postCheckRes.ok) {
+              benchWindowOpened = false;
+              runStopReason =
+                postCheckRes.data?.message ||
+                `自动唤醒后复核时间窗状态失败（HTTP ${postCheckRes.status}），已停止后续外放`;
+              results.push({
+                ...commonTurnFields,
+                verdict: "failed",
+                failure_reason: runStopReason,
+                wall_ms: Date.now() - turnStartedAt,
+                attribution: null,
+                detail: null,
+              });
+              stopAllBatches = true;
+              break;
+            }
+            const postDev =
+              (postCheckRes.data?.devices || []).find((d) => d.device_id === deviceId) || wakeRes.device;
+            const postLastClosed = extractLastBenchWindowClosed(postCheckRes.data, postDev, deviceId);
+            if (!canReopenBenchWindowAfterExit({ lastClosed: postLastClosed, boundSessionId })) {
+              benchWindowOpened = false;
+              runStopReason = formatBenchWindowStopReason(postLastClosed);
+              results.push({
+                ...commonTurnFields,
+                verdict: "failed",
+                failure_reason: runStopReason,
+                wall_ms: Date.now() - turnStartedAt,
+                attribution: null,
+                detail: null,
+              });
+              stopAllBatches = true;
+              break;
+            }
+            const remainingMinutes = computeRemainingBenchMinutes({
+              firstOpenedAtMs: firstWindowOpenedAtMs,
+              maxMinutes,
+              nowMs: nowFn(),
+            });
+            if (remainingMinutes <= 0) {
+              benchWindowOpened = false;
+              runStopReason = formatBenchWindowStopReason(null, { remainingZero: true });
+              results.push({
+                ...commonTurnFields,
+                verdict: "failed",
+                failure_reason: runStopReason,
+                wall_ms: Date.now() - turnStartedAt,
+                attribution: null,
+                detail: null,
+              });
+              stopAllBatches = true;
+              break;
+            }
+            const reopenRes = await controlBenchWindow(baseUrl, token, {
+              deviceId,
+              action: "open",
+              maxMinutes: remainingMinutes,
+            });
+            if (!reopenRes.ok) {
+              benchWindowOpened = false;
+              runStopReason =
+                reopenRes.data?.message || `自动唤醒后重开测试时间窗失败（HTTP ${reopenRes.status}）`;
+              results.push({
+                ...commonTurnFields,
+                verdict: "failed",
+                failure_reason: runStopReason,
+                wall_ms: Date.now() - turnStartedAt,
+                attribution: null,
+                detail: null,
+              });
+              stopAllBatches = true;
+              break;
+            }
+            benchWindowOpened = true;
+            boundSessionId = reopenRes.data?.bench_window?.session_id || nextSessionId;
+          }
+        }
+
+        const waitQuiet = await waitForQuietListening({
+          baseUrl,
+          token,
+          deviceId,
+          quietMs,
+          timeoutMs: Math.min(idleWaitMs, 100_000),
+          pollIntervalMs,
+          allowIdle: false,
+          ignoreLevel,
+        });
+
         if (spec.require_idle_laser && waitQuiet.payload?.active_laser_job === true) {
           results.push({
             ...commonTurnFields,
@@ -2371,10 +2756,13 @@ export async function runXiaozhiE2e(opts = {}) {
         }
 
         if (!hasActiveBenchWindowForSession(waitQuiet.device, boundSessionId)) {
+          benchWindowOpened = false;
+          const closedInfo = extractLastBenchWindowClosed(waitQuiet.payload, waitQuiet.device, deviceId);
+          runStopReason = formatBenchWindowStopReason(closedInfo);
           results.push({
             ...commonTurnFields,
             verdict: "failed",
-            failure_reason: "测试时间窗已关闭、过期或设备会话已变更，已中止后续外放以防物理动作绕过安全锁",
+            failure_reason: runStopReason,
             wall_ms: Date.now() - turnStartedAt,
             attribution: null,
             detail: null,
@@ -2529,6 +2917,15 @@ export async function runXiaozhiE2e(opts = {}) {
           attribution,
           detail: waitDone.detail,
         });
+        const turnExited =
+          spec.expect_route === "fast_exit" ||
+          spec.id === "fast_exit" ||
+          waitDone.detail?.route === "fast_exit" ||
+          (Array.isArray(waitDone.detail?.tools) &&
+            waitDone.detail.tools.some((t) => t?.name === "end_conversation"));
+        if (turnExited) {
+          previousWasExit = true;
+        }
         if (benchWindowLostDuringDigital) {
           stopAllBatches = true;
           break;
@@ -2576,6 +2973,9 @@ export async function runXiaozhiE2e(opts = {}) {
       batchPlan: batchPlanSummary,
       missingTurns,
       skippedAssets,
+      wakeWord,
+      wakeEvents,
+      stopReason: runStopReason,
       startedAtMs,
       finishedAtMs,
       calibration: calibrationReport,
@@ -2588,6 +2988,20 @@ export async function runXiaozhiE2e(opts = {}) {
   const audioManifest = redactValue(
     {
       note: "仅记录外放真人录音的文件名、说话人标签、来源类型与公开数据集许可信息，绝不复制用户原始录音文件。",
+      wake_word: wakeWord,
+      wake_asset: wakeResolved.asset
+        ? {
+            filename: wakeResolved.asset.filename,
+            source_type: wakeResolved.asset.source_type,
+            audio_origin: wakeResolved.asset.audio_origin || wakeResolved.asset.source_type,
+            speaker: wakeResolved.asset.speaker || null,
+            dataset: wakeResolved.asset.dataset || null,
+            license: wakeResolved.asset.license || null,
+            source_url: wakeResolved.asset.source_url || null,
+            duration_ms: wakeResolved.asset.duration_ms,
+          }
+        : null,
+      wake_events: wakeEvents,
       noise: noiseInfo,
       calibration: assets.calibrationAsset
         ? {
@@ -2645,8 +3059,8 @@ export async function runXiaozhiE2e(opts = {}) {
     "utf8",
   );
 
-  const exitCode = summary.counts.failed > 0 || sessionAborted ? 1 : 0;
-  return { exitCode, archiveDir, summary, turns: redactedTurns, audioManifest, errorMessage: null };
+  const exitCode = summary.counts.failed > 0 || sessionAborted || Boolean(runStopReason) ? 1 : 0;
+  return { exitCode, archiveDir, summary, turns: redactedTurns, audioManifest, errorMessage: runStopReason || null };
 }
 
 export function parseE2eArgs(argv) {
@@ -2665,6 +3079,8 @@ export function parseE2eArgs(argv) {
     turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
     quietMs: DEFAULT_QUIET_MS,
+    wakeTimeoutMs: DEFAULT_WAKE_TIMEOUT_MS,
+    wakeRetries: DEFAULT_WAKE_RETRIES,
     noise: null,
     noiseGain: 0.22,
     compareDigital: false,
@@ -2689,6 +3105,8 @@ export function parseE2eArgs(argv) {
     else if (a === "--turn-timeout-ms") opts.turnTimeoutMs = Number(argv[++i]);
     else if (a === "--poll-interval-ms") opts.pollIntervalMs = Number(argv[++i]);
     else if (a === "--quiet-ms") opts.quietMs = Number(argv[++i]);
+    else if (a === "--wake-timeout-ms") opts.wakeTimeoutMs = Number(argv[++i]);
+    else if (a === "--wake-retries") opts.wakeRetries = Number(argv[++i]);
     else if (a === "--noise") opts.noise = argv[++i];
     else if (a === "--noise-gain") opts.noiseGain = Number(argv[++i]);
     else if (a === "--compare-digital") opts.compareDigital = true;
@@ -2724,6 +3142,9 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     }
     const result = await runXiaozhiE2e(opts);
     if (result.errorMessage) {
+      if (result.archiveDir) {
+        console.log(result.archiveDir);
+      }
       console.error(redactText(result.errorMessage, { paths: [homedir(), process.cwd()] }));
       process.exit(result.exitCode || 1);
     }

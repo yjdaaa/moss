@@ -44,6 +44,8 @@ pub struct CorpusSegment {
 struct RawCorpusTurn {
     id: String,
     #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
     label: String,
     text: String,
     #[serde(default)]
@@ -73,6 +75,8 @@ struct RawCorpusFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchCorpusItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
     pub label: String,
     pub text: String,
     pub segments: Vec<CorpusSegment>,
@@ -83,6 +87,17 @@ pub struct BenchCorpusItem {
     pub expect_tool: Option<String>,
     pub expect_simulation_gate: bool,
     pub require_idle_laser: bool,
+}
+
+fn is_wake_corpus_item(item: &BenchCorpusItem) -> bool {
+    item.purpose.as_deref() == Some("wake") || item.id == "wake_word"
+}
+
+fn normalize_wake_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +149,7 @@ fn load_default_corpus() -> &'static (String, Vec<BenchCorpusItem>) {
                         t.label
                     },
                     id: t.id,
+                    purpose: t.purpose,
                     text: t.text,
                     segments: t.segments,
                     pause_hint,
@@ -564,18 +580,50 @@ impl BuiltinVoice {
         Ok(items)
     }
 
+    fn resolved_corpus_items(&self) -> (String, String, Vec<BenchCorpusItem>) {
+        let (corpus_name, raw_items) = load_default_corpus();
+        let wake_word = self.effective_wake_word(None);
+        let items = raw_items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                if is_wake_corpus_item(&item) {
+                    item.text = wake_word.clone();
+                }
+                item
+            })
+            .collect();
+        (corpus_name.clone(), wake_word, items)
+    }
+
+    fn has_matching_wake_recording(recordings: &[BenchRecordingMeta], wake_word: &str) -> bool {
+        let target = normalize_wake_text(wake_word);
+        if target.is_empty() {
+            return false;
+        }
+        recordings.iter().any(|rec| {
+            let is_online = rec.speaker_dir.eq_ignore_ascii_case("online")
+                || rec.speaker.eq_ignore_ascii_case("online");
+            !is_online && normalize_wake_text(&rec.text) == target
+        })
+    }
+
     fn summarize_speakers(
         corpus_items: &[BenchCorpusItem],
         recordings: &[BenchRecordingMeta],
     ) -> Vec<SpeakerSummary> {
-        let corpus_ids: BTreeSet<&str> = corpus_items.iter().map(|c| c.id.as_str()).collect();
-        let corpus_count = corpus_items.len();
+        let standard_ids: BTreeSet<&str> = corpus_items
+            .iter()
+            .filter(|c| !is_wake_corpus_item(c))
+            .map(|c| c.id.as_str())
+            .collect();
+        let corpus_count = standard_ids.len();
         let mut by_speaker: BTreeMap<String, (String, BTreeSet<String>, u64)> = BTreeMap::new();
         for rec in recordings {
             let entry = by_speaker
                 .entry(rec.speaker.clone())
                 .or_insert_with(|| (rec.speaker_dir.clone(), BTreeSet::new(), 0));
-            if corpus_ids.contains(rec.corpus_id.as_str()) {
+            if standard_ids.contains(rec.corpus_id.as_str()) {
                 entry.1.insert(rec.corpus_id.clone());
             }
             if rec.recorded_at_ms > entry.2 {
@@ -600,11 +648,22 @@ impl BuiltinVoice {
 
     /// 供 `voice_builtin_status` 返回的无音频、无绝对路径轻量统计（绝不进入 `diagnostics_bundle`）。
     pub(super) fn bench_recordings_summary(&self) -> Value {
-        let (_name, corpus_items) = load_default_corpus();
-        let corpus_count = corpus_items.len();
+        let (_name, wake_word, corpus_items) = self.resolved_corpus_items();
+        let corpus_count = corpus_items
+            .iter()
+            .filter(|c| !is_wake_corpus_item(c))
+            .count();
         let recordings = self.scan_bench_recordings().unwrap_or_default();
-        let speakers = Self::summarize_speakers(corpus_items, &recordings);
+        let online_count = recordings
+            .iter()
+            .filter(|rec| {
+                rec.speaker_dir.eq_ignore_ascii_case("online")
+                    || rec.speaker.eq_ignore_ascii_case("online")
+            })
+            .count();
+        let speakers = Self::summarize_speakers(&corpus_items, &recordings);
         let complete_speaker_count = speakers.iter().filter(|s| s.complete).count();
+        let wake_word_recorded = Self::has_matching_wake_recording(&recordings, &wake_word);
         let speaker_briefs: Vec<Value> = speakers
             .iter()
             .map(|s| {
@@ -619,6 +678,9 @@ impl BuiltinVoice {
         json!({
             "recordings_dir_rel": BENCH_RECORDINGS_DIR_REL,
             "corpus_count": corpus_count,
+            "wake_word": wake_word,
+            "wake_word_recorded": wake_word_recorded,
+            "online_count": online_count,
             "total_recordings": recordings.len(),
             "speaker_count": speakers.len(),
             "complete_speaker_count": complete_speaker_count,
@@ -630,9 +692,21 @@ impl BuiltinVoice {
         &self,
         extra: Option<(&str, Value)>,
     ) -> Result<Value, CenterError> {
-        let (corpus_name, corpus_items) = load_default_corpus();
+        let (corpus_name, wake_word, corpus_items) = self.resolved_corpus_items();
+        let corpus_count = corpus_items
+            .iter()
+            .filter(|c| !is_wake_corpus_item(c))
+            .count();
         let recordings = self.scan_bench_recordings().map_err(internal)?;
-        let speakers = Self::summarize_speakers(corpus_items, &recordings);
+        let online_count = recordings
+            .iter()
+            .filter(|rec| {
+                rec.speaker_dir.eq_ignore_ascii_case("online")
+                    || rec.speaker.eq_ignore_ascii_case("online")
+            })
+            .count();
+        let speakers = Self::summarize_speakers(&corpus_items, &recordings);
+        let wake_word_recorded = Self::has_matching_wake_recording(&recordings, &wake_word);
         let complete_speakers: Vec<String> = speakers
             .iter()
             .filter(|s| s.complete)
@@ -641,7 +715,10 @@ impl BuiltinVoice {
         let mut out = json!({
             "recordings_dir_rel": BENCH_RECORDINGS_DIR_REL,
             "corpus_name": corpus_name,
-            "corpus_count": corpus_items.len(),
+            "corpus_count": corpus_count,
+            "wake_word": wake_word,
+            "wake_word_recorded": wake_word_recorded,
+            "online_count": online_count,
             "corpus_items": corpus_items,
             "total_recordings": recordings.len(),
             "speaker_count": speakers.len(),
@@ -678,7 +755,7 @@ impl BuiltinVoice {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("缺少语料编号"))?;
                 let corpus_id = sanitize_corpus_id(raw_corpus_id).map_err(|m| invalid(&m))?;
-                let (_name, corpus_items) = load_default_corpus();
+                let (_name, _wake_word, corpus_items) = self.resolved_corpus_items();
                 let default_text = corpus_items
                     .iter()
                     .find(|c| c.id == corpus_id)

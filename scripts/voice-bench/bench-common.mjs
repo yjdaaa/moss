@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-export const NO_ONLINE_DEVICE_MESSAGE = "请先唤醒小智（喊‘你好小智’或按对话键），或开启常连模式";
+export const NO_ONLINE_DEVICE_MESSAGE =
+  "未检测到在线小智设备：请确认小智已通电联网并开启常连模式；若处于非常连待机态，准备唤醒词真人录音后脚本可自动唤醒";
 export const DEFAULT_DEBUG_PORT = 18009;
 export const DEFAULT_TURN_TIMEOUT_MS = 90_000;
 export const DEFAULT_IDLE_WAIT_MS = 30_000;
