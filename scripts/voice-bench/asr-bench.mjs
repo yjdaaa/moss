@@ -39,12 +39,13 @@ const LOCAL_PROTO_VERSION = 9;
 export const NO_LABELED_CORPUS_MESSAGE =
   "未找到已标注的识别语料：请先在 MOSS 语音中心「记录与诊断 › 对话记录与排障」开启“同时保存完整过程记录与原始录音”，对着小智说几句话并点“✓ 识别正确”或“纠偏此句”完成真值标注后再运行测评。";
 
-/** 本地 ASR 模型清单（对齐 crates/moss-voice/src/local_models.rs CATALOG）。 */
+/** 本地 ASR 模型清单（对齐 crates/moss-voice/src/local_models.rs CATALOG 与 moss-voice-local-proto AsrEngine::streaming）。 */
 export const LOCAL_ASR_CATALOG = [
   {
     id: "sense_voice",
     label: "SenseVoice 2024",
     engine: "sense_voice",
+    streaming: true,
     dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
     required: ["model.int8.onnx", "tokens.txt"],
   },
@@ -52,6 +53,7 @@ export const LOCAL_ASR_CATALOG = [
     id: "sense_voice_2025",
     label: "SenseVoice 2025",
     engine: "sense_voice",
+    streaming: true,
     dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09",
     required: ["model.int8.onnx", "tokens.txt"],
   },
@@ -59,6 +61,7 @@ export const LOCAL_ASR_CATALOG = [
     id: "x_asr_streaming",
     label: "X-ASR 流式识别",
     engine: "streaming_transducer",
+    streaming: true,
     dir: "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
     required: ["encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt"],
   },
@@ -66,6 +69,7 @@ export const LOCAL_ASR_CATALOG = [
     id: "qwen3_asr_0_6b",
     label: "Qwen3-ASR 0.6B",
     engine: "qwen3_asr",
+    streaming: false,
     dir: "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
     required: ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx", "tokenizer"],
   },
@@ -73,6 +77,7 @@ export const LOCAL_ASR_CATALOG = [
     id: "firered_asr2_ctc",
     label: "FireRedASR2-CTC",
     engine: "fire_red_asr2_ctc",
+    streaming: true,
     dir: "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25",
     required: ["model.int8.onnx", "tokens.txt"],
   },
@@ -628,7 +633,148 @@ export function loadLabeledCorpus(corpusDir, traceDir = null) {
   return samples;
 }
 
-/** 复用 chain_clips.py 的混噪逻辑（经 `python3 -I`）为语料批量生成噪声变体 WAV。 */
+function clampInt16(val) {
+  const n = Math.trunc(val);
+  if (n < -32768) return -32768;
+  if (n > 32767) return 32767;
+  return n;
+}
+
+/** 确定性伪随机数发生器（Mulberry32 + Box-Muller 高斯），用于无 python3 时的纯 Node 混噪兜底。 */
+function createSeededRng(seed) {
+  let state = (Number(seed) || 0) >>> 0;
+  let spareGauss = null;
+  const next = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return {
+    next,
+    randint(min, max) {
+      return min + Math.floor(next() * (max - min + 1));
+    },
+    uniform(min, max) {
+      return min + next() * (max - min);
+    },
+    gauss(mean = 0, sigma = 1) {
+      if (spareGauss !== null) {
+        const v = spareGauss;
+        spareGauss = null;
+        return mean + v * sigma;
+      }
+      const u1 = Math.max(1e-12, next());
+      const u2 = next();
+      const mag = Math.sqrt(-2.0 * Math.log(u1));
+      const z0 = mag * Math.cos(2.0 * Math.PI * u2);
+      spareGauss = mag * Math.sin(2.0 * Math.PI * u2);
+      return mean + z0 * sigma;
+    },
+  };
+}
+
+function resamplePcm16To16k(pcmBuf, srcRate) {
+  const sampleCount = Math.floor(pcmBuf.length / 2);
+  if (srcRate === 16_000) {
+    const out = new Int16Array(sampleCount);
+    for (let i = 0; i < sampleCount; i += 1) out[i] = pcmBuf.readInt16LE(i * 2);
+    return out;
+  }
+  const targetLen = Math.floor((sampleCount * 16_000) / srcRate);
+  const out = new Int16Array(targetLen);
+  for (let i = 0; i < targetLen; i += 1) {
+    const x = (i * srcRate) / 16_000;
+    const j = Math.floor(x);
+    const t = x - j;
+    const a = pcmBuf.readInt16LE(Math.min(j, sampleCount - 1) * 2);
+    const b = pcmBuf.readInt16LE(Math.min(j + 1, sampleCount - 1) * 2);
+    out[i] = clampInt16(a * (1 - t) + b * t);
+  }
+  return out;
+}
+
+/**
+ * 纯 Node 原生混噪（对齐 chain_clips.py 的 888 排风扇/气泵持续噪声与 999 突发冲击噪声），
+ * 在未安装 python3 的 Windows 机器上作为无依赖兜底。
+ */
+export function mixNoisePcm16(samples, level, seed = 0) {
+  const n = samples.length;
+  const out = new Int16Array(n);
+  if (level === 0) {
+    out.set(samples);
+    return out;
+  }
+  const rng = createSeededRng(seed);
+  if (level === 999) {
+    for (let i = 0; i < n; i += 1) {
+      out[i] = clampInt16(samples[i] + rng.gauss(0, 120));
+    }
+    let idx = rng.randint(2000, 9000);
+    while (idx < n) {
+      const len = rng.randint(1280, 2560);
+      const amp = rng.uniform(3000, 8000);
+      const end = Math.min(n, idx + len);
+      for (let k = idx; k < end; k += 1) {
+        out[k] = clampInt16(out[k] + rng.gauss(0, amp) * (1 - (k - idx) / len));
+      }
+      idx += len + rng.randint(9600, 16000);
+    }
+    return out;
+  }
+  if (level === 888) {
+    let lp = 0.0;
+    const rate = 16_000;
+    for (let k = 0; k < n; k += 1) {
+      const t = k / rate;
+      const hum =
+        900 * Math.sin(2 * Math.PI * 100 * t) +
+        450 * Math.sin(2 * Math.PI * 200 * t + 1) +
+        250 * Math.sin(2 * Math.PI * 300 * t + 2);
+      lp = 0.85 * lp + 0.15 * rng.gauss(0, 5200);
+      out[k] = clampInt16(samples[k] + hum + lp);
+    }
+    return out;
+  }
+  for (let i = 0; i < n; i += 1) {
+    out[i] = clampInt16(samples[i] + rng.gauss(0, level));
+  }
+  return out;
+}
+
+/** 纯 Node 生成 16 kHz 纯背景噪声 WAV（供 voice-assets.mjs 在无 python3 环境下复用）。 */
+export function generateNoiseWavWithNode(presetRaw, durationSecs, gain, outputPath, seed = 42) {
+  const key = String(presetRaw || "fan").trim().toLowerCase();
+  const level = NOISE_PRESETS[key] ?? Number(key);
+  if (!Number.isFinite(level)) {
+    throw new Error(`未知背景噪声档位：${presetRaw}`);
+  }
+  const sampleCount = Math.max(16_000, Math.round(Number(durationSecs || 12) * 16_000));
+  const raw = mixNoisePcm16(new Int16Array(sampleCount), level, seed);
+  const scale = Math.max(0.01, Math.min(1.0, Number(gain) || 0.25));
+  const pcmBuf = Buffer.alloc(sampleCount * 2);
+  for (let i = 0; i < sampleCount; i += 1) {
+    pcmBuf.writeInt16LE(clampInt16(raw[i] * scale), i * 2);
+  }
+  mkdirSync(dirname(resolve(outputPath)), { recursive: true });
+  writeFileSync(outputPath, encodeWavPcm16(pcmBuf, 16_000));
+}
+
+function mixNoiseBatchWithNode(jobs) {
+  for (const job of jobs) {
+    const { pcm, sampleRate } = readWavPcm16(job.input);
+    const samples16k = resamplePcm16To16k(pcm, sampleRate);
+    const mixed = mixNoisePcm16(samples16k, Number(job.level), Number(job.seed || 0));
+    const outBuf = Buffer.alloc(mixed.length * 2);
+    for (let i = 0; i < mixed.length; i += 1) {
+      outBuf.writeInt16LE(mixed[i], i * 2);
+    }
+    mkdirSync(dirname(resolve(job.output)), { recursive: true });
+    writeFileSync(job.output, encodeWavPcm16(outBuf, 16_000));
+  }
+}
+
+/** 复用 chain_clips.py 的混噪逻辑（经 `python3 -I`）为语料批量生成噪声变体 WAV；无 python3 时自动切 Node 原生混噪。 */
 export function mixNoiseBatchWithPython(samples, noiseLevels, tempDir, pythonBin = "python3") {
   const map = new Map();
   const jobs = [];
@@ -653,10 +799,14 @@ export function mixNoiseBatchWithPython(samples, noiseLevels, tempDir, pythonBin
   if (jobs.length > 0) {
     const manifestPath = join(tempDir, "noise-batch.json");
     writeFileSync(manifestPath, JSON.stringify(jobs), "utf8");
-    execFileSync(pythonBin, ["-I", NOISE_MIX_SCRIPT, "--batch", manifestPath], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    try {
+      execFileSync(pythonBin, ["-I", NOISE_MIX_SCRIPT, "--batch", manifestPath], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      mixNoiseBatchWithNode(jobs);
+    }
   }
   return map;
 }
@@ -738,16 +888,38 @@ export function discoverInstalledLocalModels(runtimeDir, extraModelDirs = []) {
   return found;
 }
 
-/** 查找本机 `moss-voice-local` 可执行文件。 */
-export function resolveHelperExe(explicitPath = "") {
+/** 查找本机 `moss-voice-local` 可执行文件（兼容根工作区、独立子工作区与桌面 sidecar 目录）。 */
+export function resolveHelperExe(explicitPath = "", { rootDir = resolve(SCRIPT_DIR, "../.."), platform = process.platform, arch = process.arch } = {}) {
+  const isWin = platform === "win32";
+  const exeName = isWin ? "moss-voice-local.exe" : "moss-voice-local";
+  const sidecarDir = resolve(rootDir, "apps/desktop/src-tauri/binaries");
+  const sidecarCandidates = [];
+  if (existsSync(sidecarDir)) {
+    const targetTriple = isWin
+      ? arch === "arm64"
+        ? "aarch64-pc-windows-msvc"
+        : "x86_64-pc-windows-msvc"
+      : platform === "darwin"
+        ? arch === "arm64"
+          ? "aarch64-apple-darwin"
+          : "x86_64-apple-darwin"
+        : arch === "arm64"
+          ? "aarch64-unknown-linux-gnu"
+          : "x86_64-unknown-linux-gnu";
+    sidecarCandidates.push(
+      join(sidecarDir, `moss-voice-local-${targetTriple}${isWin ? ".exe" : ""}`),
+      join(sidecarDir, exeName),
+    );
+  }
   const candidates = [
     explicitPath,
     process.env.MOSS_VOICE_LOCAL_EXE || "",
-    resolve(SCRIPT_DIR, "../../apps/moss-voice-local/target/release/moss-voice-local"),
-    resolve(SCRIPT_DIR, "../../apps/moss-voice-local/target/release/moss-voice-local.exe"),
-    resolve(SCRIPT_DIR, "../../apps/moss-voice-local/target/debug/moss-voice-local"),
-    resolve(SCRIPT_DIR, "../../apps/moss-voice-local/target/debug/moss-voice-local.exe"),
-    "/Applications/MOSS.app/Contents/MacOS/moss-voice-local",
+    resolve(rootDir, "target/release", exeName),
+    resolve(rootDir, "apps/moss-voice-local/target/release", exeName),
+    ...sidecarCandidates,
+    resolve(rootDir, "target/debug", exeName),
+    resolve(rootDir, "apps/moss-voice-local/target/debug", exeName),
+    ...(isWin ? [] : ["/Applications/MOSS.app/Contents/MacOS/moss-voice-local"]),
   ].filter(Boolean);
   for (const cand of candidates) {
     if (existsSync(cand) && statSync(cand).isFile()) return cand;
@@ -863,10 +1035,10 @@ export class LocalHelperClient {
     });
   }
 
-  async transcribeWav(wavPath) {
+  async transcribeWav(wavPath, { streaming = true } = {}) {
     const { pcm, sampleRate } = readWavPcm16(wavPath);
-    if (sampleRate !== 16_000) {
-      // 流式 asr_open/asr_feed 仅接受 16 kHz 单声道 PCM，非 16 kHz 直接走整段 transcribe
+    if (!streaming || sampleRate !== 16_000) {
+      // 非流式模型（如 Qwen3-ASR 0.6B）或非 16 kHz 音频直接走单次整段 transcribe
       const t0 = performance.now();
       const fin = await this.request({ op: "transcribe", sample_rate: sampleRate }, pcm);
       const finalMs = Math.round(performance.now() - t0);
@@ -1632,7 +1804,7 @@ export async function runAsrBench(options = {}) {
           recognizers.push({
             id: spec.id,
             label: spec.label,
-            transcribe: (wavPath) => client.transcribeWav(wavPath),
+            transcribe: (wavPath) => client.transcribeWav(wavPath, { streaming: spec.streaming !== false }),
           });
         }
       }

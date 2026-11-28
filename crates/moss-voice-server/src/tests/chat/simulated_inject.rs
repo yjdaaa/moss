@@ -1636,3 +1636,187 @@ fn ve4_bench_window_blocks_play_music_and_restores_after_close() {
 
     server.stop();
 }
+
+/// 模拟轮次生成 `preview_ready` 激光预览后，即使经 `HostTools` 截断超长 `detail`（>1500 字符）
+/// 服务端仍经 `call_raw` 提取完整 `workflow_id` 自动静默取消（不残留在桌面弹窗），
+/// 而真实真人对话生成的预览绝不自动取消。
+#[test]
+fn simulated_preview_auto_cancels_workflow_while_real_turn_keeps_it() {
+    struct PreviewHost {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+        seq: AtomicUsize,
+    }
+    impl crate::tools::ToolHost for PreviewHost {
+        fn list(&self) -> serde_json::Value {
+            serde_json::json!({
+                "tools": [{
+                    "name": "laser_workflow_tool",
+                    "description": "激光加工任务",
+                    "inputSchema": {"type": "object"}
+                }]
+            })
+        }
+        fn call(
+            &self,
+            _: &ToolContext,
+            name: &str,
+            arguments: &serde_json::Value,
+        ) -> crate::tools::ToolHostResult {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), arguments.clone()));
+            if name == "laser_workflow_tool"
+                && arguments.get("action").and_then(|v| v.as_str()) == Some("preview")
+            {
+                let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                let wf_id = format!("wf-test-{n}");
+                // 构造超过 MAX_RESULT_CHARS(1500) 的 pretty JSON，验证 HostTools 截断后
+                // call_raw 依然能完整提取出末尾的 workflow_id 与 status=preview_ready
+                let hull: Vec<[f64; 2]> = (0..120)
+                    .map(|i| [i as f64 * 0.5, i as f64 * 0.25])
+                    .collect();
+                let detail = serde_json::to_string_pretty(&serde_json::json!({
+                    "result": {
+                        "artifacts": {
+                            "frame_hull_mm": hull,
+                            "gcode_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        },
+                        "status": "preview_ready",
+                        "workflow_id": wf_id,
+                    },
+                    "success": true,
+                }))
+                .unwrap();
+                assert!(
+                    detail.chars().count() > 2000,
+                    "须覆盖超过 1500 字符截断场景"
+                );
+                return crate::tools::ToolHostResult {
+                    success: true,
+                    result: "laser_workflow_tool 完成".into(),
+                    detail: Some(detail),
+                };
+            }
+            crate::tools::ToolHostResult {
+                success: true,
+                result: "ok".into(),
+                detail: None,
+            }
+        }
+    }
+
+    let host = Arc::new(PreviewHost {
+        calls: Mutex::default(),
+        seq: AtomicUsize::new(0),
+    });
+    // 按生产装配套上最外层 TimerTools，验证装饰器链完整透传 call_raw 不回落到 1500 字截断
+    let tools: Arc<dyn ToolExecutor> = Arc::new(crate::timer::TimerTools {
+        original: Arc::new(crate::tools::HostTools::new(host.clone())),
+        timers: Arc::new(crate::timer::TimerStore::new()),
+        permitted: None,
+        disabled: None,
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            // 第 1 轮（模拟文字注入）：生成预览 wf-test-1 -> 服务端应自动静默 cancel
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "c-sim",
+                    "laser_workflow_tool",
+                    r#"{"action":"preview","text":"福气满满","material":"椴木","thickness_mm":3}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["模拟预览已生成。"]),
+            // 第 2 轮（真实语音对话）：生成预览 wf-test-2 -> 绝不自动 cancel
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "c-real",
+                    "laser_workflow_tool",
+                    r#"{"action":"preview","text":"新年快乐","material":"椴木","thickness_mm":3}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["真实预览已生成。"]),
+        ])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("生成新年快乐预览".to_owned())])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        tools,
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            idle_timeout: Duration::from_secs(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let mut device = chat_device(&server, &registry, 1);
+    wait_until("设备上线", || {
+        !server.active_device_sessions().is_empty()
+    });
+
+    // 1. 模拟文字注入生成超长 detail 预览：自动追加一次 cancel wf-test-1，且不暴露给工具明细
+    let ack = server
+        .inject_text(DEVICE, "生成福气满满预览", true)
+        .unwrap();
+    let _ = collect_items(&mut device);
+    wait_until("模拟轮次完成", || {
+        server
+            .turn_detail(&ack.turn_id)
+            .is_some_and(|d| d.status == "done")
+    });
+    {
+        let recorded = host.calls.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "模拟预览即使 detail 超 1500 字也须自动静默取消：{recorded:?}"
+        );
+        assert_eq!(recorded[1].0, "laser_workflow_tool");
+        assert_eq!(recorded[1].1["action"], "cancel");
+        assert_eq!(recorded[1].1["workflow_id"], "wf-test-1");
+        let detail = server.turn_detail(&ack.turn_id).unwrap();
+        assert_eq!(detail.tools.len(), 1, "内部静默清理不应污染轮次工具明细");
+    }
+
+    // 2. 真实语音生成预览：保留 preview_ready，绝不调用 cancel
+    speak_manual(&mut device, 1, 500);
+    let _ = collect_items(&mut device);
+    wait_until("真实轮次完成", || {
+        server
+            .turn_details_for_device(DEVICE, 5)
+            .iter()
+            .any(|d| d.turn == 2 && d.status == "done")
+    });
+    {
+        let recorded = host.calls.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            3,
+            "真实语音预览绝不能自动取消：{recorded:?}"
+        );
+        assert_eq!(recorded[2].1["action"], "preview");
+    }
+
+    server.stop();
+}

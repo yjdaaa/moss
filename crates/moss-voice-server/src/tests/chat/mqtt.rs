@@ -844,3 +844,135 @@ fn device_mcp_timeout_keeps_tools_unready_and_retries_on_sync_tools() {
         serde_json::json!(true)
     );
 }
+
+/// 常连待机态（MQTT 未唤醒开 UDP 音频通道）下做文字直通注入与“退下”：
+/// 服务端照常跑通对话与合成，并把 `TurnDetail.audio_channel_open` 标为 `false`，
+/// 绝不向待机设备发送 `stt` / `tts` / `goodbye`（避免把未开音频通道的设备硬推入“聆听中”）。
+#[test]
+fn mqtt_idle_text_inject_skips_device_tts_and_goodbye_so_device_stays_idle() {
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            say(&["好的，已记录。"]),
+            say(&[
+                "这是一段较长的回复，用来确保在测试里进入播放态后再被设备打断不会泄漏悬空的停止播放指令。",
+            ]),
+        ])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 60,
+            idle_timeout: Duration::from_secs(60),
+            mqtt: Some(crate::MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("常连模式已开启");
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    // 常连登录，但不发 hello（保持待机态，不打开 UDP 语音通道）
+    let (mut device, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    let init = device.read_mcp();
+    assert_eq!(init["method"], "initialize");
+    device.reply_mcp(
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(device.read_mcp()["method"], "notifications/initialized");
+    let list = device.read_mcp();
+    device.reply_mcp(&list["id"], serde_json::json!({"tools": []}));
+    wait_until("常连设备上线且处于待机态", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.state == "idle" && s.device_tools_ready)
+    });
+
+    // 1. 注入普通对话文字
+    let ack1 = server.inject_text(DEVICE, "随便测试一句", true).unwrap();
+    wait_until("待机文字直通第 1 轮完成", || {
+        server
+            .turn_detail(&ack1.turn_id)
+            .is_some_and(|d| d.status == "done")
+    });
+    let d1 = server.turn_detail(&ack1.turn_id).unwrap();
+    assert!(!d1.audio_channel_open, "未开 UDP 音频通道须标为 false");
+    assert!(d1.reply.contains("已记录"));
+
+    // 2. 注入噪声/标点触发 Ignored：不得切入 listening，必须保持 idle
+    let ack_ign = server.inject_text(DEVICE, "。。。", true).unwrap();
+    wait_until("待机文字直通 Ignored 轮完成", || {
+        server
+            .turn_detail(&ack_ign.turn_id)
+            .is_some_and(|d| d.status == "ignored")
+    });
+    assert_eq!(server.status().sessions[0].state, "idle");
+
+    // 3. 注入并中途发 abort 打断正在播放的 silent 轮次：不得泄漏悬空 tts stop
+    let ack_abort = server.inject_text(DEVICE, "长回复测试", true).unwrap();
+    wait_until("silent 轮次进入 speaking", || {
+        server
+            .active_device_sessions()
+            .iter()
+            .any(|s| s.device_id == DEVICE && s.state == "speaking")
+    });
+    device.publish(&serde_json::json!({"type": "abort", "reason": "wake_word_detected"}));
+    wait_until("silent 轮次被打断并回到 idle", || {
+        server
+            .turn_detail(&ack_abort.turn_id)
+            .is_some_and(|d| d.status == "interrupted")
+            && server
+                .active_device_sessions()
+                .iter()
+                .any(|s| s.device_id == DEVICE && s.state == "idle")
+    });
+
+    // 4. 注入退出词“退下”
+    let ack2 = server.inject_text(DEVICE, "退下", true).unwrap();
+    wait_until("待机文字直通退出轮完成", || {
+        server
+            .turn_detail(&ack2.turn_id)
+            .is_some_and(|d| d.status == "done")
+    });
+    let d2 = server.turn_detail(&ack2.turn_id).unwrap();
+    assert!(!d2.audio_channel_open);
+    assert_eq!(d2.route, "fast_exit");
+
+    // 5. 发一个 ping 并收 pong，确认期间服务端从未下发任何 stt / tts / goodbye
+    device.publish(&serde_json::json!({"type": "ping"}));
+    loop {
+        let value = device.read_json();
+        let ty = value["type"].as_str().unwrap_or("");
+        assert!(
+            !matches!(ty, "stt" | "tts" | "goodbye" | "llm"),
+            "常连待机态文字直通绝不能向设备发 stt/tts/goodbye/llm，实际收到：{value}"
+        );
+        if ty == "pong" {
+            break;
+        }
+    }
+    assert_eq!(server.status().sessions.len(), 1, "设备保持常连在线");
+    assert_eq!(server.status().sessions[0].state, "idle");
+    server.stop();
+}

@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   NO_ONLINE_DEVICE_MESSAGE,
+  evaluateTurnExpectations,
   redactText,
   runLiveDebugBench,
 } from "../voice-bench/live-xiaozhi-debug.mjs";
@@ -374,6 +375,130 @@ test("VA4/VA6 存在失败轮次时仍完成归档并返回非 0 状态码", asy
     assert.ok(existsSync(join(res.archiveDir, "summary.json")));
     assert.ok(existsSync(join(res.archiveDir, "report.md")));
     assert.equal(redactText("Bearer mysecretvalue12345"), "Bearer [REDACTED]");
+  } finally {
+    await fake.close();
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test("VA4 工具断言回归：设备工具就绪但被剪空未调用时判失败，常连待机无音频通道在报告给出提示", async () => {
+  const spec = {
+    id: "device_volume_and_screen",
+    expect: {
+      route: "llm",
+      expect_device_tools_if_ready: ["self.audio_speaker.set_volume", "self.screen.set_brightness"],
+    },
+  };
+  const readyDev = { device_tools_ready: true, device_tools_count: 14 };
+  // 未调用设备工具必须判失败（不能再误报通过）
+  const errMissing = evaluateTurnExpectations(
+    spec,
+    { route: "llm", outcome: "done", tools: [], reply: "我无法控制音量与屏幕亮度" },
+    { deviceInfo: readyDev },
+  );
+  assert.ok(errMissing.includes("未调用预期设备工具"), `预期报错，实际：${errMissing}`);
+
+  // 正确调用了音量与亮度（含 AMOLED setbacklight 别名）则判通过
+  const errOk = evaluateTurnExpectations(
+    spec,
+    {
+      route: "llm",
+      outcome: "done",
+      tools: [
+        { name: "device__self_audio_speaker_set_volume" },
+        { name: "device__self_disp_setbacklight" },
+      ],
+    },
+    { deviceInfo: readyDev },
+  );
+  assert.equal(errOk, "");
+
+  // 设备未就绪设备工具时不强卡设备工具断言
+  const errNotReady = evaluateTurnExpectations(
+    spec,
+    { route: "llm", outcome: "done", tools: [] },
+    { deviceInfo: { device_tools_ready: false, device_tools_count: 0 } },
+  );
+  assert.equal(errNotReady, "");
+
+  // 无屏小智仅声明音量工具未声明亮度工具时，只调音量应判通过，不误报缺亮度工具
+  const errNoScreen = evaluateTurnExpectations(
+    spec,
+    {
+      route: "llm",
+      outcome: "done",
+      tools: [{ name: "device__self_audio_speaker_set_volume" }],
+    },
+    {
+      deviceInfo: {
+        device_tools_ready: true,
+        device_tools_count: 2,
+        device_tools: ["self.get_device_status", "self.audio_speaker.set_volume"],
+      },
+    },
+  );
+  assert.equal(errNoScreen, "");
+
+  // 端到端验证 audio_channel_open === false 时报告显式提示
+  const runtimeDir = mkdtempSync(join(tmpdir(), "moss-va4-silent-"));
+  const debugToken = "fake_debug_token_silent_mqtt_1234567890abcdef";
+  const fake = await startFakeDebugServer({
+    token: debugToken,
+    devices: [
+      {
+        device_id: "aa:bb:cc:77:88:99",
+        session_id: "sess-fake",
+        state: "idle",
+        level: 0,
+        transport: "mqtt",
+        device_tools_ready: true,
+        device_tools_count: 14,
+      },
+    ],
+    turnBehavior: ({ deviceId, turnId, turn, text }) => ({
+      turn_id: turnId,
+      device_id: deviceId,
+      session_id: "sess-fake",
+      turn,
+      simulated: true,
+      audio_channel_open: false,
+      status: "done",
+      outcome: "done",
+      route: "llm",
+      injected_text: text,
+      corrected_text: text,
+      stages_ms: { turn_end: 80 },
+      tools: [
+        { name: "device__self_audio_speaker_set_volume", arguments: '{"volume":50}', ms: 5 },
+        { name: "device__self_screen_set_brightness", arguments: '{"brightness":70}', ms: 5 },
+      ],
+      reply: "已调好音量和亮度。",
+      spoken: "已调好音量和亮度。",
+      playback: { frames: 12, underruns: 0, stall_ms: 0 },
+      device_online: true,
+      device_state: "idle",
+      device_level: 0,
+    }),
+  });
+  try {
+    mkdirSync(join(runtimeDir, "debug"), { recursive: true });
+    writeFileSync(join(runtimeDir, "debug", "voice-debug.token"), debugToken, "utf8");
+    const corpusFile = join(runtimeDir, "corpus.json");
+    writeFileSync(
+      corpusFile,
+      JSON.stringify({ name: "silent-check", turns: [spec] }),
+      "utf8",
+    );
+    const res = await runLiveDebugBench({
+      runtimeDir,
+      url: fake.baseUrl,
+      corpus: corpusFile,
+      pollIntervalMs: 25,
+    });
+    assert.equal(res.exitCode, 0);
+    assert.equal(res.summary.audio_channel_closed_turns, 1);
+    const report = readFileSync(join(res.archiveDir, "report.md"), "utf8");
+    assert.ok(report.includes("常连待机态"), "report.md 须明确提示待机无声原因");
   } finally {
     await fake.close();
     rmSync(runtimeDir, { recursive: true, force: true });

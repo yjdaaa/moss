@@ -114,7 +114,8 @@ pub enum AsrEngine {
     SenseVoice,
     /// 流式 Zipformer Transducer（`encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx`、`tokens.txt`）：原生逐块流式识别
     StreamingTransducer,
-    /// Qwen3-ASR 0.6B（`conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx`、`tokenizer/`）
+    /// Qwen3-ASR 0.6B（`conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx`、`tokenizer/`）：
+    /// 自回归离线整段模型，不做每 0.5 秒伪流式重解码，说完后单次整段识别。
     Qwen3Asr,
     /// FireRedASR2-CTC 中文/中英多方言流式切片识别（`model.int8.onnx`、`tokens.txt`）
     FireRedAsr2Ctc,
@@ -124,7 +125,7 @@ impl AsrEngine {
     pub fn streaming(self) -> bool {
         matches!(
             self,
-            Self::SenseVoice | Self::StreamingTransducer | Self::Qwen3Asr | Self::FireRedAsr2Ctc
+            Self::SenseVoice | Self::StreamingTransducer | Self::FireRedAsr2Ctc
         )
     }
 }
@@ -810,7 +811,7 @@ mod tests {
         assert!(
             AsrEngine::StreamingTransducer.streaming()
                 && AsrEngine::SenseVoice.streaming()
-                && AsrEngine::Qwen3Asr.streaming()
+                && !AsrEngine::Qwen3Asr.streaming()
                 && AsrEngine::FireRedAsr2Ctc.streaming()
         );
         assert_eq!(

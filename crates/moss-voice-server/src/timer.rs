@@ -626,6 +626,35 @@ impl ToolExecutor for TimerTools {
         })
     }
 
+    fn call_raw<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> BoxFuture<'a, crate::tools::ToolHostResult> {
+        if name != TIMER_TOOL {
+            return self.original.call_raw(context, name, arguments);
+        }
+        Box::pin(async move {
+            let (success, result) = match self.call(context, name, arguments).await {
+                ToolOutcome::Speak(text) => (true, text),
+                ToolOutcome::Reply(text) => {
+                    let value: Value = serde_json::from_str(&text).unwrap_or_default();
+                    (
+                        value["success"].as_bool().unwrap_or(false),
+                        value["result"].as_str().unwrap_or_default().to_owned(),
+                    )
+                }
+                ToolOutcome::PlayMusic { .. } => (false, String::new()),
+            };
+            crate::tools::ToolHostResult {
+                success,
+                result,
+                detail: None,
+            }
+        })
+    }
+
     fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         self.original.recent_workflows(context)
     }

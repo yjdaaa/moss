@@ -1280,7 +1280,14 @@ async function executeScenario(scenario, ctx) {
           benchToggle.data,
         );
 
-        // 2) 操作者开启空跑模式
+        // 2) 操作者先握手连通激光机，再开启空跑模式（未连接不得开启）
+        const probeRes = await api("POST", "/api/connection/check", netConn);
+        assertCheck(
+          probeRes.status === 200 && probeRes.data?.result?.connected === true,
+          `空跑前握手连通模拟机必须成功（实际 ${probeRes.status}）`,
+          "safety",
+          probeRes.data,
+        );
         const enableRes = await api("POST", "/api/settings", {
           laser_dry_run_enabled: true,
           dry_run_max_feed_mm_min: maxFeed,

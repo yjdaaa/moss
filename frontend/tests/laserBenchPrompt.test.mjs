@@ -147,6 +147,29 @@ test("LD: 激光测试卡片挪入语音中心 AI 联调与测试分组（全链
     assert.match(onHtml, /id="voice-laser-dry-run-remaining"[^>]*>剩余 40 分钟</);
     assert.match(onHtml, /已连接 · 空跑开启（限速 1500 mm\/min · 剩余 40 分钟）/);
 
+    // 2b) 未连接激光机：关闭态禁用空跑开关并明确提示；已开启态即使中途断连仍允许随时关闭
+    const disconnectedOffHtml = renderToStaticMarkup(
+      React.createElement(LaserBenchSection, {
+        embedded: true,
+        canEdit: true,
+        connectionStatus: { connected: false },
+        initialDryRun: { enabled: false, max_feed_mm_min: 2000, remaining_seconds: 0 },
+      }),
+    );
+    assert.match(disconnectedOffHtml, /id="voice-laser-dry-run-toggle"[^>]*disabled=""/);
+    assert.match(disconnectedOffHtml, /id="voice-laser-bench-hint"[^>]*>请先连接激光雕刻机后再开启真机空跑/);
+
+    const disconnectedOnHtml = renderToStaticMarkup(
+      React.createElement(LaserBenchSection, {
+        embedded: true,
+        canEdit: true,
+        connectionStatus: { connected: false },
+        initialDryRun: { enabled: true, max_feed_mm_min: 2000, remaining_seconds: 1200 },
+      }),
+    );
+    assert.doesNotMatch(disconnectedOnHtml, /id="voice-laser-dry-run-toggle"[^>]*disabled=""/);
+    assert.match(disconnectedOnHtml, /id="voice-laser-bench-hint"[^>]*>当前未连接激光机，可随时取消勾选关闭空跑/);
+
     // 3) 只读客户端（canEdit=false）：仍显示状态行与复制提示词按钮，隐藏空跑开关与限速输入框
     const readonlyHtml = renderToStaticMarkup(
       React.createElement(LaserBenchSection, {

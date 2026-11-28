@@ -2771,6 +2771,9 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(e2ePrompt, /暂停/);
   assert.match(e2ePrompt, /30–50 cm/);
   assert.match(e2ePrompt, /生成预览/);
+  assert.match(e2ePrompt, /不要测试激光雕刻机/);
+  assert.match(e2ePrompt, /不运行 `scripts\/laser-bench\/\*`/);
+  assert.match(e2ePrompt, /激光空跑模式/);
   // 网上素材 4 字段 + 动态覆盖率状态与汇报要求
   assert.match(e2ePrompt, /`text`、`dataset`、`license`、`source_url`/);
   assert.match(e2ePrompt, /recordings\/online\//);
@@ -2843,11 +2846,13 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
 
   const textPrompt = buildAiBenchPrompt(readyStatus, "text");
   assert.match(textPrompt, /live-xiaozhi-debug\.mjs/);
+  assert.match(textPrompt, /不要测试激光雕刻机/);
   assert.ok(textPrompt.length < 500, `精简后的文字直通提示词应明显缩短，当前 ${textPrompt.length} 字符`);
   assert.ok(!textPrompt.includes(fakeToken));
 
   const asrPrompt = buildAiBenchPrompt(readyStatus, "asr");
   assert.match(asrPrompt, /asr-bench\.mjs/);
+  assert.match(asrPrompt, /不要测试激光雕刻机/);
   assert.match(asrPrompt, /8 条已标注/);
   assert.ok(asrPrompt.length < 600, `精简后的识别测评提示词应明显缩短，当前 ${asrPrompt.length} 字符`);
   assert.ok(!asrPrompt.includes(fakeToken));

@@ -23,7 +23,8 @@
       "label": "生成木牌雕刻预览（不发送）",
       "text": "帮我用三毫米椴木生成一个木牌雕刻预览，上面写新年快乐，宽60毫米高40毫米，只生成预览，不要开始雕刻",
       "expect": {
-        "route": "llm"
+        "route": "llm",
+        "expect_tool_any": ["laser_workflow_tool"]
       }
     },
     {
@@ -31,7 +32,8 @@
       "label": "多轮追问改参数",
       "text": "把刚才的木牌文字改成福气满满，功率调到60%，重新生成预览，先不要雕刻",
       "expect": {
-        "route": "llm"
+        "route": "llm",
+        "expect_tool_any": ["laser_workflow_tool", "regenerate_text_laser_task_tool"]
       }
     },
     {
@@ -39,7 +41,8 @@
       "label": "设备音量与屏幕控制",
       "text": "把你的音量调到50%，屏幕亮度调到70%",
       "expect": {
-        "route": "llm"
+        "route": "llm",
+        "expect_device_tools_if_ready": ["self.audio_speaker.set_volume", "self.screen.set_brightness"]
       }
     },
     {

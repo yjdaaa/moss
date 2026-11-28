@@ -8,10 +8,14 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  LOCAL_ASR_CATALOG,
   NO_LABELED_CORPUS_MESSAGE,
   classifyCommand,
   computeCer,
   isSafeHomophoneCandidate,
+  mixNoiseBatchWithPython,
+  readWavPcm16,
+  resolveHelperExe,
   runAsrBench,
 } from "../voice-bench/asr-bench.mjs";
 
@@ -380,6 +384,65 @@ test("审查回归：命令词全量退出词/子串前缀拦截、非单声道 
       /提前退出/,
     );
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("Windows 适配与 Qwen3-ASR 离线策略：helper 路径探测、无 python3 纯 Node 混噪兜底与非流式标记", () => {
+  const qwenSpec = LOCAL_ASR_CATALOG.find((m) => m.id === "qwen3_asr_0_6b");
+  assert.ok(qwenSpec, "LOCAL_ASR_CATALOG 必须包含 qwen3_asr_0_6b");
+  assert.equal(qwenSpec.streaming, false, "Qwen3-ASR 0.6B 不走伪流式重解码，应标记 streaming=false");
+
+  const tmp = mkdtempSync(join(tmpdir(), "moss-asr-win-"));
+  const prevEnv = process.env.MOSS_VOICE_LOCAL_EXE;
+  delete process.env.MOSS_VOICE_LOCAL_EXE;
+  try {
+    // 1. 根工作区 target/release/moss-voice-local.exe 与 tauri sidecar 目录均应被 resolveHelperExe 探测到
+    const rootRelease = join(tmp, "target", "release");
+    mkdirSync(rootRelease, { recursive: true });
+    const winExe = join(rootRelease, "moss-voice-local.exe");
+    writeFileSync(winExe, "stub");
+    assert.equal(
+      resolveHelperExe("", { rootDir: tmp, platform: "win32", arch: "x64" }),
+      winExe,
+      "应探测到仓库根 target/release/moss-voice-local.exe",
+    );
+
+    const sidecarDir = join(tmp, "apps", "desktop", "src-tauri", "binaries");
+    mkdirSync(sidecarDir, { recursive: true });
+    const sidecarExe = join(sidecarDir, "moss-voice-local-x86_64-pc-windows-msvc.exe");
+    writeFileSync(sidecarExe, "stub");
+    rmSync(winExe);
+    assert.equal(
+      resolveHelperExe("", { rootDir: tmp, platform: "win32", arch: "x64" }),
+      sidecarExe,
+      "应探测到 apps/desktop/src-tauri/binaries/ sidecar 可执行文件",
+    );
+
+    // 2. 无 python3 环境（传入不存在的可执行名）时，fan(888) 与 pump(999) 自动切纯 Node 混噪产出合法 16 kHz WAV
+    const srcWav = join(tmp, "clean.wav");
+    writeSyntheticWav16k(srcWav, 440, 0.3);
+    const outDir = join(tmp, "mixed");
+    mkdirSync(outDir, { recursive: true });
+    const map = mixNoiseBatchWithPython(
+      [{ id: "s1", turn_id: "t1", wav_path: srcWav }],
+      [0, 888, 999],
+      outDir,
+      "definitely_nonexistent_python_binary_xyz",
+    );
+    assert.equal(map.get("s1@@0"), srcWav);
+    for (const level of [888, 999]) {
+      const outPath = map.get(`s1@@${level}`);
+      assert.ok(outPath && existsSync(outPath), `无 python3 时档位 ${level} 必须由 Node 原生混噪生成 WAV`);
+      const parsed = readWavPcm16(outPath);
+      assert.equal(parsed.sampleRate, 16_000);
+      assert.equal(parsed.numChannels, 1);
+      assert.equal(parsed.bitsPerSample, 16);
+      assert.ok(parsed.pcm.length > 0);
+    }
+  } finally {
+    if (prevEnv === undefined) delete process.env.MOSS_VOICE_LOCAL_EXE;
+    else process.env.MOSS_VOICE_LOCAL_EXE = prevEnv;
     rmSync(tmp, { recursive: true, force: true });
   }
 });

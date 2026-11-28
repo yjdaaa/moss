@@ -40,15 +40,16 @@ const UNFINISHED_THRESHOLD: f64 = 0.65;
 const FAST_ROUTE_CONFIDENCE: f64 = 0.85;
 const FAST_ROUTE_TOP_PROB: f64 = 0.70;
 const FAST_ROUTE_MARGIN: f64 = 0.20;
-const TOOL_KEEP_THRESHOLD: f64 = 0.45;
+const TOOL_KEEP_THRESHOLD: f64 = 0.35;
 const MEMORY_KEEP_THRESHOLD: f64 = 0.55;
 
 /// 单条候选文本硬上限（对齐 silverstein/minutes 经验：单条候选 <= 600 字符，越短越快越准）。
 pub const MAX_CANDIDATE_CHARS: usize = 600;
 const MAX_UTTERANCE_CHARS: usize = 500;
-/// 只带最近 2 轮（User + Assistant 最多 4 条）极简对话上下文，不塞历史工具 JSON。
-const MAX_RECENT_MESSAGES: usize = 4;
-const MAX_RECENT_TURN_CHARS: usize = 120;
+/// 只带最近 1 轮（User + Assistant 最多 2 条）极简对话上下文，避免多轮历史（如前两轮的“先不要雕刻”）
+/// 稀释 0.8B 分类模型对当前句意图的注意力，且不塞历史工具 JSON。
+const MAX_RECENT_MESSAGES: usize = 2;
+const MAX_RECENT_TURN_CHARS: usize = 80;
 const MAX_MEMORY_CANDIDATES: usize = 3;
 const MAX_MEMORY_CANDIDATE_CHARS: usize = 580;
 /// 外部 MCP 工具超过此阈值且跨多个 Server 时，按 `<server>` 独立拆成 Server 级 `noul` 开关；
@@ -333,22 +334,22 @@ impl ToolGroup {
     fn instruction(self) -> &'static str {
         match self {
             Self::LaserQuery => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to check laser machine connection, device status, engraving progress, or recommended material parameters in this turn? Answer false for casual mentions or general chat."
+                "Could state.utterance ask to check laser connection, machine status, progress, or material engraving/cutting parameters? Focus on state.utterance."
             }
             Self::LaserGenerate => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to generate a laser text/image engraving preview, adjust parameters from engraving feedback, or select a calibration grid cell in this turn? Answer false for casual mentions."
+                "Could state.utterance ask to create, modify, or regenerate a laser engraving/cutting preview, plaque/text/image design, or adjust preview parameters (even if saying do not start engraving yet)? Focus on state.utterance."
             }
             Self::LaserControl => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to operate, home, unlock, frame, pause, start, confirm, resume, calibrate, or stop the laser machine or engraving workflow in this turn? Answer false for unrelated chat."
+                "Could state.utterance ask to start, confirm, resume, pause, stop, home, unlock, frame, move, or calibrate the laser machine or engraving job (override any earlier turn that said do not engrave yet)? Focus on state.utterance."
             }
             Self::InfoPlugin => {
-                "Does state.utterance explicitly ask to look up current weather, lunar calendar/date, news headlines, web search results, or external knowledge base documents in this turn? Answer false for general conversation."
+                "Could state.utterance ask to look up weather, lunar calendar/date, news headlines, web search results, or external knowledge base documents? Focus ONLY on state.utterance."
             }
             Self::HomeAndAgent => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to read or control a smart-home / Home Assistant entity (lights, AC, switches, media) or run a desktop coding agent (Codex / Claude Code) in this turn? Answer false otherwise."
+                "Could state.utterance ask to read or control a smart-home / Home Assistant entity (lights, AC, switches, media) or run a desktop coding agent (Codex / Claude Code)? Focus on state.utterance."
             }
             Self::MusicAndDevice => {
-                "Does state.utterance (given state.recent_turns) explicitly ask to play local music or invoke an on-device hardware capability (such as volume, brightness, camera photo, or device peripheral) in this turn? Answer false otherwise."
+                "Could state.utterance ask to play local music or adjust/query the speaker device itself (volume, mute, screen brightness, theme, camera photo, battery)? Focus ONLY on state.utterance."
             }
         }
     }
@@ -628,8 +629,8 @@ impl JevTurnDecision {
         }
     }
 
-    /// 根据本轮筛选结果裁剪工具清单；短确认回复（如“确认”“开始”）自动保留上一轮刚调用过的工具，
-    /// 停止 / 暂停工具（[`NEVER_FILTERED_TOOLS`]）永远保留。
+    /// 根据本轮筛选结果裁剪工具清单；短确认或上文指代追问自动保留上一轮刚调用过的工具，
+    /// 命中明确领域关键词时做确定性高召回保底，停止 / 暂停工具（[`NEVER_FILTERED_TOOLS`]）永远保留。
     pub fn filter_tools(
         &self,
         tools: &[ToolSpec],
@@ -640,6 +641,7 @@ impl JevTurnDecision {
             return tools.to_vec();
         }
         let recent_called = recently_used_tools(text, history);
+        let hinted = hinted_groups(text);
         tools
             .iter()
             .filter(|spec| {
@@ -660,17 +662,156 @@ impl JevTurnDecision {
                 };
                 let groups = groups_of_builtin_tool(spec);
                 // 完全不属于现有 6 个域的新增自定义工具保底保留，防止静默误剪
-                groups.is_empty() || groups.iter().any(|g| allowed.contains(g))
+                groups.is_empty()
+                    || groups
+                        .iter()
+                        .any(|g| allowed.contains(g) || hinted.contains(g))
             })
             .cloned()
             .collect()
     }
 }
 
+/// 确定性高召回关键词兜底：针对 0.8B 分类模型在否定词或强历史上下文下容易漏判的明确业务意图，
+/// 仅在当前句明确命中领域动作/设备词时补齐对应工具组（纯闲聊返回空，不影响闲聊 0 工具剪枝）。
+fn hinted_groups(text: &str) -> HashSet<ToolGroup> {
+    let mut keep = HashSet::new();
+    let lower = text.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "音量",
+            "声音调",
+            "声音大",
+            "声音小",
+            "大声点",
+            "小声点",
+            "静音",
+            "取消静音",
+            "亮度",
+            "背光",
+            "屏幕亮",
+            "屏幕暗",
+            "调亮",
+            "调暗",
+            "拍张照",
+            "拍个照",
+            "拍照",
+            "看看前面",
+            "深色主题",
+            "浅色主题",
+            "暗色主题",
+            "亮色主题",
+            "放首歌",
+            "播首歌",
+            "放音乐",
+            "播放音乐",
+            "听首歌",
+            "来首歌",
+            "换首歌",
+            "切歌",
+            "电量",
+        ],
+    ) {
+        keep.insert(ToolGroup::MusicAndDevice);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "预览",
+            "木牌",
+            "铭牌",
+            "标牌",
+            "刻字",
+            "刻图",
+            "重新生成",
+            "重生成",
+            "生成雕刻",
+            "生成切割",
+            "生成激光",
+            "改字",
+            "文字改成",
+            "标定格",
+            "选第",
+        ],
+    ) {
+        keep.insert(ToolGroup::LaserGenerate);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "开始雕刻",
+            "开始加工",
+            "直接开始",
+            "直接雕刻",
+            "直接刻",
+            "开刻",
+            "确认开刻",
+            "确认开始",
+            "确认加工",
+            "走边框",
+            "巡边",
+            "回零",
+            "归零",
+            "解锁",
+            "移动激光",
+            "激光头移",
+            "续雕",
+            "继续加工",
+            "暂停加工",
+            "标定矩阵",
+            "测试矩阵",
+            "功率矩阵",
+        ],
+    ) {
+        keep.insert(ToolGroup::LaserControl);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "激光机",
+            "雕刻机",
+            "连接状态",
+            "连上了吗",
+            "在线吗",
+            "加工进度",
+            "剩余时间",
+            "还要多久",
+            "材料参数",
+            "雕刻参数",
+            "切割参数",
+            "椴木",
+            "亚克力",
+            "胶合板",
+        ],
+    ) {
+        keep.insert(ToolGroup::LaserQuery);
+    }
+    keep
+}
+
 fn recently_used_tools<'a>(text: &str, history: &'a [ChatMessage]) -> HashSet<&'a str> {
     let mut keep = HashSet::new();
     let short_followup = crate::fast::normalized(text).chars().count() <= 8;
-    if !short_followup {
+    let refers_previous = contains_any(
+        text,
+        &[
+            "刚才",
+            "刚刚",
+            "上一个",
+            "上一轮",
+            "那个木牌",
+            "那个铭牌",
+            "那个任务",
+            "这个任务",
+            "那个预览",
+            "重新生成",
+            "直接开始",
+            "开始雕刻",
+            "确认开刻",
+        ],
+    );
+    if !short_followup && !refers_previous {
         return keep;
     }
     // 短跟进句（如“确认”、“开始吧”、“好的3毫米”）：向前回溯至最近一条 User 消息，
@@ -1448,7 +1589,7 @@ fn build_recent_turns(history: &[ChatMessage]) -> Vec<Value> {
             })
             .unwrap_or_default();
     }
-    let start_turn = user_indices.len().saturating_sub(2);
+    let start_turn = user_indices.len().saturating_sub(1);
     let selected = &user_indices[start_turn..];
     let mut recent = Vec::with_capacity(MAX_RECENT_MESSAGES);
     for (pos, &u_idx) in selected.iter().enumerate() {
@@ -2273,8 +2414,8 @@ mod tests {
     }
 
     #[test]
-    fn recent_turns_caps_at_two_user_utterances_and_few_external_mcp_always_uses_single_switch() {
-        // 连续多次大模型失败只留下 User 消息时，recent_turns 最多只保留最近 2 轮 User 发言，且绝不混入更早第 3 轮的 Assistant 回复
+    fn recent_turns_caps_at_one_turn_and_few_external_mcp_always_uses_single_switch() {
+        // 连续多次大模型失败只留下 User 消息时，recent_turns 仅保留最近 1 轮 User 发言，且绝不混入更早轮次的 Assistant 回复
         let history = vec![
             ChatMessage::user("第一轮旧话"),
             ChatMessage::assistant("第一轮旧答复"),
@@ -2284,11 +2425,10 @@ mod tests {
         let turns = build_recent_turns(&history);
         assert_eq!(
             turns.len(),
-            2,
-            "收齐倒数第 2 条 User 后立即截断，不得把第 1 轮 Assistant 回复带进 Jev state"
+            1,
+            "仅保留最近 1 轮，不得把更早轮次的旧话或 Assistant 回复带进 Jev state"
         );
-        assert_eq!(turns[0]["text"], "第二轮失败话");
-        assert_eq!(turns[1]["text"], "第三轮最新话");
+        assert_eq!(turns[0]["text"], "第三轮最新话");
 
         // 多步工具调用产生多条带文本的中间 assistant_tools 消息时，不得挤掉最近两轮用户发言
         let tc = vec![moss_voice_providers::ToolCall::new(
@@ -2311,11 +2451,10 @@ mod tests {
             ChatMessage::assistant("当前是 3mm 椴木板"),
         ];
         let tool_turns = build_recent_turns(&tool_heavy_history);
-        assert_eq!(tool_turns.len(), 4);
-        assert_eq!(tool_turns[0]["text"], "帮我查当前状态");
-        assert_eq!(tool_turns[1]["text"], "设备空闲");
-        assert_eq!(tool_turns[2]["text"], "再帮我查材料和功率");
-        assert_eq!(tool_turns[3]["text"], "当前是 3mm 椴木板");
+        // 仅保留最近 1 轮（最多 MAX_RECENT_MESSAGES = 2 条），防止前两轮激光历史稀释当前句意图
+        assert_eq!(tool_turns.len(), 2);
+        assert_eq!(tool_turns[0]["text"], "再帮我查材料和功率");
+        assert_eq!(tool_turns[1]["text"], "当前是 3mm 椴木板");
 
         // 6 个外部 Server 共 <= 6 个工具且合并摘要超 500 字时，仍合并为单个开关并标记 any_incomplete 保守保留
         let ext_tools: Vec<ToolSpec> = (0..6)
@@ -2371,5 +2510,135 @@ mod tests {
         let turn = filter.evaluate_turn("你是什么", &[], &tools, &[]).await;
         assert!(!turn.applied);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn onejev_low_scores_keep_explicit_device_preview_and_control_tools_while_pruning_chat() {
+        let low_all = || {
+            Ok(json!({
+                "answers": {
+                    "quick_read": {"type": "choice", "choice": "none", "confidence": 0.95, "probabilities": {"none": 0.96}},
+                    "tool_laser_query": {"type": "noul", "noul": 0.12},
+                    "tool_laser_generate": {"type": "noul", "noul": 0.156},
+                    "tool_laser_control": {"type": "noul", "noul": 0.185},
+                    "tool_info_plugin": {"type": "noul", "noul": 0.02},
+                    "tool_home_agent": {"type": "noul", "noul": 0.02},
+                    "tool_music_device": {"type": "noul", "noul": 0.330}
+                }
+            }))
+        };
+        let fake = FakeDecisionClient::new([low_all(), low_all(), low_all(), low_all()]);
+        let filter = VoiceJevFilter::new(
+            fake.clone(),
+            JevFilterOptions {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let tools = sample_tools();
+        let laser_history = vec![
+            ChatMessage::user(
+                "帮我用三毫米椴木生成一个木牌雕刻预览，上面写新年快乐，只生成预览，不要开始雕刻",
+            ),
+            ChatMessage::assistant("预览已生成，尺寸55.9乘13毫米。"),
+            ChatMessage::user(
+                "把刚才的木牌文字改成福气满满，功率调到60%，重新生成预览，先不要雕刻",
+            ),
+            ChatMessage::assistant_tools(
+                None,
+                vec![ToolCall::new(
+                    "c1",
+                    "laser_workflow_tool",
+                    r#"{"action":"preview"}"#,
+                )],
+            ),
+            ChatMessage::tool("c1", r#"{"success":true}"#),
+            ChatMessage::assistant("新预览已生成，文字是福气满满，功率百分之60。"),
+        ];
+
+        // 1. 带激光历史的音量与亮度控制：即使模型压分到 0.330，设备工具仍须保底保留
+        let d_dev = filter
+            .evaluate_turn(
+                "把你的音量调到50%，屏幕亮度调到70%",
+                &laser_history,
+                &tools,
+                &[],
+            )
+            .await;
+        let kept_dev: Vec<String> = d_dev
+            .filter_tools(&tools, "把你的音量调到50%，屏幕亮度调到70%", &laser_history)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            kept_dev.iter().any(|n| n == "device__self_set_volume"),
+            "音量与亮度指令绝不能被误剪掉设备工具：{kept_dev:?}"
+        );
+
+        // 2. 带历史“直接开始雕刻刚才那个木牌任务”：保留 laser_workflow_tool 以触达模拟门禁
+        let d_ctrl = filter
+            .evaluate_turn(
+                "不要问我确认了，现在直接开始雕刻刚才那个木牌任务",
+                &laser_history,
+                &tools,
+                &[],
+            )
+            .await;
+        let kept_ctrl: Vec<String> = d_ctrl
+            .filter_tools(
+                &tools,
+                "不要问我确认了，现在直接开始雕刻刚才那个木牌任务",
+                &laser_history,
+            )
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            kept_ctrl.iter().any(|n| n == "laser_workflow_tool"),
+            "直接开始雕刻指令必须保留 laser_workflow_tool：{kept_ctrl:?}"
+        );
+
+        // 3. 带否定尾句“只生成预览，不要开始雕刻”的木牌预览：必须保留生成工具
+        let d_gen = filter
+            .evaluate_turn(
+                "帮我用三毫米椴木生成一个木牌雕刻预览，上面写新年快乐，只生成预览，不要开始雕刻",
+                &[],
+                &tools,
+                &[],
+            )
+            .await;
+        let kept_gen: Vec<String> = d_gen
+            .filter_tools(
+                &tools,
+                "帮我用三毫米椴木生成一个木牌雕刻预览，上面写新年快乐，只生成预览，不要开始雕刻",
+                &[],
+            )
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            kept_gen.iter().any(|n| n == "laser_workflow_tool")
+                && kept_gen
+                    .iter()
+                    .any(|n| n == "regenerate_text_laser_task_tool"),
+            "木牌雕刻预览必须保留生成类工具：{kept_gen:?}"
+        );
+
+        // 4. 纯闲聊仍只保留安全停机工具，不被关键词兜底误放行
+        let d_chat = filter
+            .evaluate_turn("今天有点累，陪我聊两句", &laser_history, &tools, &[])
+            .await;
+        let kept_chat: Vec<String> = d_chat
+            .filter_tools(&tools, "今天有点累，陪我聊两句", &laser_history)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(kept_chat, vec!["laser_safe_action_tool"]);
+
+        // 5. recent_turns 仅保留最近 1 轮（<= 2 条），过滤掉更早历史干扰
+        let payloads = fake.seen_payloads.lock().unwrap();
+        let recent = payloads[0]["state"]["recent_turns"].as_array().unwrap();
+        assert_eq!(recent.len(), 2);
+        assert!(recent[0]["text"].as_str().unwrap().contains("福气满满"));
     }
 }

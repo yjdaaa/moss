@@ -227,16 +227,17 @@ impl ApiService {
                 detail: Some(result["attempts"].to_string()),
             });
         }
-        // n73 / r66：工作台（桌面、本机网页、局域网配对）握手成功的连接与固件行程一并记下来，语音与接入点默认用它
-        if let Some(spec) = verified
-            && matches!(
-                ctx,
-                laser_contracts::CallerContext::Desktop
-                    | laser_contracts::CallerContext::Loopback
-                    | laser_contracts::CallerContext::Lan { .. }
-            )
-        {
-            self.remember_verified_connection_with_limits(&spec, result.get("machine_limits"));
+        // n73 / r66 / r79：工作台（桌面、本机网页、局域网配对）同步本进程激光连通态；握手成功时记下连接与固件行程
+        if matches!(
+            ctx,
+            laser_contracts::CallerContext::Desktop
+                | laser_contracts::CallerContext::Loopback
+                | laser_contracts::CallerContext::Lan { .. }
+        ) {
+            self.set_laser_connected(verified.is_some());
+            if let Some(spec) = verified {
+                self.remember_verified_connection_with_limits(&spec, result.get("machine_limits"));
+            }
         }
         http_json(200, success(result))
     }

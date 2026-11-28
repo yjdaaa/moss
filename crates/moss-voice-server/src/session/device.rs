@@ -599,21 +599,30 @@ impl<'a> Session<'a> {
         }
         self.last_activity = Instant::now();
         let injected = trimmed.to_owned();
-        if !self.send_stt(socket, injected.clone()).await {
+        // 常连模式待机未唤醒时未建立 UDP 音频通道：音频帧会被丢弃且固件未同步本轮 session_id，
+        // 若仍下发 stt/tts/goodbye 会把待机设备硬推进“聆听中”且无法靠 goodbye 退回待命。
+        let device_silent = self.mqtt && !socket.audio_open();
+        if !device_silent && !self.send_stt(socket, injected.clone()).await {
             let _ = reply.send(Err(crate::InjectTurnError::offline(
                 "向设备下发 stt 字幕失败，会话可能已断开",
             )));
             return Err("发送失败".into());
         }
         self.event(format!(
-            "文字直通注入{}：{} 字",
+            "文字直通注入{}{}：{} 字",
             if simulated { "（模拟）" } else { "" },
+            if device_silent {
+                "（设备常连待机未开音频通道，仅服务端验证，不下发设备播报）"
+            } else {
+                ""
+            },
             injected.chars().count()
         ));
         self.start_turn(
             TurnInput::Text {
                 text: injected,
                 simulated,
+                device_silent,
             },
             TurnKind::Answer,
         );

@@ -1042,7 +1042,11 @@ impl<'a> Session<'a> {
                 );
                 None
             }
-            TurnInput::Text { text, simulated } => {
+            TurnInput::Text {
+                text,
+                simulated,
+                device_silent,
+            } => {
                 self.trace_record_in(
                     trace,
                     &flow,
@@ -1055,6 +1059,7 @@ impl<'a> Session<'a> {
                         "input_source_label": "文字直通（无音频）",
                         "text": text,
                         "simulated": simulated,
+                        "audio_channel_open": !device_silent,
                     }),
                 );
                 None

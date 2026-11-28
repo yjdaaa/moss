@@ -548,6 +548,15 @@ impl ApiService {
                 }
             }
         };
+        if dry_run_enabled_update == Some(true) && !self.is_laser_connected() {
+            return http_json(
+                409,
+                failure(
+                    "请先连接激光雕刻机后再开启空跑模式",
+                    Some(serde_json::json!({"error_code": "laser_not_connected"})),
+                ),
+            );
+        }
         if let Some(pin_val) = object.get("lan_static_pin") {
             let Some(pin_str) = pin_val.as_str() else {
                 return http_json(400, failure("lan_static_pin 必须是字符串", None));

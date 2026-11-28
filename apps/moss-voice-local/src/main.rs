@@ -705,8 +705,11 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
 // ---------------------------------------------------------------- 识别
 
 enum Recognizer {
-    /// 整段识别（SenseVoice）
-    Offline(OfflineRecognizer),
+    /// 整段识别（SenseVoice / FireRedASR2-CTC 支持伪流式周期重认；Qwen3-ASR 仅说完后单次整段解码）
+    Offline {
+        recognizer: OfflineRecognizer,
+        interim_decode: bool,
+    },
     /// 流式识别（Zipformer Transducer）：也能整段识别
     Online(OnlineRecognizer),
 }
@@ -738,7 +741,10 @@ fn load_recognizer(
             config.model_config.num_threads = inference_threads();
             config.model_config.debug = false;
             OfflineRecognizer::create(&config)
-                .map(Recognizer::Offline)
+                .map(|recognizer| Recognizer::Offline {
+                    recognizer,
+                    interim_decode: engine.streaming(),
+                })
                 .ok_or_else(|| "SenseVoice 模型加载失败".to_owned())
         }
         AsrEngine::StreamingTransducer => {
@@ -790,7 +796,10 @@ fn load_recognizer(
             config.model_config.num_threads = inference_threads();
             config.model_config.debug = false;
             OfflineRecognizer::create(&config)
-                .map(Recognizer::Offline)
+                .map(|recognizer| Recognizer::Offline {
+                    recognizer,
+                    interim_decode: engine.streaming(),
+                })
                 .ok_or_else(|| "Qwen3-ASR 模型加载失败".to_owned())
         }
         AsrEngine::FireRedAsr2Ctc => {
@@ -803,7 +812,10 @@ fn load_recognizer(
             config.model_config.num_threads = inference_threads();
             config.model_config.debug = false;
             OfflineRecognizer::create(&config)
-                .map(Recognizer::Offline)
+                .map(|recognizer| Recognizer::Offline {
+                    recognizer,
+                    interim_decode: engine.streaming(),
+                })
                 .ok_or_else(|| "FireRedASR2-CTC 模型加载失败".to_owned())
         }
     }
@@ -851,12 +863,15 @@ const OFFLINE_STREAM_MAX_SAMPLES: usize = 16_000 * 30;
 /// 同时打开的识别流上限，防止异常未关闭流无限累积。
 const MAX_ACTIVE_ASR_STREAMS: usize = 64;
 
-/// 离线模型（SenseVoice）的伪流式增量重认缓冲：
-/// 说话期间按约 0.5 秒步长重认当前滑窗，不足步长时快速返回 `None`（对应 `Reply::Done`）。
-#[derive(Default)]
+/// 离线模型的流式会话缓冲：
+/// - `interim_decode == true`（SenseVoice / FireRedASR2-CTC）：说话期间按约 0.5 秒步长重认当前滑窗；
+/// - `interim_decode == false`（Qwen3-ASR 0.6B 自回归模型）：说话期间仅缓存音频不重解码，
+///   避免每 0.5 秒全量重跑导致延迟放大 5–9 倍，等到 `AsrFinish` 时一次性整段解码。
 struct OfflineAsrBuffer {
     samples: Vec<f32>,
     pending_samples: usize,
+    /// 是否启用说话期间周期重认（false 表示纯缓冲，仅在 finish 时单次解码）。
+    interim_decode: bool,
     /// 已至少产出过一次非空识别文字：此后切入 500ms 稳态重认步长。
     /// 自动拾音起音前若带静音 preroll（如 1s 静音 + 60ms 辅音头）导致首轮试认出空串，
     /// 保持 320ms 首认步长不退化为 500ms，确保真实开口后约 320ms 即出首屏字或命中急停。
@@ -866,7 +881,24 @@ struct OfflineAsrBuffer {
     last_text: String,
 }
 
+impl Default for OfflineAsrBuffer {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
 impl OfflineAsrBuffer {
+    fn new(interim_decode: bool) -> Self {
+        Self {
+            samples: Vec::new(),
+            pending_samples: 0,
+            interim_decode,
+            has_nonempty_decode: false,
+            has_clean_decode: false,
+            last_text: String::new(),
+        }
+    }
+
     fn feed_with(
         &mut self,
         incoming: &[f32],
@@ -880,6 +912,9 @@ impl OfflineAsrBuffer {
             }
             self.pending_samples = self.pending_samples.saturating_add(incoming.len());
             self.has_clean_decode = false;
+        }
+        if !self.interim_decode {
+            return None;
         }
         let step = if self.has_nonempty_decode {
             OFFLINE_INTERIM_STEP_SAMPLES
@@ -1013,7 +1048,7 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         error(&out, id, "识别模型未加载");
                         continue;
                     }
-                    Some(Recognizer::Offline(recognizer)) => {
+                    Some(Recognizer::Offline { recognizer, .. }) => {
                         decode_offline(recognizer, rate, &samples)
                     }
                     Some(Recognizer::Online(recognizer)) => {
@@ -1029,8 +1064,8 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     Some(Recognizer::Online(recognizer)) => {
                         ActiveAsrStreamKind::Online(recognizer.create_stream())
                     }
-                    Some(Recognizer::Offline(_)) => {
-                        ActiveAsrStreamKind::Offline(OfflineAsrBuffer::default())
+                    Some(Recognizer::Offline { interim_decode, .. }) => {
+                        ActiveAsrStreamKind::Offline(OfflineAsrBuffer::new(*interim_decode))
                     }
                     None => {
                         error(&out, id, "识别模型未加载");
@@ -1067,7 +1102,7 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     send(&out, id, Reply::Text { text }, &[]);
                 }
                 (
-                    Some(Recognizer::Offline(recognizer)),
+                    Some(Recognizer::Offline { recognizer, .. }),
                     Some(ActiveAsrStream {
                         kind: ActiveAsrStreamKind::Offline(buffer),
                         denoiser,
@@ -1100,7 +1135,7 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     send(&out, id, Reply::Text { text }, &[]);
                 }
                 (
-                    Some(Recognizer::Offline(recognizer)),
+                    Some(Recognizer::Offline { recognizer, .. }),
                     Some(ActiveAsrStream {
                         kind: ActiveAsrStreamKind::Offline(mut buffer),
                         mut denoiser,
@@ -2325,6 +2360,27 @@ mod tests {
         assert_eq!(
             after_tail,
             format!("len={}", OFFLINE_INTERIM_FIRST_SAMPLES + 128)
+        );
+
+        // 非流式自回归离线模型（Qwen3-ASR）：feed 期间绝不触发中间重解码，仅在 finish 时整段解码一次
+        let mut qwen_buf = OfflineAsrBuffer::new(false);
+        for _ in 0..8 {
+            assert_eq!(
+                qwen_buf.feed_with(&vec![0.15; OFFLINE_INTERIM_STEP_SAMPLES], |_| {
+                    panic!("interim_decode=false must not decode during feed")
+                }),
+                None
+            );
+        }
+        let mut finish_calls = 0usize;
+        let final_text = qwen_buf.finish_with(|s| {
+            finish_calls += 1;
+            format!("samples={}", s.len())
+        });
+        assert_eq!(finish_calls, 1);
+        assert_eq!(
+            final_text,
+            format!("samples={}", OFFLINE_INTERIM_STEP_SAMPLES * 8)
         );
     }
 

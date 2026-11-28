@@ -29,6 +29,13 @@ impl<'a> Session<'a> {
                     .is_bench_window_active_for_session(self.device_id, self.session_id));
         let digital_audio =
             kind == TurnKind::Answer && std::mem::take(&mut self.next_turn_is_digital);
+        let device_silent = matches!(
+            &input,
+            TurnInput::Text {
+                device_silent: true,
+                ..
+            }
+        );
         let simulated = in_bench_window
             || digital_audio
             || matches!(
@@ -259,6 +266,7 @@ impl<'a> Session<'a> {
                 session_id: self.session_id.into(),
                 turn: self.turn_number,
                 simulated,
+                audio_channel_open: !device_silent,
                 bench_window: in_bench_window,
                 simulated_label,
                 digital_audio,
@@ -375,6 +383,7 @@ impl<'a> Session<'a> {
             released_at: None,
             music_error: None,
             simulated,
+            device_silent,
             bench_window: in_bench_window,
             digital_audio,
             input_source,
@@ -487,7 +496,8 @@ impl<'a> Session<'a> {
             return Ok(Some("本地音乐还没开启"));
         }
         if matches!(self.phase, Phase::Speaking { .. }) {
-            self.stop_speaking(socket, Some("开始新歌曲")).await?;
+            self.stop_speaking(socket, Some("开始新歌曲"), false)
+                .await?;
             if let Some(turn) = self.turn.as_mut() {
                 turn.audio_started = false;
                 turn.tts_started_at = None;
@@ -916,12 +926,14 @@ impl<'a> Session<'a> {
             }
             TurnEvent::NotForMe => {
                 self.finish_timing("not_for_me");
+                let mut silent = false;
                 if let Some(mut turn) = self.turn.take() {
+                    silent = turn.device_silent;
                     self.stash_uncommitted_photo(&mut turn);
                 }
                 self.screen.last_screen_stt = None;
                 self.event("这句不是对小智说的，没有接话，继续拾音");
-                if self.listen.listen_manual {
+                if silent || self.listen.listen_manual {
                     self.phase = Phase::Idle;
                     self.set_state("idle");
                 } else {
@@ -930,12 +942,14 @@ impl<'a> Session<'a> {
             }
             TurnEvent::Ignored => {
                 self.finish_timing("ignored");
+                let mut silent = false;
                 if let Some(mut turn) = self.turn.take() {
+                    silent = turn.device_silent;
                     self.stash_uncommitted_photo(&mut turn);
                 }
                 self.screen.last_screen_stt = None;
                 self.event("没有识别出文字，继续拾音");
-                if self.listen.listen_manual {
+                if silent || self.listen.listen_manual {
                     self.phase = Phase::Idle;
                     self.set_state("idle");
                 } else {
@@ -957,6 +971,9 @@ impl<'a> Session<'a> {
             }
             TurnEvent::Emotion(emotion) => {
                 self.shared.state.set_emotion(self.session_id, emotion);
+                if self.current_turn_silent() {
+                    return Ok(());
+                }
                 let message = ServerMessage::Llm {
                     session_id: self.session_id.into(),
                     text: emotion.into(),
@@ -1198,6 +1215,15 @@ impl<'a> Session<'a> {
         self.set_state("idle");
         self.last_activity = Instant::now();
         if turn.close {
+            if turn.device_silent && self.mqtt {
+                // 常连待机态文字直通退出：未开音频通道、未发 tts，不向设备发送不匹配的 goodbye，
+                // 仅清空本轮模拟内存历史，设备保持常连待机。
+                self.history.clear();
+                self.memory_history.clear();
+                self.last_verified_person = None;
+                self.event("模拟文字注入结束（用户说了退出词），设备保持常连待机");
+                return Ok(());
+            }
             if played {
                 // tick 已等到预计播完才发 tts stop，这里只留设备本地播放队列的排空余量
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1228,8 +1254,9 @@ impl<'a> Session<'a> {
                 },
                 TurnKind::Notice,
             );
-        } else if self.listen.listen_realtime
-            || (!played && turn.kind == TurnKind::Answer && !self.listen.listen_manual)
+        } else if !turn.device_silent
+            && (self.listen.listen_realtime
+                || (!played && turn.kind == TurnKind::Answer && !self.listen.listen_manual))
         {
             // realtime 固件一直上传声音，不保证再发 listen start；无音频的 auto 模式也仍在拾音
             self.start_listening(false);
@@ -1563,6 +1590,7 @@ impl<'a> Session<'a> {
             music.cancel(&mut self.pump);
         }
         self.music_failed = false;
+        let silent = self.current_turn_silent();
         if let Some(mut turn) = self.turn.take() {
             if turn.kind == TurnKind::Answer
                 && let Some(user) = turn.user.clone()
@@ -1629,12 +1657,12 @@ impl<'a> Session<'a> {
             }
         }
         match self.phase {
-            Phase::Speaking { .. } => self.stop_speaking(socket, Some(reason)).await,
+            Phase::Speaking { .. } => self.stop_speaking(socket, Some(reason), silent).await,
             Phase::Thinking => {
                 self.event(format!("对话被打断（{reason}）"));
                 self.phase = Phase::Idle;
                 self.set_state("idle");
-                if early_start {
+                if early_start && !silent {
                     self.tts(socket, TtsState::Stop, None).await?;
                 }
                 Ok(())

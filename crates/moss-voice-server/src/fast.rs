@@ -289,12 +289,26 @@ fn match_core_read(core: &str) -> Option<ReadIntent> {
         | "当前状态"
         | "机器现在什么状态"
         | "设备现在什么状态"
+        | "激光机现在什么状态"
+        | "雕刻机现在什么状态"
+        | "激光机当前状态"
+        | "雕刻机当前状态"
         | "雕刻机状态"
         | "激光机状态" => ReadIntent::Status,
-        "连接状态" | "设备连接了吗" | "连接了吗" | "机器连上了吗" | "设备连上了吗" | "连上了吗"
-        | "连上设备了吗" | "连上机器了吗" | "机器在线吗" | "设备在线吗" => {
-            ReadIntent::Connection
-        }
+        "连接状态"
+        | "设备连接了吗"
+        | "连接了吗"
+        | "机器连上了吗"
+        | "设备连上了吗"
+        | "激光机连上了吗"
+        | "雕刻机连上了吗"
+        | "连上了吗"
+        | "连上设备了吗"
+        | "连上机器了吗"
+        | "机器在线吗"
+        | "设备在线吗"
+        | "激光机在线吗"
+        | "雕刻机在线吗" => ReadIntent::Connection,
         "加工进度"
         | "当前进度"
         | "进度怎么样"
@@ -465,6 +479,13 @@ mod tests {
             read_intent("看看机器现在什么状态"),
             Some(ReadIntent::Status)
         );
+        assert_eq!(read_intent("激光机现在什么状态"), Some(ReadIntent::Status));
+        assert_eq!(
+            read_intent("雕刻机现在什么状态？"),
+            Some(ReadIntent::Status)
+        );
+        assert_eq!(read_intent("激光机连上了吗"), Some(ReadIntent::Connection));
+        assert_eq!(read_intent("雕刻机在线吗"), Some(ReadIntent::Connection));
         assert_eq!(
             read_intent("看下现在用什么材料呢"),
             Some(ReadIntent::Material)

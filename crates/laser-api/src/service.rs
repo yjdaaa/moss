@@ -56,6 +56,7 @@ impl ApiService {
             mcp_telemetry: laser_contracts::global_mcp_telemetry_arc(),
             voice_telemetry: laser_contracts::global_voice_telemetry_arc(),
             dry_run: std::sync::Arc::new(laser_device::DryRunState::default()),
+            laser_connected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -66,6 +67,17 @@ impl ApiService {
 
     pub fn is_dry_run_active(&self) -> bool {
         self.dry_run.active_policy_now().is_some()
+    }
+
+    /// 当前进程内工作台最近一次激光机握手探测是否成功（重启后默认 false）。
+    pub fn is_laser_connected(&self) -> bool {
+        self.laser_connected
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn set_laser_connected(&self, connected: bool) {
+        self.laser_connected
+            .store(connected, std::sync::atomic::Ordering::Release);
     }
 
     /// 注入隔离的 MCP 遥测实例（默认使用进程级全局单例）。

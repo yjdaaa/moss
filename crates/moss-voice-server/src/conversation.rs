@@ -1149,8 +1149,13 @@ pub enum TurnInput {
         stream: Option<AsrStream>,
     },
     /// VA1 文字直通联调：跳过麦克风与识别，直接以“刚识别出的话”进入识别后的完整对话链路；
-    /// `simulated == true` 时启用 VA2 模拟门禁（禁止物理控制/外部控制/长期记忆污染）。
-    Text { text: String, simulated: bool },
+    /// `simulated == true` 时启用 VA2 模拟门禁（禁止物理控制/外部控制/长期记忆污染）；
+    /// `device_silent == true` 表示常连待机态未开 UDP 音频通道，不下发设备播报与退出协议。
+    Text {
+        text: String,
+        simulated: bool,
+        device_silent: bool,
+    },
     /// 固定话术（唤醒回应、空闲再见）；`close` 为真时说完结束会话
     Say { text: String, close: bool },
     /// 后台查询结果出来了：由大模型组织成一两句话主动告诉用户（n100）
@@ -2282,11 +2287,37 @@ impl Turn {
                 } else {
                     None
                 };
+                let mut simulated_preview_cancel_id: Option<String> = None;
                 let outcome = if let Some(ref reason) = blocked_reason {
                     ToolOutcome::Reply(crate::sim_guard::blocked_tool_reply(
                         &call.function.name,
                         reason,
                     ))
+                } else if effective_simulated
+                    && device_target.is_none()
+                    && is_simulated_preview_tool(&call.function.name, &call.function.arguments)
+                {
+                    // 模拟预览走 call_raw 获取未截断的完整 detail，避免 HostTools 1500 字符截断导致提取不到 workflow_id
+                    let raw = tokio::time::timeout(
+                        timeout,
+                        tools.call_raw(&context, &call.function.name, &call.function.arguments),
+                    )
+                    .await;
+                    match raw {
+                        Ok(host_res) => {
+                            simulated_preview_cancel_id =
+                                extract_preview_workflow_id_from_host_result(&host_res);
+                            match crate::tools::approval_speech(&host_res) {
+                                Some(speech) => ToolOutcome::Speak(speech),
+                                None => {
+                                    ToolOutcome::Reply(crate::tools::outcome_for_model(&host_res))
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            ToolOutcome::Reply(format!("工具 {} 执行超时", call.function.name))
+                        }
+                    }
                 } else {
                     let work = async {
                         match device_target {
@@ -2307,6 +2338,20 @@ impl Turn {
                         })
                 };
                 let elapsed_ms = began.elapsed().as_millis() as u64;
+                if let Some(wf_id) = simulated_preview_cancel_id {
+                    // 模拟联调/测试时间窗生成的预览仅供校验对话与参数解析，在记录完原工具耗时后自动静默取消，
+                    // 避免残留在桌面 AI 预览弹窗中且不污染预览工具自身耗时。
+                    let cancel_args = serde_json::json!({
+                        "action": "cancel",
+                        "workflow_id": wf_id,
+                    })
+                    .to_string();
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        tools.call(&context, "laser_workflow_tool", &cancel_args),
+                    )
+                    .await;
+                }
                 let _ = events.send(TurnEvent::ToolTiming {
                     name: call.function.name.clone(),
                     ms: elapsed_ms,
@@ -3433,6 +3478,50 @@ pub(crate) fn spawn_turn_traced(
         }
     });
     (handle, receiver)
+}
+
+fn is_simulated_preview_tool(tool_name: &str, arguments: &str) -> bool {
+    match tool_name {
+        "laser_workflow_tool" => serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_owned))
+            .is_some_and(|a| matches!(a.as_str(), "preview" | "plan" | "create")),
+        "regenerate_text_laser_task_tool" => true,
+        _ => false,
+    }
+}
+
+/// 从未截断的宿主工具结果里提取待清理的 `workflow_id`（仅命中 `status == "preview_ready"`）。
+fn extract_preview_workflow_id_from_host_result(
+    host_res: &crate::tools::ToolHostResult,
+) -> Option<String> {
+    if !host_res.success {
+        return None;
+    }
+    let extract_from_obj = |obj: &serde_json::Value| -> Option<String> {
+        let target = obj.get("result").filter(|v| v.is_object()).unwrap_or(obj);
+        if target.get("status").and_then(|v| v.as_str()) != Some("preview_ready") {
+            return None;
+        }
+        target
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    if let Some(detail_str) = host_res.detail.as_deref()
+        && let Ok(detail_val) = serde_json::from_str::<serde_json::Value>(detail_str)
+        && let Some(id) = extract_from_obj(&detail_val)
+    {
+        return Some(id);
+    }
+    if let Ok(result_val) = serde_json::from_str::<serde_json::Value>(&host_res.result)
+        && let Some(id) = extract_from_obj(&result_val)
+    {
+        return Some(id);
+    }
+    None
 }
 
 /// 把一轮的新消息追加到历史并截断。

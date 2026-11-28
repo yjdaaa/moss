@@ -236,7 +236,7 @@ export function AiBenchAssistantCard({
                 <div className="voice-muted ai-bench-prompt-desc">
                   <b>两步开始：</b>先打开上方联调开关，唤醒小智放到电脑喇叭旁（30–50 cm），再点左侧复制发给 AI。
                   <br />
-                  AI 会<b>自动准备中文真人语音并缓存复用</b>，完成全流程联调测试并按结果调优（不含密钥或本机路径）。
+                  AI 会<b>自动准备中文真人语音并缓存复用</b>，<b>仅测试小智语音链路、不测试激光雕刻机</b>，完成后按结果调优（不含密钥或本机路径）。
                 </div>
               </div>
             </div>

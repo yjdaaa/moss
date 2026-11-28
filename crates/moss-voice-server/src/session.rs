@@ -436,6 +436,9 @@ struct ActiveTurn {
     music_error: Option<&'static str>,
     /// VA1/VA2 模拟联调轮次标记
     simulated: bool,
+    /// 常连待机态（MQTT 未唤醒开 UDP 音频通道）下进行的文字直通注入：仅在服务端验证链路与合成，
+    /// 不向待机设备下发 stt/tts/emotion/goodbye，避免把未开音频通道的待机设备拉进聆听态。
+    device_silent: bool,
     /// VC1 测试时间窗内按模拟处理的真实音频轮次标记
     bench_window: bool,
     /// VC2 数字音频对照注入轮次标记（不写入 asr-corpus）

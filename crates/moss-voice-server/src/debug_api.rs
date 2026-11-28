@@ -676,6 +676,7 @@ async fn list_devices(State(state): State<DebugApiState>) -> Response {
                 "device_mcp_enabled": s.device_mcp_enabled,
                 "device_tools_ready": s.device_tools_ready,
                 "device_tools_count": s.device_tools.len(),
+                "device_tools": s.device_tools,
                 "screen_monochrome": s.screen_monochrome,
             })
         })

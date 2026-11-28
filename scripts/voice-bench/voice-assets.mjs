@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import {
   PROTECTED_COMMAND_WORDS,
   classifyCommand,
+  generateNoiseWavWithNode,
   loadLabeledCorpus,
   normalizeForCer,
   readWavPcm16,
@@ -238,22 +239,26 @@ export function startBackgroundNoise({
   const clampedGain = Math.max(0.02, Math.min(1.0, Number(gain) || 0.22));
   const noiseWav = join(cacheDir, `bg-noise-${safePreset}-g${Math.round(clampedGain * 100)}.wav`);
   if (!existsSync(noiseWav)) {
-    execFileSync(
-      pythonBin,
-      [
-        "-I",
-        NOISE_MIX_SCRIPT,
-        "--generate-noise",
-        safePreset,
-        "--duration-secs",
-        "12",
-        "--gain",
-        String(clampedGain),
-        "--output",
-        noiseWav,
-      ],
-      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
-    );
+    try {
+      execFileSync(
+        pythonBin,
+        [
+          "-I",
+          NOISE_MIX_SCRIPT,
+          "--generate-noise",
+          safePreset,
+          "--duration-secs",
+          "12",
+          "--gain",
+          String(clampedGain),
+          "--output",
+          noiseWav,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+      );
+    } catch {
+      generateNoiseWavWithNode(safePreset, 12, clampedGain, noiseWav, 42);
+    }
   }
   const activePlayer = player || checkPlayerAvailable(platform);
   let stopped = false;

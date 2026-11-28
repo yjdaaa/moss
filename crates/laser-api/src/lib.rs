@@ -140,6 +140,8 @@ pub struct ApiService {
     voice_telemetry: std::sync::Arc<laser_contracts::VoiceTelemetry>,
     /// LB2 真机空跑模式运行时状态（默认关闭，开启后 60 分钟自动到期，底盘传输出口强制不出光与限速）。
     dry_run: std::sync::Arc<laser_device::DryRunState>,
+    /// 当前进程内工作台最近一次 `/api/connection/check` 是否握手连通（默认 false，重启清零；用于门禁开启真机空跑）。
+    laser_connected: std::sync::atomic::AtomicBool,
 }
 
 fn unix_seconds() -> u64 {

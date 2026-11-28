@@ -145,7 +145,7 @@ impl<'a> Session<'a> {
                             music.finish_after_pump_done();
                         }
                     }
-                    self.stop_speaking(socket, None).await?;
+                    self.stop_speaking(socket, None, false).await?;
                     return if was_music {
                         if music_failed
                             && self.permission.load(std::sync::atomic::Ordering::Acquire)
@@ -178,13 +178,15 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// 结束播放。`interrupted` 为打断原因时立即丢弃未播内容。
+    /// 结束播放。`interrupted` 为打断原因时立即丢弃未播内容；`skip_device_tts` 用于打断前已取出 `device_silent` 轮次的场景。
     pub(super) async fn stop_speaking(
         &mut self,
         socket: &mut crate::link::Link,
         interrupted: Option<&str>,
+        skip_device_tts: bool,
     ) -> Result<(), String> {
         let stats = self.pump.stats();
+        let skip_tts = skip_device_tts || self.current_turn_silent();
         if let Some(turn) = self.turn.as_mut() {
             if let Some(since) = turn.underrun_started_at.take() {
                 turn.playback_stall_ms = turn
@@ -209,7 +211,9 @@ impl<'a> Session<'a> {
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();
-        self.tts(socket, TtsState::Stop, None).await?;
+        if !skip_tts {
+            self.tts(socket, TtsState::Stop, None).await?;
+        }
         if interrupted.is_none() {
             if let Some(hold_url) = self.screen.preview_hold.as_mut().map(|hold| {
                 let now = Instant::now();

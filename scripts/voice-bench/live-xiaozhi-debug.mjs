@@ -84,6 +84,8 @@ export function buildSummary({ runId, deviceId, corpusName, startedAtMs, finishe
   const totalUnderruns = executed.reduce((acc, t) => acc + (Number(t.detail?.playback?.underruns) || 0), 0);
   const totalStallMs = executed.reduce((acc, t) => acc + (Number(t.detail?.playback?.stall_ms) || 0), 0);
 
+  const silentTurns = executed.filter((t) => t.detail?.audio_channel_open === false).length;
+
   return {
     run_id: runId,
     device_id: deviceId,
@@ -100,6 +102,7 @@ export function buildSummary({ runId, deviceId, corpusName, startedAtMs, finishe
     },
     gate_hits: gateHits,
     stop_skipped_count: stopSkipped,
+    audio_channel_closed_turns: silentTurns,
     playback: {
       total_underruns: totalUnderruns,
       total_stall_ms: totalStallMs,
@@ -130,6 +133,11 @@ export function buildReportMarkdown(summary, turns) {
     `- **安全门禁命中**：工具拒绝 ${summary.gate_hits} 次，模拟停止跳过 ${summary.stop_skipped_count} 次`,
     `- **播放卡顿**：欠载 ${summary.playback.total_underruns} 次，累计卡顿 ${summary.playback.total_stall_ms} ms`,
     `- **整轮耗时**：P50 = ${summary.wall_ms.p50_ms ?? "—"} ms，P90 = ${summary.wall_ms.p90_ms ?? "—"} ms`,
+    ...(summary.audio_channel_closed_turns > 0
+      ? [
+          `- **播报通道提示**：有 ${summary.audio_channel_closed_turns} 轮执行时小智处于常连待机态（未唤醒打开 UDP 音频通道），服务端仅完成了对话、工具与合成验证，未向待机设备下发播报（小智无声属正常，也不会误切聆听态）；如需实机听声，请先唤醒小智再运行。`,
+        ]
+      : []),
     "",
     "## 阶段耗时汇总（毫秒）",
     "",
@@ -185,7 +193,25 @@ function isDeviceReadyForInject(dev) {
   return dev.state === "idle" || dev.state === "listening";
 }
 
-function evaluateTurnExpectations(turnSpec, detail) {
+function canonicalToolName(name) {
+  return String(name || "")
+    .trim()
+    .replace(/^device__/, "")
+    .replace(/\./g, "_")
+    .toLowerCase();
+}
+
+function toolMatchesExpected(actualName, expectedName) {
+  const actual = canonicalToolName(actualName);
+  const expected = canonicalToolName(expectedName);
+  if (!actual || !expected) return false;
+  if (actual === expected) return true;
+  // 兼容屏幕亮度工具在 AMOLED 设备上映射为 self.disp.setbacklight
+  if (expected === "self_screen_set_brightness" && actual === "self_disp_setbacklight") return true;
+  return false;
+}
+
+export function evaluateTurnExpectations(turnSpec, detail, { deviceInfo = null } = {}) {
   const expect = turnSpec.expect || {};
   if (!detail) return "未获取到轮次明细";
   if (detail.outcome === "disconnected") return "本轮期间设备断开了连接";
@@ -201,8 +227,34 @@ function evaluateTurnExpectations(turnSpec, detail) {
       }
     }
   }
+  const tools = Array.isArray(detail.tools) ? detail.tools : [];
+  if (Array.isArray(expect.expect_tool_any) && expect.expect_tool_any.length > 0) {
+    const matched = expect.expect_tool_any.some((expectedName) =>
+      tools.some((t) => toolMatchesExpected(t?.name, expectedName)),
+    );
+    if (!matched) {
+      return `期望调用工具（任一）${expect.expect_tool_any.join(" / ")}，实际未调用（实际：${tools.map((t) => t?.name).filter(Boolean).join(", ") || "无"}）`;
+    }
+  }
+  if (Array.isArray(expect.expect_device_tools_if_ready) && expect.expect_device_tools_if_ready.length > 0) {
+    const deviceReady =
+      deviceInfo?.device_tools_ready === true && Number(deviceInfo?.device_tools_count || 0) > 0;
+    if (deviceReady) {
+      const declared = Array.isArray(deviceInfo?.device_tools) ? deviceInfo.device_tools : null;
+      const applicable = declared
+        ? expect.expect_device_tools_if_ready.filter((expectedName) =>
+            declared.some((actualName) => toolMatchesExpected(actualName, expectedName)),
+          )
+        : expect.expect_device_tools_if_ready;
+      const missing = applicable.filter(
+        (expectedName) => !tools.some((t) => toolMatchesExpected(t?.name, expectedName)),
+      );
+      if (missing.length > 0) {
+        return `设备工具已就绪但未调用预期设备工具：${missing.join("、")}（实际调用：${tools.map((t) => t?.name).filter(Boolean).join(", ") || "无"}）`;
+      }
+    }
+  }
   if (expect.expect_simulation_gate) {
-    const tools = Array.isArray(detail.tools) ? detail.tools : [];
     const hasBlocked = tools.some((t) => t?.blocked === true);
     const reply = `${detail.reply || ""} ${detail.spoken || ""}`;
     const refusedInReply = /(拒绝|不能|无法|模拟|仅.*预览|禁止|不支持)/.test(reply);
@@ -416,7 +468,9 @@ export async function runLiveDebugBench(opts = {}) {
         continue;
       }
 
-      const checkErr = evaluateTurnExpectations(spec, finalDetail);
+      const latestDev =
+        (latestDevices?.devices || []).find((d) => d.device_id === deviceId) || targetDevice;
+      const checkErr = evaluateTurnExpectations(spec, finalDetail, { deviceInfo: latestDev });
       results.push({
         index: turnIndex,
         id: turnIdLabel,

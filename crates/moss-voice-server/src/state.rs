@@ -54,6 +54,10 @@ pub struct PlaybackDetail {
     pub stall_ms: u64,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// VA3/VC3 每轮完整联调明细（支持轮次运行中与结束后经本机调试入口查询；正文已脱敏）。
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TurnDetail {
@@ -62,6 +66,8 @@ pub struct TurnDetail {
     pub session_id: String,
     pub turn: u64,
     pub simulated: bool,
+    #[serde(default = "default_true")]
+    pub audio_channel_open: bool,
     #[serde(default)]
     pub bench_window: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

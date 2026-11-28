@@ -2144,7 +2144,61 @@ fn lb2_dry_run_switch_gate_and_backend_forced_rewriting() {
     );
     assert_eq!(bad_st2, 400);
 
-    // 桌面端开启空跑（限速 1600 -> 折算 200% 倍率后下发上限 F800）
+    // 未连接激光机时开启空跑返回 409 laser_not_connected（关闭空跑仍放行）
+    let (unconn_st, unconn_body) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true, "dry_run_max_feed_mm_min": 1600}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(unconn_st, 409, "{unconn_body}");
+    assert_eq!(unconn_body["detail"]["error_code"], "laser_not_connected");
+    assert!(!service.is_dry_run_active());
+    let (unconn_off_st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": false}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(unconn_off_st, 200);
+
+    // 激光模式未开（$32=0）的握手失败不算连通，仍拒绝开启空跑
+    let bad_port = fake_grbl_handshake(0);
+    let (bad_probe_st, bad_probe_body) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": bad_port,
+            "network_timeout": 2
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(bad_probe_st, 200, "{bad_probe_body}");
+    assert_eq!(
+        bad_probe_body["result"]["connected"], false,
+        "{bad_probe_body}"
+    );
+    assert!(!service.is_laser_connected());
+
+    // 工作台握手连通激光机后，允许开启空跑（限速 1600 -> 折算 200% 倍率后下发上限 F800）
+    let port = fake_grbl_handshake(1);
+    let (probe_st, probe_body) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": port,
+            "network_timeout": 2
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(probe_st, 200, "{probe_body}");
+    assert_eq!(probe_body["result"]["connected"], true, "{probe_body}");
+    assert!(service.is_laser_connected());
+
     let (ok_st, ok_body) = service.dispatch_json(
         "POST",
         "/api/settings",
@@ -2224,7 +2278,8 @@ fn lb2_dry_run_switch_gate_and_backend_forced_rewriting() {
         "G0 须全部改写为限速 G1: {mv_lines:?}"
     );
 
-    // 3) 关闭开关后恢复原样（点射恢复 M3 S10，相对移动恢复 G0 F3000）
+    // 3) 若中途断连，已开启的空跑仍允许随时手动关闭；关闭后再开则被 409 拒绝
+    service.set_laser_connected(false);
     let (off_st, _) = service.dispatch_json(
         "POST",
         "/api/settings",
@@ -2232,6 +2287,14 @@ fn lb2_dry_run_switch_gate_and_backend_forced_rewriting() {
         laser_contracts::CallerContext::Desktop,
     );
     assert_eq!(off_st, 200);
+    let (re_on_st, re_on_body) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(re_on_st, 409, "{re_on_body}");
+    assert_eq!(re_on_body["detail"]["error_code"], "laser_not_connected");
     written.lock().unwrap().clear();
     let (pf2_st, _) = service.dispatch_json(
         "POST",
@@ -2298,9 +2361,23 @@ fn lb4_process_trace_tags_bench_sources_and_dry_run_without_granting_privileges(
     let ro_resp = parse_json_response(&service.handle_http(ro_req.as_bytes()));
     assert_eq!(ro_resp["success"], true, "{ro_resp}");
 
-    // 3) 开启空跑模式后：
+    // 3) 握手连通并开启空跑模式后：
     //    - 普通桌面手动请求（无 X-Moss-Bench 头）标上 dry_run:true 与“空跑模式”；
     //    - 带 X-Moss-Bench: dryrun 的请求同时标上 ai_laser_bench_dryrun、“AI 激光测试 · 空跑”与“空跑模式”。
+    let port = fake_grbl_handshake(1);
+    let (probe_st, probe_body) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": port,
+            "network_timeout": 2
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(probe_st, 200, "{probe_body}");
+    assert_eq!(probe_body["result"]["connected"], true, "{probe_body}");
     let (on_st, _) = service.dispatch_json(
         "POST",
         "/api/settings",
@@ -2383,7 +2460,21 @@ fn lc_dry_run_blocks_g28_g30_in_send_preflight_and_transport_fallback_logs_warni
     .with_upload_root(upload_dir.clone())
     .with_transport_factory(recording_transport_factory(20_000, written.clone()));
 
-    // 开启完整过程记录与空跑模式
+    // 先握手连通激光机，再开启完整过程记录与空跑模式
+    let port = fake_grbl_handshake(1);
+    let (probe_st, probe_body) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": port,
+            "network_timeout": 2
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(probe_st, 200, "{probe_body}");
+    assert_eq!(probe_body["result"]["connected"], true, "{probe_body}");
     let (st, _) = service.dispatch_json(
         "POST",
         "/api/settings",

@@ -134,8 +134,12 @@ function LaserBenchPanel({
     broadcastDryRun(next);
   };
 
+  const connected = Boolean(connectionStatus?.connected);
+  const canToggleDryRun = connected || Boolean(dryRun.enabled);
+
   const handleToggleDryRun = async (checked) => {
     if (!editable) return;
+    if (checked && !connected) return;
     const feed = parseFeed();
     if (checked && feed === null) {
       await showAlert(`速度上限必须在 ${DRY_RUN_MIN_FEED} ~ ${DRY_RUN_MAX_FEED} mm/min 之间`, {
@@ -206,9 +210,15 @@ function LaserBenchPanel({
   };
 
   const statusLine = formatLaserBenchStatusLine({
-    connected: Boolean(connectionStatus?.connected),
+    connected,
     dryRun,
   });
+
+  const laserHintText = !connected
+    ? dryRun.enabled
+      ? "当前未连接激光机，可随时取消勾选关闭空跑；重新连接后再跑真机空跑。"
+      : "请先连接激光雕刻机后再开启真机空跑（未连接时仅可跑 L0 模拟机，不能进入真机测试）。"
+    : "模拟机与只读核对不用开开关；跑真机空跑再勾选（不出光、60 分钟自动关）。";
 
   const previewFeed = parseFeed() ?? (Number(dryRun.max_feed_mm_min) || DRY_RUN_DEFAULT_MAX_FEED);
   const approxMmPerSec = Math.max(1, Math.round(previewFeed / 60));
@@ -220,12 +230,16 @@ function LaserBenchPanel({
 
   const controlsRow = editable ? (
     <div className={embedded ? "ai-bench-laser-controls" : "settings-row"} style={embedded ? undefined : { flexWrap: "wrap", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
-      <label className={embedded ? "voice-check" : "settings-label"} style={embedded ? undefined : { marginBottom: 0 }}>
+      <label
+        className={embedded ? "voice-check" : "settings-label"}
+        style={embedded ? undefined : { marginBottom: 0 }}
+        title={!canToggleDryRun ? "请先连接激光雕刻机后再开启真机空跑" : undefined}
+      >
         <input
           type="checkbox"
           id={toggleId}
           checked={Boolean(dryRun.enabled)}
-          disabled={busy}
+          disabled={busy || !canToggleDryRun}
           onChange={(e) => void handleToggleDryRun(e.target.checked)}
         />
         <span>允许 AI 真机空跑测试（不出光、限速）</span>
@@ -293,8 +307,8 @@ function LaserBenchPanel({
         {controlsRow}
         <div className="voice-actions ai-bench-laser-actions">
           {copyButton}
-          <span className="voice-muted ai-bench-laser-hint">
-            模拟机与只读核对不用开开关；跑真机空跑再勾选（不出光、60 分钟自动关）。
+          <span className="voice-muted ai-bench-laser-hint" id="voice-laser-bench-hint">
+            {laserHintText}
           </span>
         </div>
       </div>

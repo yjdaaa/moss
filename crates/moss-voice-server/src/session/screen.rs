@@ -45,7 +45,7 @@ impl<'a> Session<'a> {
         scene: crate::BotPose,
         force: bool,
     ) -> Result<(), String> {
-        if !self.pack_active() {
+        if !self.pack_active() || self.current_turn_silent() {
             return Ok(());
         }
         let name = crate::screen_pack::emotion_name(self.shared.card_style(), scene);
@@ -153,6 +153,9 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         payload: &[u8],
     ) -> Result<(), String> {
+        if self.current_turn_silent() {
+            return Ok(());
+        }
         let frame = encode_frame(self.version, payload, self.timestamp)
             .map_err(|error| error.to_string())?;
         self.timestamp = self.timestamp.wrapping_add(FRAME_MS as u32);

@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 未连接激光机时禁止开启真机空跑，小智语音测试提示词明确不测激光雕刻机（2026-11-28）
+
+- **现象**：未连接激光雕刻机时，桌面端仍可勾选开启「允许 AI 真机空跑测试」并点亮顶栏空跑倒计时；小智语音联调一键提示词未显式禁止运行激光雕刻机测试。
+- **根因与修复**：按融合技术书 r79，后端 `ApiService` 增加本进程工作台握手连通态 `laser_connected`（重启归零，随 `/api/connection/check` 同步），`POST /api/settings` 开启 `laser_dry_run_enabled: true` 且未连接时返回 409 `laser_not_connected`（关闭始终放行）；前端 `LaserBenchSection` 未连接时禁用开启空跑开关并明确提示（已开启仍允许随时手动关闭），保留提示词复制供 L0 模拟机使用；`buildAiBenchPrompt`（`e2e` / `text` / `asr`）与卡片说明显式限定仅测小智语音链路、不运行 `scripts/laser-bench/*`、不连接激光机或开启空跑。既有发送、审批与急停门禁不变。
+- **验证**：`cargo test -p laser-api`、前端 lint / 单测 / 构建、Playwright 浏览器测试（含未连接禁用与握手后解锁闭环）与 L0 `dryrun_mode_enforced` 通过；未在实机激光硬件上验收。
+- **关联**：`crates/laser-api/src/{lib,service}.rs`、`crates/laser-api/src/routes/{device,system}.rs`、`frontend/src/components/LaserBenchSection.jsx`、`frontend/src/components/voice-builtin/AiBenchAssistantCard.jsx`、`frontend/src/voiceState/aiBench.js`、`scripts/laser-bench/laser-sim-bench.mjs`、`docs/integration/revisions/fusion-technical-spec.md`（r79）。
+
+### 修复 OneJev 工具误剪、Qwen3-ASR 伪流式卡顿、测试预览残留与常连待机注入误切聆听态（2026-11-28）
+
+- **现象**：OneJev 0.8B 在历史对话干扰下误剪 `device__*` 与 `laser_workflow_tool`，默认联调语料未校验设备工具误报通过；`qwen3_asr_0_6b` 伪流式重解码导致延迟放大 5–9 倍；「激光机现在什么状态」漏命中本地快查；常连待机下文字直通仍发 `stt` / `tts` / `goodbye`，设备静音却在“好的，再见”后卡在聆听中，且桌面残留测试预览窗；无 `python3` 的 Windows 无法跑混噪测评且未自动找到根目录 `moss-voice-local.exe`。
+- **根因与修复**：`jev.rs` 精简 `recent_turns` 为最近 1 轮、改写 6 组当前句导向提示词、阈值降至 `0.35` 并补领域关键词与指代保底；`AsrEngine::Qwen3Asr::streaming()` 改为 `false`，helper 与测评脚本改走单次整段识别；`fast.rs` 补齐状态与连接快查；`conversation.rs` 经 `call_raw`（同步补全 `TimerTools::call_raw` 透传）在模拟轮次新建预览后自动静默取消以免残留桌面弹窗；常连待机文字直通标 `device_silent`（`audio_channel_open: false`）跳过下发 `stt` / `tts` / `emotion` / `goodbye` / 音频帧；`asr-bench.mjs` / `voice-assets.mjs` 补路径探测与纯 Node 混噪兜底，`debug_api.rs` 输出 `device_tools` 供 `live-corpus.json` 精准校验。发送、审批与急停门禁不变。
+- **验证**：`node scripts/verify.mjs --finish`、`cargo clippy/test --manifest-path apps/moss-voice-local/Cargo.toml`（23 passed）与 voice-bench 脚本单测（16 passed）全部通过；新增 OneJev 回归、经 `TimerTools`/`HostTools` 截断超长 `detail` 的模拟预览自动取消、常连待机文字注入与打断回归、无屏设备工具校验、Windows 路径探测与纯 Node 混噪单测。OneJev 实机打分已对照复测，Windows 重编与真小智外放全链路待同步部署后实机复测（`unverified`）。
+- **关联**：`crates/moss-voice-server/src/{jev,fast,conversation,timer,debug_api,state,session}.rs`、`crates/moss-voice-server/src/session/{device,input,lifecycle,playback,screen,trace,turn}.rs`、`crates/moss-voice-local-proto/src/lib.rs`、`apps/moss-voice-local/src/main.rs`、`scripts/voice-bench/{asr-bench,voice-assets,live-xiaozhi-debug}.mjs`、`scripts/voice-bench/live-corpus.json`。
+
 ### 精简小智在线音量调节提示文案，去掉“（重连自动保持）”（2026-11-28）
 
 - **现象**：在语音中心「设备 › 已连接设备」应用扬声器音量后，提示显示“音量已设为 XX%（重连自动保持）”，容易误解为只能在重启或重连时修改。

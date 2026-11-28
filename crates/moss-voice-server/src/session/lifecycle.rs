@@ -191,6 +191,7 @@ impl<'a> Session<'a> {
                     session_id: self.session_id.into(),
                     turn: turn_no,
                     simulated: turn.simulated,
+                    audio_channel_open: !turn.device_silent,
                     bench_window: turn.bench_window,
                     simulated_label,
                     digital_audio: turn.digital_audio,
@@ -513,7 +514,14 @@ impl<'a> Session<'a> {
         glyph_push
     }
 
+    pub(super) fn current_turn_silent(&self) -> bool {
+        self.turn.as_ref().is_some_and(|turn| turn.device_silent)
+    }
+
     pub(super) async fn send_stt(&mut self, socket: &mut crate::link::Link, text: String) -> bool {
+        if self.current_turn_silent() {
+            return true;
+        }
         let glyph_push = self.prepare_glyphs_async(&text).await;
         let sent = send_json(
             socket,
@@ -536,6 +544,9 @@ impl<'a> Session<'a> {
         state: TtsState,
         text: Option<String>,
     ) -> Result<(), String> {
+        if self.current_turn_silent() {
+            return Ok(());
+        }
         let starting = matches!(state, TtsState::Start);
         let glyph_push = match (&state, text.as_deref()) {
             (TtsState::SentenceStart, Some(s)) => {

@@ -404,6 +404,7 @@ impl<'a> Session<'a> {
             self.pump.pause();
             self.listen.playback_started = None;
         } else {
+            let silent = self.current_turn_silent();
             self.interrupt(
                 socket,
                 if follow_up {
@@ -413,7 +414,7 @@ impl<'a> Session<'a> {
                 },
             )
             .await?;
-            if thinking && !follow_up {
+            if thinking && !follow_up && !silent {
                 self.tts(socket, TtsState::Stop, None).await?;
             }
         }

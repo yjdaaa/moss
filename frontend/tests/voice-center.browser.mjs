@@ -619,7 +619,7 @@ try {
   await context.addInitScript(() => {
     window.__TAURI__ = { core: { invoke: (command, args) => window.__fakeInvoke(command, args) }, event: { listen: async () => () => {} } };
   });
-  const dryRunState = { enabled: false, max_feed_mm_min: 2000 };
+  const dryRunState = { enabled: false, max_feed_mm_min: 2000, laserConnected: false };
   const dryRunPayload = () => ({
     laser_dry_run_enabled: dryRunState.enabled,
     dry_run_max_feed_mm_min: dryRunState.max_feed_mm_min,
@@ -636,8 +636,23 @@ try {
       const approvals = [{ approval_id: "apr_fail", status: "failed", kind: "laser_job", summary: "椴木书签", source: "voice", created_at: 1_790_000_000, outcome: { success: false, message: "控制器忙，未开始加工", error_code: "controller_busy" } }];
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { approvals, limit: 50, server_time: 1_790_000_100, ttl_seconds: 120 } }) });
     }
+    if (target.hostname === "127.0.0.1" && target.port === "9666" && target.pathname === "/api/connection/check" && route.request().method() === "POST") {
+      dryRunState.laserConnected = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, result: { connected: true, network_connected: true, serial_connected: true, summary: "Idle ($32=1)" } }),
+      });
+    }
     if (target.hostname === "127.0.0.1" && target.port === "9666" && target.pathname === "/api/settings" && route.request().method() === "POST") {
       const body = route.request().postDataJSON?.() || {};
+      if (body.laser_dry_run_enabled === true && !dryRunState.laserConnected) {
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ success: false, result: "请先连接激光雕刻机后再开启空跑模式", detail: { error_code: "laser_not_connected" } }),
+        });
+      }
       if (typeof body.dry_run_max_feed_mm_min === "number") dryRunState.max_feed_mm_min = body.dry_run_max_feed_mm_min;
       if (typeof body.laser_dry_run_enabled === "boolean") dryRunState.enabled = body.laser_dry_run_enabled;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { ...dryRunPayload(), message: "已保存" } }) });
@@ -710,6 +725,18 @@ try {
   );
   const officialDryRunToggle = page.locator("#voice-group-ai-bench-hub #voice-laser-dry-run-toggle");
   assert.equal(await officialDryRunToggle.isChecked(), false, "空跑开关默认关闭");
+  assert.equal(await officialDryRunToggle.isDisabled(), true, "r79：未连接激光机时必须禁用空跑开关");
+  assert.match(await page.locator("#voice-laser-bench-hint").innerText(), /请先连接激光雕刻机后再开启真机空跑/);
+  // 通过顶栏统一连接弹窗完成一次握手探测后，空跑开关解锁并可正常开关
+  await page.locator("#nav-hardware-status").click();
+  const connModal = page.locator("#device-connection-modal");
+  await connModal.waitFor();
+  await connModal.locator("#conn-network-host").fill("192.0.2.88");
+  await connModal.locator("#conn-probe-btn").click();
+  await connModal.locator("#conn-probe-status").filter({ hasText: /Idle/ }).waitFor();
+  await page.keyboard.press("Escape");
+  await connModal.waitFor({ state: "detached" });
+  assert.equal(await officialDryRunToggle.isDisabled(), false, "r79：激光机握手连通后空跑开关解锁");
   await officialDryRunToggle.click();
   await confirmDialog("开启空跑");
   await page.waitForFunction(() => document.querySelector("#voice-laser-dry-run-toggle")?.checked === true);
