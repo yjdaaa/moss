@@ -327,7 +327,7 @@ export function BuiltinDevicesPanel({ builtin }) {
                             type="button"
                             className="btn btn-ghost"
                             disabled={Boolean(asking) || !online || !controls.canVolume}
-                            onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%（重连自动保持）`)}
+                            onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%`)}
                           >
                             应用
                           </button>

@@ -1714,7 +1714,7 @@ try {
   await ctrlBox.getByLabel("设备音量").focus();
   await page.keyboard.press("ArrowRight");
   await ctrlBox.getByRole("button", { name: "应用" }).first().click();
-  await ctrlBox.getByText("音量已设为 5%").waitFor();
+  await ctrlBox.getByText("音量已设为 5%", { exact: true }).waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 5 } }, "扬声器音量在快捷控制里调，仍走 set_volume");
   assert.equal(await page.locator('[id^="voice-volume-"]').count(), 0, "n69：不再另有一份“MOSS 说话音量”滑块");
   await ctrlBox.getByRole("button", { name: "长按说话（抗噪）" }).click();

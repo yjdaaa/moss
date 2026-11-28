@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 精简小智在线音量调节提示文案，去掉“（重连自动保持）”（2026-11-28）
+
+- **现象**：在语音中心「设备 › 已连接设备」应用扬声器音量后，提示显示“音量已设为 XX%（重连自动保持）”，容易误解为只能在重启或重连时修改。
+- **根因与修复**：删除 `BuiltinDevicesPanel.jsx` 中 `set_volume` 完成提示的“（重连自动保持）”后缀，仅显示“音量已设为 XX%”（与屏幕亮度提示一致）；后端实时下发 `self.audio_speaker.set_volume` 与重连自动恢复偏好的行为不变。
+- **验证**：`node scripts/verify.mjs --finish` 通过；`voice-center.browser.mjs` 收紧为精确匹配“音量已设为 5%”。
+- **关联**：`frontend/src/components/voice-builtin/BuiltinDevicesPanel.jsx`、`frontend/tests/voice-center.browser.mjs`。
+
 ### 内置链路小智底部字幕改为与官方一致的整句跑马灯滚动（2026-11-28）
 
 - **现象**：内置链路把超过一行的回答切成几段、按语速逐段替换，底部字幕一行一行跳着换；用户要求和官方链路一样是滑动的。
