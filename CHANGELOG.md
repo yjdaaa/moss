@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复并精简语音中心「AI 联调与测试」界面布局、重复开关与大白话说明（2026-11-28）
+
+- **现象**：语音中心「记录与诊断 › AI 联调与测试」状态卡片在桌面宽度下挤成 4 窄列导致长胶囊穿模重叠、提示被单行截断；“自己用麦克风录声音”折叠栏因引用不存在的 `.voice-item` 失去边框与展开箭头，展开后首句文案与“可选”矛盾；“允许 AI 联调开关”上下重复渲染两份，激光测试“上限 mm/min”不够直观，两处复制按钮反馈不统一。
+- **根因与修复**：`15-addenda-2026-11.css` 改为固定双列网格（≤760px 单列）、取消提示单行截断、收紧卡片胶囊并允许折行，统一使用主题变量玻璃面板与滑块开关样式；`AiBenchAssistantCard.jsx` 与 `aiBench.js` 将 `#voice-debug-inject-switch` 直接整合进首张状态卡（开启后就地展示令牌与到期信息，删去下方重复大卡片）、精简文案与编号、切为 `.voice-fold` 折叠栏；`LaserBenchSection.jsx` 将“上限”改为“空跑限速”并附 `约 X mm/s` 动态换算与开关时机提示；`BenchRecordingsSection.jsx` 修正旧文案矛盾；两处复制按钮统一为就地切换已复制并在 2.5 秒后自动恢复；同步 `frontend-behavior.md` 与单测/浏览器布局回归断言。
+- **验证**：`node scripts/verify.mjs --finish` 通过（脚本单测 110 项、前端单测 433 项、Playwright 浏览器测试 20/20，覆盖 2×2 网格、零溢出、合并开关、720px 窄屏与折叠样式，并已快更 `/Applications/MOSS.app`）。
+- **关联**：`frontend/src/components/voice-builtin/{AiBenchAssistantCard,BenchRecordingsSection}.jsx`、`frontend/src/components/LaserBenchSection.jsx`、`frontend/src/voiceState/aiBench.js`、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/{voiceState.test,laserBenchPrompt.test,voice-center.browser}.mjs`、`docs/developer/frontend-behavior.md`。
+
 ### 将激光 AI 测试入口与空跑开关整体迁入语音中心「AI 联调与测试」（2026-11-28）
 
 - **现象**：此前激光自主测试卡片与空跑开关放在系统偏好设置，和语音中心的「AI 联调与测试」入口分散在两处。

@@ -153,7 +153,7 @@ export function aiBenchChecklistView(status) {
   const items = [
     {
       key: "debug_inject",
-      label: "① 允许 AI 联调开关",
+      label: "允许 AI 联调开关",
       ok: debugInject.enabled,
       statusText: debugInject.enabled
         ? debugInject.port
@@ -161,13 +161,13 @@ export function aiBenchChecklistView(status) {
           : "已开启（等待服务启动）"
         : "未开启",
       fixHint: debugInject.enabled
-        ? "已就绪；本机临时令牌 24 小时或关开关自动失效。"
-        : "点右侧“立即开启”允许本机 AI 联调脚本连接（仅限本机 127.0.0.1）。",
+        ? "已就绪；仅限本机 127.0.0.1，24 小时或关闭开关自动失效。"
+        : "打开右侧开关允许本机联调脚本连接（仅限 127.0.0.1，24 小时自动关，测试期间锁死激光动作）。",
       goto: { tab: "records", group: "ai-bench-hub", target: "voice-debug-inject-switch" },
     },
     {
       key: "online_device",
-      label: "② 小智连接状态",
+      label: "小智连接状态",
       ok: onlineDevices.length > 0,
       statusText: onlineDevices.length > 0 ? `${onlineDevices.length} 台在线` : "无在线设备",
       fixHint:
@@ -178,28 +178,28 @@ export function aiBenchChecklistView(status) {
     },
     {
       key: "bench_recordings",
-      label: "③ 测试真人语音素材",
+      label: "测试真人语音素材",
       ok: recordingsReady,
       statusText: recordingsReady
-        ? `${completeSpeakerCount} 位说话人已录齐（共 ${totalRecordings} 条 · 直接复用）`
+        ? `${completeSpeakerCount} 位说话人已录齐（${totalRecordings} 条）`
         : totalRecordings > 0
-          ? `本机已缓存 ${totalRecordings} 条真人语音（直接复用）`
-          : "本机暂无缓存（AI 自动从网上拉取并缓存）",
+          ? `已缓存 ${totalRecordings} 条`
+          : "AI 自动拉取缓存",
       fixHint:
         totalRecordings > 0
-          ? "每次测试直接复用本机已缓存的真人语音，无需重复说话；想补录可展开下方可选录音台。"
-          : "无需你开口说话：复制提示词发给 AI 后，AI 会自动从网上公开中文真人语音库下载并缓存到本机复用（也可展开下方可选“录制测试语料”自己录）。",
+          ? "每次测试直接复用本机已缓存的真人语音，无需重复说话；想补录可展开下方录音台。"
+          : "无需你开口说话：发提示词给 AI 后会自动下载公开中文真人语音并缓存复用，也可展开下方自行录制。",
       goto: { tab: "records", group: "ai-bench-hub", target: "voice-bench-recordings-box" },
     },
     {
       key: "bench_window",
-      label: "④ 真机安全锁",
+      label: "真机安全锁",
       ok: true,
       active: activeBenchWindows.length > 0,
       statusText:
         activeBenchWindows.length > 0
           ? `整体测试中（物理动作已锁定 · ${activeBenchWindows.length} 台）`
-          : "已保护（测试时自动锁死激光机动作）",
+          : "测试时自动锁机",
       fixHint:
         activeBenchWindows.length > 0
           ? "当前已锁定该设备所有物理动作；如需提前停止请点“立即结束测试”。"

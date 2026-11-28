@@ -2860,13 +2860,13 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(assistantSrc, /buildAiBenchPrompt\(/);
   assert.match(assistantSrc, /aiBenchChecklistView\(/);
   const idxChecklist = assistantSrc.indexOf('id="voice-ai-bench-checklist"');
+  const idxSwitch = assistantSrc.indexOf('id="voice-debug-inject-switch"');
   const idxCopy = assistantSrc.indexOf('id="voice-ai-bench-prompt-actions"');
   const idxRecorder = assistantSrc.indexOf("<BenchRecordingsSection");
-  const idxSwitch = assistantSrc.indexOf('id="voice-debug-inject-switch"');
   const idxLaser = assistantSrc.indexOf("<LaserBenchSection");
   assert.ok(
-    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch && idxSwitch < idxLaser,
-    "VD6/LD：AI 联调与测试分组内必须严格按 语音（状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关）→ 激光雕刻机测试 排列",
+    idxChecklist > 0 && idxChecklist < idxSwitch && idxSwitch < idxCopy && idxCopy < idxRecorder && idxRecorder < idxLaser,
+    "VD6/LD：AI 联调与测试分组内必须严格按 语音（状态清单［首项内置调试注入开关］→ 复制按钮 → 录制测试语料）→ 激光雕刻机测试 排列",
   );
   assert.match(assistantSrc, /const isBuiltin = mode === "builtin"/, "LD：语音子块仅在 builtin 下展示，激光子块始终展示");
   assert.doesNotMatch(assistantSrc, /<VoiceAsrCorpusCard/, "识别语料已合并进完整过程记录与对话记录与排障");

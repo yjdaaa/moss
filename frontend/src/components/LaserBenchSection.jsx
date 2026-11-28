@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Check, Copy, FlaskConical } from "lucide-react";
 import { FoldHeader } from "./FoldHeader.jsx";
 import { getJson, postJson } from "../api/client.js";
@@ -78,6 +78,11 @@ function LaserBenchPanel({
   const [serverCanEdit, setServerCanEdit] = useState(true);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
 
   const editable = !isReadOnlyReferenceClient() && canEdit !== false && serverCanEdit;
 
@@ -193,6 +198,8 @@ function LaserBenchPanel({
     try {
       await navigator.clipboard.writeText(prompt);
       setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 2500);
     } catch {
       await showAlert("无法写入剪贴板，请检查系统剪贴板权限", { title: "复制失败", tone: "error" });
     }
@@ -202,6 +209,9 @@ function LaserBenchPanel({
     connected: Boolean(connectionStatus?.connected),
     dryRun,
   });
+
+  const previewFeed = parseFeed() ?? (Number(dryRun.max_feed_mm_min) || DRY_RUN_DEFAULT_MAX_FEED);
+  const approxMmPerSec = Math.max(1, Math.round(previewFeed / 60));
 
   const toggleId = embedded ? "voice-laser-dry-run-toggle" : "settings-laser-dry-run-toggle";
   const feedId = embedded ? "voice-laser-dry-run-feed" : "settings-laser-dry-run-feed";
@@ -221,7 +231,7 @@ function LaserBenchPanel({
         <span>允许 AI 真机空跑测试（不出光、限速）</span>
       </label>
       <label className={embedded ? "ai-bench-laser-feed" : undefined} style={embedded ? undefined : { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
-        <span>上限</span>
+        <span>空跑限速</span>
         <input
           type="number"
           id={feedId}
@@ -243,6 +253,7 @@ function LaserBenchPanel({
           aria-label="空跑速度上限（mm/min）"
         />
         <span>mm/min</span>
+        <span className="voice-muted ai-bench-laser-speed-equiv">（约 {approxMmPerSec} mm/s）</span>
       </label>
       {dryRun.enabled && (
         <span className="ob-pill ob-pill--warn" id={remainingId}>
@@ -260,13 +271,16 @@ function LaserBenchPanel({
       onClick={() => void handleCopyPrompt()}
     >
       {copied ? <Check size={13} /> : <Copy size={13} />}
-      <span>{copied ? "已复制提示词" : "一键复制 AI 激光测试提示词"}</span>
+      <span>{copied ? "已复制，直接发给 AI 即可" : "一键复制 AI 激光测试提示词"}</span>
     </button>
   );
 
   if (embedded) {
     return (
-      <div className="voice-block ai-bench-laser-block" id="voice-laser-bench-box">
+      <div
+        className={`voice-block ai-bench-panel-card ai-bench-laser-block${dryRun.enabled ? " is-active" : ""}`}
+        id="voice-laser-bench-box"
+      >
         <div className="voice-block-h">
           <h3>
             <FlaskConical size={14} aria-hidden="true" className="ai-bench-laser-icon" />
@@ -277,7 +291,12 @@ function LaserBenchPanel({
           </span>
         </div>
         {controlsRow}
-        <div className="voice-actions">{copyButton}</div>
+        <div className="voice-actions ai-bench-laser-actions">
+          {copyButton}
+          <span className="voice-muted ai-bench-laser-hint">
+            模拟机与只读核对不用开开关；跑真机空跑再勾选（不出光、60 分钟自动关）。
+          </span>
+        </div>
       </div>
     );
   }

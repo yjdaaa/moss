@@ -121,6 +121,8 @@ test("LD: 激光测试卡片挪入语音中心 AI 联调与测试分组（全链
     assert.match(offHtml, /id="voice-laser-dry-run-toggle"/);
     assert.match(offHtml, /允许 AI 真机空跑测试（不出光、限速）/);
     assert.match(offHtml, /id="voice-laser-dry-run-feed"/);
+    assert.match(offHtml, /空跑限速/);
+    assert.match(offHtml, /约 33 mm\/s/);
     assert.match(offHtml, /id="voice-laser-bench-copy-btn"/);
     assert.match(offHtml, /一键复制 AI 激光测试提示词/);
     assert.doesNotMatch(offHtml, /settings-laser-bench-levels|L0 模拟机全自动|L1 真机只读核对|L2 真机空跑|查看记录/);
@@ -186,9 +188,10 @@ test("LD: 激光测试卡片挪入语音中心 AI 联调与测试分组（全链
       }),
     );
     assert.match(builtinHubHtml, /id="voice-group-ai-bench-hub"/);
-    const voiceSwitchIdx = builtinHubHtml.indexOf('id="voice-debug-inject-box"');
+    assert.match(builtinHubHtml, /id="voice-debug-inject-switch"/);
+    const voiceFoldIdx = builtinHubHtml.indexOf('id="voice-bench-recordings-fold"');
     const laserBoxIdx = builtinHubHtml.indexOf('id="voice-laser-bench-box"');
-    assert.ok(voiceSwitchIdx > 0 && laserBoxIdx > voiceSwitchIdx, "builtin 下语音部分须在前、激光雕刻机测试子块须在后");
+    assert.ok(voiceFoldIdx > 0 && laserBoxIdx > voiceFoldIdx, "builtin 下语音部分须在前、激光雕刻机测试子块须在后");
 
     const officialHubHtml = renderToStaticMarkup(
       React.createElement(AiBenchAssistantCard, {
@@ -203,7 +206,7 @@ test("LD: 激光测试卡片挪入语音中心 AI 联调与测试分组（全链
     assert.match(officialHubHtml, /id="voice-laser-bench-box"/);
     assert.doesNotMatch(
       officialHubHtml,
-      /voice-ai-bench-checklist|voice-ai-bench-prompt-actions|voice-bench-recordings-fold|voice-debug-inject-box/,
+      /voice-ai-bench-checklist|voice-ai-bench-prompt-actions|voice-bench-recordings-fold|voice-debug-inject-switch/,
       "非 builtin 模式下不渲染语音联调子块",
     );
 

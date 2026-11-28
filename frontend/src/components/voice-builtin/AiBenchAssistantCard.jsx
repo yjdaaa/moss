@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Check, Copy, OctagonX, X } from "lucide-react";
 import { showAlert, showConfirm } from "../../appDialog.js";
 import { voiceApi } from "../../voiceApi.js";
@@ -18,7 +18,7 @@ import { formatTime } from "./shared.js";
 
 /**
  * VD6 / LD 语音中心「记录与诊断 › AI 联调与测试」统一分组（所有语音链路均显示，默认展开）：
- * - 内置语音（builtin）模式下依次显示语音部分（4 项状态清单 → 一键复制语音提示词 → 录制测试语料 → 允许 AI 联调开关）与「激光雕刻机测试」子块；
+ * - 内置语音（builtin）模式下依次显示语音部分（4 项状态清单［首项内置 #voice-debug-inject-switch 开关与令牌说明］→ 一键复制语音提示词 → 可选录制测试语料）与「激光雕刻机测试」子块；
  * - 非内置模式下只显示「激光雕刻机测试」子块（一行状态 + 空跑开关与限速 + 一键复制 AI 激光测试提示词），摘要相应调整。
  */
 export function AiBenchAssistantCard({
@@ -32,8 +32,13 @@ export function AiBenchAssistantCard({
   const status = builtin?.status;
   const busy = builtin?.busy;
   const act = builtin?.act;
-  const [copiedKind, setCopiedKind] = useState("");
+  const [copied, setCopied] = useState(false);
   const [stoppingId, setStoppingId] = useState("");
+  const copyTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
 
   const isBuiltin = mode === "builtin";
   const showVoice = isBuiltin && Boolean(status && !status.error);
@@ -55,11 +60,13 @@ export function AiBenchAssistantCard({
 
   const groupTone = (showVoice && hasBenchWindow) || dryRunStatus?.enabled ? "warn" : undefined;
 
-  const copyPrompt = async (kind = "e2e", label = "AI 全自动联调与调试") => {
+  const copyPrompt = async (kind = "e2e") => {
     const prompt = buildAiBenchPrompt(status, kind);
     try {
       await navigator.clipboard.writeText(prompt);
-      setCopiedKind(label);
+      setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 2500);
     } catch {
       await showAlert("无法写入剪贴板，请检查系统剪贴板权限", { title: "复制失败", tone: "error" });
     }
@@ -168,34 +175,47 @@ export function AiBenchAssistantCard({
                   >
                     <div className="ai-bench-check-head">
                       <span className="ai-bench-check-title">
+                        <b>{item.label}</b>
+                      </span>
+                      <span className="ai-bench-check-meta">
                         <span
                           className={`ob-pill ${item.active ? "ob-pill--warn" : visualOk ? "ob-pill--ok" : "ob-pill--off"}`}
                           aria-label={visualOk ? "已就绪" : "待处理"}
                         >
-                          {visualOk ? <Check size={12} /> : <X size={12} />} {item.statusText}
+                          {visualOk ? <Check size={12} /> : <X size={12} />}
+                          <span>{item.statusText}</span>
                         </span>
-                        <b>{item.label}</b>
+                        {item.key === "debug_inject" ? (
+                          <input
+                            type="checkbox"
+                            id="voice-debug-inject-switch"
+                            className="ai-bench-toggle"
+                            checked={debugInject.enabled}
+                            disabled={Boolean(busy)}
+                            aria-label="允许本机 AI 联调开关"
+                            onChange={(e) => void toggleDebugInject(e.target.checked)}
+                          />
+                        ) : !visualOk && item.goto ? (
+                          <button
+                            type="button"
+                            className="btn btn-ghost voice-inline-btn"
+                            onClick={() => handleGotoItem(item.goto)}
+                          >
+                            去连接
+                          </button>
+                        ) : null}
                       </span>
-                      {item.key === "debug_inject" ? (
-                        <button
-                          type="button"
-                          className={`btn ${debugInject.enabled ? "btn-ghost" : "btn-primary"} voice-inline-btn`}
-                          disabled={Boolean(busy)}
-                          onClick={() => void toggleDebugInject(!debugInject.enabled)}
-                        >
-                          {debugInject.enabled ? "关闭开关" : "立即开启"}
-                        </button>
-                      ) : !visualOk && item.goto ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost voice-inline-btn"
-                          onClick={() => handleGotoItem(item.goto)}
-                        >
-                          去连接
-                        </button>
-                      ) : null}
                     </div>
                     <div className="voice-muted ai-bench-check-hint">{item.fixHint}</div>
+                    {item.key === "debug_inject" && debugInject.enabled && (
+                      <div className="voice-muted ai-bench-check-meta-line" id="voice-debug-inject-meta">
+                        令牌：<code className="mono">{`<运行目录>/${debugInject.tokenFileRel}`}</code>
+                        {debugInject.active && debugInject.port
+                          ? ` · 入口 127.0.0.1:${debugInject.port}`
+                          : " · 启动内置服务后开放入口"}
+                        {debugInject.expiresAt ? ` · 到期 ${formatTime(debugInject.expiresAt)}` : ""}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -208,67 +228,35 @@ export function AiBenchAssistantCard({
                   type="button"
                   className="btn btn-primary ai-bench-copy-hero"
                   id="voice-ai-bench-copy-e2e"
-                  onClick={() => void copyPrompt("e2e", "AI 全自动联调与调试")}
+                  onClick={() => void copyPrompt("e2e")}
                 >
-                  <Copy size={14} /> 一键复制 AI 全自动调试提示词
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{copied ? "已复制，直接发给 AI 即可" : "一键复制 AI 全自动调试提示词"}</span>
                 </button>
                 <div className="voice-muted ai-bench-prompt-desc">
-                  <b>你只需做两步：</b>① 点上方「立即开启」打开联调开关 → ② 唤醒小智放在电脑喇叭旁（30–50 cm）→ 点此按钮复制发给 AI。
+                  <b>两步开始：</b>先打开上方联调开关，唤醒小智放到电脑喇叭旁（30–50 cm），再点左侧复制发给 AI。
                   <br />
-                  AI 会<b>自动从网上下载中文真人语音并缓存到本机复用</b>（无需你开口说话），自动按顺序跑完<b>文字直通快检、真小智外放全链路（含数字对照与风扇噪声）与离线识别测评</b>，并自动改代码复测。
+                  AI 会<b>自动准备中文真人语音并缓存复用</b>，完成全流程联调测试并按结果调优（不含密钥或本机路径）。
                 </div>
               </div>
             </div>
 
-            {copiedKind && (
-              <div className="voice-ok" id="voice-ai-bench-copied-notice">
-                已复制「{copiedKind}」提示词到剪贴板，直接粘贴给 AI 即可开始全自动调试（不含任何令牌、密钥或本机绝对路径）。
-              </div>
-            )}
-
             {/* 3. VD2 “录制测试语料”引导（默认折叠：平时由 AI 自动从网上找真人语音并缓存，想用自己声音时再展开） */}
-            <details className="voice-item ai-bench-optional-fold" id="voice-bench-recordings-fold">
+            <details className="voice-fold ai-bench-optional-fold" id="voice-bench-recordings-fold">
               <summary>
-                <span>自己用麦克风录声音（可选 · 默认不用录，AI 会自动从网上准备真人语音并缓存复用）</span>
-                <span className={`ob-pill ${checklist.totalRecordings > 0 ? "ob-pill--ok" : "ob-pill--off"}`}>
+                <span className="ai-bench-optional-fold-title">
+                  自己用麦克风录声音（可选 · 默认不用录，AI 会自动准备真人语音并缓存复用）
+                </span>
+                <span
+                  className={`ob-pill ai-bench-optional-fold-pill ${checklist.totalRecordings > 0 ? "ob-pill--ok" : "ob-pill--off"}`}
+                >
                   {checklist.totalRecordings > 0 ? `本机已缓存 ${checklist.totalRecordings} 条` : "选填"}
                 </span>
               </summary>
-              <div className="voice-item-b">
+              <div className="ai-bench-optional-fold-body">
                 <BenchRecordingsSection builtin={builtin} active={active} />
               </div>
             </details>
-
-            {/* 4. 从“服务”页挪来的“允许本机 AI 调试注入”开关（保留确认弹窗与原 id） */}
-            <div className="voice-block" id="voice-debug-inject-box">
-              <div className="voice-block-h">
-                <h3>允许 AI 联调开关</h3>
-                <span className={`ob-pill ${debugInject.enabled ? "ob-pill--ok" : "ob-pill--off"}`}>
-                  {debugInject.enabled ? "已开启" : "未开启"}
-                </span>
-              </div>
-              <label className="voice-check">
-                <input
-                  type="checkbox"
-                  id="voice-debug-inject-switch"
-                  checked={debugInject.enabled}
-                  disabled={Boolean(busy)}
-                  onChange={(e) => void toggleDebugInject(e.target.checked)}
-                />
-                <span>允许本机 AI 联调脚本连接调试（仅限本机 127.0.0.1，24 小时自动关闭，测试期间全程锁死激光机物理动作）</span>
-              </label>
-              {debugInject.enabled ? (
-                <span className="voice-muted" id="voice-debug-inject-meta">
-                  令牌位置：<code className="mono">{`<运行目录>/${debugInject.tokenFileRel}`}</code>
-                  {debugInject.active && debugInject.port ? ` · 本机入口 127.0.0.1:${debugInject.port}` : " · 启动内置服务后开放本机入口"}
-                  {debugInject.expiresAt ? ` · 到期 ${formatTime(debugInject.expiresAt)}` : ""}
-                </span>
-              ) : (
-                <span className="voice-muted">
-                  默认关闭。开启后可由本机联调脚本运行整体测试，或在“设备 › 已连接设备”中向在线小智直接发送测试文字。
-                </span>
-              )}
-            </div>
           </div>
         )}
 

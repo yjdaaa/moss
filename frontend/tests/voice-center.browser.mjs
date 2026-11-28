@@ -704,7 +704,7 @@ try {
   assert.match(await page.locator("#voice-group-ai-bench-hub > .voice-group-h").innerText(), /激光雕刻机测试 ·/, "LD：非 builtin 模式摘要调整为激光状态");
   assert.ok(await page.locator("#voice-group-ai-bench-hub #voice-laser-bench-box").isVisible(), "LD：非 builtin 模式显示激光雕刻机测试子块");
   assert.equal(
-    await page.locator("#voice-group-ai-bench-hub #voice-ai-bench-checklist, #voice-group-ai-bench-hub #voice-ai-bench-prompt-actions, #voice-group-ai-bench-hub #voice-bench-recordings-fold, #voice-group-ai-bench-hub #voice-debug-inject-box").count(),
+    await page.locator("#voice-group-ai-bench-hub #voice-ai-bench-checklist, #voice-group-ai-bench-hub #voice-ai-bench-prompt-actions, #voice-group-ai-bench-hub #voice-bench-recordings-fold, #voice-group-ai-bench-hub #voice-debug-inject-switch").count(),
     0,
     "LD：非 builtin 模式下不显示语音联调子块",
   );
@@ -715,6 +715,11 @@ try {
   await page.waitForFunction(() => document.querySelector("#voice-laser-dry-run-toggle")?.checked === true);
   await page.locator("#nav-dry-run-badge").waitFor();
   assert.match(await page.locator("#nav-dry-run-badge").innerText(), /空跑模式（不出光 · 限速 2000 mm\/min/);
+  if (process.env.VOICE_QA_DIR) {
+    await page.locator("#voice-group-ai-bench-hub").screenshot({
+      path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub-official-on.png"),
+    });
+  }
   await officialDryRunToggle.click();
   await page.waitForFunction(() => document.querySelector("#voice-laser-dry-run-toggle")?.checked === false);
   await page.locator("#nav-dry-run-badge").waitFor({ state: "detached" });
@@ -1338,7 +1343,102 @@ try {
     .evaluateAll((els) => els.map((el) => el.id));
   assert.equal(recordsGroupIds[0], "voice-group-ai-bench-hub", "VD6：AI 联调与测试须在记录与诊断最上方");
   assert.equal(recordsGroupIds.includes("voice-group-asr-corpus"), false, "VD6：识别语料不再在记录与诊断单独列一组");
-  if (process.env.VOICE_QA_DIR) await page.locator("#voice-group-ai-bench-hub").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub.png") });
+  // UI 布局与防穿模回归断言：2×2 双列状态卡零溢出/零重叠、提示不单行截断、可选录音折叠栏带卡片边框与内边距
+  const benchLayout = await page.evaluate(() => {
+    const hub = document.getElementById("voice-group-ai-bench-hub");
+    const cards = Array.from(document.querySelectorAll("#voice-ai-bench-checklist .ai-bench-check-card"));
+    const cardRects = cards.map((card) => {
+      const r = card.getBoundingClientRect();
+      const pill = card.querySelector(".ob-pill");
+      const pr = pill ? pill.getBoundingClientRect() : null;
+      const btn = card.querySelector("button, input");
+      const br = btn ? btn.getBoundingClientRect() : null;
+      const hint = card.querySelector(".ai-bench-check-hint");
+      const hs = hint ? getComputedStyle(hint) : null;
+      return {
+        id: card.id,
+        left: r.left,
+        right: r.right,
+        top: r.top,
+        bottom: r.bottom,
+        pillOverflow: pr ? pr.right > r.right + 1 || pr.left < r.left - 1 : false,
+        btnOverflow: br ? br.right > r.right + 1 || br.left < r.left - 1 : false,
+        hintNowrap: hs ? hs.whiteSpace === "nowrap" : false,
+        hintClipped: hint ? hint.scrollWidth > hint.clientWidth + 1 : false,
+      };
+    });
+    let overlapCount = 0;
+    for (let i = 0; i < cardRects.length; i += 1) {
+      for (let j = i + 1; j < cardRects.length; j += 1) {
+        const a = cardRects[i];
+        const b = cardRects[j];
+        if (a.left < b.right - 1 && a.right > b.left + 1 && a.top < b.bottom - 1 && a.bottom > b.top + 1) {
+          overlapCount += 1;
+        }
+      }
+    }
+    const distinctCols = new Set(cardRects.map((c) => Math.round(c.left / 20))).size;
+    const distinctRows = new Set(cardRects.map((c) => Math.round(c.top / 20))).size;
+    const fold = document.getElementById("voice-bench-recordings-fold");
+    const foldStyle = fold ? getComputedStyle(fold) : null;
+    return {
+      hubOverflow: hub ? hub.scrollWidth > hub.clientWidth + 1 : true,
+      cardCount: cardRects.length,
+      distinctCols,
+      distinctRows,
+      overlapCount,
+      anyPillOverflow: cardRects.some((c) => c.pillOverflow),
+      anyBtnOverflow: cardRects.some((c) => c.btnOverflow),
+      anyHintNowrap: cardRects.some((c) => c.hintNowrap || c.hintClipped),
+      foldStyled: Boolean(
+        fold &&
+          fold.classList.contains("voice-fold") &&
+          parseFloat(foldStyle.borderTopWidth) > 0 &&
+          parseFloat(foldStyle.paddingLeft) >= 10,
+      ),
+    };
+  });
+  assert.equal(benchLayout.hubOverflow, false, "AI 联调与测试分组不得横向溢出");
+  assert.equal(benchLayout.cardCount, 4, "联调清单固定 4 张状态卡");
+  assert.equal(benchLayout.distinctCols, 2, "桌面宽度下联调清单须为 2 列网格");
+  assert.equal(benchLayout.distinctRows, 2, "桌面宽度下联调清单须为 2 行网格");
+  assert.equal(benchLayout.overlapCount, 0, "4 张状态卡彼此不得重叠");
+  assert.equal(benchLayout.anyPillOverflow, false, "状态胶囊不得穿出卡片边框");
+  assert.equal(benchLayout.anyBtnOverflow, false, "卡片操作按钮不得穿出卡片边框");
+  assert.equal(benchLayout.anyHintNowrap, false, "状态卡提示说明不得单行强制截断");
+  assert.equal(benchLayout.foldStyled, true, "可选麦克风录音折叠栏须应用 .voice-fold 边框与内边距");
+  if (process.env.VOICE_QA_DIR) {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.locator("#voice-group-ai-bench-hub").screenshot({
+      path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub.png"),
+    });
+    const foldSummary = page.locator("#voice-bench-recordings-fold > summary");
+    await foldSummary.click();
+    await page.locator("#voice-bench-recordings-box").waitFor({ state: "visible" });
+    await page.locator("#voice-group-ai-bench-hub").screenshot({
+      path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub-recorder-open.png"),
+    });
+    await foldSummary.click();
+  }
+  const origVpForBench = page.viewportSize();
+  await page.setViewportSize({ width: 720, height: 1000 });
+  const narrowBench = await page.evaluate(() => {
+    const hub = document.getElementById("voice-group-ai-bench-hub");
+    const cards = Array.from(document.querySelectorAll("#voice-ai-bench-checklist .ai-bench-check-card"));
+    const cols = new Set(cards.map((c) => Math.round(c.getBoundingClientRect().left / 20))).size;
+    return {
+      overflow: hub ? hub.scrollWidth > hub.clientWidth + 1 : true,
+      cols,
+    };
+  });
+  assert.equal(narrowBench.overflow, false, "窄屏 720px 下 AI 联调与测试不得横向溢出");
+  assert.equal(narrowBench.cols, 1, "窄屏 720px 下联调清单须自动折为单列");
+  if (process.env.VOICE_QA_DIR) {
+    await page.locator("#voice-group-ai-bench-hub").screenshot({
+      path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub-narrow.png"),
+    });
+  }
+  if (origVpForBench) await page.setViewportSize(origVpForBench);
   assert.equal(
     await page.locator("#voice-group-ai-bench-hub > .voice-group-h").getAttribute("aria-expanded"),
     "true",
@@ -1349,7 +1449,6 @@ try {
       "voice-ai-bench-checklist",
       "voice-ai-bench-prompt-actions",
       "voice-bench-recordings-box",
-      "voice-debug-inject-box",
       "voice-laser-bench-box",
     ];
     const nodes = ids.map((id) => document.getElementById(id));
@@ -1359,14 +1458,22 @@ try {
     }
     return true;
   });
-  assert.equal(hubOrderOk, true, "VD6/LD：AI 联调与测试内部五块顺序（语音四块 → 激光雕刻机测试）必须严格一致");
+  assert.equal(hubOrderOk, true, "VD6/LD：AI 联调与测试内部四块顺序（语音三块［清单含联调开关 → 复制按钮 → 录制测试语料］→ 激光雕刻机测试）必须严格一致");
+  assert.equal(await page.locator("#voice-debug-inject-box").count(), 0, "不再在底部重复渲染第二份调试注入开关卡片");
   assert.equal(await page.locator("#voice-asr-corpus-section").count(), 0, "识别语料已并入完整过程记录与对话记录与排障");
-  // 验证挪来的调试注入开关仍保留确认弹窗与原 id
-  const debugSwitch = page.locator("#voice-group-ai-bench-hub #voice-debug-inject-switch");
+  // 验证合并进清单首卡的调试注入开关仍保留确认弹窗、原 id 与开启后令牌元信息
+  const debugSwitch = page.locator("#voice-ai-bench-item-debug_inject #voice-debug-inject-switch");
   assert.equal(await debugSwitch.isChecked(), false, "调试注入开关默认关闭");
   await debugSwitch.click();
   await confirmDialog("开启调试注入");
   await page.waitForFunction(() => document.querySelector("#voice-debug-inject-switch")?.checked === true);
+  await page.locator("#voice-ai-bench-item-debug_inject #voice-debug-inject-meta").waitFor({ state: "visible" });
+  if (process.env.VOICE_QA_DIR) {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.locator("#voice-group-ai-bench-hub").screenshot({
+      path: path.join(process.env.VOICE_QA_DIR, "voice-ai-bench-hub-switch-on.png"),
+    });
+  }
   await debugSwitch.click();
   await page.waitForFunction(() => document.querySelector("#voice-debug-inject-switch")?.checked === false);
   // 8a. n68：服务事件带级别 / 分类 / 怎么办 / 技术细节，可只看错误和警告，覆盖计数明确提示，可导出诊断包

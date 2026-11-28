@@ -516,9 +516,9 @@ export function BenchRecordingsSection({ builtin, active = true }) {
       </div>
 
       <p className="voice-muted">
-        整体测试只使用此处录制的真人声音（16 kHz 单声道 WAV，存本机{" "}
+        可选补充你自己的声音，用于补齐 13 句工作室标准语料（默认不录也可用，AI 会自动准备网上真人语音；录音为 16 kHz 单声道 WAV 存本机{" "}
         <code className="mono">{`<运行目录>/${data.recordings_dir_rel || "voice-bench/recordings"}/`}</code>
-        ；支持多说话人标签，不进诊断包与过程记录，不用于声纹）。
+        ，支持多说话人标签，不进诊断包与过程记录，不用于声纹）。
       </p>
 
       {/* 说话人标签选择 / 新建（左选标签、右紧凑新建，统一等高对齐） */}
