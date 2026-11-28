@@ -112,12 +112,28 @@ export function originNote(record) {
  * 绕一圈后回到起点；默认不出光。没有范围或没有设备目标时返回 null（绝不猜）。
  */
 // 2026-11-16 橡皮筋走边框（对齐 LightBurn Rubber Band Framing）：沿出光点的外轮廓（凸包）走，
-// 而不是外接矩形；偏好存在本机，工作台、AI 预览窗与画板共用。默认外接矩形。
+// 而不是外接矩形；r78 起改为后端全局设置（`laser_framing_shape`），工作台、AI 预览窗、画板与语音/MCP 共用。默认外接矩形。
 export const FRAMING_SHAPE_KEY = "moss.framingShape.v1";
 
-export function readFramingShape(storage = globalThis.localStorage) {
+const USE_DEFAULT_FRAMING_STORAGE = Symbol("defaultFramingStorage");
+let backendFramingShapeReader = null;
+
+/** 供 machineProfileSync.js 注入后端权威走边框形状读取器（避免循环依赖）。 */
+export function registerBackendFramingShapeReader(reader) {
+  backendFramingShapeReader = typeof reader === "function" ? reader : null;
+}
+
+export function readFramingShape(storage = USE_DEFAULT_FRAMING_STORAGE) {
+  const isDefault = storage === USE_DEFAULT_FRAMING_STORAGE;
+  if (isDefault && backendFramingShapeReader) {
+    const backendShape = backendFramingShapeReader();
+    if (backendShape === "hull" || backendShape === "box") {
+      return backendShape;
+    }
+  }
+  const resolved = isDefault ? globalThis.localStorage : storage;
   try {
-    return storage?.getItem(FRAMING_SHAPE_KEY) === "hull" ? "hull" : "box";
+    return resolved?.getItem(FRAMING_SHAPE_KEY) === "hull" ? "hull" : "box";
   } catch {
     return "box";
   }
@@ -155,15 +171,28 @@ export function framingRequest(record, connectionPayload, { shape = "box" } = {}
   if (!connectionPayload || !frame || !keys.every((key) => Number.isFinite(Number(frame[key])))) return null;
   if (Number(frame.max_x) <= Number(frame.min_x) || Number(frame.max_y) <= Number(frame.min_y)) return null;
   const round = (value) => Math.round(Number(value) * 1000) / 1000;
+  const outline = shape === "hull" ? framingOutline(record?.artifacts) : null;
+  let minX = round(frame.min_x);
+  let maxX = round(frame.max_x);
+  let minY = round(frame.min_y);
+  let maxY = round(frame.max_y);
+  if (outline) {
+    for (const [x, y] of outline) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
   return {
     ...connectionPayload,
     relative_to_head: true,
-    min_x: round(frame.min_x),
-    max_x: round(frame.max_x),
-    min_y: round(frame.min_y),
-    max_y: round(frame.max_y),
+    min_x: minX,
+    max_x: maxX,
+    min_y: minY,
+    max_y: maxY,
     feed_rate: 2000,
     power: 0,
-    ...(shape === "hull" && framingOutline(record?.artifacts) ? { outline: framingOutline(record.artifacts) } : {}),
+    ...(outline ? { outline } : {}),
   };
 }

@@ -49,6 +49,8 @@ impl ApiService {
             external_tools: std::sync::OnceLock::new(),
             disabled_tools: std::sync::RwLock::new(std::collections::BTreeSet::new()),
             verified_connection: std::sync::RwLock::new(None),
+            machine_profiles: std::sync::RwLock::new(Default::default()),
+            framing_shape: std::sync::RwLock::new(None),
             voice_sessions: Default::default(),
             shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_telemetry: laser_contracts::global_mcp_telemetry_arc(),
@@ -287,6 +289,19 @@ impl ApiService {
             && let Ok(mut slot) = self.verified_connection.write()
         {
             *slot = Some(saved.clone());
+        }
+        if let Ok(mut slot) = self.machine_profiles.write() {
+            *slot = crate::machine_profiles::MachineProfileStore::from_settings_value(
+                runtime_settings.get(crate::machine_profiles::MACHINE_PROFILES_KEY),
+            );
+        }
+        if let Some(shape) = runtime_settings
+            .get(crate::machine_profiles::FRAMING_SHAPE_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| crate::machine_profiles::FramingShape::parse(s).ok())
+            && let Ok(mut slot) = self.framing_shape.write()
+        {
+            *slot = Some(shape);
         }
         let disabled = runtime_settings
             .get("mcp_disabled_tools")

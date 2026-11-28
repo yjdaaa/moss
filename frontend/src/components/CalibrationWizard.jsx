@@ -30,6 +30,13 @@ import {
   writeFillSettings,
 } from "../fillOptions.js";
 import { readUnifiedConnection } from "../deviceConnection.js";
+import {
+  canEditMachineProfiles,
+  isMachineProfilesHydrated,
+  readFillSettingsWithMachineCalibration,
+  saveTargetMachineCalibration,
+  stripMachineCalibrationFromFillSettings,
+} from "../machineProfileSync.js";
 
 /**
  * 首次标定向导（r40，2026-11-16）：按顺序串起线距测试、功率 × 速度矩阵、双向扫描偏移、过扫描检查、
@@ -99,14 +106,14 @@ export function CalibrationWizard({
   };
 
   const generate = async (testType) => {
-    const settings = readFillSettings();
+    const targetConn = connectionForm || readUnifiedConnection();
+    const settings = readFillSettingsWithMachineCalibration(readFillSettings, targetConn);
     const fill = testType === "overscan" ? fillSettingsPayload(settings) : null;
     if (fill?.error) {
       setNote(`填充设置有误：${fill.error}`);
       return;
     }
     const speeds = speedsText.split(/[,，\s]+/).filter(Boolean);
-    const targetConn = connectionForm || readUnifiedConnection();
     const built = buildPatternPreviewPayload({
       testType,
       material,
@@ -146,16 +153,29 @@ export function CalibrationWizard({
     return false;
   };
 
-  const saveScanOffsets = () => {
+  const saveScanOffsets = async () => {
     const cells = Array.isArray(pattern?.cells) ? pattern.cells : [];
     const parsed = scanOffsetRowsFromMeasurements(cells.map((c) => ({ speed: c.speed, measured: measured[c.speed] })));
     if (parsed.error) {
       setNote(parsed.error);
       return;
     }
-    const settings = readFillSettings();
+    const targetConn = connectionForm || readUnifiedConnection();
+    const settings = readFillSettingsWithMachineCalibration(readFillSettings, targetConn);
     const table = mergeScanOffsetTable(settings.scanOffsetTable, parsed.rows);
-    writeFillSettings({ ...settings, scanOffsetTable: table });
+    const nextSettings = { ...settings, scanOffsetTable: table };
+    if (canEditMachineProfiles()) {
+      const saved = await saveTargetMachineCalibration(nextSettings, targetConn);
+      if (!saved.ok && !saved.skipped) {
+        showAlert(saved.error || "保存扫描偏移表失败", { title: "保存扫描偏移表失败", tone: "error" });
+        return;
+      }
+      if (isMachineProfilesHydrated()) {
+        writeFillSettings(stripMachineCalibrationFromFillSettings(settings));
+      }
+    } else if (!isMachineProfilesHydrated()) {
+      writeFillSettings(nextSettings);
+    }
     mark("scan_offset", "done", `偏移表 ${parsed.rows.map((r) => `${r.speed}→${r.offset}`).join("，")}`);
   };
 

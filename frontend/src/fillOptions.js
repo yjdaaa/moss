@@ -16,6 +16,14 @@ export { MACHINE_MOTION_KEY };
 
 export const FILL_SETTINGS_KEY = "moss.fillSettings.v1";
 
+const USE_DEFAULT_MOTION_STORAGE = Symbol("defaultMotionStorage");
+let backendMotionManualReader = null;
+
+/** 供 machineProfileSync.js 注入后端权威手填运动参数读取器（避免循环依赖）。 */
+export function registerBackendMotionManualReader(reader) {
+  backendMotionManualReader = typeof reader === "function" ? reader : null;
+}
+
 export const FILL_GROUPING_OPTIONS = [
   { value: "all", label: "一次填完（每行横穿所有图形，速度均匀，默认）" },
   { value: "individual", label: "逐块填充（一块块扫完，空白多时更快）" },
@@ -406,13 +414,47 @@ function parseMotionStoreObject(parsed) {
   return { targets: Object.fromEntries(entries) };
 }
 
-export function readMachineMotionStore(storage = globalThis.localStorage) {
+/** 直接读取本机 localStorage 里的原始固件运动参数缓存（不含后端合并）。 */
+export function readRawLocalMachineMotionStore(storage = globalThis.localStorage) {
   try {
     const raw = storage?.getItem?.(MACHINE_MOTION_KEY);
     return raw ? parseMotionStoreObject(JSON.parse(raw)) : { targets: {} };
   } catch {
     return { targets: {} };
   }
+}
+
+function overlayBackendManualMotion(localStore, backendProfiles) {
+  const localTargets = localStore?.targets && typeof localStore.targets === "object" ? localStore.targets : {};
+  const profTargets = backendProfiles?.targets && typeof backendProfiles.targets === "object" ? backendProfiles.targets : {};
+  const allKeys = new Set([...Object.keys(localTargets), ...Object.keys(profTargets)]);
+  const merged = {};
+  for (const key of allKeys) {
+    const local = localTargets[key];
+    const prof = profTargets[key];
+    const motion = {
+      ...(local?.motion && typeof local.motion === "object" ? local.motion : {}),
+      ...(prof?.manual_motion && typeof prof.manual_motion === "object" ? prof.manual_motion : {}),
+    };
+    if (!Object.keys(motion).length) continue;
+    merged[key] = {
+      motion,
+      updated_at: Math.max(Number(local?.updated_at) || 0, Number(prof?.updated_at) || 0),
+    };
+  }
+  return { targets: merged };
+}
+
+export function readMachineMotionStore(storage = USE_DEFAULT_MOTION_STORAGE) {
+  const isDefault = storage === USE_DEFAULT_MOTION_STORAGE;
+  const localStore = readRawLocalMachineMotionStore(isDefault ? globalThis.localStorage : storage);
+  if (isDefault && backendMotionManualReader) {
+    const backendProfiles = backendMotionManualReader();
+    if (backendProfiles) {
+      return overlayBackendManualMotion(localStore, backendProfiles);
+    }
+  }
+  return localStore;
 }
 
 export function resolveMachineMotionForTarget(storeOrMotion, target) {
@@ -425,7 +467,7 @@ export function resolveMachineMotionForTarget(storeOrMotion, target) {
 }
 
 /** 读取指定连接目标保存的机器运动参数；目标为空或未记录时返回 null。 */
-export function readMachineMotion(target, storage = globalThis.localStorage) {
+export function readMachineMotion(target, storage = USE_DEFAULT_MOTION_STORAGE) {
   const key = connectionTargetKey(target);
   if (!key) return null;
   const store = readMachineMotionStore(storage);
@@ -437,10 +479,12 @@ export function readMachineMotion(target, storage = globalThis.localStorage) {
  * - 握手未报运动参数（`motion` 为空）时清空该目标记录，不再沿用旧值；
  * - 最多保留 16 个连接目标，超出淘汰最旧项，并广播 `MACHINE_MOTION_EVENT`。
  */
-export function writeMachineMotion(motion, target, storage = globalThis.localStorage) {
+export function writeMachineMotion(motion, target, storage = USE_DEFAULT_MOTION_STORAGE) {
+  const isDefault = storage === USE_DEFAULT_MOTION_STORAGE;
+  const resolved = isDefault ? globalThis.localStorage : storage;
   const key = connectionTargetKey(target);
   if (!key) return null;
-  const store = readMachineMotionStore(storage);
+  const store = readRawLocalMachineMotionStore(resolved);
   const nextTargets = { ...store.targets };
   const clean = machineMotionFromLimits(motion);
   if (clean) {
@@ -455,13 +499,20 @@ export function writeMachineMotion(motion, target, storage = globalThis.localSto
   }
   const saved = parseMotionStoreObject({ targets: nextTargets });
   try {
-    storage?.setItem?.(MACHINE_MOTION_KEY, JSON.stringify(saved));
+    resolved?.setItem?.(MACHINE_MOTION_KEY, JSON.stringify(saved));
   } catch {
     // 存储被禁用时只是不记住
   }
+  let broadcast = saved;
+  if (isDefault && backendMotionManualReader) {
+    const backendProfiles = backendMotionManualReader();
+    if (backendProfiles) {
+      broadcast = overlayBackendManualMotion(saved, backendProfiles);
+    }
+  }
   try {
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-      window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: saved }));
+      window.dispatchEvent(new CustomEvent(MACHINE_MOTION_EVENT, { detail: broadcast }));
     }
   } catch {
     // 非浏览器环境忽略广播

@@ -296,6 +296,17 @@ impl ApiService {
             .filter(|spec| !self.tool_disabled(spec.name))
             .count();
         let dry_run = self.dry_run_snapshot();
+        // 未鉴权局域网访问不暴露含串口号 / 控制器 IP 的机器档案键
+        let machine_profiles = if include_mcp_details {
+            self.machine_profiles_json()
+        } else {
+            serde_json::json!({ "targets": {} })
+        };
+        let verified_target_key = if include_mcp_details {
+            self.verified_connection_target_key()
+        } else {
+            None
+        };
         http_json(
             200,
             success(serde_json::json!({
@@ -309,6 +320,9 @@ impl ApiService {
                 "laser_dry_run_remaining_seconds": dry_run.remaining_seconds,
                 "laser_dry_run_expires_at": dry_run.expires_at,
                 "laser_dry_run_ttl_seconds": laser_device::DRY_RUN_TTL_SECS,
+                "machine_profiles": machine_profiles,
+                "laser_framing_shape": self.framing_shape().as_str(),
+                "verified_connection_target_key": verified_target_key,
                 "actual_port": actual,
                 "preferred_port": preferred,
                 "is_fallback": actual != preferred,
@@ -588,7 +602,83 @@ impl ApiService {
         if let Some(endpoint) = mcp_endpoint {
             file_changes.push(("mcp_endpoint", endpoint.map(serde_json::Value::String)));
         }
-        if !file_changes.is_empty() {
+        // r78：机器档案（手填行程 / 手填运动参数 / 扫描偏移）与全局走边框形状校验（先算新态，写盘成功再更新内存）
+        let mut next_profiles: Option<crate::machine_profiles::MachineProfileStore> = None;
+        if let Some(migrate_val) = object.get("machine_profiles_migrate") {
+            let Some(migrate_obj) = migrate_val.as_object() else {
+                return http_json(400, failure("machine_profiles_migrate 必须是对象", None));
+            };
+            let mut draft = self
+                .machine_profiles
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            match draft.merge_migration(migrate_obj) {
+                Ok(true) => next_profiles = Some(draft),
+                Ok(false) => {}
+                Err(error) => return http_json(400, failure(error, None)),
+            }
+        }
+        if let Some(patch_val) = object.get("machine_profile_patch") {
+            let Some(patch_obj) = patch_val.as_object() else {
+                return http_json(400, failure("machine_profile_patch 必须是对象", None));
+            };
+            let mut draft = next_profiles.take().unwrap_or_else(|| {
+                self.machine_profiles
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default()
+            });
+            if let Err(error) = draft.apply_patch(patch_obj) {
+                return http_json(400, failure(error, None));
+            }
+            next_profiles = Some(draft);
+        }
+        if let Some(ref updated_profiles) = next_profiles {
+            file_changes.push((
+                crate::machine_profiles::MACHINE_PROFILES_KEY,
+                Some(updated_profiles.to_json()),
+            ));
+        }
+        let mut next_framing_shape: Option<crate::machine_profiles::FramingShape> = None;
+        if let Some(migrate_shape) = object.get("laser_framing_shape_migrate") {
+            let Some(raw) = migrate_shape.as_str() else {
+                return http_json(
+                    400,
+                    failure("laser_framing_shape_migrate 必须是字符串", None),
+                );
+            };
+            match crate::machine_profiles::FramingShape::parse(raw) {
+                Ok(shape) => {
+                    if !self.framing_shape_configured() {
+                        next_framing_shape = Some(shape);
+                    }
+                }
+                Err(error) => return http_json(400, failure(error, None)),
+            }
+        }
+        if let Some(shape_val) = object.get("laser_framing_shape") {
+            let Some(raw) = shape_val.as_str() else {
+                return http_json(400, failure("laser_framing_shape 必须是字符串", None));
+            };
+            match crate::machine_profiles::FramingShape::parse(raw) {
+                Ok(shape) => next_framing_shape = Some(shape),
+                Err(error) => return http_json(400, failure(error, None)),
+            }
+        }
+        if let Some(shape) = next_framing_shape {
+            file_changes.push((
+                crate::machine_profiles::FRAMING_SHAPE_KEY,
+                Some(serde_json::Value::String(shape.as_str().into())),
+            ));
+        }
+        // 纯内存测试实例无 runtime_path 时，允许机器档案与走边框形状更新内存状态；其他落盘设置沿用原错处理
+        let only_profile_or_framing = !file_changes.is_empty()
+            && file_changes.iter().all(|(k, _)| {
+                *k == crate::machine_profiles::MACHINE_PROFILES_KEY
+                    || *k == crate::machine_profiles::FRAMING_SHAPE_KEY
+            });
+        if !file_changes.is_empty() && !(self.runtime_path.is_none() && only_profile_or_framing) {
             let written = update_runtime_settings(self.runtime_path.as_deref(), |current| {
                 for (key, value) in file_changes {
                     match value {
@@ -609,6 +699,16 @@ impl ApiService {
             if process_trace_changed && let Some(trace) = self.process_trace() {
                 trace.invalidate();
             }
+        }
+        if let Some(updated_profiles) = next_profiles
+            && let Ok(mut slot) = self.machine_profiles.write()
+        {
+            *slot = updated_profiles;
+        }
+        if let Some(shape) = next_framing_shape
+            && let Ok(mut slot) = self.framing_shape.write()
+        {
+            *slot = Some(shape);
         }
         // 更新运行时空跑模式状态（开启时计时 60 分钟自动关闭，重启不持久化开启状态）
         match (dry_run_enabled_update, dry_run_max_feed_update) {
@@ -688,6 +788,8 @@ impl ApiService {
                 "laser_dry_run_effective_max_feed_mm_min": dry_run.effective_max_feed_mm_min,
                 "laser_dry_run_remaining_seconds": dry_run.remaining_seconds,
                 "laser_dry_run_expires_at": dry_run.expires_at,
+                "machine_profiles": self.machine_profiles_json(),
+                "laser_framing_shape": self.framing_shape().as_str(),
             })),
         )
     }

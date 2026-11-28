@@ -1241,27 +1241,87 @@ impl ApiService {
             );
         }
         let round = |v: f64| (v * 1000.0).round() / 1000.0;
+        let (r_min_x, r_max_x, r_min_y, r_max_y) =
+            (round(min_x), round(max_x), round(min_y), round(max_y));
         let mut framing = object.clone();
         for key in ["action", "workflow_id", "outline", "feed_rate", "power"] {
             framing.remove(key);
         }
         framing.insert("relative_to_head".into(), serde_json::Value::Bool(true));
-        framing.insert("min_x".into(), serde_json::json!(round(min_x)));
-        framing.insert("max_x".into(), serde_json::json!(round(max_x)));
-        framing.insert("min_y".into(), serde_json::json!(round(min_y)));
-        framing.insert("max_y".into(), serde_json::json!(round(max_y)));
+        framing.insert("min_x".into(), serde_json::json!(r_min_x));
+        framing.insert("max_x".into(), serde_json::json!(r_max_x));
+        framing.insert("min_y".into(), serde_json::json!(r_min_y));
+        framing.insert("max_y".into(), serde_json::json!(r_max_y));
         framing.insert("feed_rate".into(), serde_json::json!(2000));
         framing.insert("power".into(), serde_json::json!(0));
+        // r78：沿用后端全局走边框形状设置；若选了 `hull` 且该预览冻结了有效外轮廓 `frame_hull_mm`，
+        // 仅由服务端填入 `outline`（绝不信任调用方传入的 outline），并随 framing_digest_facts 进入审批摘要。
+        // 双向扫描偏移（±2 mm 以内，半偏移 ≤1 mm）可让实际出光凸包略超出笔画外框 frame_mm，
+        // 仅在冻结凸包落在 frame_mm 外扩 2.1 mm 以内时按凸包包络同步收齐 min_*/max_*，保证审批摘要与实际轮廓一致。
+        let mut used_hull = false;
+        if self.framing_shape() == crate::machine_profiles::FramingShape::Hull
+            && let Some(hull) = stored
+                .payload
+                .get("artifacts")
+                .and_then(|a| a.get("frame_hull_mm"))
+                .filter(|v| v.is_array())
+        {
+            const HULL_SCAN_OFFSET_SLACK_MM: f64 = 2.1;
+            let expanded_bounds = hull.as_array().and_then(|items| {
+                let mut h_min_x = r_min_x;
+                let mut h_max_x = r_max_x;
+                let mut h_min_y = r_min_y;
+                let mut h_max_y = r_max_y;
+                for item in items {
+                    let pair = item.as_array().filter(|p| p.len() == 2)?;
+                    let (x, y) = (pair[0].as_f64()?, pair[1].as_f64()?);
+                    if !x.is_finite()
+                        || !y.is_finite()
+                        || x < r_min_x - HULL_SCAN_OFFSET_SLACK_MM
+                        || x > r_max_x + HULL_SCAN_OFFSET_SLACK_MM
+                        || y < r_min_y - HULL_SCAN_OFFSET_SLACK_MM
+                        || y > r_max_y + HULL_SCAN_OFFSET_SLACK_MM
+                    {
+                        return None;
+                    }
+                    h_min_x = h_min_x.min(round(x));
+                    h_max_x = h_max_x.max(round(x));
+                    h_min_y = h_min_y.min(round(y));
+                    h_max_y = h_max_y.max(round(y));
+                }
+                Some((h_min_x, h_min_y, h_max_x, h_max_y))
+            });
+            if let Some((e_min_x, e_min_y, e_max_x, e_max_y)) = expanded_bounds {
+                framing.insert("outline".into(), hull.clone());
+                if framing_outline(&framing, (e_min_x, e_min_y, e_max_x, e_max_y))
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    framing.insert("min_x".into(), serde_json::json!(e_min_x));
+                    framing.insert("max_x".into(), serde_json::json!(e_max_x));
+                    framing.insert("min_y".into(), serde_json::json!(e_min_y));
+                    framing.insert("max_y".into(), serde_json::json!(e_max_y));
+                    used_hull = true;
+                } else {
+                    framing.remove("outline");
+                }
+            }
+        }
         let response = self.framing_with_authority(framing, ctx, short_job_watch);
         if !response.starts_with(b"HTTP/1.1 200") {
             return response;
         }
         let mut body = http_response_json(&response);
         body["result"]["workflow_id"] = serde_json::Value::String(workflow_id);
+        body["result"]["framing_shape"] =
+            serde_json::Value::String(if used_hull { "hull" } else { "box" }.into());
         body["result"]["next_actions"] = serde_json::json!(["frame", "confirm_send", "cancel"]);
-        body["result"]["hint"] = serde_json::Value::String(
-            "边框已空走一圈（未出光），激光头已回到起点。请用户核对材料位置；挪好后可再走一次，用户明确说确认开始后再 confirm_send".into(),
-        );
+        body["result"]["hint"] = serde_json::Value::String(if used_hull {
+            "边框已按图形外轮廓空走一圈（未出光），激光头已回到起点。请用户核对材料位置；挪好后可再走一次，用户明确说确认开始后再 confirm_send".into()
+        } else {
+            "边框已空走一圈（未出光），激光头已回到起点。请用户核对材料位置；挪好后可再走一次，用户明确说确认开始后再 confirm_send".into()
+        });
         http_json(200, body)
     }
 

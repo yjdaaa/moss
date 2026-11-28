@@ -70,14 +70,28 @@ import { canResumeJob, getResumeStartLine, sendProgressFromResult } from "../est
 import { applyImagePreset } from "../qualityPresets.js";
 import { useEngraveRoute } from "../useEngraveRoute.js";
 import {
-  clearManualWorkspaceLimits,
   connectionSummaryView,
+  connectionTargetKey,
   MACHINE_MOTION_EVENT,
   readWorkspaceLimitsStore,
   resolveSoftLimitSendWarning,
   resolveWorkspaceLimitsForTarget,
   WORKSPACE_LIMITS_EVENT,
 } from "../deviceConnection.js";
+import {
+  FRAMING_SHAPE_EVENT,
+  MACHINE_PROFILE_EVENT,
+  applyMachineCalibrationToFillSettings,
+  canEditMachineProfiles,
+  getRuntimeMachineState,
+  isMachineCalibrationChanged,
+  isMachineProfilesHydrated,
+  readFillSettingsWithMachineCalibration,
+  resetManualWorkspaceLimits,
+  saveFramingShapeSetting,
+  saveTargetMachineCalibration,
+  stripMachineCalibrationFromFillSettings,
+} from "../machineProfileSync.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { OriginBadge } from "../components/OriginBadge.jsx";
@@ -241,15 +255,42 @@ export function DrawPage({
   const [hasRec, setHasRec] = useState(true);
   const [recRefreshTick, setRecRefreshTick] = useState(0);
   const [customParams, setCustomParams] = useState(false);
-  // 2026-11-16：矢量模式的填充与走刀设置（对齐 LightBurn），与工作台文字共用一份本机设置
-  const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  // 2026-11-16：矢量模式的填充与走刀设置（对齐 LightBurn），扫描偏移与手填加速度按连接目标同步后端（r78）
+  const [fillSettings, setFillSettings] = useState(() =>
+    readFillSettingsWithMachineCalibration(readFillSettings, form),
+  );
   // r40：当前材料条目随材料保存的填充设置（矢量模式用轮廓条目），可改，“保存到材料库”写回
   const [materialLayer, setMaterialLayer] = useState(null);
   const [materialApplied, setMaterialApplied] = useState([]);
   const materialLayerKeyRef = useRef("");
+  const calibrationSaveTimerRef = useRef(null);
+  const pendingCalibrationRef = useRef(null);
+  const flushPendingCalibration = useCallback(() => {
+    if (calibrationSaveTimerRef.current !== null) {
+      clearTimeout(calibrationSaveTimerRef.current);
+      calibrationSaveTimerRef.current = null;
+    }
+    const pending = pendingCalibrationRef.current;
+    pendingCalibrationRef.current = null;
+    if (!pending) return;
+    void saveTargetMachineCalibration(pending.settings, pending.target).then((res) => {
+      if (!res.ok && !res.skipped) {
+        void showAlert(res.error || "保存机器校准参数失败", { title: "机器校准参数未保存", tone: "warning" });
+      }
+    });
+  }, []);
   const updateFillSettings = (next) => {
+    const prev = fillSettings;
     setFillSettings(next);
-    writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
+    const toStore = localSettingsToStore(next, readFillSettings(), materialApplied);
+    writeFillSettings(isMachineProfilesHydrated() ? stripMachineCalibrationFromFillSettings(toStore) : toStore);
+    if (isMachineCalibrationChanged(prev, next) && canEditMachineProfiles()) {
+      pendingCalibrationRef.current = { settings: next, target: formRef.current };
+      if (calibrationSaveTimerRef.current !== null) clearTimeout(calibrationSaveTimerRef.current);
+      calibrationSaveTimerRef.current = setTimeout(() => {
+        flushPendingCalibration();
+      }, 350);
+    }
   };
   // 握手读到的机器加速度 / 最大速度（按当前连接目标取值）：工时估算与自动过扫描用
   const [machineMotionStore, setMachineMotionStore] = useState(() => readMachineMotionStore());
@@ -263,27 +304,77 @@ export function DrawPage({
   const machineMotion = resolveMachineMotionForTarget(machineMotionStore, form);
   // 雕刻机最大雕刻范围（同一连接目标按“手填 → 固件 → 默认 100×100 mm”取值）
   const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
+  const [canEditProfiles, setCanEditProfiles] = useState(() => canEditMachineProfiles());
   useEffect(() => {
     const onLimits = (e) => {
       if (e?.detail) setWorkspaceLimitsStore(e.detail);
+      setCanEditProfiles(canEditMachineProfiles());
+    };
+    const onProfile = (e) => {
+      setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+      setCanEditProfiles(canEditMachineProfiles());
+      if (calibrationSaveTimerRef.current !== null) return;
+      const profiles = e?.detail || getRuntimeMachineState().profiles;
+      setFillSettings((prev) => applyMachineCalibrationToFillSettings(prev, profiles, formRef.current));
     };
     window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
-    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    window.addEventListener(MACHINE_PROFILE_EVENT, onProfile);
+    return () => {
+      window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+      window.removeEventListener(MACHINE_PROFILE_EVENT, onProfile);
+    };
   }, []);
+  const drawTargetKey = connectionTargetKey(form);
+  const prevDrawTargetKeyRef = useRef(drawTargetKey);
+  useEffect(() => {
+    if (prevDrawTargetKeyRef.current !== drawTargetKey) {
+      prevDrawTargetKeyRef.current = drawTargetKey;
+      flushPendingCalibration();
+      if (isMachineProfilesHydrated()) {
+        setFillSettings((prev) =>
+          applyMachineCalibrationToFillSettings(prev, getRuntimeMachineState().profiles, formRef.current),
+        );
+      }
+    }
+  }, [drawTargetKey, flushPendingCalibration]);
+  useEffect(() => () => flushPendingCalibration(), [flushPendingCalibration]);
   const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimitsStore, form);
   const maxWidthMm = effectiveWorkspaceLimits.x_travel_mm;
   const maxHeightMm = effectiveWorkspaceLimits.y_travel_mm;
-  const handleResetManualLimits = useCallback(() => {
-    clearManualWorkspaceLimits(form);
+  const handleResetManualLimits = useCallback(async () => {
+    if (!canEditMachineProfiles()) return;
+    const res = await resetManualWorkspaceLimits(form);
     setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+    if (!res.ok && !res.skipped) {
+      void showAlert(res.error || "恢复固件行程失败", { title: "未恢复行程", tone: "warning" });
+    }
   }, [form]);
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
   const [customPasses, setCustomPasses] = useState("1");
   const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(safeBrowserStorage()));
-  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与工作台共用
+  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），后端全局设置（工作台 / 画板 / AI 预览 / 语音共用，r78）
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
+  useEffect(() => {
+    const onShape = (e) => {
+      const next = e?.detail?.shape;
+      if (next === "hull" || next === "box") setFramingShape(next);
+    };
+    window.addEventListener(FRAMING_SHAPE_EVENT, onShape);
+    return () => window.removeEventListener(FRAMING_SHAPE_EVENT, onShape);
+  }, []);
+  const handleFramingShapeChange = useCallback((next) => {
+    const shape = next === "hull" ? "hull" : "box";
+    setFramingShape(shape);
+    if (!canEditMachineProfiles()) return;
+    void saveFramingShapeSetting(shape).then((res) => {
+      if (!res.ok) {
+        setFramingShape(res.shape || "box");
+        void showAlert(res.error || "保存走边框方式失败", { title: "走边框方式未保存", tone: "warning" });
+      }
+    });
+  }, []);
   // 只刻选中的图形（矢量模式）：选区变化计入预览签名
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [selectionKey, setSelectionKey] = useState("");
@@ -687,7 +778,7 @@ export function DrawPage({
         setMaterialLayer(null);
         if (materialLayerKeyRef.current) {
           materialLayerKeyRef.current = "";
-          setFillSettings(readFillSettings());
+          setFillSettings(readFillSettingsWithMachineCalibration(readFillSettings, formRef.current));
           setMaterialApplied([]);
         }
         return;
@@ -701,7 +792,10 @@ export function DrawPage({
       setMaterialLayer(layer);
       if (layer && layer.key !== materialLayerKeyRef.current) {
         materialLayerKeyRef.current = layer.key;
-        const next = applyMaterialLayer(readFillSettings(), layer);
+        const next = applyMaterialLayer(
+          readFillSettingsWithMachineCalibration(readFillSettings, formRef.current),
+          layer,
+        );
         setFillSettings(next.settings);
         setMaterialApplied(next.applied);
       }
@@ -2064,7 +2158,7 @@ export function DrawPage({
           maxWidthMm={maxWidthMm}
           maxHeightMm={maxHeightMm}
           workspaceLimits={effectiveWorkspaceLimits}
-          onResetManualLimits={handleResetManualLimits}
+          onResetManualLimits={canEditProfiles ? handleResetManualLimits : null}
         />
 
         <DrawSendCard
@@ -2081,7 +2175,7 @@ export function DrawPage({
           canConfirmSend={canConfirmSend}
           summaryAllowsSend={summaryAllowsSend}
           framingShape={framingShape}
-          setFramingShape={setFramingShape}
+          setFramingShape={handleFramingShapeChange}
           motionPayload={motionPayload}
           setStatus={setStatus}
           generatePreview={generatePreview}

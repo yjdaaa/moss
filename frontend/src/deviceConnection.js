@@ -57,8 +57,14 @@ const HANDSHAKE_META_SYMBOL = Symbol("mossHandshakeMeta");
 
 const USE_DEFAULT_STORAGE = Symbol("defaultStorage");
 let sessionFallbackForm = null;
+let backendWorkspaceManualReader = null;
 const recentDeviceLogs = [];
 const MAX_BUFFERED_DEVICE_LOGS = 50;
+
+/** 供 machineProfileSync.js 注入后端权威手填行程读取器（避免循环依赖）。 */
+export function registerBackendWorkspaceManualReader(reader) {
+  backendWorkspaceManualReader = typeof reader === "function" ? reader : null;
+}
 
 export function emitDeviceLog(tag, message, level = "info") {
   const entry = {
@@ -298,8 +304,8 @@ function parseWorkspaceLimitsStoreObject(parsed) {
   return { targets: {} };
 }
 
-/** 读取按 `target_key` 分桶保存的机器行程映射（最多保留 16 个目标）。 */
-export function readWorkspaceLimitsStore(storage = defaultStorage()) {
+/** 直接读取本机 localStorage 里的原始工作区行程缓存（不含后端合并）。 */
+export function readRawLocalWorkspaceLimitsStore(storage = defaultStorage()) {
   try {
     const raw = storage?.getItem?.(WORKSPACE_LIMITS_KEY);
     if (!raw) return { targets: {} };
@@ -309,21 +315,72 @@ export function readWorkspaceLimitsStore(storage = defaultStorage()) {
   }
 }
 
-function persistWorkspaceLimitsStore(store, storage) {
+function overlayBackendManualTravel(localStore, backendProfiles) {
+  const localTargets = localStore?.targets && typeof localStore.targets === "object" ? localStore.targets : {};
+  const profTargets = backendProfiles?.targets && typeof backendProfiles.targets === "object" ? backendProfiles.targets : {};
+  const allKeys = new Set([...Object.keys(localTargets), ...Object.keys(profTargets)]);
+  const merged = {};
+  for (const key of allKeys) {
+    const local = localTargets[key];
+    const prof = profTargets[key];
+    const hardware = local?.hardware && typeof local.hardware === "object" ? { ...local.hardware } : {};
+    const manual = {};
+    if (prof?.manual_travel) {
+      if (prof.manual_travel.x_travel_mm !== undefined) manual.x = prof.manual_travel.x_travel_mm;
+      if (prof.manual_travel.y_travel_mm !== undefined) manual.y = prof.manual_travel.y_travel_mm;
+      if (prof.manual_travel.z_travel_mm !== undefined) manual.z = prof.manual_travel.z_travel_mm;
+    }
+    const identity = local?.identity || null;
+    const safety = local?.safety || null;
+    if (!Object.keys(hardware).length && !Object.keys(manual).length && !identity && !safety) continue;
+    const entry = {
+      hardware,
+      manual,
+      updated_at: Math.max(Number(local?.updated_at) || 0, Number(prof?.updated_at) || 0),
+    };
+    if (identity) entry.identity = identity;
+    if (safety) entry.safety = safety;
+    merged[key] = entry;
+  }
+  return { targets: pruneTargetMap(merged) };
+}
+
+/** 读取按 `target_key` 分桶保存的机器行程映射（最多保留 16 个目标；后端同步后 manual 以后端为准）。 */
+export function readWorkspaceLimitsStore(storage = USE_DEFAULT_STORAGE) {
+  const isDefault = storage === USE_DEFAULT_STORAGE;
+  const resolved = isDefault ? defaultStorage() : storage;
+  const localStore = readRawLocalWorkspaceLimitsStore(resolved);
+  if (isDefault && backendWorkspaceManualReader) {
+    const backendProfiles = backendWorkspaceManualReader();
+    if (backendProfiles) {
+      return overlayBackendManualTravel(localStore, backendProfiles);
+    }
+  }
+  return localStore;
+}
+
+function persistWorkspaceLimitsStore(store, storage, { isDefaultStorage = false, skipBackendOverlay = false } = {}) {
   const clean = { targets: pruneTargetMap(store?.targets || {}) };
   try {
     storage?.setItem?.(WORKSPACE_LIMITS_KEY, JSON.stringify(clean));
   } catch (_error) {
     // 存储受限时仅在当前会话广播
   }
+  let broadcast = clean;
+  if (isDefaultStorage && !skipBackendOverlay && backendWorkspaceManualReader) {
+    const backendProfiles = backendWorkspaceManualReader();
+    if (backendProfiles) {
+      broadcast = overlayBackendManualTravel(clean, backendProfiles);
+    }
+  }
   try {
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-      window.dispatchEvent(new CustomEvent(WORKSPACE_LIMITS_EVENT, { detail: clean }));
+      window.dispatchEvent(new CustomEvent(WORKSPACE_LIMITS_EVENT, { detail: broadcast }));
     }
   } catch (_error) {
     // 非浏览器环境忽略事件广播
   }
-  return clean;
+  return broadcast;
 }
 
 /**
@@ -374,7 +431,7 @@ export function resolveWorkspaceLimitsForTarget(storeOrLimits, target) {
 }
 
 /** 读取本机保存的雕刻机行程：传入 `target` 时返回该目标的解析结果，省略时返回完整存储映射 `{ targets }`。 */
-export function readWorkspaceLimits(storage = defaultStorage(), target = undefined) {
+export function readWorkspaceLimits(storage = USE_DEFAULT_STORAGE, target = undefined) {
   const store = readWorkspaceLimitsStore(storage);
   if (target !== undefined) {
     return resolveWorkspaceLimitsForTarget(store, target);
@@ -384,15 +441,16 @@ export function readWorkspaceLimits(storage = defaultStorage(), target = undefin
 
 function resolveTargetAndStorage(targetOrStorage, maybeStorage) {
   const hasStorageSecondArg = isStorageLike(targetOrStorage) && maybeStorage === undefined;
-  const resolvedStorage = hasStorageSecondArg
-    ? targetOrStorage
-    : maybeStorage !== undefined
-      ? maybeStorage
-      : defaultStorage();
+  const isDefaultStorage = !hasStorageSecondArg && (maybeStorage === undefined || maybeStorage === USE_DEFAULT_STORAGE);
+  const resolvedStorage = isDefaultStorage
+    ? defaultStorage()
+    : hasStorageSecondArg
+      ? targetOrStorage
+      : maybeStorage;
   const targetKey = hasStorageSecondArg || targetOrStorage === undefined
     ? connectionTargetKey(readUnifiedConnection(resolvedStorage))
     : connectionTargetKey(targetOrStorage);
-  return { resolvedStorage, targetKey };
+  return { resolvedStorage, targetKey, isDefaultStorage };
 }
 
 /**
@@ -483,11 +541,12 @@ export function syncHardwareWorkspaceLimits(
   maybeStorage = undefined,
   handshakeMeta = undefined,
 ) {
-  const { resolvedStorage, targetKey } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
+  const { resolvedStorage, targetKey, isDefaultStorage } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
   if (!targetKey) {
     return defaultWorkspaceLimits("");
   }
-  const store = readWorkspaceLimitsStore(resolvedStorage);
+  // 握手只写 localStorage 的 hardware / identity / safety 槽位，不把后端手填值反向写进 localStorage
+  const store = readRawLocalWorkspaceLimitsStore(resolvedStorage);
   const prev = store.targets[targetKey] || { hardware: {}, manual: {}, updated_at: 0 };
   const attachedMeta = (machineLimits && typeof machineLimits === "object" && machineLimits[HANDSHAKE_META_SYMBOL]) || null;
   const metaSource = handshakeMeta && typeof handshakeMeta === "object" ? handshakeMeta : attachedMeta;
@@ -544,7 +603,11 @@ export function syncHardwareWorkspaceLimits(
     if (nextSafety) entry.safety = nextSafety;
     nextTargets[targetKey] = entry;
   }
-  const savedStore = persistWorkspaceLimitsStore({ targets: nextTargets }, resolvedStorage);
+  const savedStore = persistWorkspaceLimitsStore(
+    { targets: nextTargets },
+    resolvedStorage,
+    { isDefaultStorage, skipBackendOverlay: machineSwapped },
+  );
   const resolved = resolveWorkspaceLimitsForTarget(savedStore, targetKey);
   return {
     ...resolved,
@@ -561,9 +624,9 @@ export function resolveSoftLimitSendWarning(
   maybeStorage = undefined,
   liveStatus = null,
 ) {
-  const { resolvedStorage, targetKey } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
+  const { resolvedStorage, targetKey, isDefaultStorage } = resolveTargetAndStorage(targetOrStorage, maybeStorage);
   if (!targetKey) return "";
-  const store = readWorkspaceLimitsStore(resolvedStorage);
+  const store = readWorkspaceLimitsStore(isDefaultStorage ? USE_DEFAULT_STORAGE : resolvedStorage);
   const resolved = resolveWorkspaceLimitsForTarget(store, targetKey);
   const safety = resolved.safety;
   const probed = Boolean(safety?.probed || liveStatus?.connected);

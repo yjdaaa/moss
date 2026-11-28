@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 手填行程、运动参数、扫描偏移校准与走边框形状改为后端统一保存，界面 / 语音 / MCP / 各客户端共用（2026-11-28）
+
+- **现象**：手填行程、手填加速度与运动参数、双向扫描偏移（含速度偏移表）、走边框形状只存在浏览器本地；小智语音、MCP 和手机 / 别的窗口看不到，语音生成的填充 / 位图任务用不上扫描偏移校准，问“能刻多大”拿不到手填行程，语音走边框只走矩形。
+- **根因与修复**：按技术书 r78 新增后端按连接目标保存的 `laser_machine_profiles`（最多 16 个）与全局 `laser_framing_shape`，经 `/api/system/info` 读取、`/api/settings` 写入（仅经来源校验的主窗口可写，局域网未鉴权读取脱敏）；生成、预览、能力摘要与工时按“请求显式值 → 手填档案 → 固件 → 默认”取值并回显来源；前端改为以后端为准，首次在主窗口把本地旧值一次性迁移（后端已有不覆盖）。语音 / MCP 走边框按全局形状，外轮廓只用服务端冻结凸包。**发送前按当场固件行程复核不变**；机器特性与数字孪生木板配置核实后保持本地。
+- **验证**：`node scripts/verify.mjs --finish` 通过（含 E2E）；新增档案读写与门禁、16 个上限、旧文件兼容、取值优先级、语音 / MCP 取到手填值、固件复核仍拦截超行程、前端迁移等测试。未实机验证；其他客户端同步依赖约 3 秒的状态轮询。
+- **关联**：`crates/laser-api/src/{machine_profiles,service,connection,safe_action}.rs`、`crates/laser-api/src/routes/{system,workflow}.rs`、`crates/laser-api/src/generation/options.rs`、`frontend/src/{machineProfileSync,deviceConnection,fillOptions,aiPreviewState}.js`。
+
 ### 内置工具补能力：机器能力问答、语音刻最近上传的图片、加工剩余时间、内置语音计时提醒（2026-11-28）
 
 - **现象**：问“最大能刻多大 / 能回零吗 / 功率上限多少”时连接工具只给原始 `$$` 行；语音不能刻已上传的图片；查进度没有预计剩余时间（核实确认缺失）；内置语音没有通用计时提醒。

@@ -15,6 +15,7 @@ import {
   syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
 import { writeMachineMotion } from "../fillOptions.js";
+import { clearTargetMachineProfile } from "../machineProfileSync.js";
 import { defaultSerialPortHint } from "../platform.js";
 import { describeMachinePeripherals } from "../twinState.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
@@ -243,7 +244,10 @@ function DeviceConnectionModalBody({
       if (!mountedRef.current || probeEpochRef.current !== epoch) return;
       setConnectionStatus?.(outcome.status);
       if (outcome.connected) {
-        syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm, undefined, outcome.handshakeMeta);
+        const synced = syncHardwareWorkspaceLimits(outcome.machineLimits, probeForm, undefined, outcome.handshakeMeta);
+        if (synced?.identity_changed_notice) {
+          void clearTargetMachineProfile(probeForm);
+        }
         syncHardwareMachineFeatures(outcome.status?.features ?? null, probeForm);
         writeMachineMotion(outcome.machineLimits, probeForm);
       }

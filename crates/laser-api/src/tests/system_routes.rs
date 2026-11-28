@@ -2858,3 +2858,626 @@ fn workflow_status_computes_remaining_seconds_and_reports_unknown_when_missing()
     assert!(body_unk["result"]["remaining_seconds"].is_null());
     assert_eq!(body_unk["result"]["remaining_text"], "未知");
 }
+
+/// r78（2026-11-28）：后端机器档案（按 `target_key` 分桶，上限 16）与全局 `laser_framing_shape`：
+/// 读写持久化、旧设置文件兼容、操作者设置门禁（只读客户端与非桌面调用方拒绝写）、
+/// 未鉴权局域网脱敏（不泄露串口号 / 控制器 IP）与一次性迁移不覆盖后端已有值。
+#[test]
+fn r78_machine_profiles_crud_cap_legacy_compat_and_access_gate() {
+    let temp = tempfile::tempdir().unwrap();
+
+    // 1. 旧设置文件不含新字段（以及损坏格式）均按空处理，不报错不丢旧设置
+    std::fs::write(
+        temp.path().join("settings.json"),
+        serde_json::json!({
+            "web_port": 9666,
+            "laser_machine_profiles": "corrupt-legacy-value"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let auth = std::sync::Arc::new(AuthManager::new());
+    let challenge = auth.issue_code(unix_seconds()).unwrap();
+    let (lan_token, _) = auth
+        .pair("10.0.0.12", &challenge.code, unix_seconds())
+        .unwrap();
+
+    let service = ApiService::new(
+        laser_runtime::LaserSettings {
+            default_connection_mode: "network".into(),
+            engraving_mode: "raster".into(),
+            web_host: "0.0.0.0".into(),
+            web_port: 9666,
+            material_params_file: None,
+        },
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_auth(auth.clone());
+    let session = service.enable_desktop_session().unwrap();
+
+    let (st, info0) = desktop_request(&service, "GET", "/api/system/info", None, Some(&session));
+    assert_eq!(st, 200, "{info0}");
+    assert_eq!(
+        info0["result"]["machine_profiles"],
+        serde_json::json!({ "targets": {} })
+    );
+    assert_eq!(info0["result"]["laser_framing_shape"], "box");
+    assert_eq!(info0["result"]["can_edit_operator_settings"], true);
+
+    // 2. 门禁：无桌面会话回环、局域网只读、语音、MCP 桥均拒绝写入 machine_profile_patch / laser_framing_shape
+    let patch_body = serde_json::json!({
+        "machine_profile_patch": {
+            "target_key": "network:10.0.0.20:23",
+            "manual_travel": { "x_travel_mm": 320, "y_travel_mm": 220 },
+            "manual_motion": { "acceleration_mm_s2": 600 },
+            "scan_offset_mm": 0.15,
+            "scan_offset_table": [[1000, 0.1], [2500, 0.25]]
+        },
+        "laser_framing_shape": "hull"
+    });
+    let (st_no_sess, denied_no_sess) =
+        desktop_request(&service, "POST", "/api/settings", Some(&patch_body), None);
+    assert_eq!(st_no_sess, 403, "{denied_no_sess}");
+
+    for caller in [
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "pair-1".into(),
+        },
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+        laser_contracts::CallerContext::McpBridge,
+    ] {
+        let (st_ro, denied_ro) =
+            service.dispatch_json("POST", "/api/settings", &patch_body, caller);
+        assert_eq!(st_ro, 403, "{denied_ro}");
+    }
+
+    // 3. 桌面主窗口带有效会话写入成功并持久化到 settings.json，重启后读回一致
+    let (st_ok, saved) = desktop_request(
+        &service,
+        "POST",
+        "/api/settings",
+        Some(&patch_body),
+        Some(&session),
+    );
+    assert_eq!(st_ok, 200, "{saved}");
+    assert_eq!(saved["result"]["laser_framing_shape"], "hull");
+    let target_prof = &saved["result"]["machine_profiles"]["targets"]["network:10.0.0.20:23"];
+    assert_eq!(target_prof["manual_travel"]["x_travel_mm"], 320.0);
+    assert_eq!(target_prof["manual_travel"]["y_travel_mm"], 220.0);
+    assert_eq!(target_prof["manual_motion"]["x_accel_mm_s2"], 600.0);
+    assert_eq!(target_prof["manual_motion"]["y_accel_mm_s2"], 600.0);
+    assert_eq!(target_prof["scan_offset_mm"], 0.15);
+    assert_eq!(
+        target_prof["scan_offset_table"],
+        serde_json::json!([[1000.0, 0.1], [2500.0, 0.25]])
+    );
+
+    // 4. 未鉴权局域网 GET /api/system/info 隐藏含设备地址的 machine_profiles；已配对局域网可读但不可写
+    let anon_info = parse_json_response(&service.handle_http_from(
+        b"GET /api/system/info HTTP/1.1\r\nHost: 192.168.1.10:9666\r\n\r\n",
+        false,
+        "10.0.0.12",
+        None,
+    ));
+    assert_eq!(anon_info["success"], true);
+    assert_eq!(
+        anon_info["result"]["machine_profiles"],
+        serde_json::json!({ "targets": {} }),
+        "未鉴权局域网不得暴露含设备 IP/串口号的档案键"
+    );
+    assert!(!anon_info.to_string().contains("10.0.0.20"));
+
+    let authed_req = format!(
+        "GET /api/system/info HTTP/1.1\r\nHost: 192.168.1.10:9666\r\nAuthorization: Bearer {lan_token}\r\n\r\n"
+    );
+    let lan_info = parse_json_response(&service.handle_http_from(
+        authed_req.as_bytes(),
+        false,
+        "10.0.0.12",
+        None,
+    ));
+    assert_eq!(lan_info["result"]["can_edit_operator_settings"], false);
+    assert_eq!(lan_info["result"]["laser_framing_shape"], "hull");
+    assert_eq!(
+        lan_info["result"]["machine_profiles"]["targets"]["network:10.0.0.20:23"]["manual_travel"]
+            ["x_travel_mm"],
+        320.0
+    );
+
+    // 5. 一次性迁移：后端已有值不覆盖，只补齐缺失字段与新目标
+    let migrate_body = serde_json::json!({
+        "laser_framing_shape_migrate": "box",
+        "machine_profiles_migrate": {
+            "targets": {
+                "network:10.0.0.20:23": {
+                    "manual_travel": { "x_travel_mm": 999, "z_travel_mm": 45 },
+                    "scan_offset_mm": 0.99
+                },
+                "serial:/dev/ttyUSB0:115200": {
+                    "manual_travel": { "x_travel_mm": 180, "y_travel_mm": 160 }
+                }
+            }
+        }
+    });
+    let (st_mig, migrated) = desktop_request(
+        &service,
+        "POST",
+        "/api/settings",
+        Some(&migrate_body),
+        Some(&session),
+    );
+    assert_eq!(st_mig, 200, "{migrated}");
+    assert_eq!(
+        migrated["result"]["laser_framing_shape"], "hull",
+        "后端已设置的 framing_shape 不得被迁移覆盖"
+    );
+    let existing = &migrated["result"]["machine_profiles"]["targets"]["network:10.0.0.20:23"];
+    assert_eq!(existing["manual_travel"]["x_travel_mm"], 320.0);
+    assert_eq!(existing["manual_travel"]["z_travel_mm"], 45.0);
+    assert_eq!(existing["scan_offset_mm"], 0.15);
+    assert_eq!(
+        migrated["result"]["machine_profiles"]["targets"]["serial:/dev/ttyUSB0:115200"]["manual_travel"]
+            ["x_travel_mm"],
+        180.0
+    );
+
+    // 6. 最多保留 16 个目标（写入第 17 个淘汰最旧项），并验证重启后重新从 settings.json 读回一致
+    for idx in 1..=17 {
+        let key = format!("network:10.0.1.{idx}:23");
+        let (st_i, body_i) = desktop_request(
+            &service,
+            "POST",
+            "/api/settings",
+            Some(&serde_json::json!({
+                "machine_profile_patch": {
+                    "target_key": key,
+                    "manual_travel": { "x_travel_mm": 100 + idx, "y_travel_mm": 100 + idx }
+                }
+            })),
+            Some(&session),
+        );
+        assert_eq!(st_i, 200, "{body_i}");
+    }
+    let reloaded = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf());
+    let profiles = reloaded.machine_profiles_json();
+    let map = profiles["targets"].as_object().unwrap();
+    assert_eq!(map.len(), 16, "机器档案最多保留 16 个连接目标");
+    assert!(
+        !map.contains_key("network:10.0.0.20:23") && !map.contains_key("network:10.0.1.1:23"),
+        "最旧目标应被淘汰: {:?}",
+        map.keys().collect::<Vec<_>>()
+    );
+    assert!(map.contains_key("network:10.0.1.17:23"));
+    assert_eq!(reloaded.framing_shape().as_str(), "hull");
+
+    // 7. 清除单个目标后立即从档案移除
+    let (st_clr, cleared) = reloaded.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({
+            "machine_profile_patch": {
+                "target_key": "network:10.0.1.17:23",
+                "clear": true
+            }
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_clr, 200, "{cleared}");
+    assert!(
+        cleared["result"]["machine_profiles"]["targets"]
+            .get("network:10.0.1.17:23")
+            .is_none()
+    );
+}
+
+/// r78（2026-11-28）：取值优先级（请求显式值 > 后端手填档案 > 固件 > 默认），
+/// 语音 / MCP 无前端参与也能拿到手填行程、手填加速度、双向扫描偏移表与全局走边框形状，
+/// 且发送前仍按当场读到的固件行程拦截超行程刀路（r65 / r68 不变）。
+#[test]
+fn r78_backend_profile_priority_voice_mcp_framing_and_firmware_send_gate() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    image::GrayImage::from_fn(200, 100, |x, _| image::Luma([(x * 255 / 199) as u8]))
+        .save(gen_dir.join("wide_r78.png"))
+        .unwrap();
+
+    // 模拟真实 TCP GRBL 控制器（响应 $$ / $CD / $I），固件报行程 100×100、加速度 800 mm/s²
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let probe_port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(4) {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                match line.trim() {
+                    "$$" => {
+                        let _ = write!(
+                            writer,
+                            "$20=1\r\n$22=1\r\n$30=1000\r\n$32=1\r\n$120=800.000\r\n$121=800.000\r\n$130=100.000\r\n$131=100.000\r\nok\r\n"
+                        );
+                    }
+                    "$CD" | "$I" => {
+                        let _ = write!(writer, "error:3\r\n");
+                    }
+                    _ => {
+                        let _ = write!(writer, "ok\r\n");
+                    }
+                }
+                line.clear();
+            }
+        }
+    });
+
+    let written_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        laser_runtime::RuntimeDb::open_memory().unwrap(),
+    ));
+    {
+        let guard = db.lock().unwrap();
+        guard
+            .voice_device_seen("dev-r78", "cli-r78", "", "", "", 0.0)
+            .unwrap();
+        guard
+            .set_voice_device_status("dev-r78", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+    }
+
+    let firmware_100_factory: TransportFactory = std::sync::Arc::new(move |_spec| {
+        // 发送前探查仍读到固件 100×100（绝不被手填 260×200 覆盖）
+        let mut replies = vec![
+            "$20=1".to_string(),
+            "$30=1000".to_string(),
+            "$32=1".to_string(),
+            "$120=800.000".to_string(),
+            "$121=800.000".to_string(),
+            "$130=100.000".to_string(),
+            "$131=100.000".to_string(),
+            "ok".to_string(),
+        ];
+        replies.extend(std::iter::repeat_n("ok".to_string(), 20_000));
+        let fake = laser_device::FakeGrbl::new(replies);
+        Ok(Box::new(fake))
+    });
+
+    let target_key = format!("network:127.0.0.1:{probe_port}");
+    let voice_ctx = laser_contracts::CallerContext::Voice {
+        device_id: "dev-r78".into(),
+        session_id: "sess-r78".into(),
+    };
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_runtime_db(db)
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir.clone()])
+    .with_transport_factory(firmware_100_factory);
+    service
+        .register_voice_session("dev-r78", "cli-r78", "sess-r78")
+        .unwrap();
+
+    // 1. 先由桌面端握手探测，建立已验证连接与固件行程（100×100）+ 固件加速度（800）
+    let (st_chk0, chk0) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": probe_port,
+            "auto_fallback": false
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_chk0, 200, "{chk0}");
+    assert_eq!(chk0["result"]["connected"], true, "{chk0}");
+    assert_eq!(
+        chk0["result"]["capabilities"]["effective_travel_mm"]["x_source"],
+        "firmware"
+    );
+
+    // 2. 桌面主窗口在后端保存该机器的手填行程（260×200）、手填加速度（200 mm/s²）与双向扫描偏移表
+    let (st_set, set_body) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({
+            "machine_profile_patch": {
+                "target_key": target_key,
+                "manual_travel": { "x_travel_mm": 260, "y_travel_mm": 200 },
+                "manual_motion": { "acceleration_mm_s2": 200 },
+                "scan_offset_mm": 0.15,
+                "scan_offset_table": [[1000, 0.12], [3000, 0.36]]
+            }
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_set, 200, "{set_body}");
+
+    // 3. 语音不传 work_area_* 调用 /api/connection/check：自动按“手填 → 固件 → 默认”拿到 260×200（手填）
+    let (st_chk1, chk1) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": probe_port,
+            "auto_fallback": false
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_chk1, 200, "{chk1}");
+    assert_eq!(
+        chk1["result"]["capabilities"]["effective_travel_mm"]["x"],
+        260.0
+    );
+    assert_eq!(
+        chk1["result"]["capabilities"]["effective_travel_mm"]["x_source"],
+        "manual"
+    );
+    assert!(
+        chk1["result"]["capabilities"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("有效行程 260×200 mm（手填）"),
+        "{chk1}"
+    );
+    // 请求显式传 work_area_width_mm=180 时仍以请求为准
+    let (st_chk_exp, chk_exp) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": probe_port,
+            "auto_fallback": false,
+            "work_area_width_mm": 180
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_chk_exp, 200, "{chk_exp}");
+    assert_eq!(
+        chk_exp["result"]["capabilities"]["effective_travel_mm"]["x"],
+        180.0
+    );
+
+    // 4. 语音 / MCP（laser_workflow_tool preview 转发到 /api/text-task/generate）不传 work_area_*、
+    //    machine_motion、fill_options 生成填充文字预览：
+    //    自动套用后端手填行程（允许超过固件 100mm）、手填加速度（200 mm/s²）与双向扫描偏移表
+    let (st_pv, pv) = service.dispatch_json(
+        "POST",
+        "/api/text-task/generate",
+        &serde_json::json!({
+            "text": "MOSS LASER TEST",
+            "font_size_mm": 18,
+            "text_fill": "fill",
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_pv, 200, "{pv}");
+    let art = &pv["result"]["artifacts"];
+    assert_eq!(
+        art["time_estimate"]["acceleration_origin"], "manual",
+        "{art}"
+    );
+    assert_eq!(art["time_estimate"]["acceleration_mm_s2"]["x"], 200.0);
+    assert_eq!(
+        art["fill_options"]["scan_offset_origin"], "machine_profile",
+        "{art}"
+    );
+    assert_eq!(
+        art["fill_options"]["scan_offset_table"],
+        serde_json::json!([[1000.0, 0.12], [3000.0, 0.36]])
+    );
+    let est_manual = art["time_estimate"]["estimated_seconds"].as_f64().unwrap();
+
+    // 请求显式传 machine_motion 与 fill_options 时以请求为准
+    let (st_exp, exp) = service.dispatch_json(
+        "POST",
+        "/api/text-task/generate",
+        &serde_json::json!({
+            "text": "MOSS LASER TEST",
+            "font_size_mm": 18,
+            "text_fill": "fill",
+            "material": "椴木",
+            "thickness_mm": 3,
+            "machine_motion": { "x_accel_mm_s2": 4000, "y_accel_mm_s2": 4000 },
+            "fill_options": { "bidirectional": true, "scan_offset_mm": 0.04 }
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_exp, 200, "{exp}");
+    let art_exp = &exp["result"]["artifacts"];
+    assert_eq!(
+        art_exp["time_estimate"]["acceleration_origin"], "request",
+        "{art_exp}"
+    );
+    assert_eq!(art_exp["time_estimate"]["acceleration_mm_s2"]["x"], 4000.0);
+    assert_eq!(art_exp["fill_options"]["scan_offset_origin"], "request");
+    assert_eq!(art_exp["fill_options"]["scan_offset_mm"], 0.04);
+    assert!(
+        est_manual
+            > art_exp["time_estimate"]["estimated_seconds"]
+                .as_f64()
+                .unwrap(),
+        "更低的手填加速度应算出更长的工时"
+    );
+
+    // 5. 语音图片预览不传 work_area_* / fill_options：用后端手填行程（260×200，可刻 150 mm 宽）和扫描偏移表
+    let (st_img, img) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview",
+            "source_type": "image",
+            "image_file": "wide_r78.png",
+            "width_mm": 150,
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_img, 200, "{img}");
+    let img_art = &img["result"]["artifacts"];
+    assert_eq!(img_art["width_mm"].as_f64().unwrap().round(), 150.0);
+    assert_eq!(
+        img_art["scan_options"]["scan_offset_origin"], "machine_profile",
+        "{img_art}"
+    );
+    assert_eq!(
+        img_art["scan_options"]["scan_offset_table"],
+        serde_json::json!([[1000.0, 0.12], [3000.0, 0.36]])
+    );
+    assert_eq!(img_art["time_estimate"]["acceleration_origin"], "manual");
+
+    // 6. 安全不变量（r65 / r68 / r78）：即使后端手填行程允许生成 150 mm 宽预览，
+    //    发送前仍按当场读到的固件行程（100×100）拦截！
+    let wide_wf_id = img["result"]["workflow_id"].as_str().unwrap();
+    let (st_send, send_blocked) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "confirm_send",
+            "workflow_id": wide_wf_id,
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": probe_port
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_send, 400, "{send_blocked}");
+    assert_eq!(
+        send_blocked["detail"]["error_code"], "job_exceeds_travel",
+        "手填行程绝不能绕过发送前固件复核: {send_blocked}"
+    );
+
+    // 7. 清掉手填运动参数后回落到固件加速度 800（acceleration_origin="firmware"）
+    let (st_clr_m, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({
+            "machine_profile_patch": {
+                "target_key": target_key,
+                "manual_motion": null
+            }
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_clr_m, 200);
+    let (st_fw, pv_fw) = service.dispatch_json(
+        "POST",
+        "/api/text-task/generate",
+        &serde_json::json!({
+            "text": "HI",
+            "font_size_mm": 12,
+            "text_fill": "fill",
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_fw, 200, "{pv_fw}");
+    assert_eq!(
+        pv_fw["result"]["artifacts"]["time_estimate"]["acceleration_origin"],
+        "firmware"
+    );
+    assert_eq!(
+        pv_fw["result"]["artifacts"]["time_estimate"]["acceleration_mm_s2"]["x"],
+        800.0
+    );
+
+    // 8. 全局走边框形状（laser_framing_shape）：语音 workflow(action=frame) 跟随全局设置，
+    //    hull 时只取预览冻结的 frame_hull_mm（忽略请求自带 outline，仍强制 power=0）
+    let small_wf_id = pv_fw["result"]["workflow_id"].as_str().unwrap();
+    let frame_service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_runtime_db(service.runtime_db.clone().unwrap())
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir])
+    .with_transport_factory(recording_transport_factory(20_000, written_lines.clone()));
+    frame_service
+        .register_voice_session("dev-r78", "cli-r78", "sess-r78")
+        .unwrap();
+
+    // 默认 box：走外接矩形
+    let (st_box, res_box) = frame_service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "frame",
+            "workflow_id": small_wf_id,
+            "confirmed": true,
+            "outline": [[99, 99], [99, 98], [98, 98]],
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": 23
+        }),
+        voice_ctx.clone(),
+    );
+    assert_eq!(st_box, 200, "{res_box}");
+    assert_eq!(res_box["result"]["framing_shape"], "box");
+    let box_lines = std::mem::take(&mut *written_lines.lock().unwrap());
+    assert!(
+        !box_lines.iter().any(|l| l.contains("99.000")),
+        "请求自带 outline 必须被忽略: {box_lines:?}"
+    );
+
+    // 切换全局 laser_framing_shape = "hull"：语音走边框改沿服务器冻结的 frame_hull_mm 走，仍忽略请求 outline 且不出光
+    let (st_sh, _) = frame_service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({ "laser_framing_shape": "hull" }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st_sh, 200);
+    let (st_hull, res_hull) = frame_service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "frame",
+            "workflow_id": small_wf_id,
+            "confirmed": true,
+            "outline": [[99, 99], [99, 98], [98, 98]],
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": 23
+        }),
+        voice_ctx,
+    );
+    assert_eq!(st_hull, 200, "{res_hull}");
+    assert_eq!(res_hull["result"]["framing_shape"], "hull");
+    let hull_lines = std::mem::take(&mut *written_lines.lock().unwrap());
+    assert!(
+        !hull_lines.iter().any(|l| l.contains("99.000")),
+        "hull 模式下仍不得信任请求自带 outline: {hull_lines:?}"
+    );
+    assert!(
+        !hull_lines
+            .iter()
+            .any(|l| l.contains("M3") || l.contains("M4")),
+        "语音走边框永不出光: {hull_lines:?}"
+    );
+    assert_ne!(
+        box_lines, hull_lines,
+        "box 与 hull 的实际走边框轨迹应当不同"
+    );
+}

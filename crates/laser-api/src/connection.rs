@@ -201,8 +201,59 @@ impl ApiService {
         req_spec.describe() == ver_spec.describe()
     }
 
-    /// r66 读取最近一次工作台握手记下的固件 X/Y 行程（请求指向其他连接目标、无记录或某轴未报时返回 `None`）。
-    pub(crate) fn remembered_work_area(
+    /// r78 当前记住连接的规范目标键（与前端 `connectionTargetKey` 对齐）。
+    pub(crate) fn verified_connection_target_key(&self) -> Option<String> {
+        let record = self.verified_connection()?;
+        let fields = record.get("fields")?.as_object()?;
+        let spec = self.connection_spec_from_request(fields).ok()?;
+        Some(crate::machine_profiles::connection_target_key(&spec))
+    }
+
+    /// r78 解析本次请求对应的连接目标键：
+    /// 1. 请求显式给了串口 / 网络地址 → 按该目标；
+    /// 2. 请求未显式给连接目标 → 优先用最近一次握手记住的目标（`laser_verified_connection`），
+    ///    否则回退 `.env` 默认配置目标；均无时返回 `None`（绝不猜测其他机器档案）。
+    pub(crate) fn resolve_target_key_for_request(
+        &self,
+        request: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<String> {
+        let has = |keys: &[&str]| {
+            keys.iter().any(|key| {
+                request
+                    .get(*key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty())
+            })
+        };
+        let mode = request
+            .get("connection_mode")
+            .or_else(|| request.get("preferred_mode"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let explicit = match mode {
+            Some(m) if m.eq_ignore_ascii_case("serial") => has(&["port", "serial_port"]),
+            Some(_) => has(&["network_host", "host"]),
+            None => has(&["port", "serial_port", "network_host", "host"]),
+        };
+        if explicit {
+            return self
+                .connection_spec_from_request(request)
+                .ok()
+                .map(|spec| crate::machine_profiles::connection_target_key(&spec));
+        }
+        if mode.is_none()
+            && let Some(key) = self.verified_connection_target_key()
+        {
+            return Some(key);
+        }
+        self.connection_spec_from_request(request)
+            .ok()
+            .map(|spec| crate::machine_profiles::connection_target_key(&spec))
+    }
+
+    /// 仅读取最近一次工作台握手记下的**固件** X/Y 行程（不含手填；供能力摘要忙态回退区分来源）。
+    pub(crate) fn remembered_firmware_work_area(
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
     ) -> (Option<f64>, Option<f64>) {
@@ -219,40 +270,186 @@ impl ApiService {
         )
     }
 
-    /// r66 生成请求未显式传 `work_area_*` 或 `machine_motion`（且未指向其他连接目标）时，
-    /// 补入最近一次握手记下的固件行程与运动参数（仍交由 `parse_work_area_mm` 与 `parse_machine_motion` 校验）。
+    /// r66 / r78 读取当前目标的默认 X/Y 行程：逐轴按“手填（后端档案） → 固件（最近握手）”取值。
+    pub(crate) fn remembered_work_area(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> (Option<f64>, Option<f64>) {
+        let profile = self
+            .resolve_target_key_for_request(object)
+            .and_then(|key| self.machine_profile_for_key(&key));
+        let (fw_x, fw_y) = self.remembered_firmware_work_area(object);
+        let man_x = profile.as_ref().and_then(|p| p.manual_travel.x_travel_mm);
+        let man_y = profile.as_ref().and_then(|p| p.manual_travel.y_travel_mm);
+        (man_x.or(fw_x), man_y.or(fw_y))
+    }
+
+    /// r66 / r78 生成请求缺省补齐：按“请求显式值 → 手填（后端机器档案） → 固件（最近握手） → 默认”
+    /// 逐项补入 `work_area_*`、`machine_motion`（含加速度来源标记）与 `fill_options` 双向扫描偏移。
     pub(crate) fn with_remembered_work_area<'a>(
         &self,
         object: &'a serde_json::Map<String, serde_json::Value>,
     ) -> std::borrow::Cow<'a, serde_json::Map<String, serde_json::Value>> {
-        let Some(record) = self
+        let profile = self
+            .resolve_target_key_for_request(object)
+            .and_then(|key| self.machine_profile_for_key(&key));
+        let verified_limits = self
             .verified_connection()
             .filter(|rec| self.request_matches_verified_connection(object, rec))
-        else {
+            .map(|rec| rec["machine_limits"].clone());
+        if profile.is_none() && verified_limits.is_none() {
             return std::borrow::Cow::Borrowed(object);
-        };
-        let lim = &record["machine_limits"];
-        let rem_w = lim.get("x_travel_mm").and_then(serde_json::Value::as_f64);
-        let rem_h = lim.get("y_travel_mm").and_then(serde_json::Value::as_f64);
+        }
         let missing = |key: &str| matches!(object.get(key), None | Some(serde_json::Value::Null));
-        let fill_w = missing("work_area_width_mm").then_some(rem_w).flatten();
-        let fill_h = missing("work_area_height_mm").then_some(rem_h).flatten();
-        let fill_motion = missing("machine_motion")
-            .then(|| {
-                let mut motion = serde_json::Map::new();
-                for key in SAVED_MOTION_KEYS {
-                    if let Some(val) = lim
-                        .get(*key)
-                        .and_then(serde_json::Value::as_f64)
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                    {
-                        motion.insert((*key).into(), serde_json::json!(val));
+
+        // 1. 行程：请求显式 > 后端手填档案 > 固件握手
+        let fw_w = verified_limits
+            .as_ref()
+            .and_then(|lim| lim.get("x_travel_mm"))
+            .and_then(serde_json::Value::as_f64);
+        let fw_h = verified_limits
+            .as_ref()
+            .and_then(|lim| lim.get("y_travel_mm"))
+            .and_then(serde_json::Value::as_f64);
+        let man_w = profile.as_ref().and_then(|p| p.manual_travel.x_travel_mm);
+        let man_h = profile.as_ref().and_then(|p| p.manual_travel.y_travel_mm);
+        let fill_w = missing("work_area_width_mm")
+            .then_some(man_w.or(fw_w))
+            .flatten();
+        let fill_h = missing("work_area_height_mm")
+            .then_some(man_h.or(fw_h))
+            .flatten();
+
+        // 2. 运动参数（工时估算 / 自动过扫描 / 剩余时间）：请求显式 > 后端手填运动 > 固件握手运动
+        let mut merged_motion: Option<serde_json::Map<String, serde_json::Value>> = None;
+        let mut accel_origin: Option<&'static str> = None;
+        let motion_allows_fill = matches!(
+            object.get("machine_motion"),
+            None | Some(serde_json::Value::Null | serde_json::Value::Object(_))
+        );
+        if motion_allows_fill {
+            let explicit_motion = object
+                .get("machine_motion")
+                .and_then(serde_json::Value::as_object);
+            let explicit_has = |key: &str| {
+                explicit_motion
+                    .and_then(|m| m.get(key))
+                    .is_some_and(|v| !v.is_null())
+            };
+            let mut next_motion = explicit_motion.cloned().unwrap_or_default();
+            let mut motion_changed = false;
+
+            let fw_pos = |key: &str| {
+                verified_limits
+                    .as_ref()
+                    .and_then(|lim| lim.get(key))
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            };
+            let manual_motion = profile.as_ref().map(|p| &p.manual_motion);
+
+            // 加速度（X/Y 成组优先级：若请求未显式传任一轴，再按手填 → 固件补齐）
+            if explicit_has("x_accel_mm_s2") || explicit_has("y_accel_mm_s2") {
+                accel_origin = Some("request");
+            } else {
+                let man_ax = manual_motion.and_then(|m| m.x_accel_mm_s2);
+                let man_ay = manual_motion.and_then(|m| m.y_accel_mm_s2);
+                if man_ax.is_some() || man_ay.is_some() {
+                    if let Some(v) = man_ax {
+                        next_motion.insert("x_accel_mm_s2".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = man_ay {
+                        next_motion.insert("y_accel_mm_s2".into(), serde_json::json!(v));
+                    }
+                    accel_origin = Some("manual");
+                    motion_changed = true;
+                } else {
+                    let fw_ax = fw_pos("x_accel_mm_s2");
+                    let fw_ay = fw_pos("y_accel_mm_s2");
+                    if fw_ax.is_some() || fw_ay.is_some() {
+                        if let Some(v) = fw_ax {
+                            next_motion.insert("x_accel_mm_s2".into(), serde_json::json!(v));
+                        }
+                        if let Some(v) = fw_ay {
+                            next_motion.insert("y_accel_mm_s2".into(), serde_json::json!(v));
+                        }
+                        accel_origin = Some("firmware");
+                        motion_changed = true;
                     }
                 }
-                (!motion.is_empty()).then_some(serde_json::Value::Object(motion))
-            })
-            .flatten();
-        if fill_w.is_none() && fill_h.is_none() && fill_motion.is_none() {
+            }
+
+            let other_keys: [(&str, Option<f64>); 3] = [
+                (
+                    "x_max_rate_mm_per_min",
+                    manual_motion.and_then(|m| m.x_max_rate_mm_per_min),
+                ),
+                (
+                    "y_max_rate_mm_per_min",
+                    manual_motion.and_then(|m| m.y_max_rate_mm_per_min),
+                ),
+                (
+                    "junction_deviation_mm",
+                    manual_motion.and_then(|m| m.junction_deviation_mm),
+                ),
+            ];
+            for (key, man_val) in other_keys {
+                if !explicit_has(key)
+                    && let Some(val) = man_val.or_else(|| fw_pos(key))
+                {
+                    next_motion.insert(key.into(), serde_json::json!(val));
+                    motion_changed = true;
+                }
+            }
+            if motion_changed {
+                merged_motion = Some(next_motion);
+            }
+        }
+
+        // 3. 双向扫描偏移校准：请求未显式传 scan_offset_mm / scan_offset_table 且未显式关闭双向时，补入后端档案
+        let mut merged_fill: Option<serde_json::Map<String, serde_json::Value>> = None;
+        if let Some(ref prof) = profile
+            && (prof.scan_offset_mm.is_some() || !prof.scan_offset_table.is_empty())
+            && matches!(
+                object.get("fill_options"),
+                None | Some(serde_json::Value::Null | serde_json::Value::Object(_))
+            )
+        {
+            let explicit_fill = object
+                .get("fill_options")
+                .and_then(serde_json::Value::as_object);
+            let explicit_bidirectional_off = explicit_fill
+                .and_then(|m| m.get("bidirectional"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false);
+            let explicit_offset_given = explicit_fill.is_some_and(|m| {
+                m.get("scan_offset_mm").is_some_and(|v| !v.is_null())
+                    || m.get("scan_offset_table").is_some_and(|v| !v.is_null())
+            });
+            if !explicit_bidirectional_off && !explicit_offset_given {
+                let mut next_fill = explicit_fill.cloned().unwrap_or_default();
+                if !prof.scan_offset_table.is_empty() {
+                    next_fill.insert(
+                        "scan_offset_table".into(),
+                        serde_json::json!(prof.scan_offset_table),
+                    );
+                } else if let Some(offset) = prof.scan_offset_mm {
+                    next_fill.insert("scan_offset_mm".into(), serde_json::json!(offset));
+                }
+                next_fill.insert(
+                    "_scan_offset_origin".into(),
+                    serde_json::Value::String("machine_profile".into()),
+                );
+                merged_fill = Some(next_fill);
+            }
+        }
+
+        if fill_w.is_none()
+            && fill_h.is_none()
+            && merged_motion.is_none()
+            && merged_fill.is_none()
+            && accel_origin.is_none()
+        {
             return std::borrow::Cow::Borrowed(object);
         }
         let mut cloned = object.clone();
@@ -262,8 +459,17 @@ impl ApiService {
         if let Some(h) = fill_h {
             cloned.insert("work_area_height_mm".into(), serde_json::json!(h));
         }
-        if let Some(motion) = fill_motion {
-            cloned.insert("machine_motion".into(), motion);
+        if let Some(motion) = merged_motion {
+            cloned.insert("machine_motion".into(), serde_json::Value::Object(motion));
+        }
+        if let Some(origin) = accel_origin {
+            cloned.insert(
+                "_acceleration_origin".into(),
+                serde_json::Value::String(origin.into()),
+            );
+        }
+        if let Some(fill) = merged_fill {
+            cloned.insert("fill_options".into(), serde_json::Value::Object(fill));
         }
         std::borrow::Cow::Owned(cloned)
     }
@@ -885,28 +1091,39 @@ impl ApiService {
             .and_then(|lim| lim.soft_limits_enabled);
         let homing_enabled = machine_limits.as_ref().and_then(|lim| lim.homing_enabled);
         let capabilities = connected.then(|| {
-            let manual_x = crate::generation::parse_optional_work_area_override(
+            let explicit_x = crate::generation::parse_optional_work_area_override(
                 object.get("work_area_width_mm"),
                 "work_area_width_mm",
             )
             .ok()
             .flatten();
-            let manual_y = crate::generation::parse_optional_work_area_override(
+            let explicit_y = crate::generation::parse_optional_work_area_override(
                 object.get("work_area_height_mm"),
                 "work_area_height_mm",
             )
             .ok()
             .flatten();
-            let remembered = if probed_live {
+            let profile_target = verified
+                .as_ref()
+                .map(crate::machine_profiles::connection_target_key)
+                .or_else(|| self.resolve_target_key_for_request(object));
+            let profile = profile_target
+                .as_deref()
+                .and_then(|key| self.machine_profile_for_key(key));
+            let manual_x =
+                explicit_x.or_else(|| profile.as_ref().and_then(|p| p.manual_travel.x_travel_mm));
+            let manual_y =
+                explicit_y.or_else(|| profile.as_ref().and_then(|p| p.manual_travel.y_travel_mm));
+            let remembered_fw = if probed_live {
                 (None, None)
             } else {
-                self.remembered_work_area(object)
+                self.remembered_firmware_work_area(object)
             };
             laser_device::build_machine_capabilities(
                 manual_x,
                 manual_y,
                 machine_limits.as_ref(),
-                remembered,
+                remembered_fw,
                 &firmware_settings,
                 machine_features.as_ref(),
                 device_identity.as_ref(),

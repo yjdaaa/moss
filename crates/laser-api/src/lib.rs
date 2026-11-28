@@ -21,6 +21,7 @@ mod files;
 mod generation;
 mod http;
 mod jobs;
+mod machine_profiles;
 mod material_lab;
 mod material_lab_patterns;
 mod materials;
@@ -127,6 +128,10 @@ pub struct ApiService {
     /// n73 工作台最近一次握手成功的连接（`settings.json` 的 `laser_verified_connection`）：
     /// 语音与接入点调用激光工具时没给串口号 / IP，就用它（2026-11-08 用户决定）。
     verified_connection: std::sync::RwLock<Option<serde_json::Value>>,
+    /// r78 按连接目标保存的“跟机器走”后端档案（手填行程、手填运动参数、扫描偏移校准；最多 16 个目标）。
+    machine_profiles: std::sync::RwLock<machine_profiles::MachineProfileStore>,
+    /// r78 全局走边框形状（`None` 表示尚未显式保存、默认 `box`；显式设置后为 `Some(Box | Hull)`）。
+    framing_shape: std::sync::RwLock<Option<machine_profiles::FramingShape>>,
     voice_sessions: voice_authority::VoiceSessions,
     /// 宿主关停门禁：关停清点前置位，拒绝所有新启动的连接、发码与设备操作（急停现有在途/待确认通道除外）。
     shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,

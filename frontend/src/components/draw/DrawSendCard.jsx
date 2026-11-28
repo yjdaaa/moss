@@ -1,6 +1,5 @@
 import React from "react";
 import { Eye, Flame, Save, Send, Square, UploadCloud } from "lucide-react";
-import { writeFramingShape } from "../../aiPreviewState.js";
 import { drawTargetMissingText } from "../../drawConnection.js";
 import { canResumeJob, formatResumeActionLabel, sendProgressFromResult } from "../../estopResumeState.js";
 import { REGISTRATION_DRAW_SESSION_KEY, drawOriginNote } from "../../registrationState.js";
@@ -163,7 +162,6 @@ export function DrawSendCard({
                 onChange={(event) => {
                   const next = event.target.checked ? "hull" : "box";
                   setFramingShape(next);
-                  writeFramingShape(next);
                 }}
               />
               <span>沿外轮廓</span>

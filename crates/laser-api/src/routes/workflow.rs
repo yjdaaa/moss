@@ -111,6 +111,13 @@ impl ApiService {
         object.remove("_origin");
         object.remove("_origin_mpos");
         object.remove("_artifacts");
+        object.remove("_acceleration_origin");
+        if let Some(fill) = object
+            .get_mut("fill_options")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            fill.remove("_scan_offset_origin");
+        }
         let creates_preview = route == "/api/text-task/generate"
             || (route == "/api/workflow"
                 && matches!(
@@ -378,10 +385,17 @@ impl ApiService {
     }
 
     fn handle_draw_preview(&self, body: &[u8]) -> Vec<u8> {
-        let object = match parse_json_object(body, 10 * 1024 * 1024) {
+        let mut object = match parse_json_object(body, 10 * 1024 * 1024) {
             Ok(value) => value,
             Err(error) => return http_json(400, failure(error, None)),
         };
+        object.remove("_acceleration_origin");
+        if let Some(fill) = object
+            .get_mut("fill_options")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            fill.remove("_scan_offset_origin");
+        }
         let effective_library = match self.effective_material_library() {
             Ok(lib) => lib,
             Err(error) => {

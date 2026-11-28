@@ -3,7 +3,6 @@ import { AlertTriangle, Box, Clock, Cpu, Download, Flame, PauseCircle, Ruler, Sq
 import { postJson, resolveApiUrl } from "../../api/client.js";
 import { showAlert } from "../../appDialog.js";
 import { isRemoteMode, readAuthToken } from "../../authSession.js";
-import { writeFramingShape } from "../../aiPreviewState.js";
 import { approvalPendingMessage, isApprovalRequiredResponse } from "../../approvalState.js";
 import { canResumeJob, formatResumeActionLabel } from "../../estopResumeState.js";
 import { timeEstimateNote } from "../../fillOptions.js";
@@ -329,7 +328,6 @@ export function WorkbenchMonitorCard({
                         onChange={(e) => {
                           const next = e.target.checked ? "hull" : "box";
                           setFramingShape(next);
-                          writeFramingShape(next);
                         }}
                       />
                       <span>沿外轮廓</span>

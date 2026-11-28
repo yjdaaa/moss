@@ -5,8 +5,10 @@
 /// `x_max_rate_mm_per_min`、`y_max_rate_mm_per_min`、`junction_deviation_mm`，全部可省略。
 pub(crate) struct MachineMotion {
     pub(crate) profile: laser_core::gcode::MotionProfile,
-    /// `machine`：请求带了加速度；`default`：按默认 1000 mm/s² 估算
+    /// `machine`：带了机器加速度（请求、后端手填档案或固件）；`default`：按默认 1000 mm/s² 估算
     pub(crate) source: &'static str,
+    /// 细粒度来源（r78）：`manual`（后端手填档案）/ `firmware`（固件读回）/ `request`（请求显式传入）/ `default`
+    pub(crate) origin: &'static str,
 }
 
 impl MachineMotion {
@@ -88,6 +90,20 @@ pub(crate) fn parse_machine_motion(
         (Some(v), None) | (None, Some(v)) => (v, v),
         (None, None) => (defaults.accel_x_mm_s2, defaults.accel_y_mm_s2),
     };
+    let has_accel = ax.is_some() || ay.is_some();
+    let origin = if has_accel {
+        match object
+            .get("_acceleration_origin")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("manual") => "manual",
+            Some("firmware") => "firmware",
+            Some("request") => "request",
+            _ => "request",
+        }
+    } else {
+        "default"
+    };
     Ok(MachineMotion {
         profile: MotionProfile {
             rapid_mm_per_min: rapid,
@@ -97,11 +113,8 @@ pub(crate) fn parse_machine_motion(
             max_rate_y_mm_per_min: ry,
             junction_deviation_mm: jd.unwrap_or(defaults.junction_deviation_mm),
         },
-        source: if ax.is_some() || ay.is_some() {
-            "machine"
-        } else {
-            "default"
-        },
+        source: if has_accel { "machine" } else { "default" },
+        origin,
     })
 }
 
@@ -118,6 +131,7 @@ pub(crate) fn time_estimate_json(
         "model": "acceleration",
         "acceleration_mm_s2": {"x": motion.profile.accel_x_mm_s2, "y": motion.profile.accel_y_mm_s2},
         "acceleration_source": motion.source,
+        "acceleration_origin": motion.origin,
     })
 }
 
@@ -140,6 +154,8 @@ pub(crate) struct ParsedFill {
     pub(crate) options: laser_core::vector_plan::FillOptions,
     pub(crate) auto: bool,
     pub(crate) offset_table: Option<Vec<(f64, f64)>>,
+    /// 扫描偏移来源（r78）：`machine_profile`（后端机器档案）/ `request`（请求显式给出）/ `default`（默认 0）
+    pub(crate) scan_offset_origin: &'static str,
     /// 取自材料库条目的键（请求没写、由材料库补上的，r40）
     pub(crate) from_material: Vec<String>,
 }
@@ -253,6 +269,20 @@ pub(crate) fn parse_fill_options(
             .map_err(|e| format!("fill_options.scan_offset_table：{e}"))?,
         None => fixed_offset,
     };
+    let scan_offset_origin = if fill
+        .get("_scan_offset_origin")
+        .and_then(serde_json::Value::as_str)
+        == Some("machine_profile")
+    {
+        "machine_profile"
+    } else if offset_table.is_some()
+        || fill.get("scan_offset_mm").is_some_and(|v| !v.is_null())
+        || fill.get("scan_offset_table").is_some_and(|v| !v.is_null())
+    {
+        "request"
+    } else {
+        "default"
+    };
     Ok(ParsedFill {
         options: FillOptions {
             grouping: FillGrouping::parse(fill.get("grouping").and_then(|v| v.as_str()))?,
@@ -265,12 +295,13 @@ pub(crate) fn parse_fill_options(
         },
         auto,
         offset_table,
+        scan_offset_origin,
         from_material: Vec::new(),
     })
 }
 
 /// `fill_options.scan_offset_table`：`[[速度 mm/min, 偏移 mm], …]`，省略、null 或空数组表示不用表。
-fn parse_scan_offset_table(
+pub(crate) fn parse_scan_offset_table(
     value: Option<&serde_json::Value>,
 ) -> Result<Option<Vec<(f64, f64)>>, String> {
     use laser_core::vector_plan::{MAX_SCAN_OFFSET_MM, MAX_SCAN_OFFSET_ROWS};
@@ -496,6 +527,7 @@ pub(super) fn fill_options_json(
         "overscan_auto": overscan_auto,
         "scan_offset_mm": options.scan_offset_mm,
         "scan_offset_source": if table.is_some() { "table" } else { "fixed" },
+        "scan_offset_origin": parsed.scan_offset_origin,
         "scan_offset_table": table,
         "from_material": parsed.from_material,
     })

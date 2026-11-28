@@ -102,10 +102,17 @@ impl ApiService {
     }
 
     fn handle_material_lab_preview(&self, body: &[u8]) -> Vec<u8> {
-        let object = match parse_json_object(body, 64 * 1024) {
+        let mut object = match parse_json_object(body, 64 * 1024) {
             Ok(value) => value,
             Err(error) => return http_json(400, failure(error, None)),
         };
+        object.remove("_acceleration_origin");
+        if let Some(fill) = object
+            .get_mut("fill_options")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            fill.remove("_scan_offset_origin");
+        }
         match self.material_lab_preview(&object) {
             Ok(record) => http_json(200, success(record)),
             Err((status, body)) => http_json(status, body),

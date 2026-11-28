@@ -48,7 +48,6 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import {
   MACHINE_FEATURES_EVENT,
   WORKSPACE_LIMITS_EVENT,
-  clearManualWorkspaceLimits,
   connectionSummaryView,
   connectionTargetKey,
   emitDeviceLog,
@@ -61,9 +60,15 @@ import {
   syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
   workspaceLimitsExceedsHardwareWarning,
-  writeManualWorkspaceLimits,
 } from "../deviceConnection.js";
 import { writeMachineMotion } from "../fillOptions.js";
+import {
+  MACHINE_PROFILE_EVENT,
+  canEditMachineProfiles,
+  clearTargetMachineProfile,
+  resetManualWorkspaceLimits,
+  saveManualWorkspaceLimits,
+} from "../machineProfileSync.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
 const TWIN_STATUS_LABELS = {
@@ -187,12 +192,22 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
     [connectionMode, serialPort, baudrate, networkHost, telnetPort],
   );
   const [workspaceLimitsStore, setWorkspaceLimitsStore] = useState(() => readWorkspaceLimitsStore());
+  const [canEditProfiles, setCanEditProfiles] = useState(() => canEditMachineProfiles());
   useEffect(() => {
     const onLimits = (e) => {
       if (e?.detail) setWorkspaceLimitsStore(e.detail);
+      setCanEditProfiles(canEditMachineProfiles());
+    };
+    const onProfile = () => {
+      setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+      setCanEditProfiles(canEditMachineProfiles());
     };
     window.addEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
-    return () => window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+    window.addEventListener(MACHINE_PROFILE_EVENT, onProfile);
+    return () => {
+      window.removeEventListener(WORKSPACE_LIMITS_EVENT, onLimits);
+      window.removeEventListener(MACHINE_PROFILE_EVENT, onProfile);
+    };
   }, []);
   const machineLimits = useMemo(
     () => resolveWorkspaceLimitsForTarget(workspaceLimitsStore, currentConnForm),
@@ -231,19 +246,81 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
   const [materialConfig, setMaterialConfig] = useState(() => loadTwinMaterialConfig());
   const [widthDraft, setWidthDraft] = useState(null);
   const [heightDraft, setHeightDraft] = useState(null);
+  const [travelDraft, setTravelDraft] = useState({ x: null, y: null });
+  const travelSaveTimerRef = useRef(null);
+  const pendingTravelSaveRef = useRef(null);
+
+  const commitManualWorkspaceLimits = useCallback(async (patch, targetOverride = undefined) => {
+    const target = targetOverride ?? readUnifiedConnection();
+    const res = await saveManualWorkspaceLimits(patch, target);
+    setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+    if (!res.ok && !res.skipped) {
+      void showAlert(res.error || "保存手填行程失败", { title: "行程未保存", tone: "warning" });
+    }
+  }, []);
+
+  const flushPendingTravelSave = useCallback(() => {
+    if (travelSaveTimerRef.current !== null) {
+      clearTimeout(travelSaveTimerRef.current);
+      travelSaveTimerRef.current = null;
+    }
+    const pending = pendingTravelSaveRef.current;
+    pendingTravelSaveRef.current = null;
+    if (pending) {
+      void commitManualWorkspaceLimits(pending.patch, pending.target);
+    }
+  }, [commitManualWorkspaceLimits]);
+
+  useEffect(() => {
+    flushPendingTravelSave();
+    setTravelDraft({ x: null, y: null });
+  }, [connTargetKey, flushPendingTravelSave]);
+
+  useEffect(() => () => flushPendingTravelSave(), [flushPendingTravelSave]);
 
   const updateMaterialConfig = useCallback((patch) => {
     setMaterialConfig((prev) => saveTwinMaterialConfig(prev, patch));
   }, []);
   const updateManualWorkspaceLimits = useCallback((patch) => {
-    const conn = readUnifiedConnection();
-    writeManualWorkspaceLimits(patch, conn);
+    if (!canEditMachineProfiles()) return;
+    if (travelSaveTimerRef.current !== null) {
+      clearTimeout(travelSaveTimerRef.current);
+      travelSaveTimerRef.current = null;
+    }
+    pendingTravelSaveRef.current = null;
+    setTravelDraft({ x: null, y: null });
+    void commitManualWorkspaceLimits(patch, readUnifiedConnection());
+  }, [commitManualWorkspaceLimits]);
+  const handleManualTravelInput = useCallback((axis, raw) => {
+    if (!canEditMachineProfiles()) return;
+    setTravelDraft((prev) => ({ ...prev, [axis]: raw }));
+    const field = axis === "x" ? "x_travel_mm" : "y_travel_mm";
+    const trimmed = String(raw ?? "").trim();
+    if (trimmed === "") {
+      pendingTravelSaveRef.current = { patch: { [field]: null }, target: readUnifiedConnection() };
+    } else {
+      const num = Number(trimmed);
+      if (!Number.isFinite(num) || num < 20 || num > MAX_XY_TRAVEL_MM) return;
+      pendingTravelSaveRef.current = { patch: { [field]: num }, target: readUnifiedConnection() };
+    }
+    if (travelSaveTimerRef.current !== null) clearTimeout(travelSaveTimerRef.current);
+    travelSaveTimerRef.current = setTimeout(() => {
+      flushPendingTravelSave();
+    }, 300);
+  }, [flushPendingTravelSave]);
+  const handleRestoreHardwareLimits = useCallback(async () => {
+    if (!canEditMachineProfiles()) return;
+    if (travelSaveTimerRef.current !== null) {
+      clearTimeout(travelSaveTimerRef.current);
+      travelSaveTimerRef.current = null;
+    }
+    pendingTravelSaveRef.current = null;
+    setTravelDraft({ x: null, y: null });
+    const res = await resetManualWorkspaceLimits(readUnifiedConnection());
     setWorkspaceLimitsStore(readWorkspaceLimitsStore());
-  }, []);
-  const handleRestoreHardwareLimits = useCallback(() => {
-    const conn = readUnifiedConnection();
-    clearManualWorkspaceLimits(conn);
-    setWorkspaceLimitsStore(readWorkspaceLimitsStore());
+    if (!res.ok && !res.skipped) {
+      void showAlert(res.error || "恢复固件行程失败", { title: "未恢复行程", tone: "warning" });
+    }
   }, []);
   const [telemetry, setTelemetry] = useState(() => parseGrblStatusReport(""));
   const [pollingTelemetry, setPollingTelemetry] = useState(false);
@@ -586,6 +663,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
           setWorkspaceLimitsStore(readWorkspaceLimitsStore());
           setFeaturesStore(readMachineFeaturesStore());
           if (syncedSwapNotice) {
+            void clearTargetMachineProfile(conn);
             emitDeviceLog("DEVICE", syncedSwapNotice, "warn");
           }
         }
@@ -1534,7 +1612,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 100 && workspace.yTravelMm === 100 ? "active" : ""}`}
                   onClick={() => updateManualWorkspaceLimits({ x_travel_mm: 100, y_travel_mm: 100 })}
-                  title="手动设为 100×100 mm 行程"
+                  disabled={!canEditProfiles}
+                  title={canEditProfiles ? "手动设为 100×100 mm 行程" : "只读客户端不可修改机器行程，请在电脑主窗口修改"}
                 >
                   <span>100×100 满行程</span>
                 </button>
@@ -1542,7 +1621,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                   type="button"
                   className={`btn btn-ghost twin-speed-btn ${workspace.xTravelMm === 90 && workspace.yTravelMm === 90 ? "active" : ""}`}
                   onClick={() => updateManualWorkspaceLimits({ x_travel_mm: 90, y_travel_mm: 90 })}
-                  title="四周预留 5mm 安全边距 (90×90 mm 安全雕刻区)"
+                  disabled={!canEditProfiles}
+                  title={canEditProfiles ? "四周预留 5mm 安全边距 (90×90 mm 安全雕刻区)" : "只读客户端不可修改机器行程，请在电脑主窗口修改"}
                 >
                   <span>90×90 安全区</span>
                 </button>
@@ -1552,7 +1632,8 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     id="btn-twin-restore-hardware-limits"
                     className="btn btn-ghost twin-speed-btn"
                     onClick={handleRestoreHardwareLimits}
-                    title="清除本连接目标的手填行程，恢复为固件上报值（未上报时回退默认 100×100 mm）"
+                    disabled={!canEditProfiles}
+                    title={canEditProfiles ? "清除本连接目标的手填行程，恢复为固件上报值（未上报时回退默认 100×100 mm）" : "只读客户端不可修改机器行程，请在电脑主窗口修改"}
                   >
                     <span>恢复为固件值</span>
                   </button>
@@ -1579,8 +1660,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     min={20}
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
-                    value={workspace.xTravelMm}
-                    onChange={(e) => updateManualWorkspaceLimits({ x_travel_mm: e.target.value })}
+                    value={travelDraft.x !== null ? travelDraft.x : workspace.xTravelMm}
+                    disabled={!canEditProfiles}
+                    onChange={(e) => handleManualTravelInput("x", e.target.value)}
+                    onBlur={() => {
+                      flushPendingTravelSave();
+                      setTravelDraft((prev) => ({ ...prev, x: null }));
+                    }}
                     className="text-input"
                     aria-label="X 轴可调行程 (mm)"
                   />
@@ -1592,8 +1678,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus, on
                     min={20}
                     max={MAX_XY_TRAVEL_MM}
                     step={1}
-                    value={workspace.yTravelMm}
-                    onChange={(e) => updateManualWorkspaceLimits({ y_travel_mm: e.target.value })}
+                    value={travelDraft.y !== null ? travelDraft.y : workspace.yTravelMm}
+                    disabled={!canEditProfiles}
+                    onChange={(e) => handleManualTravelInput("y", e.target.value)}
+                    onBlur={() => {
+                      flushPendingTravelSave();
+                      setTravelDraft((prev) => ({ ...prev, y: null }));
+                    }}
                     className="text-input"
                     aria-label="Y 轴可调行程 (mm)"
                   />

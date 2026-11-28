@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Type,
   FileCode,
@@ -89,6 +89,20 @@ import {
   syncHardwareMachineFeatures,
   syncHardwareWorkspaceLimits,
 } from "../deviceConnection.js";
+import {
+  FRAMING_SHAPE_EVENT,
+  MACHINE_PROFILE_EVENT,
+  applyMachineCalibrationToFillSettings,
+  canEditMachineProfiles,
+  clearTargetMachineProfile,
+  getRuntimeMachineState,
+  isMachineCalibrationChanged,
+  isMachineProfilesHydrated,
+  readFillSettingsWithMachineCalibration,
+  saveFramingShapeSetting,
+  saveTargetMachineCalibration,
+  stripMachineCalibrationFromFillSettings,
+} from "../machineProfileSync.js";
 import { useDeviceConnection } from "../useDeviceConnection.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
@@ -167,17 +181,50 @@ export function HomePage({
   );
   // 对刀起点（r48）：后端全局设置，工作台与语音共用；手机连电脑时只改本次
   const { origin: textOrigin, setOrigin: setTextOrigin } = useTextOrigin();
-  // 2026-11-16：矢量填充与走刀设置（对齐 LightBurn），与创意画板共用一份本机设置
-  const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  // 2026-11-16：矢量填充与走刀设置（对齐 LightBurn），非机器草稿存本机，扫描偏移与手填加速度按连接目标同步后端（r78）
+  const [fillSettings, setFillSettings] = useState(() =>
+    readFillSettingsWithMachineCalibration(readFillSettings, {
+      connection_mode: connectionMode,
+      port: serialPort,
+      baudrate: String(baudrate),
+      network_host: networkHost,
+      network_telnet_port: String(telnetPort),
+    }),
+  );
   // r40：当前材料条目随材料保存的填充 / 切割设置（选材料、厚度、刻法后载入，可改，“保存到材料库”写回）
   const [materialLayer, setMaterialLayer] = useState(null);
   const [materialApplied, setMaterialApplied] = useState([]);
   const materialLayerKeyRef = useRef("");
   const sendInFlightRef = useRef(false);
   const workflowAssetSeqRef = useRef(0);
+  const calibrationSaveTimerRef = useRef(null);
+  const pendingCalibrationRef = useRef(null);
+  const flushPendingCalibration = useCallback(() => {
+    if (calibrationSaveTimerRef.current !== null) {
+      clearTimeout(calibrationSaveTimerRef.current);
+      calibrationSaveTimerRef.current = null;
+    }
+    const pending = pendingCalibrationRef.current;
+    pendingCalibrationRef.current = null;
+    if (!pending) return;
+    void saveTargetMachineCalibration(pending.settings, pending.target).then((res) => {
+      if (!res.ok && !res.skipped) {
+        void showAlert(res.error || "保存机器校准参数失败", { title: "机器校准参数未保存", tone: "warning" });
+      }
+    });
+  }, []);
   const updateFillSettings = (next) => {
+    const prev = fillSettings;
     setFillSettings(next);
-    writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
+    const toStore = localSettingsToStore(next, readFillSettings(), materialApplied);
+    writeFillSettings(isMachineProfilesHydrated() ? stripMachineCalibrationFromFillSettings(toStore) : toStore);
+    if (isMachineCalibrationChanged(prev, next) && canEditMachineProfiles()) {
+      pendingCalibrationRef.current = { settings: next, target: currentConnectionTargetRef.current };
+      if (calibrationSaveTimerRef.current !== null) clearTimeout(calibrationSaveTimerRef.current);
+      calibrationSaveTimerRef.current = setTimeout(() => {
+        flushPendingCalibration();
+      }, 350);
+    }
   };
   const [materials, setMaterials] = useState([]);
   const [selectedMaterial, setSelectedMaterial] = useState(
@@ -267,8 +314,37 @@ export function HomePage({
   const effectiveWorkspaceLimits = resolveWorkspaceLimitsForTarget(workspaceLimitsStore, currentConnectionTarget);
   const maxWidthMm = effectiveWorkspaceLimits.x_travel_mm;
   const maxHeightMm = effectiveWorkspaceLimits.y_travel_mm;
-  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
+  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），后端全局设置（工作台 / 画板 / AI 预览 / 语音共用，r78）
   const [framingShape, setFramingShape] = useState(() => readFramingShape());
+  useEffect(() => {
+    const onShape = (e) => {
+      const next = e?.detail?.shape;
+      if (next === "hull" || next === "box") setFramingShape(next);
+    };
+    window.addEventListener(FRAMING_SHAPE_EVENT, onShape);
+    return () => window.removeEventListener(FRAMING_SHAPE_EVENT, onShape);
+  }, []);
+  const handleFramingShapeChange = (next) => {
+    const shape = next === "hull" ? "hull" : "box";
+    setFramingShape(shape);
+    if (!canEditMachineProfiles()) return;
+    void saveFramingShapeSetting(shape).then((res) => {
+      if (!res.ok) {
+        setFramingShape(res.shape || "box");
+        void showAlert(res.error || "保存走边框方式失败", { title: "走边框方式未保存", tone: "warning" });
+      }
+    });
+  };
+  useEffect(() => {
+    const onProfile = (e) => {
+      if (calibrationSaveTimerRef.current !== null) return;
+      const profiles = e?.detail || getRuntimeMachineState().profiles;
+      setFillSettings((prev) => applyMachineCalibrationToFillSettings(prev, profiles, currentConnectionTargetRef.current));
+    };
+    window.addEventListener(MACHINE_PROFILE_EVENT, onProfile);
+    return () => window.removeEventListener(MACHINE_PROFILE_EVENT, onProfile);
+  }, []);
+  useEffect(() => () => flushPendingCalibration(), [flushPendingCalibration]);
   const motionPayload = machineMotionPayload(fillSettings, machineMotion);
 
   const [uploadedImagePath, setUploadedImagePath] = useState("");
@@ -508,12 +584,18 @@ export function HomePage({
     if (prevConnectionKeyRef.current !== connectionTargetKey) {
       prevConnectionKeyRef.current = connectionTargetKey;
       probeEpochRef.current += 1;
+      flushPendingCalibration();
+      if (isMachineProfilesHydrated()) {
+        setFillSettings((prev) =>
+          applyMachineCalibrationToFillSettings(prev, getRuntimeMachineState().profiles, currentConnectionTargetRef.current),
+        );
+      }
       setConnectionStatus?.({
         connected: false,
         summary: "连接参数已更改，请重新握手探测",
       });
     }
-  }, [connectionTargetKey, setConnectionStatus]);
+  }, [connectionTargetKey, setConnectionStatus, flushPendingCalibration]);
 
   // Save to local storage only for keys whose value actually changed
   const persistedRef = useRef({});
@@ -621,7 +703,10 @@ export function HomePage({
         setMaterialLayer(layer);
         if (layer && layer.key !== materialLayerKeyRef.current) {
           materialLayerKeyRef.current = layer.key;
-          const next = applyMaterialLayer(readFillSettings(), layer);
+          const next = applyMaterialLayer(
+            readFillSettingsWithMachineCalibration(readFillSettings, currentConnectionTargetRef.current),
+            layer,
+          );
           setFillSettings(next.settings);
           setMaterialApplied(next.applied);
         }
@@ -630,7 +715,7 @@ export function HomePage({
         setMaterialLayer(null);
         if (materialLayerKeyRef.current) {
           materialLayerKeyRef.current = "";
-          setFillSettings(readFillSettings());
+          setFillSettings(readFillSettingsWithMachineCalibration(readFillSettings, currentConnectionTargetRef.current));
           setMaterialApplied([]);
         }
       }
@@ -684,7 +769,10 @@ export function HomePage({
     if (probeEpochRef.current !== epoch) return false;
     setConnectionStatus(outcome.status);
     if (outcome.connected) {
-      syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm, undefined, outcome.handshakeMeta);
+      const synced = syncHardwareWorkspaceLimits(outcome.machineLimits, connectionForm, undefined, outcome.handshakeMeta);
+      if (synced?.identity_changed_notice) {
+        void clearTargetMachineProfile(connectionForm);
+      }
       syncHardwareMachineFeatures(outcome.status?.features ?? null, connectionForm);
       writeMachineMotion(outcome.machineLimits, connectionForm);
       addLog("DEVICE", outcome.text, outcome.logLevel || "ok");
@@ -1574,7 +1662,7 @@ export function HomePage({
           canGenerate={activeTool !== "text" || Boolean(textContent.trim())}
           overlayStatus={overlayStatus}
           framingShape={framingShape}
-          setFramingShape={setFramingShape}
+          setFramingShape={handleFramingShapeChange}
           connectionForm={connectionForm}
           connectionStatus={connectionStatus}
           activeJobs={activeJobs}

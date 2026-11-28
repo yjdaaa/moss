@@ -13,7 +13,7 @@ pub(crate) use image_upload::generate_image_or_gcode_artifacts;
 use options::{MachineMotion, ParsedFill, cut_options_json, fill_options_json, parse_path_options};
 pub(crate) use options::{
     feed_exceeds_max_rate_warning, frame_hull_json, merge_layer_options, parse_cut_options,
-    parse_fill_options, parse_machine_motion, time_estimate_json,
+    parse_fill_options, parse_machine_motion, parse_scan_offset_table, time_estimate_json,
 };
 pub(crate) use text::generate_text_artifacts;
 

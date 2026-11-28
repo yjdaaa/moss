@@ -47,6 +47,7 @@ import {
 } from "../deviceConnection.js";
 import { drawConnectionPayload } from "../drawConnection.js";
 import { machineMotionPayload, readFillSettings, readMachineMotion } from "../fillOptions.js";
+import { readFillSettingsWithMachineCalibration } from "../machineProfileSync.js";
 import { readLocalSafe, writeLocalSafe } from "../components/material-lab/labStorage.js";
 import { LabLibraryPanel } from "../components/material-lab/LabLibraryPanel.jsx";
 import { LabParamsPanel } from "../components/material-lab/LabParamsPanel.jsx";
@@ -598,7 +599,10 @@ export function MaterialLabPage({
       work_area_width_mm: effectiveWorkspaceLimits.x_travel_mm,
       work_area_height_mm: effectiveWorkspaceLimits.y_travel_mm,
       ...drawConnectionPayload(labConnectionForm),
-      ...machineMotionPayload(readFillSettings(), readMachineMotion(labConnectionForm)),
+      ...machineMotionPayload(
+        readFillSettingsWithMachineCalibration(readFillSettings, labConnectionForm),
+        readMachineMotion(labConnectionForm),
+      ),
     };
     const testLabel = matrixTestType === "interval" ? "线距测试" : `「${modeInfo.label}」标定矩阵`;
     setMatrixBusy(true);
@@ -826,7 +830,10 @@ export function MaterialLabPage({
         work_area_width_mm: effectiveWorkspaceLimits.x_travel_mm,
         work_area_height_mm: effectiveWorkspaceLimits.y_travel_mm,
         ...drawConnectionPayload(labConnectionForm),
-        ...machineMotionPayload(readFillSettings(), readMachineMotion(labConnectionForm)),
+        ...machineMotionPayload(
+          readFillSettingsWithMachineCalibration(readFillSettings, labConnectionForm),
+          readMachineMotion(labConnectionForm),
+        ),
       });
       if (res.ok && res.data?.success && res.data.result?.calibration_id) {
         const record = res.data.result;

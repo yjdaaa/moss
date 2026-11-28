@@ -227,6 +227,7 @@ pub(super) fn insert_raster_fields(
             "overscan_auto": scan.auto,
             "bidirectional": scan.options.bidirectional,
             "scan_offset_mm": if scan.options.bidirectional { scan.options.scan_offset_mm } else { 0.0 },
+            "scan_offset_origin": scan.scan_offset_origin,
             "scan_offset_table": scan.offset_table,
             "from_material": scan.from_material,
         }),

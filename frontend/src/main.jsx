@@ -19,6 +19,7 @@ import {
 } from "./deviceConnection.js";
 import { drawTargetReady } from "./drawConnection.js";
 import { writeMachineMotion } from "./fillOptions.js";
+import { clearTargetMachineProfile, hydrateMachineProfilesFromSystemInfo } from "./machineProfileSync.js";
 import { useDeviceConnection } from "./useDeviceConnection.js";
 import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
@@ -153,7 +154,10 @@ function App() {
       if (!sameTarget) return;
       setConnectionStatus(outcome.status);
       if (outcome.connected) {
-        syncHardwareWorkspaceLimits(outcome.machineLimits, saved, undefined, outcome.handshakeMeta);
+        const synced = syncHardwareWorkspaceLimits(outcome.machineLimits, saved, undefined, outcome.handshakeMeta);
+        if (synced?.identity_changed_notice) {
+          void clearTargetMachineProfile(saved);
+        }
         syncHardwareMachineFeatures(outcome.status?.features ?? null, saved);
         writeMachineMotion(outcome.machineLimits, saved);
         emitDeviceLog("DEVICE", outcome.text, outcome.logLevel || "ok");
@@ -356,6 +360,7 @@ function App() {
         setMcpStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextMcp) ? prev : nextMcp));
         setVoiceStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextVoice) ? prev : nextVoice));
         setDryRunStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextDryRun) ? prev : nextDryRun));
+        void hydrateMachineProfilesFromSystemInfo(result, { post: postJson });
         if (!autoUpdateCheckedRef.current) {
           autoUpdateCheckedRef.current = true;
           if (result.auto_check_update && !isRemoteMode()) {
