@@ -22,7 +22,7 @@ import {
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = path.resolve(TEST_DIR, "..");
 
-test("LB5: buildLaserBenchPrompt 内容精简、完整覆盖 L0/L1/L2 与前提、满足长度上限且零敏感泄露", () => {
+test("LB5/LD: buildLaserBenchPrompt 内容精简、指向语音中心开关位置、完整覆盖 L0/L1/L2 且零敏感泄露", () => {
   const prompt = buildLaserBenchPrompt();
   assert.ok(
     prompt.length > 200 && prompt.length <= LASER_BENCH_PROMPT_MAX_LENGTH,
@@ -32,11 +32,13 @@ test("LB5: buildLaserBenchPrompt 内容精简、完整覆盖 L0/L1/L2 与前提�
   assert.match(prompt, /遵守 `AGENTS\.md` 与 `docs\/developer\/safety\.md`/);
   assert.doesNotMatch(prompt, /launch_send_job_for|FakeGrbl|sim_guard\.rs/);
 
-  // 三条命令与用途、前提
+  // 三条命令与用途、前提及新入口路径
   assert.match(prompt, /node scripts\/laser-bench\/laser-sim-bench\.mjs/);
   assert.match(prompt, /node scripts\/laser-bench\/laser-readonly-check\.mjs/);
   assert.match(prompt, /node scripts\/laser-bench\/laser-dryrun-bench\.mjs/);
+  assert.match(prompt, /语音中心 › 记录与诊断 › AI 联调与测试 › 激光雕刻机测试/);
   assert.match(prompt, /打开空跑开关/);
+  assert.doesNotMatch(prompt, /偏好设置/);
   assert.match(prompt, /出光永远由用户手动/);
   assert.match(prompt, /<runtime>\/laser-bench\/\{sim,readonly,dryrun\}-<run-id>\//);
   assert.match(prompt, /scripts\/laser-bench\/README\.md/);
@@ -92,7 +94,7 @@ test("LB5: 空跑状态行、顶栏标记文案与开启前确认提示符合约
   );
 });
 
-test("LB5: LaserBenchSection 精简卡片仅含三项（状态行、空跑开关与限速、复制按钮），开启需确认，顶栏展示空跑标记", async () => {
+test("LD: 激光测试卡片挪入语音中心 AI 联调与测试分组（全链路可见、只读隐藏开关）、偏好设置不再出现且顶栏保留空跑标记", async () => {
   const server = await createServer({
     root: FRONTEND_ROOT,
     logLevel: "error",
@@ -100,58 +102,117 @@ test("LB5: LaserBenchSection 精简卡片仅含三项（状态行、空跑开关
   });
   try {
     const { LaserBenchSection } = await server.ssrLoadModule("/src/components/LaserBenchSection.jsx");
+    const { AiBenchAssistantCard } = await server.ssrLoadModule("/src/components/voice-builtin/AiBenchAssistantCard.jsx");
     const { SettingsModal } = await server.ssrLoadModule("/src/components/SettingsModal.jsx");
     const { Navbar } = await server.ssrLoadModule("/src/components/Navbar.jsx");
 
-    // 1) 关闭态渲染：只含 3 样核心元素，不含 L0/L1/L2 分级列表或“查看记录”按钮
+    // 1) embedded 模式关闭态渲染：只含 3 样核心元素（状态行、空跑开关与限速、复制按钮），不含 L0/L1/L2 分级与多余按钮
     const offHtml = renderToStaticMarkup(
       React.createElement(LaserBenchSection, {
+        embedded: true,
         canEdit: true,
         connectionStatus: { connected: true },
         initialDryRun: { enabled: false, max_feed_mm_min: 2000, remaining_seconds: 0 },
       }),
     );
-    assert.match(offHtml, /id="settings-laser-bench-section"/);
-    assert.match(offHtml, /id="settings-laser-bench-status"[^>]*>已连接 · 空跑关闭</);
-    assert.match(offHtml, /id="settings-laser-dry-run-toggle"/);
+    assert.match(offHtml, /id="voice-laser-bench-box"/);
+    assert.match(offHtml, /激光雕刻机测试/);
+    assert.match(offHtml, /id="voice-laser-bench-status"[^>]*>已连接 · 空跑关闭</);
+    assert.match(offHtml, /id="voice-laser-dry-run-toggle"/);
     assert.match(offHtml, /允许 AI 真机空跑测试（不出光、限速）/);
-    assert.match(offHtml, /id="settings-laser-dry-run-feed"/);
-    assert.match(offHtml, /id="settings-laser-bench-copy-btn"/);
+    assert.match(offHtml, /id="voice-laser-dry-run-feed"/);
+    assert.match(offHtml, /id="voice-laser-bench-copy-btn"/);
     assert.match(offHtml, /一键复制 AI 激光测试提示词/);
-    // 不包含被删掉的分级列表和多余按钮
     assert.doesNotMatch(offHtml, /settings-laser-bench-levels|L0 模拟机全自动|L1 真机只读核对|L2 真机空跑|查看记录/);
-    // 除 FoldHeader 折叠按钮外，卡片内仅有一个操作按钮（复制提示词）
-    const actionButtons = offHtml.match(/<button\b[^>]*id="settings-laser-bench-[^"]*"/g) || [];
-    assert.equal(actionButtons.length, 1, `卡片内只应有一个操作按钮，实际：${actionButtons.join(", ")}`);
+    const actionButtons = offHtml.match(/<button\b/g) || [];
+    assert.equal(actionButtons.length, 1, `卡片内只应有一个操作按钮，实际 ${actionButtons.length} 个`);
 
     // 2) 开启态渲染：显示剩余时间
     const onHtml = renderToStaticMarkup(
       React.createElement(LaserBenchSection, {
+        embedded: true,
         canEdit: true,
         connectionStatus: { connected: true },
         initialDryRun: { enabled: true, max_feed_mm_min: 1500, remaining_seconds: 2400 },
       }),
     );
-    assert.match(onHtml, /id="settings-laser-dry-run-remaining"[^>]*>剩余 40 分钟</);
+    assert.match(onHtml, /id="voice-laser-dry-run-remaining"[^>]*>剩余 40 分钟</);
     assert.match(onHtml, /已连接 · 空跑开启（限速 1500 mm\/min · 剩余 40 分钟）/);
 
-    // 3) 无操作者权限时隐藏
-    assert.equal(renderToStaticMarkup(React.createElement(LaserBenchSection, { canEdit: false })), "");
+    // 3) 只读客户端（canEdit=false）：仍显示状态行与复制提示词按钮，隐藏空跑开关与限速输入框
+    const readonlyHtml = renderToStaticMarkup(
+      React.createElement(LaserBenchSection, {
+        embedded: true,
+        canEdit: false,
+        connectionStatus: { connected: true },
+        initialDryRun: { enabled: false, max_feed_mm_min: 2000, remaining_seconds: 0 },
+      }),
+    );
+    assert.match(readonlyHtml, /id="voice-laser-bench-status"[^>]*>已连接 · 空跑关闭</);
+    assert.match(readonlyHtml, /id="voice-laser-bench-copy-btn"/);
+    assert.doesNotMatch(readonlyHtml, /id="voice-laser-dry-run-toggle"/);
+    assert.doesNotMatch(readonlyHtml, /id="voice-laser-dry-run-feed"/);
 
     // 4) 开关开启必须经 showConfirm 二次确认
     const sectionSrc = readFileSync(path.join(FRONTEND_ROOT, "src/components/LaserBenchSection.jsx"), "utf8");
     assert.match(sectionSrc, /showConfirm\s*\(\s*DRY_RUN_CONFIRM_MESSAGE/);
-    assert.match(sectionSrc, /<FoldHeader[^>]*summary=/, "折叠标题须带当前值摘要");
 
-    // 5) 接入 SettingsModal 诊断区（紧邻完整过程记录之后）
+    // 5) 偏好设置不再渲染激光测试卡片或空跑开关，完整过程记录保持不变
     const settingsHtml = renderToStaticMarkup(
       React.createElement(SettingsModal, { visible: true, onClose: () => {} }),
     );
-    const traceIdx = settingsHtml.indexOf('id="settings-process-trace-section"');
-    const benchIdx = settingsHtml.indexOf('id="settings-laser-bench-section"');
-    assert.ok(traceIdx > 0 && benchIdx > traceIdx, "AI 激光自主测试卡片应位于偏好设置完整过程记录旁");
+    assert.match(settingsHtml, /id="settings-process-trace-section"/, "完整过程记录保持不变");
+    assert.doesNotMatch(
+      settingsHtml,
+      /settings-laser-bench-section|voice-laser-bench-box|dry-run-toggle|允许 AI 真机空跑测试/,
+      "偏好设置中不再出现激光测试卡片与空跑开关",
+    );
 
-    // 6) 顶栏在空跑开启时显示醒目标记，关闭时不显示
+    // 6) 语音中心 AI 联调与测试分组（#voice-group-ai-bench-hub）：
+    //    - builtin 模式：语音部分在前，激光雕刻机测试子块在后；
+    //    - official（非 builtin）模式：只渲染激光雕刻机测试子块，摘要相应调整，不依赖 builtin.status。
+    const builtinHubHtml = renderToStaticMarkup(
+      React.createElement(AiBenchAssistantCard, {
+        mode: "builtin",
+        builtin: {
+          status: {
+            debug_inject: { enabled: false, active: false },
+            sessions: [],
+            bench_recordings: { corpus_count: 13, total_recordings: 0, speaker_count: 0, complete_speaker_count: 0 },
+          },
+        },
+        connectionStatus: { connected: true },
+        dryRunStatus: { enabled: false, max_feed_mm_min: 2000, remaining_seconds: 0 },
+      }),
+    );
+    assert.match(builtinHubHtml, /id="voice-group-ai-bench-hub"/);
+    const voiceSwitchIdx = builtinHubHtml.indexOf('id="voice-debug-inject-box"');
+    const laserBoxIdx = builtinHubHtml.indexOf('id="voice-laser-bench-box"');
+    assert.ok(voiceSwitchIdx > 0 && laserBoxIdx > voiceSwitchIdx, "builtin 下语音部分须在前、激光雕刻机测试子块须在后");
+
+    const officialHubHtml = renderToStaticMarkup(
+      React.createElement(AiBenchAssistantCard, {
+        mode: "official",
+        builtin: { status: null },
+        connectionStatus: { connected: false },
+        dryRunStatus: { enabled: false, max_feed_mm_min: 2000, remaining_seconds: 0 },
+      }),
+    );
+    assert.match(officialHubHtml, /id="voice-group-ai-bench-hub"/);
+    assert.match(officialHubHtml, /激光雕刻机测试 · 未连接 · 空跑关闭/, "非 builtin 模式摘要须调整为激光状态");
+    assert.match(officialHubHtml, /id="voice-laser-bench-box"/);
+    assert.doesNotMatch(
+      officialHubHtml,
+      /voice-ai-bench-checklist|voice-ai-bench-prompt-actions|voice-bench-recordings-fold|voice-debug-inject-box/,
+      "非 builtin 模式下不渲染语音联调子块",
+    );
+
+    // 7) VoicePage 在所有语音模式下均挂载 ai-bench-hub
+    const voicePageSrc = readFileSync(path.join(FRONTEND_ROOT, "src/pages/VoicePage.jsx"), "utf8");
+    const recordsTab = voicePageSrc.split('<VoiceTabPanel tab="records"')[1].split("</VoiceTabPanel>")[0];
+    assert.match(recordsTab, /key:\s*"ai-bench-hub",\s*modes:\s*\["official",\s*"builtin"\]/);
+
+    // 8) 顶栏在空跑开启时显示醒目标记，关闭时不显示
     const navOn = renderToStaticMarkup(
       React.createElement(Navbar, {
         currentPath: "/",

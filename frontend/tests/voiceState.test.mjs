@@ -2863,10 +2863,12 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   const idxCopy = assistantSrc.indexOf('id="voice-ai-bench-prompt-actions"');
   const idxRecorder = assistantSrc.indexOf("<BenchRecordingsSection");
   const idxSwitch = assistantSrc.indexOf('id="voice-debug-inject-switch"');
+  const idxLaser = assistantSrc.indexOf("<LaserBenchSection");
   assert.ok(
-    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch,
-    "VD6：AI 联调与测试分组内必须严格按 状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关 排列",
+    idxChecklist > 0 && idxChecklist < idxCopy && idxCopy < idxRecorder && idxRecorder < idxSwitch && idxSwitch < idxLaser,
+    "VD6/LD：AI 联调与测试分组内必须严格按 语音（状态清单 → 复制按钮 → 录制测试语料 → 调试注入开关）→ 激光雕刻机测试 排列",
   );
+  assert.match(assistantSrc, /const isBuiltin = mode === "builtin"/, "LD：语音子块仅在 builtin 下展示，激光子块始终展示");
   assert.doesNotMatch(assistantSrc, /<VoiceAsrCorpusCard/, "识别语料已合并进完整过程记录与对话记录与排障");
 
   const tracesSrc = readFileSync(
@@ -2878,6 +2880,7 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
 
   const pageSrc = readFileSync(new URL("../src/pages/VoicePage.jsx", import.meta.url), "utf8");
   assert.match(pageSrc, /<AiBenchAssistantCard/);
+  assert.match(pageSrc, /key:\s*"ai-bench-hub",\s*modes:\s*\["official",\s*"builtin"\]/);
 });
 
 test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/削顶校验、权限指引与删除前确认", async () => {

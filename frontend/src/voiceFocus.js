@@ -5,6 +5,7 @@
 const KEY = "moss_voice_focus";
 export const VOICE_FOCUS_EVENT = "moss:voice-focus";
 export const HOME_APPROVALS = "home-approvals";
+export const LASER_BENCH = "laser-bench";
 
 export function requestVoiceFocus(target, storage = globalThis.sessionStorage) {
   try {

@@ -9,7 +9,6 @@ import { useModalFocusTrap } from "./useModalFocusTrap.js";
 import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
 import { ProcessTraceSection } from "./ProcessTraceSection.jsx";
-import { LaserBenchSection } from "./LaserBenchSection.jsx";
 import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
 import { hasDesktopSession, isReadOnlyReferenceClient, isRemoteMode } from "../authSession.js";
 import { shouldShowExportSettings } from "../exportSettings.js";
@@ -34,9 +33,6 @@ export function SettingsModal(props) {
 function SettingsModalBody({
   onClose,
   onOpenVoice = null,
-  connectionStatus = null,
-  dryRunStatus = null,
-  onDryRunChange = null,
   hideTopPills: hideTopPillsProp,
   onHideTopPillsChange = null,
   initialUpdateReport = null,
@@ -461,23 +457,6 @@ function SettingsModalBody({
 
           {/* 完整过程记录（n105，默认关；只在有操作者设置权限的本机显示） */}
           <ProcessTraceSection canEdit={canEditOperatorSettings} hasVoice={Boolean(onOpenVoice)} />
-
-          {/* AI 激光自主测试（LB5 精简卡片：状态行 + 空跑开关与限速 + 复制提示词） */}
-          <LaserBenchSection
-            canEdit={canEditOperatorSettings}
-            connectionStatus={connectionStatus}
-            initialDryRun={
-              dryRunStatus || (systemInfo
-                ? {
-                    enabled: Boolean(systemInfo.laser_dry_run_enabled),
-                    max_feed_mm_min: Number(systemInfo.dry_run_max_feed_mm_min) || 2000,
-                    remaining_seconds: Number(systemInfo.laser_dry_run_remaining_seconds) || 0,
-                    expires_at: systemInfo.laser_dry_run_expires_at ?? null,
-                  }
-                : null)
-            }
-            onDryRunChange={onDryRunChange}
-          />
 
           {/* 软件更新（Magpie 风格：当前版本 + 启动时自动检查更新 + 包含预览版 + 立即检查更新） */}
           {canEditOperatorSettings && (

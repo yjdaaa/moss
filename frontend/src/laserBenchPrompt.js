@@ -1,5 +1,5 @@
 /**
- * LB5 偏好设置「AI 激光自主测试」状态格式化、空跑确认文案与精简提示词纯函数（不依赖 React，便于单测）。
+ * LB5 / LD 语音中心「AI 联调与测试 › 激光雕刻机测试」状态格式化、空跑确认文案与精简提示词纯函数（不依赖 React，便于单测）。
  * 严禁在输出中包含任何令牌、密钥、设备地址（IP / 串口号）或本机绝对路径。
  */
 
@@ -64,7 +64,7 @@ export function buildLaserBenchPrompt(options = {}) {
     "## 命令与用途",
     `- L0 模拟机全自动（隔离运行目录 + 回环模拟器，零硬件风险）：\`node scripts/laser-bench/laser-sim-bench.mjs${profileArg}\``,
     "- L1 真机只读核对（白名单仅握手与状态查询，前提：用户已在 App 连接机器）：`node scripts/laser-bench/laser-readonly-check.mjs`",
-    "- L2 真机空跑（后端强制不出光、限速；前提：用户已在 App 连接机器并打开空跑开关；出光永远由用户手动）：`node scripts/laser-bench/laser-dryrun-bench.mjs`",
+    "- L2 真机空跑（后端强制不出光、限速；前提：用户已在 App 连接机器并在「语音中心 › 记录与诊断 › AI 联调与测试 › 激光雕刻机测试」打开空跑开关；出光永远由用户手动）：`node scripts/laser-bench/laser-dryrun-bench.mjs`",
     "- 前提未满足时暂停并告知用户，不自行改连接或绕过开关。",
     "- 归档位置：`<runtime>/laser-bench/{sim,readonly,dryrun}-<run-id>/`，字段见 `scripts/laser-bench/README.md`。",
     "",

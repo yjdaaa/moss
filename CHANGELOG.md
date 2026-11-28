@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 将激光 AI 测试入口与空跑开关整体迁入语音中心「AI 联调与测试」（2026-11-28）
+
+- **现象**：此前激光自主测试卡片与空跑开关放在系统偏好设置，和语音中心的「AI 联调与测试」入口分散在两处。
+- **根因与修复**：按 2026-11-28 用户决定（技术书 `r75` 补充），为 `LaserBenchSection` 新增 `embedded` 样式变体（只读客户端隐藏开关、保留状态与复制按钮），整体迁入语音中心「记录与诊断 › AI 联调与测试」分组（`#voice-group-ai-bench-hub`）语音子块之后；该分组改为所有语音链路均显示（非 `builtin` 下仅显示激光子块并调整摘要）；偏好设置删除重复入口与接线（`ProcessTraceSection` 不变），点击顶栏 `#nav-dry-run-badge` 经 `requestVoiceFocus(LASER_BENCH)` 跳至语音中心该分组，并同步提示词、L2 提示与文档。
+- **验证**：`node scripts/verify.mjs --finish` 通过（前端单测 433 项、脚本 110 项、浏览器 20 个文件，已快更），含语音中心浏览器测试对官方 / 内置两种链路的实测。
+- **关联**：`frontend/src/components/{LaserBenchSection,SettingsModal,Navbar}.jsx`、`frontend/src/components/voice-builtin/AiBenchAssistantCard.jsx`、`frontend/src/pages/VoicePage.jsx`、`frontend/src/{main.jsx,voiceFocus.js,laserBenchPrompt.js}`、`frontend/src/styles/15-addenda-2026-11.css`、`scripts/laser-bench/{laser-dryrun-bench.mjs,README.md}`、`docs/{developer/frontend-behavior,developer/api-contracts,integration/revisions/fusion-technical-spec}.md`。
+
 ### 修复 `$22=0` 后端仍发 `$H` 回零漏洞，新增 L2 真机空跑（后端强制不出光与限速）、过程记录来源区分与界面精简（2026-11-28）
 
 - **现象**：上一轮 L0 检出固件 `$22=0` 时后端仍向控制器发送 `$H`；缺少真机空跑底层强制保护与 L2 脚本；过程记录未区分 AI 测试与空跑操作，偏好设置测试卡片元素偏多。

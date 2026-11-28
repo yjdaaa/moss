@@ -102,7 +102,7 @@ export function Navbar({
             id="nav-dry-run-badge"
             role="status"
             onClick={onDryRunClick}
-            title="当前处于真机空跑模式（后端强制不出光与限速），点击可前往偏好设置关闭"
+            title="当前处于真机空跑模式（后端强制不出光与限速），点击可前往语音中心「AI 联调与测试」关闭"
           >
             <FlaskConical size={13} aria-hidden="true" />
             <span>{dryRunBannerText}</span>

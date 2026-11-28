@@ -58,7 +58,7 @@ node scripts/laser-bench/laser-readonly-check.mjs --port 9666 --out-dir /path/to
 
 前提：
 1. 用户已在 MOSS 桌面端连接好激光机，无运行中或待确认停机任务；
-2. 用户已在 MOSS 桌面端「偏好设置 → AI 激光自主测试」打开 **「允许 AI 真机空跑测试（不出光、限速）」** 开关（可设限速上限 `300–5000 mm/min`，默认 `2000`，60 分钟自动关闭）。
+2. 用户已在 MOSS 桌面端「语音中心 › 记录与诊断 › AI 联调与测试 › 激光雕刻机测试」打开 **「允许 AI 真机空跑测试（不出光、限速）」** 开关（可设限速上限 `300–5000 mm/min`，默认 `2000`，60 分钟自动关闭）。
 
 ```bash
 node scripts/laser-bench/laser-dryrun-bench.mjs

@@ -1813,6 +1813,38 @@ button.conn-pill:hover {
   gap: 8px 12px;
   width: 100%;
 }
+.ai-bench-section-head {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ob-ink-3);
+}
+.ai-bench-laser-divider {
+  padding-top: 10px;
+  border-top: 1px dashed var(--ob-line);
+}
+.ai-bench-laser-block .voice-block-h h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ai-bench-laser-icon {
+  flex-shrink: 0;
+  color: var(--ob-accent-2);
+}
+.ai-bench-laser-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.ai-bench-laser-feed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ob-ink-2);
+}
 .ai-bench-checklist-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));

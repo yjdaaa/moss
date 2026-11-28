@@ -619,6 +619,15 @@ try {
   await context.addInitScript(() => {
     window.__TAURI__ = { core: { invoke: (command, args) => window.__fakeInvoke(command, args) }, event: { listen: async () => () => {} } };
   });
+  const dryRunState = { enabled: false, max_feed_mm_min: 2000 };
+  const dryRunPayload = () => ({
+    laser_dry_run_enabled: dryRunState.enabled,
+    dry_run_max_feed_mm_min: dryRunState.max_feed_mm_min,
+    laser_dry_run_effective_max_feed_mm_min: Math.floor(dryRunState.max_feed_mm_min / 2),
+    laser_dry_run_remaining_seconds: dryRunState.enabled ? 3600 : 0,
+    laser_dry_run_expires_at: dryRunState.enabled ? 1_790_003_600 : null,
+    laser_dry_run_ttl_seconds: 3600,
+  });
   await context.route("**/*", async (route) => {
     const target = new URL(route.request().url());
     if (target.origin === new URL(local).origin) return route.continue();
@@ -627,8 +636,21 @@ try {
       const approvals = [{ approval_id: "apr_fail", status: "failed", kind: "laser_job", summary: "椴木书签", source: "voice", created_at: 1_790_000_000, outcome: { success: false, message: "控制器忙，未开始加工", error_code: "controller_busy" } }];
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { approvals, limit: 50, server_time: 1_790_000_100, ttl_seconds: 120 } }) });
     }
+    if (target.hostname === "127.0.0.1" && target.port === "9666" && target.pathname === "/api/settings" && route.request().method() === "POST") {
+      const body = route.request().postDataJSON?.() || {};
+      if (typeof body.dry_run_max_feed_mm_min === "number") dryRunState.max_feed_mm_min = body.dry_run_max_feed_mm_min;
+      if (typeof body.laser_dry_run_enabled === "boolean") dryRunState.enabled = body.laser_dry_run_enabled;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { ...dryRunPayload(), message: "已保存" } }) });
+    }
     if (target.hostname === "127.0.0.1" && target.port === "9666") {
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { mcp: {}, approvals: [] } }) });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          result: { mcp: {}, approvals: [], can_edit_operator_settings: true, ...dryRunPayload() },
+        }),
+      });
     }
     return route.abort("blockedbyclient");
   });
@@ -667,7 +689,36 @@ try {
   await page.getByTitle("系统偏好设置").click();
   await page.locator(".settings-modal").waitFor();
   assert.equal(await page.locator(".settings-modal #settings-jev").count(), 0, "桌面端偏好设置不再显示 Jev");
+  assert.equal(
+    await page.locator(".settings-modal #settings-laser-bench-section, .settings-modal #settings-laser-dry-run-toggle, .settings-modal #voice-laser-dry-run-toggle").count(),
+    0,
+    "LD：偏好设置中不再出现激光测试卡片与空跑开关",
+  );
   await page.locator(".settings-modal .mat-modal-close").click();
+  // LD：非 builtin（官方小智）模式下，记录与诊断最上方仍显示 AI 联调与测试分组，但只渲染激光雕刻机测试子块且开启空跑须二次确认并点亮顶栏标记
+  await tab("记录与诊断").click();
+  const officialRecordsGroupIds = await page
+    .locator("#voice-panel-records .voice-group")
+    .evaluateAll((els) => els.map((el) => el.id));
+  assert.equal(officialRecordsGroupIds[0], "voice-group-ai-bench-hub", "LD：非 builtin 模式下 AI 联调与测试仍在记录与诊断最上方");
+  assert.match(await page.locator("#voice-group-ai-bench-hub > .voice-group-h").innerText(), /激光雕刻机测试 ·/, "LD：非 builtin 模式摘要调整为激光状态");
+  assert.ok(await page.locator("#voice-group-ai-bench-hub #voice-laser-bench-box").isVisible(), "LD：非 builtin 模式显示激光雕刻机测试子块");
+  assert.equal(
+    await page.locator("#voice-group-ai-bench-hub #voice-ai-bench-checklist, #voice-group-ai-bench-hub #voice-ai-bench-prompt-actions, #voice-group-ai-bench-hub #voice-bench-recordings-fold, #voice-group-ai-bench-hub #voice-debug-inject-box").count(),
+    0,
+    "LD：非 builtin 模式下不显示语音联调子块",
+  );
+  const officialDryRunToggle = page.locator("#voice-group-ai-bench-hub #voice-laser-dry-run-toggle");
+  assert.equal(await officialDryRunToggle.isChecked(), false, "空跑开关默认关闭");
+  await officialDryRunToggle.click();
+  await confirmDialog("开启空跑");
+  await page.waitForFunction(() => document.querySelector("#voice-laser-dry-run-toggle")?.checked === true);
+  await page.locator("#nav-dry-run-badge").waitFor();
+  assert.match(await page.locator("#nav-dry-run-badge").innerText(), /空跑模式（不出光 · 限速 2000 mm\/min/);
+  await officialDryRunToggle.click();
+  await page.waitForFunction(() => document.querySelector("#voice-laser-dry-run-toggle")?.checked === false);
+  await page.locator("#nav-dry-run-badge").waitFor({ state: "detached" });
+  await tab("服务").click();
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "语音状态条默认跟随官方链路");
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-expanded"), "false", "非对话时默认收成单行状态条");
   assert.match(await page.locator("#voice-moss-twin-source").innerText(), /官方小智/);
@@ -1299,6 +1350,7 @@ try {
       "voice-ai-bench-prompt-actions",
       "voice-bench-recordings-box",
       "voice-debug-inject-box",
+      "voice-laser-bench-box",
     ];
     const nodes = ids.map((id) => document.getElementById(id));
     if (nodes.some((n) => !n)) return false;
@@ -1307,7 +1359,7 @@ try {
     }
     return true;
   });
-  assert.equal(hubOrderOk, true, "VD6：AI 联调与测试内部四块顺序必须严格一致");
+  assert.equal(hubOrderOk, true, "VD6/LD：AI 联调与测试内部五块顺序（语音四块 → 激光雕刻机测试）必须严格一致");
   assert.equal(await page.locator("#voice-asr-corpus-section").count(), 0, "识别语料已并入完整过程记录与对话记录与排障");
   // 验证挪来的调试注入开关仍保留确认弹窗与原 id
   const debugSwitch = page.locator("#voice-group-ai-bench-hub #voice-debug-inject-switch");

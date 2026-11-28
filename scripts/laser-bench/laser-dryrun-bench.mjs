@@ -554,7 +554,7 @@ export async function runDryRunBench(opts = {}) {
 
   if (sysInfo.laser_dry_run_enabled !== true) {
     const reason =
-      "空跑开关未开启：请在 MOSS 桌面端打开「偏好设置 → AI 激光自主测试」，开启「允许 AI 真机空跑测试（不出光、限速）」后再重跑本脚本";
+      "空跑开关未开启：请在 MOSS 桌面端打开「语音中心 › 记录与诊断 › AI 联调与测试 › 激光雕刻机测试」，开启「允许 AI 真机空跑测试（不出光、限速）」后再重跑本脚本";
     log(`[L2] 预检阻断：${reason}`);
     return finalizeArchive({
       precheckBlocked: true,

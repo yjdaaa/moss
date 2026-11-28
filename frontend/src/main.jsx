@@ -35,6 +35,7 @@ import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
 import { isVoiceCenterAvailable } from "./voiceApi.js";
+import { LASER_BENCH, requestVoiceFocus } from "./voiceFocus.js";
 import {
   readHideTopPills,
   readSideCollapsed,
@@ -504,10 +505,14 @@ function App() {
           onApprovalsClick={openApprovals}
           hideStatusPills={hideTopPills}
           dryRunStatus={dryRunStatus}
-          onDryRunClick={() => {
-            writeFoldOpen("settings-laser-bench", true);
-            setShowSettingsModal(true);
-          }}
+          onDryRunClick={
+            voiceEnabled
+              ? () => {
+                  requestVoiceFocus(LASER_BENCH);
+                  navigateTo("/voice");
+                }
+              : null
+          }
           compact={topCompact}
           onToggleCompact={toggleTopCompact}
           updateNotice={
@@ -610,7 +615,13 @@ function App() {
             )}
             {currentPath === "/voice" && voiceEnabled && (
               <VoiceErrorBoundary onBack={navigateTo}>
-                <VoicePage mcpStatus={mcpStatus} approvalCount={approvalCount} />
+                <VoicePage
+                  mcpStatus={mcpStatus}
+                  approvalCount={approvalCount}
+                  connectionStatus={connectionStatus}
+                  dryRunStatus={dryRunStatus}
+                  onDryRunChange={setDryRunStatus}
+                />
               </VoiceErrorBoundary>
             )}
             {currentPath === "/" && (
@@ -648,9 +659,6 @@ function App() {
           setShowSettingsModal(false);
           setFocusUpdateSection(false);
         }}
-        connectionStatus={connectionStatus}
-        dryRunStatus={dryRunStatus}
-        onDryRunChange={setDryRunStatus}
         hideTopPills={hideTopPills}
         onHideTopPillsChange={handleHideTopPillsChange}
         initialUpdateReport={startupUpdate}

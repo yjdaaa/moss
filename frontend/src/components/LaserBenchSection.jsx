@@ -32,20 +32,24 @@ function broadcastDryRun(next) {
 }
 
 /**
- * LB5 偏好设置 → 诊断区「AI 激光自主测试」精简卡片（仅三项）：
+ * LB5 / LD 激光雕刻机 AI 自主测试精简卡片（三项核心元素）：
  * 1. 一行状态（已连接/未连接 · 空跑开启/关闭）；
- * 2. 「允许 AI 真机空跑测试（不出光、限速）」开关 + 速度上限输入框 + 剩余时间；
+ * 2. 「允许 AI 真机空跑测试（不出光、限速）」开关 + 速度上限输入框 + 剩余时间（只读客户端隐藏开关，仅保留状态与复制按钮）；
  * 3. 「一键复制 AI 激光测试提示词」按钮。
+ *
+ * `embedded=true` 用于语音中心「记录与诊断 › AI 联调与测试」分组内的「激光雕刻机测试」子块。
  */
 export function LaserBenchSection({
   canEdit = true,
+  embedded = false,
   connectionStatus = null,
   initialDryRun = null,
   onDryRunChange = null,
 } = {}) {
-  if (isReadOnlyReferenceClient() || canEdit === false) return null;
   return (
     <LaserBenchPanel
+      canEdit={canEdit}
+      embedded={embedded}
       connectionStatus={connectionStatus}
       initialDryRun={initialDryRun}
       onDryRunChange={onDryRunChange}
@@ -53,7 +57,13 @@ export function LaserBenchSection({
   );
 }
 
-function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryRunChange = null }) {
+function LaserBenchPanel({
+  canEdit = true,
+  embedded = false,
+  connectionStatus = null,
+  initialDryRun = null,
+  onDryRunChange = null,
+}) {
   const [dryRun, setDryRun] = useState(
     () =>
       initialDryRun || {
@@ -65,8 +75,11 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
   const [feedInput, setFeedInput] = useState(() =>
     String(initialDryRun?.max_feed_mm_min || DRY_RUN_DEFAULT_MAX_FEED),
   );
+  const [serverCanEdit, setServerCanEdit] = useState(true);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const editable = !isReadOnlyReferenceClient() && canEdit !== false && serverCanEdit;
 
   useEffect(() => {
     if (!initialDryRun) return;
@@ -79,7 +92,11 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
     const refresh = async () => {
       const res = await getJson("/api/system/info");
       if (!alive || !(res.ok && res.data?.success)) return;
-      const next = extractDryRun(res.data.result);
+      const result = res.data.result;
+      if (result && typeof result === "object" && "can_edit_operator_settings" in result) {
+        setServerCanEdit(result.can_edit_operator_settings !== false);
+      }
+      const next = extractDryRun(result);
       if (next) {
         setDryRun(next);
         setFeedInput(String(next.max_feed_mm_min));
@@ -113,6 +130,7 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
   };
 
   const handleToggleDryRun = async (checked) => {
+    if (!editable) return;
     const feed = parseFeed();
     if (checked && feed === null) {
       await showAlert(`速度上限必须在 ${DRY_RUN_MIN_FEED} ~ ${DRY_RUN_MAX_FEED} mm/min 之间`, {
@@ -148,6 +166,7 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
   };
 
   const handleCommitFeed = async () => {
+    if (!editable) return;
     const feed = parseFeed();
     if (feed === null) {
       setFeedInput(String(dryRun.max_feed_mm_min || DRY_RUN_DEFAULT_MAX_FEED));
@@ -184,6 +203,85 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
     dryRun,
   });
 
+  const toggleId = embedded ? "voice-laser-dry-run-toggle" : "settings-laser-dry-run-toggle";
+  const feedId = embedded ? "voice-laser-dry-run-feed" : "settings-laser-dry-run-feed";
+  const remainingId = embedded ? "voice-laser-dry-run-remaining" : "settings-laser-dry-run-remaining";
+  const copyBtnId = embedded ? "voice-laser-bench-copy-btn" : "settings-laser-bench-copy-btn";
+
+  const controlsRow = editable ? (
+    <div className={embedded ? "ai-bench-laser-controls" : "settings-row"} style={embedded ? undefined : { flexWrap: "wrap", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+      <label className={embedded ? "voice-check" : "settings-label"} style={embedded ? undefined : { marginBottom: 0 }}>
+        <input
+          type="checkbox"
+          id={toggleId}
+          checked={Boolean(dryRun.enabled)}
+          disabled={busy}
+          onChange={(e) => void handleToggleDryRun(e.target.checked)}
+        />
+        <span>允许 AI 真机空跑测试（不出光、限速）</span>
+      </label>
+      <label className={embedded ? "ai-bench-laser-feed" : undefined} style={embedded ? undefined : { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
+        <span>上限</span>
+        <input
+          type="number"
+          id={feedId}
+          className="text-input"
+          style={{ width: "86px", padding: "4px 8px" }}
+          min={DRY_RUN_MIN_FEED}
+          max={DRY_RUN_MAX_FEED}
+          step={100}
+          value={feedInput}
+          disabled={busy}
+          onChange={(e) => setFeedInput(e.target.value)}
+          onBlur={() => void handleCommitFeed()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void handleCommitFeed();
+            }
+          }}
+          aria-label="空跑速度上限（mm/min）"
+        />
+        <span>mm/min</span>
+      </label>
+      {dryRun.enabled && (
+        <span className="ob-pill ob-pill--warn" id={remainingId}>
+          剩余 {formatDryRunRemaining(dryRun.remaining_seconds)}
+        </span>
+      )}
+    </div>
+  ) : null;
+
+  const copyButton = (
+    <button
+      type="button"
+      className={embedded ? "btn btn-primary" : "btn btn-hud-primary settings-btn"}
+      id={copyBtnId}
+      onClick={() => void handleCopyPrompt()}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      <span>{copied ? "已复制提示词" : "一键复制 AI 激光测试提示词"}</span>
+    </button>
+  );
+
+  if (embedded) {
+    return (
+      <div className="voice-block ai-bench-laser-block" id="voice-laser-bench-box">
+        <div className="voice-block-h">
+          <h3>
+            <FlaskConical size={14} aria-hidden="true" className="ai-bench-laser-icon" />
+            <span>激光雕刻机测试</span>
+          </h3>
+          <span className={`ob-pill ${dryRun.enabled ? "ob-pill--warn" : "ob-pill--off"}`} id="voice-laser-bench-status">
+            {statusLine}
+          </span>
+        </div>
+        {controlsRow}
+        <div className="voice-actions">{copyButton}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="ob-fold settings-spacer" id="settings-laser-bench-section">
       <FoldHeader
@@ -197,56 +295,8 @@ function LaserBenchPanel({ connectionStatus = null, initialDryRun = null, onDryR
       <div className="settings-box-4" id="settings-laser-bench-status">
         {statusLine}
       </div>
-      <div className="settings-row" style={{ flexWrap: "wrap", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
-        <label className="settings-label" style={{ marginBottom: 0 }}>
-          <input
-            type="checkbox"
-            id="settings-laser-dry-run-toggle"
-            checked={Boolean(dryRun.enabled)}
-            disabled={busy}
-            onChange={(e) => void handleToggleDryRun(e.target.checked)}
-          />
-          <span>允许 AI 真机空跑测试（不出光、限速）</span>
-        </label>
-        <label style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
-          <span>上限</span>
-          <input
-            type="number"
-            id="settings-laser-dry-run-feed"
-            className="text-input"
-            style={{ width: "86px", padding: "4px 8px" }}
-            min={DRY_RUN_MIN_FEED}
-            max={DRY_RUN_MAX_FEED}
-            step={100}
-            value={feedInput}
-            disabled={busy}
-            onChange={(e) => setFeedInput(e.target.value)}
-            onBlur={() => void handleCommitFeed()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void handleCommitFeed();
-              }
-            }}
-            aria-label="空跑速度上限（mm/min）"
-          />
-          <span>mm/min</span>
-        </label>
-        {dryRun.enabled && (
-          <span className="ob-pill ob-pill--warn" id="settings-laser-dry-run-remaining">
-            剩余 {formatDryRunRemaining(dryRun.remaining_seconds)}
-          </span>
-        )}
-      </div>
-      <button
-        type="button"
-        className="btn btn-hud-primary settings-btn"
-        id="settings-laser-bench-copy-btn"
-        onClick={() => void handleCopyPrompt()}
-      >
-        {copied ? <Check size={13} /> : <Copy size={13} />}
-        <span>{copied ? "已复制提示词" : "一键复制 AI 激光测试提示词"}</span>
-      </button>
+      {controlsRow}
+      {copyButton}
     </div>
   );
 }

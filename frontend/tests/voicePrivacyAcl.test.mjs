@@ -195,9 +195,11 @@ test("VD2/VD6：测试录音主窗口 ACL、macOS 麦克风权限说明与 AI �
   const aiHub = frontend("src/components/voice-builtin/AiBenchAssistantCard.jsx");
   assert.match(aiHub, /id="ai-bench-hub"/);
   assert.match(aiHub, /title="AI 联调与测试"/);
+  assert.match(aiHub, /const isBuiltin = mode === "builtin"/, "LD：语音联调子块仅在 builtin 模式下展示");
   assert.match(aiHub, /voice-debug-inject-switch/, "VD6：调试注入开关挪入 AI 联调与测试分组并保留原 id");
   assert.match(aiHub, /showConfirm\(\s*DEBUG_TEXT_INJECT_CONFIRM_TEXT/, "VD6：挪动后保留原确认弹窗");
   assert.match(aiHub, /<BenchRecordingsSection/);
+  assert.match(aiHub, /<LaserBenchSection/, "LD：激光雕刻机测试子块接入 AI 联调与测试分组");
   assert.doesNotMatch(aiHub, /<VoiceAsrCorpusCard/, "识别语料已合并进完整过程记录与对话记录与排障，不在 AI 联调与测试单独展示");
 
   const liveTraces = frontend("src/components/voice-builtin/LiveDebugTraces.jsx");
@@ -208,7 +210,7 @@ test("VD2/VD6：测试录音主窗口 ACL、macOS 麦克风权限说明与 AI �
   const serviceTab = page.split('<VoiceTabPanel tab="service"')[1].split("</VoiceTabPanel>")[0];
   assert.doesNotMatch(serviceTab, /AiBenchAssistantCard/, "VD6：AI 联调卡片不再放在服务标签");
   const recordsTab = page.split('<VoiceTabPanel tab="records"')[1].split("</VoiceTabPanel>")[0];
-  assert.match(recordsTab, /key:\s*"ai-bench-hub",\s*modes:\s*\["builtin"\]/, "VD6：AI 联调与测试仅在内置链路下的记录与诊断显示");
+  assert.match(recordsTab, /key:\s*"ai-bench-hub",\s*modes:\s*\["official",\s*"builtin"\]/, "LD：AI 联调与测试在所有语音链路下均显示（非 builtin 仅显示激光子块）");
   assert.ok(
     recordsTab.indexOf('key: "ai-bench-hub"') < recordsTab.indexOf('key: "approvals"'),
     "VD6：AI 联调与测试须位于记录与诊断最上方",

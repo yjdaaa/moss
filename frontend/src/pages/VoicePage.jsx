@@ -29,7 +29,7 @@ import { VoiceEndpointsCard, VoiceToolsCard } from "../components/VoiceEndpoints
 import { JevSettingsSection } from "../components/JevSettingsSection.jsx";
 import VoiceWakeWordSection from "../components/VoiceWakeWordSection.jsx";
 import { SaveBar, VOICE_GOTO_EVENT, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel, focusVoiceGroup, gotoVoiceGroup } from "../components/VoiceLayout.jsx";
-import { HOME_APPROVALS, VOICE_FOCUS_EVENT, peekVoiceFocus } from "../voiceFocus.js";
+import { HOME_APPROVALS, LASER_BENCH, VOICE_FOCUS_EVENT, clearVoiceFocus, peekVoiceFocus } from "../voiceFocus.js";
 import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
   SETTINGS_GROUPS,
@@ -223,23 +223,42 @@ function SettingsGroup({ group, status, form, baseline, onChange, onSaved, busy,
   );
 }
 
-export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
+export function VoicePage({
+  mcpStatus = null,
+  approvalCount = 0,
+  connectionStatus = null,
+  dryRunStatus = null,
+  onDryRunChange = null,
+}) {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
   const [form, setForm] = useState(null);
   const [baseline, setBaseline] = useState(null);
-  const [tab, setTab] = useState(() => (peekVoiceFocus() === HOME_APPROVALS ? "privacy" : readTab()));
-  // 全局审批卡“去家居审批”：切到“隐私与家居”标签（展开家居审批由 PrivateSettingsEntry 处理）
+  const [tab, setTab] = useState(() => (peekVoiceFocus() === HOME_APPROVALS ? "privacy" : peekVoiceFocus() === LASER_BENCH ? "records" : readTab()));
+  // n69 页面内“去设置”跳转：先切标签，等标签面板显示后再展开并滚动到目标分组
+  const [gotoTarget, setGotoTarget] = useState(() =>
+    peekVoiceFocus() === LASER_BENCH
+      ? { group: "ai-bench-hub", target: "voice-laser-bench-box" }
+      : null,
+  );
+  // 全局审批卡“去家居审批”与顶栏空跑标记跳到“记录与诊断 › AI 联调与测试”
   useEffect(() => {
+    if (peekVoiceFocus() === LASER_BENCH) {
+      clearVoiceFocus(LASER_BENCH);
+    }
     const onFocus = (event) => {
       if (event.detail === HOME_APPROVALS) setTab("privacy");
+      if (event.detail === LASER_BENCH) {
+        clearVoiceFocus(LASER_BENCH);
+        setTab("records");
+        writeTab("records");
+        setGotoTarget({ group: "ai-bench-hub", target: "voice-laser-bench-box" });
+      }
     };
     window.addEventListener(VOICE_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(VOICE_FOCUS_EVENT, onFocus);
   }, []);
-  // n69 页面内“去设置”跳转：先切标签，等标签面板显示后再展开并滚动到目标分组
-  const [gotoTarget, setGotoTarget] = useState(null);
   useEffect(() => {
     const onGoto = (event) => {
       const key = normalizeVoiceTab(event.detail?.tab);
@@ -252,10 +271,10 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     return () => window.removeEventListener(VOICE_GOTO_EVENT, onGoto);
   }, []);
   useEffect(() => {
-    if (!gotoTarget) return;
+    if (!gotoTarget || !status) return;
     focusVoiceGroup(gotoTarget.group, gotoTarget.target);
     setGotoTarget(null);
-  }, [gotoTarget]);
+  }, [gotoTarget, status]);
   const [dirty, setDirty] = useState({});
   const [dismissedHints, setDismissedHints] = useState(() => readDismissedVoiceHints());
   const strictEnabledFlag = Boolean(status?.strict?.enabled);
@@ -785,8 +804,21 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
               id="records"
               mode={mode}
               parts={[
-                // VD6（2026-11-27 用户确认放置方案）：仅内置链路显示，默认展开，集中 AI 联调清单、复制提示词、录制测试语料、调试注入开关与识别语料
-                { key: "ai-bench-hub", modes: ["builtin"], node: <AiBenchAssistantCard builtin={builtin} active={activeTab === "records"} /> },
+                // VD6 / LD（2026-11-28 用户决定）：所有语音链路均显示，默认展开；内置链路含小智语音联调 + 激光雕刻机测试，非内置链路仅显示激光雕刻机测试
+                {
+                  key: "ai-bench-hub",
+                  modes: ["official", "builtin"],
+                  node: (
+                    <AiBenchAssistantCard
+                      mode={mode}
+                      builtin={builtin}
+                      active={activeTab === "records"}
+                      connectionStatus={connectionStatus}
+                      dryRunStatus={dryRunStatus}
+                      onDryRunChange={onDryRunChange}
+                    />
+                  ),
+                },
                 {
                   key: "approvals",
                   modes: ["official", "builtin"],
