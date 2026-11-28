@@ -1,26 +1,8 @@
-//! 设备屏幕：字幕宽度、全屏画风常驻场景、预览续期与音乐 HUD。
+//! 设备屏幕：全屏画风常驻场景、预览续期与音乐 HUD。
 
 use super::*;
 
 impl<'a> Session<'a> {
-    /// 设备字幕一行的宽度（半角字符记 1，其余记 2）：屏宽减两侧留白后除以字号，再留一个字的余量。
-    /// 没拿到屏幕信息时按官方最常见的 320 px 宽、20 px 字号算。
-    pub(super) fn subtitle_units(&self) -> usize {
-        let width = self
-            .device_mcp
-            .as_ref()
-            .and_then(|d| d.screen_size)
-            .map_or(320, |(w, _)| w);
-        let size = self
-            .screen
-            .text_font_cap
-            .as_ref()
-            .map_or(20, |cap| cap.size)
-            .clamp(12, 40);
-        let chars = (width.saturating_sub(16) / size).saturating_sub(1);
-        (chars as usize * 2).clamp(16, 48)
-    }
-
     /// n70 这台设备是否按全屏画风包显示（单色屏不算）。
     pub(super) fn pack_active(&self) -> bool {
         self.screen.screen_pack

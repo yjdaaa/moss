@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 内置链路小智底部字幕改为与官方一致的整句跑马灯滚动（2026-11-28）
+
+- **现象**：内置链路把超过一行的回答切成几段、按语速逐段替换，底部字幕一行一行跳着换；用户要求和官方链路一样是滑动的。
+- **根因与修复**：按内置语音技术书 n145 取消 n85 ④ 的字幕分段：每句文字随首帧整句下发（`PlaybackPump::push_marked`），超长部分由固件单行跑马灯自行滚动；删除 `subtitle_segments`、`push_segmented` 与 `subtitle_units`。与官方相同的代价：长句后半截可能在下一句到达前来不及滚出。字幕缺字诊断与补字库不变。
+- **验证**：`node scripts/verify.mjs --finish` 通过；删除两条分段相关单测，其余语音单测不变。未在实机上看滚动效果。
+- **关联**：`crates/moss-voice-server/src/session/{turn,screen}.rs`、`crates/moss-voice-server/src/audio/pump.rs`、`crates/moss-voice-providers/src/text.rs`、`docs/integration/revisions/native-voice-spec.md`（n145）。
+
 ### 手填行程、运动参数、扫描偏移校准与走边框形状改为后端统一保存，界面 / 语音 / MCP / 各客户端共用（2026-11-28）
 
 - **现象**：手填行程、手填加速度与运动参数、双向扫描偏移（含速度偏移表）、走边框形状只存在浏览器本地；小智语音、MCP 和手机 / 别的窗口看不到，语音生成的填充 / 位图任务用不上扫描偏移校准，问“能刻多大”拿不到手填行程，语音走边框只走矩形。

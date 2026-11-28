@@ -1028,26 +1028,8 @@ impl<'a> Session<'a> {
                 let mut resampler = Resampler::new(pcm.sample_rate, downlink);
                 let samples = resampler.process(&pcm.samples);
                 self.trace_tts_push(&samples);
-                let segments =
-                    moss_voice_providers::text::subtitle_segments(&text, self.subtitle_units());
-                if segments.len() > 1 {
-                    // 流式合成此刻只有首段音频：整句时长取“已到音频”与“按约 5.5 字/秒估算”的较大者，
-                    // 各段按字数比例落在时间轴上（宁可略早，不要晚）
-                    let chars = text.chars().count().max(1) as u64;
-                    let total = (samples.len() as u64).max(chars * u64::from(downlink) * 2 / 11);
-                    let mut before = 0u64;
-                    let marks = segments
-                        .into_iter()
-                        .map(|segment| {
-                            let at = total * before / chars;
-                            before += segment.chars().count() as u64;
-                            (at, segment)
-                        })
-                        .collect();
-                    self.pump.push_segmented(&samples, marks);
-                } else {
-                    self.pump.push_marked(&samples, text);
-                }
+                // n145：整句随首帧下发，超过一行由固件底部单行跑马灯自行滚动（与官方链路一致）
+                self.pump.push_marked(&samples, text);
                 if let Some(turn) = self.turn.as_mut() {
                     turn.resampler = Some(resampler);
                 }

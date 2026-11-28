@@ -275,51 +275,6 @@ fn is_emoji(c: char) -> bool {
     matches!(c as u32, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D | 0x2B50 | 0x2B55)
 }
 
-/// 把一句话切成设备字幕一行放得下的几段（拼回去与原文逐字相同）。
-///
-/// 官方固件底部字幕默认是单行跑马灯：超过一行的句子要等 1 秒才开始以约 3 字/秒滚动，下一句一到又从头来，
-/// 句子后半截根本露不出来。`max_units` 为一行的宽度（半角字符记 1，其余记 2）；优先在标点或空格处断开
-/// （断点不早于行宽的四成），标点不落在段首。
-pub fn subtitle_segments(text: &str, max_units: usize) -> Vec<String> {
-    let unit = |c: char| if c.is_ascii() { 1 } else { 2 };
-    let total: usize = text.chars().map(unit).sum();
-    if total <= max_units || max_units < 4 {
-        return vec![text.to_owned()];
-    }
-    let limit = max_units;
-    let hangs =
-        |c: char| is_pause(c) || matches!(c, '、' | '”' | '’' | '）' | ')' | '》' | '」' | ' ');
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut width = 0;
-    // 当前段里最近一个可断点：（字节长度, 到此为止的宽度）
-    let mut last_break: Option<(usize, usize)> = None;
-    for c in text.chars() {
-        if width + unit(c) > limit && !current.is_empty() && !hangs(c) {
-            match last_break.take() {
-                Some((at, upto)) if upto * 5 >= width * 2 => {
-                    let rest = current.split_off(at);
-                    out.push(std::mem::replace(&mut current, rest));
-                    width -= upto;
-                }
-                _ => {
-                    out.push(std::mem::take(&mut current));
-                    width = 0;
-                }
-            }
-        }
-        current.push(c);
-        width += unit(c);
-        if hangs(c) {
-            last_break = Some((current.len(), width));
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
 /// 推理模型把思考过程用 `<think>…</think>` 夹在正文里（经 Ollama 等 OpenAI 兼容服务、关不掉思考时常见）：
 /// 流式去掉，不念出来、不进历史（n114）。标签可能被拆在两段流式文字里，结尾像半个标签的部分先留着。
 #[derive(Debug, Default)]
@@ -639,46 +594,6 @@ impl Segmenter {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn subtitle_segments_fit_one_line_and_rejoin_to_the_original() {
-        assert_eq!(
-            subtitle_segments("好的，马上开始。", 28),
-            vec!["好的，马上开始。"]
-        );
-        let text = "椴木三毫米建议用百分之八十功率，速度每分钟六百毫米，分两遍切透，记得打开吹气。";
-        let segments = subtitle_segments(text, 28);
-        assert_eq!(segments.len(), 3, "{segments:?}");
-        assert_eq!(segments.concat(), text);
-        for segment in &segments {
-            let width: usize = segment
-                .chars()
-                .map(|c| if c.is_ascii() { 1 } else { 2 })
-                .sum();
-            // 悬挂标点允许多出一个字
-            assert!(width <= 30, "{segment}");
-            assert!(!segment.starts_with(['，', '。', '、']), "{segment}");
-        }
-        // 优先在标点处断开
-        assert_eq!(
-            subtitle_segments("先把材料放平，再关上防护盖，然后按开始键。", 28),
-            vec!["先把材料放平，再关上防护盖，", "然后按开始键。"]
-        );
-        // 没有标点时按宽度硬切
-        let plain = "一二三四五六七八九十一二三四五六七八九十";
-        let segments = subtitle_segments(plain, 28);
-        assert_eq!(segments.concat(), plain);
-        assert_eq!(
-            segments
-                .iter()
-                .map(|s| s.chars().count())
-                .collect::<Vec<_>>(),
-            vec![14, 6]
-        );
-        // 英文在空格处断开
-        let english = "Laser power is set to eighty percent now";
-        assert_eq!(subtitle_segments(english, 28).concat(), english);
-    }
-
     use super::*;
 
     fn run(deltas: &[&str]) -> Vec<String> {

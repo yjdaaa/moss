@@ -112,22 +112,6 @@ impl PlaybackPump {
         }
     }
 
-    /// 推入一句话，字幕分成几段：每段文字在这句音频的 `offset`（样本，按语速估算，须不减）处随帧返回。
-    /// 估算超出实际音频长度的段在句子收尾时收回到句末，不会拖到下一句里才显示。
-    pub fn push_segmented(&mut self, pcm: &[i16], marks: Vec<(u64, String)>) {
-        if !self.finished {
-            self.sentence_ended = false;
-            self.last_sentence_closed = false;
-            let base = self.pushed;
-            self.marks.extend(
-                marks
-                    .into_iter()
-                    .map(|(offset, mark)| (base + offset, mark)),
-            );
-            self.push(pcm);
-        }
-    }
-
     fn clamp_marks(&mut self) {
         let pushed = self.pushed;
         for (at, _) in self.marks.iter_mut() {
@@ -424,41 +408,6 @@ mod tests {
             PumpTick::Frame { marks, .. } => assert!(marks.is_empty(), "打断后旧句子的标记被清掉"),
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn segmented_marks_follow_the_audio_and_never_leak_into_the_next_sentence() {
-        let mut pump = pump(0);
-        pump.begin();
-        // 一句 180 ms（3 帧），字幕三段：第 0、60 ms 处各一段，第三段估算在 600 ms（超出实际音频）
-        pump.push_segmented(
-            &tone(RATE, 440.0, 180, 8000.0),
-            vec![
-                (0, "甲".into()),
-                (FRAME as u64, "乙".into()),
-                (10 * FRAME as u64, "丙".into()),
-            ],
-        );
-        pump.mark_sentence_end();
-        pump.push_marked(&tone(RATE, 440.0, 60, 8000.0), "下一句".into());
-        pump.finish();
-        let mut seen = Vec::new();
-        loop {
-            match pump.next_frame().unwrap() {
-                PumpTick::Frame { marks, .. } => seen.push(marks),
-                PumpTick::Done => break,
-                PumpTick::Waiting => unreachable!(),
-            }
-        }
-        assert_eq!(
-            seen,
-            vec![
-                vec!["甲".to_owned()],
-                vec!["乙".to_owned()],
-                vec![],
-                vec!["丙".to_owned(), "下一句".to_owned()],
-            ]
-        );
     }
 
     #[test]
