@@ -452,6 +452,10 @@ impl<'a> Session<'a> {
         if let crate::DeviceRequest::ShowScene { scene, style } = request {
             return self.show_scene_request(socket, scene, style).await;
         }
+        if let crate::DeviceRequest::TimerReminder { id, speech } = request {
+            enqueue_bounded_notice(&mut self.pending_timers, (id, speech), |a, b| a.0 == b.0);
+            return Ok(());
+        }
         if matches!(request, crate::DeviceRequest::PreviewScreen { .. })
             && self.device_mcp.is_none()
         {
@@ -770,6 +774,10 @@ impl<'a> Session<'a> {
                 return self
                     .handle_inject_text(socket, text, simulated, reply)
                     .await;
+            }
+            crate::DeviceRequest::TimerReminder { id, speech } => {
+                enqueue_bounded_notice(&mut self.pending_timers, (id, speech), |a, b| a.0 == b.0);
+                Ok(())
             }
             crate::DeviceRequest::InjectAudio {
                 pcm,

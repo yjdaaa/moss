@@ -180,6 +180,37 @@ fn timeout_from(value: Option<f64>) -> Duration {
 // check_laser_connection_tool：只读握手探测（发 `$$`，不移动轴、不出光）
 // ---------------------------------------------------------------------------
 
+/// 将 `MachineCapabilities` 格式化为清晰的结构化文本详情（纯类型层不依赖 `serde_json`）。
+fn format_capabilities_detail(
+    caps: &laser_device::MachineCapabilities,
+    raw_settings: Option<&[String]>,
+) -> String {
+    let mut lines = vec![
+        format!(
+            "有效行程 X: {} mm（{}）",
+            caps.x_travel.mm,
+            caps.x_travel.source.label_zh()
+        ),
+        format!(
+            "有效行程 Y: {} mm（{}）",
+            caps.y_travel.mm,
+            caps.y_travel.source.label_zh()
+        ),
+        format!("回零($22): {}", caps.homing_label()),
+        format!("软限位($20): {}", caps.soft_limits_label()),
+        format!("S 上限($30): {}", caps.spindle_max_s_label()),
+        format!("激光模式($32): {}", caps.laser_mode_label()),
+        format!("固件类型: {}", caps.firmware_type_label()),
+    ];
+    if let Some(settings) = raw_settings
+        && !settings.is_empty()
+    {
+        lines.push("--- 固件 $$ 原始配置 ---".into());
+        lines.extend(settings.iter().cloned());
+    }
+    lines.join("\n")
+}
+
 pub fn execute_check_laser_connection(args: &CheckLaserConnectionArgs) -> ToolCallResult {
     execute_check_laser_connection_with(args, &default_transport_opener())
 }
@@ -218,16 +249,25 @@ pub fn execute_check_laser_connection_with(
     let mut device = DeviceConnection::new(transport);
     match device.handshake_with_deadline(timeout) {
         Ok(settings) => {
-            let detail = if args.include_detail.unwrap_or(false) {
-                format!(
-                    "{label} 握手成功 ({target})，$32=1 激光模式就绪；固件设置 {} 行: {}",
-                    settings.len(),
-                    settings.join(" ")
-                )
-            } else {
-                format!("{label} 握手成功 ({target})，固件 $32=1 激光模式就绪")
-            };
-            ToolCallResult::with_detail(true, format!("{label}已连通 ({target})"), detail)
+            let caps = laser_device::build_machine_capabilities(
+                None,
+                None,
+                Some(&device.travel_limits),
+                (None, None),
+                &settings,
+                None,
+                None,
+            );
+            let cap_summary = caps.summary_zh();
+            let detail = format_capabilities_detail(
+                &caps,
+                args.include_detail.unwrap_or(false).then_some(&settings),
+            );
+            ToolCallResult::with_detail(
+                true,
+                format!("{label}已连通 ({target})。{cap_summary}"),
+                detail,
+            )
         }
         Err(error) => ToolCallResult::with_detail(
             false,
@@ -1277,8 +1317,51 @@ mod tests {
         let ok = execute_check_laser_connection_with(&args, &opener);
         assert!(ok.success, "{ok:?}");
         assert!(ok.result.contains("192.0.2.10:23"));
+        assert!(
+            ok.result.contains("有效行程 100×100 mm（默认）"),
+            "{}",
+            ok.result
+        );
+        assert!(ok.result.contains("回零未知"), "{}", ok.result);
+        assert!(ok.result.contains("S 上限未知"), "{}", ok.result);
+        assert!(ok.result.contains("激光模式已开启"), "{}", ok.result);
+        assert!(ok.result.contains("固件未知"), "{}", ok.result);
         assert_eq!(fake.lines(), vec!["$$".to_string()], "探测只允许发送 $$");
         assert_eq!(targets.lock().unwrap().as_slice(), ["192.0.2.10:23"]);
+
+        // 完整 $$ 设置 + include_detail=true 返回结构化能力与原始设置行
+        let (opener_full, _, fake_full) = fake_opener(vec![
+            "$20=1",
+            "$22=0",
+            "$30=1000",
+            "$32=1",
+            "$130=320.000",
+            "$131=220.000",
+            "ok",
+        ]);
+        let full = execute_check_laser_connection_with(
+            &CheckLaserConnectionArgs {
+                host: Some("192.0.2.11".into()),
+                include_detail: Some(true),
+                ..Default::default()
+            },
+            &opener_full,
+        );
+        assert!(full.success, "{full:?}");
+        assert!(
+            full.result.contains("有效行程 320×220 mm（固件）"),
+            "{}",
+            full.result
+        );
+        assert!(full.result.contains("回零未开启"), "{}", full.result);
+        assert!(full.result.contains("软限位已开启"), "{}", full.result);
+        assert!(full.result.contains("S 上限1000"), "{}", full.result);
+        assert_eq!(fake_full.lines(), vec!["$$".to_string()]);
+        let detail = full.detail.as_deref().unwrap();
+        assert!(detail.contains("S 上限($30): 1000"), "{detail}");
+        assert!(detail.contains("回零($22): 未开启"), "{detail}");
+        assert!(detail.contains("软限位($20): 已开启"), "{detail}");
+        assert!(detail.contains("$130=320.000"), "{detail}");
 
         // $32=0：已连接但未就绪
         let (opener, _, _) = fake_opener(vec!["$32=0", "ok"]);

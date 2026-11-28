@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 内置工具补能力：机器能力问答、语音刻最近上传的图片、加工剩余时间、内置语音计时提醒（2026-11-28）
+
+- **现象**：问“最大能刻多大 / 能回零吗 / 功率上限多少”时连接工具只给原始 `$$` 行；语音不能刻已上传的图片；查进度没有预计剩余时间（核实确认缺失）；内置语音没有通用计时提醒。
+- **根因与修复**：按技术书 r77 / n144：`/api/connection/check` 与 `check_laser_connection_tool` 返回能力摘要（有效行程按手填 → 固件 → 默认并标来源、`$22` / `$20` / `$30` / `$32`、固件类型，读不到写“未知”）；`laser_workflow_tool` preview 新增 `image: "latest_upload"` 与 `image_mode` / `line_interval_scale`，只认上传目录 30 分钟内的普通图片文件，发送仍需确认；`status` 新增 `remaining_seconds` / `remaining_text` / `progress_percent`；新增内置语音 `voice_timer_tool`（10 秒 ~ 3 小时、最多 5 个、仅内存，排在 TurnGate 后，模拟轮次只许 list，到点只对原设备播报，离线记事件），可在「MOSS 内置工具」关闭。审批、严格模式与发送门禁不变。
+- **验证**：`node scripts/verify.mjs --finish` 通过（含 E2E）；新增能力摘要（含未知）、最近上传判定、剩余时间计算、计时器上限 / 取消 / 模拟轮次拒绝等单测。未实机验证固件变体输出与小智播报；语音查询拿不到浏览器本地手填行程（r68 既有限制），按固件 → 默认取值并标来源。
+- **关联**：`crates/laser-device/src/{protocol,probe}.rs`、`crates/laser-api/src/{connection,files,workflow,jobs}.rs`、`crates/laser-mcp/src/{schema,dispatch}.rs`、`crates/moss-voice-server/src/timer.rs`、`crates/moss-voice-host/src/builtin/conversation.rs`、`tests/golden/mcp_tools.json`。
+
 ### 删除 5 个与分发不一致或重复的内置 MCP 工具，去掉“完整工具（高级）”开关（2026-11-28）
 
 - **现象**：打开“完整工具（高级）”后，`laser_grbl_tool` / `laser_network_grbl_tool` 的说明仍宣称可发文件、发任意 G-code、列串口等，实际只支持查状态与取消，并残留旧 Python 说明与写死的 100 mm 行程；`recommend_laser_params_tool`、`generate_text_laser_task_tool`、`start_tuned_job_tool` 与精简工具重复，参数表巨大。

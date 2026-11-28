@@ -649,6 +649,28 @@ pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
     limits
 }
 
+/// 从 GRBL `$$` 设置行中提取 `$30`（最大主轴/激光功率 S 上限），未报或非正数返回 `None`。
+pub fn parse_grbl_spindle_max(settings: &[String]) -> Option<f64> {
+    settings.iter().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix("$30=")
+            .and_then(|val| val.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+    })
+}
+
+/// 从 GRBL `$$` 设置行中提取 `$32`（激光模式开关），仅 `1` / `0` 有效，其余返回 `None`。
+pub fn parse_grbl_laser_mode(settings: &[String]) -> Option<bool> {
+    settings
+        .iter()
+        .rev()
+        .find_map(|line| match line.trim().strip_prefix("$32=")?.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

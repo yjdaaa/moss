@@ -410,3 +410,70 @@ fn persona_style_clock_anti_parrot_asr_corrections_and_debug_traces_work_end_to_
     server.set_debug_enabled(false);
     assert!(server.status().debug_traces.is_empty());
 }
+
+/// r77 / n144：计时提醒到点时如果设备正在对话中，不打断当前轮次，等当前轮次播完后再播“提醒：<内容>”。
+#[test]
+fn r77_timer_reminder_waits_for_active_turn_without_interrupting_and_speaks_after() {
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([Round::Reply {
+            deltas: vec!["正在回答你原来的问题。"],
+            calls: Vec::new(),
+            delay_ms: 120,
+        }])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("今天天气怎么样".into())])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        Arc::new(FastTools::default()),
+        ConversationSettings {
+            read_only_shortcuts: false,
+            ..ConversationSettings::default()
+        },
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    // 发起正常对话轮次（大模型思考约 120ms），在其尚未结束时投递一条到点提醒
+    speak_manual(&mut device, 1, 300);
+    assert_eq!(read_json(&mut device)["text"], "今天天气怎么样");
+    server
+        .device_request(
+            DEVICE,
+            crate::DeviceRequest::TimerReminder {
+                id: "t-busy".into(),
+                speech: "提醒：关掉气泵".into(),
+            },
+        )
+        .unwrap();
+
+    // 第一轮必须完整播完，不被提醒打断
+    let first = collect_items(&mut device);
+    assert_eq!(
+        texts(&first),
+        vec!["tts:start", "句:正在回答你原来的问题。", "tts:stop"]
+    );
+    // 紧接着才播报排队等待的计时提醒
+    let reminder = collect_items(&mut device);
+    assert_eq!(
+        texts(&reminder),
+        vec!["tts:start", "句:提醒：关掉气泵", "tts:stop"]
+    );
+}

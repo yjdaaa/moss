@@ -211,6 +211,78 @@ impl ApiService {
                 );
             }
             if action == "preview" || action == "create" || action == "plan" {
+                let mut latest_upload_meta: Option<crate::files::LatestUploadedImage> = None;
+                if let Some(image_val) = object.get("image").filter(|v| !v.is_null()) {
+                    let image_key = image_val
+                        .as_str()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if image_key != "latest_upload" {
+                        return http_json(
+                            400,
+                            failure(
+                                "image 参数仅支持 latest_upload（只能使用已上传到 MOSS 上传目录的图片，不接受任意路径）",
+                                Some(serde_json::json!({ "error_code": "invalid_image_source" })),
+                            ),
+                        );
+                    }
+                    let Some(upload_root) = self.upload_root.as_deref() else {
+                        return http_json(
+                            400,
+                            failure(
+                                "上传目录未配置，请先在电脑或手机上传图片后再试",
+                                Some(serde_json::json!({ "error_code": "no_uploaded_image" })),
+                            ),
+                        );
+                    };
+                    match crate::files::find_latest_uploaded_image(
+                        upload_root,
+                        unix_seconds(),
+                        crate::files::LATEST_UPLOAD_MAX_AGE_SECS,
+                    ) {
+                        Ok(found) => {
+                            object.insert(
+                                "source_type".into(),
+                                serde_json::Value::String("image".into()),
+                            );
+                            object.insert(
+                                "image_file".into(),
+                                serde_json::Value::String(found.filename.clone()),
+                            );
+                            latest_upload_meta = Some(found);
+                        }
+                        Err(crate::files::LatestUploadError::NotFound) => {
+                            return http_json(
+                                400,
+                                failure(
+                                    "还没有上传过图片，请先在电脑或手机上传图片后再试",
+                                    Some(serde_json::json!({ "error_code": "no_uploaded_image" })),
+                                ),
+                            );
+                        }
+                        Err(crate::files::LatestUploadError::Expired {
+                            display_name,
+                            age_seconds,
+                            ..
+                        }) => {
+                            let age_text = crate::files::format_uploaded_age_zh(age_seconds);
+                            return http_json(
+                                400,
+                                failure(
+                                    format!(
+                                        "最近上传的图片「{display_name}」上传于 {age_text}（已超过 30 分钟），为避免刻错旧图，请先在电脑或手机重新上传图片"
+                                    ),
+                                    Some(serde_json::json!({
+                                        "error_code": "uploaded_image_expired",
+                                        "display_name": display_name,
+                                        "age_seconds": age_seconds,
+                                    })),
+                                ),
+                            );
+                        }
+                    }
+                }
                 let source_type = object
                     .get("source_type")
                     .and_then(|v| v.as_str())
@@ -241,6 +313,18 @@ impl ApiService {
                                 artifacts.get_mut("time_estimate"),
                                 &object,
                             );
+                            if let Some(found) = latest_upload_meta {
+                                artifacts.insert(
+                                    "uploaded_image".into(),
+                                    serde_json::json!({
+                                        "file": found.filename,
+                                        "display_name": found.display_name,
+                                        "uploaded_at": found.uploaded_at,
+                                        "age_seconds": found.age_seconds,
+                                        "uploaded_ago": crate::files::format_uploaded_age_zh(found.age_seconds),
+                                    }),
+                                );
+                            }
                             object
                                 .insert("_artifacts".into(), serde_json::Value::Object(artifacts));
                         }

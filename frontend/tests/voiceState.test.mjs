@@ -1690,19 +1690,23 @@ test("内置工具按用途分组、显示中文名与风险标签，未登记�
     { name: "laser_safe_action_tool", description: "x" },
     { name: "laser_workflow_tool", description: "x" },
     { name: "material_params_tool", description: "x" },
+    { name: "voice_timer_tool", description: "x", builtin_only: true },
     { name: "open_app_tool", description: "x" },
     { name: "ext_unknown", description: "外部说明" },
   ]);
-  assert.deepEqual(groups.map((g) => g.id), ["safety", "job", "tuning", "desktop", "other"]);
+  assert.deepEqual(groups.map((g) => g.id), ["safety", "job", "tuning", "voice", "desktop", "other"]);
   const stop = groups[0].tools[0];
   assert.equal(stop.label, "停止与机器控制");
   assert.equal(stop.risk, "confirm");
   assert.equal(groups.at(-1).tools[0].summary, "外部说明");
-  // 8 个核心激光工具都有中文名，且不再有 advanced 组或已移除的 5 个旧工具
+  // 8 个核心激光工具 + 内置语音计时提醒都有中文名，且不再有 advanced 组或已移除的 5 个旧工具
   for (const name of ["check_laser_connection_tool", "laser_safe_action_tool", "laser_workflow_tool", "material_params_tool",
-    "refine_laser_params_from_feedback_tool", "regenerate_text_laser_task_tool", "run_calibration_grid_tool", "select_calibration_cell_tool"]) {
+    "refine_laser_params_from_feedback_tool", "regenerate_text_laser_task_tool", "run_calibration_grid_tool", "select_calibration_cell_tool",
+    "voice_timer_tool"]) {
     assert.ok(TOOL_META[name]?.label && TOOL_META[name].group !== "advanced", name);
   }
+  assert.equal(TOOL_META.voice_timer_tool.label, "计时提醒");
+  assert.equal(TOOL_META.voice_timer_tool.group, "voice");
   for (const removed of ["laser_grbl_tool", "laser_network_grbl_tool", "recommend_laser_params_tool", "generate_text_laser_task_tool", "start_tuned_job_tool"]) {
     assert.equal(TOOL_META[removed], undefined, `TOOL_META 不应再包含已移除工具 ${removed}`);
   }
@@ -2461,10 +2465,13 @@ test("n132 全站语音能力门禁：千问克隆/系统音色、快速回答�
 
   const tools = [
     { name: "laser_safe_action_tool", enabled: true, can_disable: false },
+    { name: "voice_timer_tool", enabled: true, can_disable: true, builtin_only: true },
     { name: "open_app_tool", enabled: true, can_disable: true },
   ];
   assert.equal(groupedTools(tools).some((g) => g.id === "desktop"), true);
   assert.equal(groupedTools(tools, { hideDesktop: true }).some((g) => g.id === "desktop"), false);
+  assert.equal(groupedTools(tools, { hideBuiltinOnly: false }).some((g) => g.id === "voice"), true);
+  assert.equal(groupedTools(tools, { hideBuiltinOnly: true }).some((g) => g.id === "voice"), false);
 });
 
 test("Colab T4 固定模型归一：笔记本忽略请求模型字段，表单与保存载荷固定写入标准常量", async () => {

@@ -28,6 +28,8 @@
       "identity": null,
       "machine_limits": null,
       "features": null,
+      "capabilities": null,
+      "capabilities_summary": null,
       "firmware_settings": [],
       "timeout_seconds": 3,
       "serial_connected": false,

@@ -2,6 +2,53 @@
 
 use crate::HostBackend;
 
+/// 图片转换方式枚举（与 `laser_core::image_job::TONE_MODES` 对齐，由测试核对一致）。
+pub const IMAGE_MODES: &[&str] = &[
+    "auto",
+    "dither",
+    "threshold",
+    "ordered",
+    "atkinson",
+    "jarvis",
+    "stucki",
+    "newsprint",
+    "halftone",
+    "sketch",
+    "grayscale",
+];
+
+/// `laser_workflow_tool(action=preview)` 刻已上传图片的图源与转换参数（2026-11-28 技术书 r77）。
+fn image_props() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "image",
+            serde_json::json!({
+                "type": "string",
+                "enum": ["latest_upload"],
+                "description": "preview：用最近上传到 MOSS 的图片时填 latest_upload（只认上传目录内最近 30 分钟的图片，不接受任意路径）"
+            }),
+        ),
+        (
+            "image_mode",
+            serde_json::json!({
+                "type": "string",
+                "enum": IMAGE_MODES,
+                "default": "auto",
+                "description": "preview（图片）：转换方式，如 auto 自动 / jarvis 照片抖动 / dither / threshold 线稿 / sketch 边缘 / grayscale 变功率灰度"
+            }),
+        ),
+        (
+            "line_interval_scale",
+            serde_json::json!({
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 3.0,
+                "description": "preview（图片）：线距倍数（0.5~3，常用 1.5 快速 / 1 均衡 / 0.8 精细）"
+            }),
+        ),
+    ]
+}
+
 /// 文字任务的基础图形、边框与文字区域（2026-11-17 技术书 r44）：坐标以木牌中心为原点、y 向上，
 /// 轮廓由后端按公式生成。只在 `laser_workflow_tool` 上列（每轮工具说明有字数预算），改图形就重新 preview。
 fn design_props() -> Vec<(&'static str, serde_json::Value)> {
@@ -115,7 +162,7 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
             }
         }
         if tool["name"] == "laser_workflow_tool" {
-            for (key, value) in design_props() {
+            for (key, value) in image_props().into_iter().chain(design_props()) {
                 tool["inputSchema"]["properties"][key] = value;
             }
         }

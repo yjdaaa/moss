@@ -707,7 +707,7 @@ fn missing_connection_does_not_force_network_mode() {
 
 #[test]
 fn image_and_material_test_options_are_listed_and_forwarded() {
-    // 2026-11-16（技术书 r41）& r76 合并单一清单：材料测试字段全部列出；语音拿不到图片文件，不列 image_mode，但分发原样转发
+    // 2026-11-28（技术书 r77）：材料测试字段全部列出；laser_workflow_tool 开放 image=latest_upload / image_mode / line_interval_scale，并由分发层转发
     let list = tools_list_json(false);
     let find = |list: &serde_json::Value, name: &str| {
         list["tools"]
@@ -719,17 +719,22 @@ fn image_and_material_test_options_are_listed_and_forwarded() {
             .unwrap()
     };
     let workflow = find(&list, "laser_workflow_tool");
+    let wf_props = &workflow["inputSchema"]["properties"];
+    assert_eq!(
+        wf_props["image"]["enum"],
+        serde_json::json!(["latest_upload"]),
+        "r77 仅开放 image=latest_upload，不接受任意路径"
+    );
+    assert!(wf_props.get("image_mode").is_some(), "应列出 image_mode");
     assert!(
-        workflow["inputSchema"]["properties"]
-            .get("image_mode")
-            .is_none(),
-        "清单不加图片参数（语音无法引用图片）"
+        wf_props.get("line_interval_scale").is_some(),
+        "应列出 line_interval_scale"
     );
     assert!(
         workflow["description"]
             .as_str()
             .unwrap()
-            .contains("工作台上传")
+            .contains("image=latest_upload")
     );
     let grid = find(&list, "run_calibration_grid_tool");
     let props = &grid["inputSchema"]["properties"];
@@ -1701,4 +1706,194 @@ fn voice_mcp_tools_surface_preview_and_send_warnings_in_summaries() {
         "{}",
         send.result
     );
+}
+
+#[test]
+fn r77_capabilities_latest_upload_image_and_status_remaining_time_in_mcp() {
+    // 1. IMAGE_MODES 与 laser-core TONE_MODES 严格对齐，workflow schema 开放 image / image_mode / line_interval_scale
+    assert_eq!(
+        crate::schema::IMAGE_MODES,
+        laser_core::image_job::TONE_MODES
+    );
+    let list = tools_list_json(false);
+    let wf = list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "laser_workflow_tool")
+        .unwrap();
+    let props = &wf["inputSchema"]["properties"];
+    assert_eq!(props["image"]["enum"], serde_json::json!(["latest_upload"]));
+    assert_eq!(
+        props["image_mode"]["enum"],
+        serde_json::json!(laser_core::image_job::TONE_MODES)
+    );
+    assert!(props.get("line_interval_scale").is_some());
+
+    // 2. check_laser_connection_tool 拼接能力摘要，include_detail=false 隐藏原始 firmware_settings、true 保留
+    let conn_resp = (
+        200,
+        serde_json::json!({
+            "success": true,
+            "result": {
+                "connected": true,
+                "summary": "网络 握手成功 (192.0.2.10:23)",
+                "firmware_settings": ["$20=1", "$22=1", "$30=1000", "$32=1"],
+                "capabilities": {
+                    "summary": "有效行程 300×200 mm（固件），回零已开启，软限位已开启，S 上限1000，激光模式已开启，固件FluidNC v4.1.1"
+                }
+            }
+        }),
+    );
+    let img_preview_resp = (
+        200,
+        serde_json::json!({
+            "success": true,
+            "result": {
+                "workflow_id": "wf-img-1",
+                "status": "preview_ready",
+                "artifacts": {
+                    "width_mm": 40.0,
+                    "height_mm": 30.0,
+                    "time_estimate": {"estimated_seconds": 95.0},
+                    "uploaded_image": {
+                        "file": "1700000000_0123456789_cat.png",
+                        "display_name": "cat.png",
+                        "uploaded_at": 1700000000,
+                        "uploaded_ago": "2 分钟前"
+                    }
+                }
+            }
+        }),
+    );
+    let status_sending_resp = (
+        200,
+        serde_json::json!({
+            "success": true,
+            "result": {
+                "workflow_id": "wf-run-1",
+                "status": "sending",
+                "remaining_seconds": 75.0,
+                "remaining_text": "约 1 分 15 秒",
+                "send_result": {
+                    "lines_sent": 50,
+                    "total_lines": 100,
+                    "estimated_total_seconds": 150.0,
+                    "remaining_seconds": 75.0,
+                    "remaining_text": "约 1 分 15 秒"
+                }
+            }
+        }),
+    );
+    let status_unknown_resp = (
+        200,
+        serde_json::json!({
+            "success": true,
+            "result": {
+                "workflow_id": "wf-run-2",
+                "status": "sending",
+                "remaining_seconds": null,
+                "remaining_text": "未知",
+                "send_result": {
+                    "lines_sent": 10,
+                    "total_lines": 100,
+                    "remaining_seconds": null,
+                    "remaining_text": "未知"
+                }
+            }
+        }),
+    );
+    let backend = FakeBackend::new(vec![
+        conn_resp.clone(),
+        conn_resp,
+        img_preview_resp,
+        status_sending_resp,
+        status_unknown_resp,
+    ]);
+
+    let c1 = dispatch_tool_call_with(
+        "check_laser_connection_tool",
+        &serde_json::json!({"host": "192.0.2.10"}),
+        false,
+        Some(&backend),
+    );
+    assert!(c1.success);
+    assert!(
+        c1.result.contains("有效行程 300×200 mm（固件）"),
+        "{}",
+        c1.result
+    );
+    assert!(
+        !c1.detail.as_deref().unwrap().contains("firmware_settings"),
+        "include_detail=false 不应堆出原始 $$ 行"
+    );
+
+    let c2 = dispatch_tool_call_with(
+        "check_laser_connection_tool",
+        &serde_json::json!({"host": "192.0.2.10", "include_detail": true}),
+        false,
+        Some(&backend),
+    );
+    assert!(c2.detail.as_deref().unwrap().contains("$30=1000"));
+
+    // 3. 图片 preview 走 /api/workflow 且带 source_type=image，禁止同时传 text 和 image
+    let conflict = dispatch_tool_call_with(
+        "laser_workflow_tool",
+        &serde_json::json!({"action": "preview", "text": "你好", "image": "latest_upload"}),
+        false,
+        Some(&backend),
+    );
+    assert!(!conflict.success);
+
+    let img_res = dispatch_tool_call_with(
+        "laser_workflow_tool",
+        &serde_json::json!({
+            "action": "preview",
+            "image": "latest_upload",
+            "image_mode": "jarvis",
+            "line_interval_scale": 0.8,
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        false,
+        Some(&backend),
+    );
+    assert!(img_res.success, "{img_res:?}");
+    assert!(
+        img_res.result.contains("cat.png") && img_res.result.contains("2 分钟前"),
+        "{}",
+        img_res.result
+    );
+
+    // 4. status 摘要包含预计剩余时间与未知兜底
+    let st_res = dispatch_tool_call_with(
+        "laser_workflow_tool",
+        &serde_json::json!({"action": "status", "workflow_id": "wf-run-1"}),
+        false,
+        Some(&backend),
+    );
+    assert!(
+        st_res.result.contains("已下发 50/100 行") && st_res.result.contains("约 1 分 15 秒"),
+        "{}",
+        st_res.result
+    );
+
+    let st_unk = dispatch_tool_call_with(
+        "laser_workflow_tool",
+        &serde_json::json!({"action": "status", "workflow_id": "wf-run-2"}),
+        false,
+        Some(&backend),
+    );
+    assert!(
+        st_unk.result.contains("预计剩余时间：未知"),
+        "{}",
+        st_unk.result
+    );
+
+    let calls = backend.calls();
+    assert_eq!(calls[2].1, "/api/workflow");
+    assert_eq!(calls[2].2["source_type"], "image");
+    assert_eq!(calls[2].2["image"], "latest_upload");
+    assert_eq!(calls[2].2["image_mode"], "jarvis");
+    assert_eq!(calls[2].2["line_interval_scale"], 0.8);
 }

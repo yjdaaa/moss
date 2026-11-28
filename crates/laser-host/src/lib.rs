@@ -862,6 +862,12 @@ pub fn set_voice_device_sessions(api: &ApiService, sessions: Option<u32>) {
 pub fn set_voice_pulse(api: &ApiService, phase: Option<&str>, level: u8) {
     api.voice_telemetry().set_pulse(phase, level);
 }
+/// 仅内置语音链路提供的工具（不在 `tests/golden/mcp_tools.json` 中，也不暴露给官方小智接入点；r77 / n144）。
+const BUILTIN_VOICE_ONLY_TOOLS: [(&str, &str); 1] = [(
+    "voice_timer_tool",
+    "设置、查看或取消倒计时提醒（10秒到3小时，最多5个，仅存内存重启丢失）。",
+)];
+
 /// 语音中心“接入点与工具”卡片的数据（NV8）：各接入点的状态与身份、每个工具的开关与调用统计。地址均已脱敏。
 pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_json::Value {
     let telemetry = api.mcp_telemetry().snapshot();
@@ -887,7 +893,7 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
         })
         .collect();
     let developer_mode = laser_tools::developer_mode_enabled();
-    let tools: Vec<serde_json::Value> = laser_mcp::tools_list_json(developer_mode)["tools"]
+    let mut tools: Vec<serde_json::Value> = laser_mcp::tools_list_json(developer_mode)["tools"]
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -907,6 +913,7 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
                 "enabled": !api.tool_disabled(&name),
                 "can_disable": laser_mcp::tool_can_be_disabled(&name),
                 "voice_hidden": laser_contracts::tool_never_exposed(&name),
+                "builtin_only": false,
                 "calls": stat.calls,
                 "failures": stat.failures,
                 "denied": stat.denied,
@@ -915,6 +922,22 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
             }))
         })
         .collect();
+    for (name, description) in BUILTIN_VOICE_ONLY_TOOLS {
+        let stat = telemetry.tool_stats.get(name).cloned().unwrap_or_default();
+        tools.push(serde_json::json!({
+            "name": name,
+            "description": description,
+            "enabled": !api.tool_disabled(name),
+            "can_disable": true,
+            "voice_hidden": false,
+            "builtin_only": true,
+            "calls": stat.calls,
+            "failures": stat.failures,
+            "denied": stat.denied,
+            "last_at": (stat.calls > 0).then_some(stat.last_at),
+            "last_caller": stat.last_caller,
+        }));
+    }
     serde_json::json!({
         "endpoints": endpoints,
         "max_extra_endpoints": laser_mcp::MAX_EXTRA_ENDPOINTS,
@@ -922,10 +945,10 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
     })
 }
 
-/// 校验关闭的工具名单：只接受工具清单里可关闭的工具，去重并排序。
+/// 校验关闭的工具名单：只接受工具清单里可关闭的工具（含内置语音专属工具），去重并排序。
 pub fn validate_disabled_tools(names: &[String]) -> Result<Vec<String>, String> {
     let known = laser_mcp::tools_list_json(true);
-    let known: Vec<&str> = known["tools"]
+    let mut known: Vec<&str> = known["tools"]
         .as_array()
         .map(|tools| {
             tools
@@ -934,6 +957,11 @@ pub fn validate_disabled_tools(names: &[String]) -> Result<Vec<String>, String> 
                 .collect()
         })
         .unwrap_or_default();
+    for (name, _) in BUILTIN_VOICE_ONLY_TOOLS {
+        if !known.contains(&name) {
+            known.push(name);
+        }
+    }
     let mut accepted = Vec::new();
     for name in names {
         let name = name.trim();
@@ -1711,14 +1739,26 @@ mod tests {
             validate_disabled_tools(&[
                 "open_app_tool".into(),
                 "material_params_tool".into(),
+                "voice_timer_tool".into(),
                 "open_app_tool".into()
             ])
             .unwrap(),
             vec![
                 "material_params_tool".to_string(),
-                "open_app_tool".to_string()
+                "open_app_tool".to_string(),
+                "voice_timer_tool".to_string()
             ]
         );
+        // r77：voice_timer_tool 仅出现在语音中心概览（标 builtin_only=true）并支持关闭，不暴露给官方小智 MCP 清单
+        assert!(!listed.contains(&"voice_timer_tool".to_owned()));
+        let timer_overview = overview["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "voice_timer_tool")
+            .expect("mcp_overview 应包含 builtin_only 计时提醒开关");
+        assert_eq!(timer_overview["builtin_only"], true);
+        assert_eq!(timer_overview["can_disable"], true);
         assert!(
             validate_disabled_tools(&["laser_safe_action_tool".into()])
                 .unwrap_err()

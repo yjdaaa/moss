@@ -2557,3 +2557,304 @@ fn lc_dry_run_blocks_g28_g30_in_send_preflight_and_transport_fallback_logs_warni
         "{txt}"
     );
 }
+
+/// r77（2026-11-28）：`/api/connection/check` 连上时返回整理好的 `capabilities` 与中文摘要；
+/// 有效行程按“手填 → 固件 → 默认 100 mm”逐轴取值并标来源，固件未报字段一律写“未知”。
+#[test]
+fn connection_check_reports_structured_capabilities_and_unknown_for_missing_fields() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let spawn_grbl =
+        |dollar_dollar: &'static str, dollar_cd: &'static str, dollar_i: &'static str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                if let Ok((stream, _)) = listener.accept() {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut writer = stream;
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                        match line.trim() {
+                            "$$" => {
+                                let _ = write!(writer, "{dollar_dollar}");
+                            }
+                            "$CD" => {
+                                let _ = write!(writer, "{dollar_cd}");
+                            }
+                            "$I" => {
+                                let _ = write!(writer, "{dollar_i}");
+                            }
+                            _ => {
+                                let _ = write!(writer, "ok\r\n");
+                            }
+                        }
+                        line.clear();
+                    }
+                }
+            });
+            port
+        };
+
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    );
+
+    // 1. 完整 FluidNC 响应 + X 轴手填覆盖
+    let full_port = spawn_grbl(
+        "$20=1\r\n$22=1\r\n$30=1000\r\n$32=1\r\n$130=300.000\r\n$131=200.000\r\nok\r\n",
+        "axes:\r\n  x:\r\n    max_travel_mm: 300\r\n    soft_limits: true\r\n    homing:\r\n      cycle: 1\r\n  y:\r\n    max_travel_mm: 200\r\n    soft_limits: true\r\nok\r\n",
+        "[VER:4.1 FluidNC v4.1.1 (esp32-wifi) :g1234]\r\n[MSG:Machine: Yisu-3020]\r\nok\r\n",
+    );
+    let (st, body) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": full_port,
+            "auto_fallback": false,
+            "work_area_width_mm": 260
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["result"]["connected"], true, "{body}");
+    let caps = &body["result"]["capabilities"];
+    assert_eq!(caps["effective_travel_mm"]["x"], 260.0);
+    assert_eq!(caps["effective_travel_mm"]["x_source"], "manual");
+    assert_eq!(caps["effective_travel_mm"]["y"], 200.0);
+    assert_eq!(caps["effective_travel_mm"]["y_source"], "firmware");
+    assert_eq!(caps["homing_enabled"], true);
+    assert_eq!(caps["soft_limits_enabled"], true);
+    assert_eq!(caps["spindle_max_s"], 1000.0);
+    assert_eq!(caps["laser_mode_enabled"], true);
+    assert_eq!(caps["firmware_type"], "FluidNC v4.1.1");
+    let cap_summary = caps["summary"].as_str().unwrap();
+    assert!(cap_summary.contains("X 260 mm（手填）"), "{cap_summary}");
+    assert!(cap_summary.contains("Y 200 mm（固件）"), "{cap_summary}");
+    assert!(cap_summary.contains("回零已开启"), "{cap_summary}");
+    assert!(cap_summary.contains("S 上限1000"), "{cap_summary}");
+
+    // 2. 极简响应（缺 $130/$131/$20/$22/$30/$CD/$I）：行程默认 100 mm，其余全标“未知”
+    let minimal_port = spawn_grbl("$32=1\r\nok\r\n", "error:3\r\n", "error:3\r\n");
+    let (st2, body2) = service.dispatch_json(
+        "POST",
+        "/api/connection/check",
+        &serde_json::json!({
+            "connection_mode": "network",
+            "network_host": "127.0.0.1",
+            "network_telnet_port": minimal_port,
+            "auto_fallback": false
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st2, 200, "{body2}");
+    let caps2 = &body2["result"]["capabilities"];
+    assert_eq!(caps2["effective_travel_mm"]["x"], 100.0);
+    assert_eq!(caps2["effective_travel_mm"]["x_source"], "default");
+    assert_eq!(caps2["homing_label"], "未知");
+    assert_eq!(caps2["soft_limits_label"], "未知");
+    assert_eq!(caps2["spindle_max_s_label"], "未知");
+    assert_eq!(caps2["firmware_type"], "未知");
+    assert_eq!(caps2["laser_mode_label"], "已开启");
+}
+
+/// r77（2026-11-28）：`laser_workflow_tool(action=status)`（带或不带 workflow_id）基于工时估算与实时进度计算 `remaining_seconds`，
+/// 缺少估算或总行数时返回 `null` 与“未知”，不编造。
+#[test]
+fn workflow_status_computes_remaining_seconds_and_reports_unknown_when_missing() {
+    use std::sync::atomic::Ordering;
+
+    // 1. 纯计算单元测试：流式、awaiting_completion、SD 脱机与缺失估算
+    let streaming = serde_json::json!({
+        "phase": "streaming",
+        "mode": "stream",
+        "lines_sent": 50,
+        "total_lines": 200,
+        "elapsed_ms": 25_000,
+        "paused": false
+    });
+    assert_eq!(
+        crate::jobs::compute_remaining_seconds(Some(120.0), &streaming),
+        Some(90.0)
+    );
+    assert_eq!(
+        crate::jobs::compute_remaining_seconds(None, &streaming),
+        None,
+        "缺少 time_estimate 时不得编造剩余秒数"
+    );
+
+    let awaiting = serde_json::json!({
+        "phase": "awaiting_completion",
+        "mode": "stream",
+        "lines_sent": 200,
+        "total_lines": 200,
+        "elapsed_ms": 100_000
+    });
+    assert_eq!(
+        crate::jobs::compute_remaining_seconds(Some(120.0), &awaiting),
+        Some(20.0)
+    );
+
+    let sd_running = serde_json::json!({
+        "phase": "streaming",
+        "mode": "sd_offline",
+        "lines_sent": 0,
+        "total_lines": 0,
+        "last_status_report": "<Run|MPos:0,0,0|SD:25.00,/sd/job.nc>"
+    });
+    assert_eq!(
+        crate::jobs::compute_remaining_seconds(Some(200.0), &sd_running),
+        Some(150.0)
+    );
+
+    // 2. 端到端 `/api/workflow {action:"status"}`（带 workflow_id 与不带 workflow_id）
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        laser_runtime::RuntimeDb::open_memory().unwrap(),
+    ));
+    {
+        let guard = db.lock().unwrap();
+        guard
+            .voice_device_seen("dev-1", "client-1", "", "", "", 0.0)
+            .unwrap();
+        guard
+            .set_voice_device_status("dev-1", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_db(db.clone());
+    service
+        .register_voice_session("dev-1", "client-1", "s-1")
+        .unwrap();
+    let wf_id = "wf-rem-test";
+    laser_runtime::RuntimeStore::put(
+        db.as_ref(),
+        &laser_runtime::StoredRecord {
+            kind: laser_runtime::RecordKind::Workflow,
+            id: wf_id.into(),
+            status: Some("sending".into()),
+            payload: serde_json::json!({
+                "workflow_id": wf_id,
+                "status": "sending",
+                "artifacts": {
+                    "time_estimate": {
+                        "estimated_seconds": 120.0,
+                        "raw_estimated_seconds": 100.0
+                    }
+                },
+                "updated_at": unix_seconds()
+            }),
+        },
+    )
+    .unwrap();
+    let progress = std::sync::Arc::new(laser_device::JobProgress::default());
+    progress.lines_sent.store(60, Ordering::Relaxed);
+    progress.total_lines.store(120, Ordering::Relaxed);
+    let fake_transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
+        std::sync::Arc::new(laser_device::FakeGrbl::new(vec!["ok".to_string()]));
+    service.active_jobs.lock().unwrap().insert(
+        wf_id.into(),
+        std::sync::Arc::new(crate::jobs::ActiveJob {
+            workflow_id: wf_id.into(),
+            mode: "stream",
+            target: "127.0.0.1:23".into(),
+            cancel: laser_device::CancellationToken::default(),
+            progress,
+            transport: fake_transport,
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+
+    let (st_by_id, body_by_id) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({"action": "status", "workflow_id": wf_id}),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_by_id, 200, "{body_by_id}");
+    assert_eq!(body_by_id["result"]["remaining_seconds"], 60.0);
+    assert_eq!(
+        body_by_id["result"]["send_result"]["remaining_seconds"],
+        60.0
+    );
+    assert_eq!(body_by_id["result"]["remaining_text"], "约 1 分钟");
+    assert_eq!(
+        body_by_id["result"]["send_result"]["progress_percent"],
+        50.0
+    );
+
+    // 不带 workflow_id 的 status 同样叠加实时进度与中文剩余时间播报
+    let (st_no_id, body_no_id) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({"action": "status"}),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_no_id, 200, "{body_no_id}");
+    let speech = body_no_id["result"]["speech"].as_str().unwrap();
+    assert!(
+        speech.contains("60/120") && speech.contains("约 1 分钟"),
+        "{speech}"
+    );
+    assert_eq!(
+        body_no_id["result"]["workflows"][0]["remaining_seconds"],
+        60.0
+    );
+
+    // 缺少 time_estimate 的活动任务：remaining_seconds=null、remaining_text="未知"
+    let wf_no_est = "wf-rem-unknown";
+    laser_runtime::RuntimeStore::put(
+        db.as_ref(),
+        &laser_runtime::StoredRecord {
+            kind: laser_runtime::RecordKind::Workflow,
+            id: wf_no_est.into(),
+            status: Some("sending".into()),
+            payload: serde_json::json!({
+                "workflow_id": wf_no_est,
+                "status": "sending",
+                "artifacts": {},
+                "updated_at": unix_seconds()
+            }),
+        },
+    )
+    .unwrap();
+    let progress2 = std::sync::Arc::new(laser_device::JobProgress::default());
+    progress2.lines_sent.store(10, Ordering::Relaxed);
+    progress2.total_lines.store(100, Ordering::Relaxed);
+    service.active_jobs.lock().unwrap().insert(
+        wf_no_est.into(),
+        std::sync::Arc::new(crate::jobs::ActiveJob {
+            workflow_id: wf_no_est.into(),
+            mode: "stream",
+            target: "127.0.0.1:24".into(),
+            cancel: laser_device::CancellationToken::default(),
+            progress: progress2,
+            transport: std::sync::Arc::new(laser_device::FakeGrbl::new(vec!["ok".to_string()])),
+            started_at: std::time::Instant::now(),
+            spec: None,
+        }),
+    );
+    let (st_unk, body_unk) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({"action": "status", "workflow_id": wf_no_est}),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_unk, 200, "{body_unk}");
+    assert!(body_unk["result"]["remaining_seconds"].is_null());
+    assert_eq!(body_unk["result"]["remaining_text"], "未知");
+}

@@ -3,8 +3,211 @@ use std::time::Duration;
 use crate::{
     ConnectionSpec, DeviceConnection, DeviceIdentity, DeviceState, DeviceTransport,
     MachineFeatures, MachineLimits, laser_off_on_alarm_warning, open_transport,
-    parse_grbl_settings_limits,
+    parse_grbl_laser_mode, parse_grbl_settings_limits, parse_grbl_spindle_max,
 };
+
+/// 有效行程缺省值（mm，翼宿 V1.0 默认幅面，与工作台一致）。
+pub const DEFAULT_WORK_AREA_MM: f64 = 100.0;
+
+/// 单轴有效行程的取值来源（严格按“手填 → 固件 → 默认 100 mm”顺序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TravelSource {
+    Manual,
+    Firmware,
+    Default,
+}
+
+impl TravelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Firmware => "firmware",
+            Self::Default => "default",
+        }
+    }
+
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Self::Manual => "手填",
+            Self::Firmware => "固件",
+            Self::Default => "默认",
+        }
+    }
+}
+
+/// 单轴有效行程与来源。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveAxisTravel {
+    pub mm: f64,
+    pub source: TravelSource,
+}
+
+/// 整理后的机器能力摘要（r77）：所有固件字段仅取真实读回值，读不到一律为 `None`（展示为“未知”），不猜。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MachineCapabilities {
+    pub x_travel: EffectiveAxisTravel,
+    pub y_travel: EffectiveAxisTravel,
+    pub firmware_x_travel_mm: Option<f64>,
+    pub firmware_y_travel_mm: Option<f64>,
+    pub homing_enabled: Option<bool>,
+    pub soft_limits_enabled: Option<bool>,
+    pub spindle_max_s: Option<f64>,
+    pub laser_mode_enabled: Option<bool>,
+    pub firmware_type: Option<String>,
+}
+
+fn format_cap_number(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < 1e-6 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.1}")
+    }
+}
+
+fn format_bool_zh(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "已开启",
+        Some(false) => "未开启",
+        None => "未知",
+    }
+}
+
+fn resolve_axis_travel(manual: Option<f64>, firmware: Option<f64>) -> EffectiveAxisTravel {
+    if let Some(mm) = manual.filter(|v| v.is_finite() && *v > 0.0) {
+        EffectiveAxisTravel {
+            mm,
+            source: TravelSource::Manual,
+        }
+    } else if let Some(mm) = firmware.filter(|v| v.is_finite() && *v > 0.0) {
+        EffectiveAxisTravel {
+            mm,
+            source: TravelSource::Firmware,
+        }
+    } else {
+        EffectiveAxisTravel {
+            mm: DEFAULT_WORK_AREA_MM,
+            source: TravelSource::Default,
+        }
+    }
+}
+
+fn format_firmware_type(
+    identity: Option<&DeviceIdentity>,
+    features: Option<&MachineFeatures>,
+) -> Option<String> {
+    if let Some(id) = identity {
+        let fw = id
+            .firmware
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let ver = id
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let head = match (fw, ver) {
+            (Some(f), Some(v)) if f.contains(v) => Some(f.to_owned()),
+            (Some(f), Some(v)) => Some(format!("{f} {v}")),
+            (Some(f), None) => Some(f.to_owned()),
+            (None, Some(v)) => Some(v.to_owned()),
+            (None, None) => None,
+        };
+        if head.is_some() {
+            return head;
+        }
+    }
+    features.map(|_| "FluidNC".to_owned())
+}
+
+/// 根据本次探测结果与可选手填/记住行程整理机器能力摘要。
+///
+/// - 有效行程按“手填 → 固件 → 默认 100 mm”逐轴取值并标明来源；
+/// - 回零（`$22` / `$CD`）、软限位（`$20` / `$CD`）、S 上限（`$30`）、激光模式（`$32`）、固件类型
+///   仅以固件真实读回值为准，读不到一律保留 `None`（文案写“未知”）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_machine_capabilities(
+    manual_x_mm: Option<f64>,
+    manual_y_mm: Option<f64>,
+    firmware_limits: Option<&MachineLimits>,
+    remembered_firmware_travel: (Option<f64>, Option<f64>),
+    firmware_settings: &[String],
+    features: Option<&MachineFeatures>,
+    identity: Option<&DeviceIdentity>,
+) -> MachineCapabilities {
+    let fw_x = firmware_limits
+        .and_then(|l| l.x_travel_mm)
+        .or(remembered_firmware_travel.0)
+        .filter(|v| v.is_finite() && *v > 0.0);
+    let fw_y = firmware_limits
+        .and_then(|l| l.y_travel_mm)
+        .or(remembered_firmware_travel.1)
+        .filter(|v| v.is_finite() && *v > 0.0);
+    MachineCapabilities {
+        x_travel: resolve_axis_travel(manual_x_mm, fw_x),
+        y_travel: resolve_axis_travel(manual_y_mm, fw_y),
+        firmware_x_travel_mm: fw_x,
+        firmware_y_travel_mm: fw_y,
+        homing_enabled: firmware_limits.and_then(|l| l.homing_enabled),
+        soft_limits_enabled: firmware_limits.and_then(|l| l.soft_limits_enabled),
+        spindle_max_s: parse_grbl_spindle_max(firmware_settings),
+        laser_mode_enabled: parse_grbl_laser_mode(firmware_settings),
+        firmware_type: format_firmware_type(identity, features),
+    }
+}
+
+impl MachineCapabilities {
+    pub fn homing_label(&self) -> &'static str {
+        format_bool_zh(self.homing_enabled)
+    }
+
+    pub fn soft_limits_label(&self) -> &'static str {
+        format_bool_zh(self.soft_limits_enabled)
+    }
+
+    pub fn laser_mode_label(&self) -> &'static str {
+        format_bool_zh(self.laser_mode_enabled)
+    }
+
+    pub fn spindle_max_s_label(&self) -> String {
+        self.spindle_max_s
+            .map(format_cap_number)
+            .unwrap_or_else(|| "未知".to_owned())
+    }
+
+    pub fn firmware_type_label(&self) -> &str {
+        self.firmware_type.as_deref().unwrap_or("未知")
+    }
+
+    /// 供语音播报与 AI 直接复述的一句中文能力摘要。
+    pub fn summary_zh(&self) -> String {
+        let travel = if self.x_travel.source == self.y_travel.source {
+            format!(
+                "有效行程 {}×{} mm（{}）",
+                format_cap_number(self.x_travel.mm),
+                format_cap_number(self.y_travel.mm),
+                self.x_travel.source.label_zh()
+            )
+        } else {
+            format!(
+                "有效行程 X {} mm（{}）、Y {} mm（{}）",
+                format_cap_number(self.x_travel.mm),
+                self.x_travel.source.label_zh(),
+                format_cap_number(self.y_travel.mm),
+                self.y_travel.source.label_zh()
+            )
+        };
+        format!(
+            "{travel}，回零{}，软限位{}，S 上限{}，激光模式{}，固件{}",
+            self.homing_label(),
+            self.soft_limits_label(),
+            self.spindle_max_s_label(),
+            self.laser_mode_label(),
+            self.firmware_type_label(),
+        )
+    }
+}
 
 /// 握手探测报告：只发 `$$` / `$CD` / `$I` 读取固件设置与身份，不移动轴、不出光。
 #[derive(Debug, Clone, PartialEq)]
@@ -339,5 +542,75 @@ mod tests {
         let lim = report.machine_limits.expect("limits");
         assert_eq!(lim.soft_limits_enabled, Some(true));
         assert_eq!(lim.homing_dir_mask, Some(3));
+    }
+
+    #[test]
+    fn machine_capabilities_resolve_sources_and_unknown_fields() {
+        let limits = MachineLimits {
+            x_travel_mm: Some(300.0),
+            y_travel_mm: Some(200.0),
+            homing_enabled: Some(true),
+            soft_limits_enabled: Some(false),
+            ..Default::default()
+        };
+        let settings = vec![
+            "$20=0".into(),
+            "$22=1".into(),
+            "$30=1000".into(),
+            "$32=1".into(),
+        ];
+        let identity = DeviceIdentity {
+            firmware: Some("FluidNC".into()),
+            version: Some("v4.1.1".into()),
+            machine_name: Some("Yisu-3020".into()),
+        };
+        let full = build_machine_capabilities(
+            Some(250.0),
+            None,
+            Some(&limits),
+            (None, None),
+            &settings,
+            None,
+            Some(&identity),
+        );
+        assert_eq!(full.x_travel.mm, 250.0);
+        assert_eq!(full.x_travel.source, TravelSource::Manual);
+        assert_eq!(full.y_travel.mm, 200.0);
+        assert_eq!(full.y_travel.source, TravelSource::Firmware);
+        assert_eq!(full.spindle_max_s, Some(1000.0));
+        assert_eq!(full.laser_mode_enabled, Some(true));
+        assert_eq!(full.firmware_type.as_deref(), Some("FluidNC v4.1.1"));
+        let summary = full.summary_zh();
+        assert!(
+            summary.contains("有效行程 X 250 mm（手填）、Y 200 mm（固件）"),
+            "{summary}"
+        );
+        assert!(summary.contains("回零已开启"), "{summary}");
+        assert!(summary.contains("软限位未开启"), "{summary}");
+        assert!(summary.contains("S 上限1000"), "{summary}");
+        assert!(summary.contains("激光模式已开启"), "{summary}");
+        assert!(summary.contains("固件FluidNC v4.1.1"), "{summary}");
+
+        // 固件未报行程与各项设置时：行程回退默认 100 mm，其余全部写“未知”，绝不猜
+        let empty = build_machine_capabilities(None, None, None, (None, None), &[], None, None);
+        assert_eq!(empty.x_travel.mm, DEFAULT_WORK_AREA_MM);
+        assert_eq!(empty.x_travel.source, TravelSource::Default);
+        assert_eq!(empty.y_travel.mm, DEFAULT_WORK_AREA_MM);
+        assert_eq!(empty.y_travel.source, TravelSource::Default);
+        assert_eq!(empty.homing_label(), "未知");
+        assert_eq!(empty.soft_limits_label(), "未知");
+        assert_eq!(empty.spindle_max_s_label(), "未知");
+        assert_eq!(empty.laser_mode_label(), "未知");
+        assert_eq!(empty.firmware_type_label(), "未知");
+        let empty_summary = empty.summary_zh();
+        assert!(
+            empty_summary.contains("有效行程 100×100 mm（默认）"),
+            "{empty_summary}"
+        );
+        assert!(empty_summary.contains("回零未知"), "{empty_summary}");
+        assert!(empty_summary.contains("软限位未知"), "{empty_summary}");
+        assert!(empty_summary.contains("S 上限未知"), "{empty_summary}");
+        assert!(empty_summary.contains("激光模式未知"), "{empty_summary}");
+        assert!(empty_summary.contains("固件未知"), "{empty_summary}");
     }
 }

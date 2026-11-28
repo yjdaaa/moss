@@ -431,17 +431,17 @@ pub fn slow_tool_filler_delay(filler: &str) -> Duration {
 /// n72（2026-11-08 用户决定）：激光工具在场时附在每轮系统提示后的用法表，让模型按用户说法选对工具。
 /// 只写工具怎么选，确认与停止规则仍以 [`IMMUTABLE_SAFETY_RULES`] 为准。
 pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
-问机器连没连、在干什么，用 check_laser_connection_tool。\
+问机器连没连、在干什么、最大能刻多大或能不能回零，用 check_laser_connection_tool。\
 要刻字，先用 laser_workflow_tool 的 preview（带文字、材料、厚度，知道木牌尺寸就带上），预览会弹到电脑上；\
 要刻圆、星星、爱心、边框这类图形，在同一个 preview 里带 shapes / border（坐标 mm，木牌中心为原点，y 正数在上），图形别和文字重叠，需要时用 text_box 给文字留位置；改图形大小位置就带改好的参数重新 preview。\
 用户想先看看位置、走个边框，用 frame 带同一个 workflow_id，按预览范围空走一圈不出光，用户确认走边框后再带 confirmed=true；边框一开始走工具就会回话；途中用户说暂停用 laser_safe_action_tool 的 pause，说不走了、取消、别走了用 stop_framing，不要用 laser_workflow_tool 的 cancel（那会作废预览）；说继续先问“确认继续走边框吗”，同意后 resume 带 confirmed=true。走完请用户挪正材料，可以再走。\
 用户核对后明确说确认开始，再用 confirm_send 带同一个 workflow_id。功率速度默认来自材料库，用户明确说了这次的功率、速度或遍数就放进 manual_params。\
-问进度用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
+问进度或还要多久用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
 边刻边调快慢或功率，用 laser_safe_action_tool 的 feed_ 或 power_ 动作。查某种材料的参数用 material_params_tool 的 get。\
 刻完用户说太焦、太浅、切不透，用 refine_laser_params_from_feedback_tool 给建议，用户同意后用 regenerate_text_laser_task_tool 采用并重新预览。\
 不知道参数就用 run_calibration_grid_tool 刻测试矩阵，用户说第几格最好再用 select_calibration_cell_tool 保存；\
 说线距测试就带 test_type=interval，想测遍数或线距就改 x_axis / y_axis。\
-照片、图片语音拿不到文件，请用户在电脑工作台上传，转换方式（如 Jarvis）和快速 / 均衡 / 精细在那里选。\
+要刻图片时，请用户先在电脑或手机上传，再用 preview 带 image=latest_upload（可按需带 image_mode 如 jarvis / grayscale 和 line_interval_scale）；还没上传就提醒先上传。\
 用户没说串口号或 IP 就不要填；工具报错说缺连接时，再问用户。";
 
 fn arg_flag_true(arguments: &Value, key: &str) -> bool {

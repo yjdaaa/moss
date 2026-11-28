@@ -576,13 +576,60 @@ pub(crate) fn handle_workflow_store_request(
         };
         let workflows = records
             .into_iter()
-            .map(|record| record.payload)
+            .map(|mut record| {
+                overlay_live_progress(&mut record.payload, jobs, &record.id);
+                record.payload
+            })
             .collect::<Vec<_>>();
+        let speech = if action == "status" {
+            if let Some(active) = workflows
+                .iter()
+                .find(|wf| wf.get("status").and_then(|v| v.as_str()) == Some("sending"))
+            {
+                let wf_id = active
+                    .get("workflow_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let sent = active
+                    .pointer("/send_result/lines_sent")
+                    .and_then(|v| v.as_u64());
+                let total = active
+                    .pointer("/send_result/total_lines")
+                    .and_then(|v| v.as_u64())
+                    .filter(|&n| n > 0);
+                let rem = active
+                    .get("remaining_text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未知");
+                let paused = active
+                    .pointer("/send_result/paused")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let pause_note = if paused { "（已暂停）" } else { "" };
+                match (sent, total) {
+                    (Some(s), Some(t)) => format!(
+                        "当前任务 {wf_id} 正在加工{pause_note}，已下发 {s}/{t} 行，预计剩余时间：{rem}。"
+                    ),
+                    _ => format!("当前任务 {wf_id} 正在加工{pause_note}，预计剩余时间：{rem}。"),
+                }
+            } else if let Some(latest) = workflows.first() {
+                let wf_id = latest
+                    .get("workflow_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let st = latest.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                format!("当前没有正在加工的任务；最近一条任务 {wf_id} 状态为 {st}。")
+            } else {
+                "已列出最近的激光 workflow；可以用 workflow_id 继续查询、反馈或重生成。".to_owned()
+            }
+        } else {
+            "已列出最近的激光 workflow；可以用 workflow_id 继续查询、反馈或重生成。".to_owned()
+        };
         return http_json(
             200,
             success(serde_json::json!({
                 "workflows": workflows,
-                "speech": "已列出最近的激光 workflow；可以用 workflow_id 继续查询、反馈或重生成。"
+                "speech": speech
             })),
         );
     }
@@ -712,14 +759,13 @@ pub(crate) fn handle_workflow_store_request(
                         if let Ok(guard) = jobs.lock()
                             && let Some(job) = guard.get(&workflow_id)
                         {
-                            return http_json(
-                                200,
-                                success(serde_json::json!({
-                                    "workflow_id": workflow_id,
-                                    "status": "sending",
-                                    "send_result": job.live_send_result(),
-                                })),
-                            );
+                            let mut payload = serde_json::json!({
+                                "workflow_id": workflow_id,
+                                "status": "sending",
+                                "send_result": job.live_send_result(),
+                            });
+                            enrich_progress_timing(&mut payload);
+                            return http_json(200, success(payload));
                         }
                         http_json(404, failure("未找到 workflow", None))
                     }

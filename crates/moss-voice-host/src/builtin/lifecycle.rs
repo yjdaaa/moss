@@ -549,11 +549,13 @@ impl BuiltinVoice {
                 audiocpp_worker: audiocpp_worker.clone(),
                 fallback_tts: fallback_tts_handle.clone(),
             };
+            let timers = Arc::new(moss_voice_server::TimerStore::new());
             let mut conversation = self.conversation(
                 &settings.builtin_models,
                 &mut local,
                 &settings.builtin_local,
                 colab.as_ref(),
+                timers.clone(),
             )?;
             // n110：对话模式确定后再汇总每类本地模型的实际情况（回声模式下识别/合成/语义判停未挂载，不虚报“已加载”）
             let local_models = self.local_models_report(
@@ -627,6 +629,7 @@ impl BuiltinVoice {
                 })),
                 debug_process_trace: Some(debug_trace_control),
                 asr_corpus: Some(self.asr_corpus.clone()),
+                timers,
                 ..defaults
             };
             let registry = Arc::new(DbRegistry {

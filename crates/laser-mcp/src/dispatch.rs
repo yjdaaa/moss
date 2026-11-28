@@ -238,6 +238,35 @@ fn preview_params_sentence(record: &serde_json::Value) -> String {
     )
 }
 
+fn format_duration_zh(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "未知".into();
+    }
+    if seconds < 1.0 {
+        return "不到 1 秒".into();
+    }
+    let total = seconds.round() as u64;
+    if total < 60 {
+        format!("约 {total} 秒")
+    } else if total < 3600 {
+        let mins = total / 60;
+        let secs = total % 60;
+        if secs == 0 {
+            format!("约 {mins} 分钟")
+        } else {
+            format!("约 {mins} 分 {secs} 秒")
+        }
+    } else {
+        let hours = total / 3600;
+        let mins = (total % 3600) / 60;
+        if mins == 0 {
+            format!("约 {hours} 小时")
+        } else {
+            format!("约 {hours} 小时 {mins} 分钟")
+        }
+    }
+}
+
 fn summarize_success(tool: &str, result: &serde_json::Value) -> String {
     let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let id = result
@@ -253,13 +282,74 @@ fn summarize_success(tool: &str, result: &serde_json::Value) -> String {
     if !status.is_empty() {
         parts.push(format!("status={status}"));
     }
-    if let Some(send) = result.get("send_result")
-        && let (Some(sent), Some(total)) = (
-            send.get("lines_sent").and_then(|v| v.as_u64()),
-            send.get("total_lines").and_then(|v| v.as_u64()),
+    if let Some(uploaded) = result.pointer("/artifacts/uploaded_image")
+        && let Some(name) = uploaded.get("display_name").and_then(|v| v.as_str())
+    {
+        let ago = uploaded
+            .get("uploaded_ago")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("最近");
+        parts.push(format!("已使用{ago}上传的图片「{name}」"));
+    }
+    if status == "preview_ready"
+        && let (Some(w), Some(h)) = (
+            result
+                .pointer("/artifacts/width_mm")
+                .and_then(|v| v.as_f64()),
+            result
+                .pointer("/artifacts/height_mm")
+                .and_then(|v| v.as_f64()),
         )
     {
-        parts.push(format!("已下发 {sent}/{total} 行"));
+        parts.push(format!("尺寸 {w:.1}×{h:.1} mm"));
+    }
+    if status == "preview_ready"
+        && let Some(est) = result
+            .pointer("/artifacts/time_estimate/estimated_seconds")
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite() && *v > 0.0)
+    {
+        parts.push(format!("预计用时 {}", format_duration_zh(est)));
+    }
+    if let Some(send) = result.get("send_result") {
+        if let (Some(sent), Some(total)) = (
+            send.get("lines_sent").and_then(|v| v.as_u64()),
+            send.get("total_lines").and_then(|v| v.as_u64()),
+        ) {
+            if total > 0 {
+                let pct = (sent.min(total) as f64 / total as f64) * 100.0;
+                parts.push(format!("已下发 {sent}/{total} 行（{pct:.0}%）"));
+            } else {
+                parts.push(format!("已下发 {sent}/{total} 行"));
+            }
+        }
+        if status == "sending" {
+            if send.get("paused").and_then(|v| v.as_bool()) == Some(true) {
+                parts.push("已暂停".into());
+            }
+            if let Some(est) = send
+                .get("estimated_total_seconds")
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite() && *v > 0.0)
+            {
+                parts.push(format!("预计总时长 {}", format_duration_zh(est)));
+            }
+            let remaining_text = send
+                .get("remaining_text")
+                .or_else(|| result.get("remaining_text"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    send.get("remaining_seconds")
+                        .or_else(|| result.get("remaining_seconds"))
+                        .and_then(|v| v.as_f64())
+                        .map(format_duration_zh)
+                        .unwrap_or_else(|| "未知".into())
+                });
+            parts.push(format!("预计剩余时间：{remaining_text}"));
+        }
     }
     if let Some(cells) = result.get("cell_count").and_then(|v| v.as_u64()) {
         parts.push(format!("{cells} 个标定单元格"));
@@ -319,12 +409,17 @@ fn probe_connection_via_backend(
     if let Some(timeout) = arguments.get("timeout").filter(|v| !v.is_null()) {
         body.insert("network_timeout".into(), timeout.clone());
     }
+    for key in ["work_area_width_mm", "work_area_height_mm"] {
+        if let Some(val) = arguments.get(key).filter(|v| !v.is_null()) {
+            body.insert(key.into(), val.clone());
+        }
+    }
     let response = backend.request(
         "POST",
         "/api/connection/check",
         &serde_json::Value::Object(body),
     );
-    let (status, resp) = match response {
+    let (status, mut resp) = match response {
         Ok((status, resp))
             if status < 400
                 && resp
@@ -337,9 +432,8 @@ fn probe_connection_via_backend(
         other => return backend_result(tool, other),
     };
     let _ = status;
-    let result = &resp["result"];
-    let connected = result["connected"].as_bool().unwrap_or(false);
-    let summary = result["summary"]
+    let connected = resp["result"]["connected"].as_bool().unwrap_or(false);
+    let mut summary = resp["result"]["summary"]
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or(if connected {
@@ -348,6 +442,21 @@ fn probe_connection_via_backend(
             "设备未连通"
         })
         .to_owned();
+    if connected
+        && let Some(cap_summary) = resp["result"]
+            .pointer("/capabilities/summary")
+            .or_else(|| resp["result"].get("capabilities_summary"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        && !summary.contains(cap_summary)
+    {
+        summary = format!("{}。{cap_summary}", summary.trim_end_matches('。'));
+    }
+    if !arg_bool(arguments, "include_detail")
+        && let Some(result_map) = resp.get_mut("result").and_then(|v| v.as_object_mut())
+    {
+        result_map.remove("firmware_settings");
+    }
     laser_contracts::ToolCallResult::with_detail(
         connected,
         summary,
@@ -562,11 +671,25 @@ fn dispatch_allowed(
             if action == "preview" {
                 body.remove("workflow_id");
             }
-            // 文字或基础图形（r44：可以只刻图形）走文字任务生成
+            // 文字或基础图形（r44：可以只刻图形）走文字任务生成；传了 image 走图片工作流
             let has_design = ["shapes", "border"]
                 .iter()
                 .any(|key| arguments.get(*key).is_some_and(|v| !v.is_null()));
+            let has_image = arg_str(arguments, "image").is_some();
+            if action == "preview"
+                && has_image
+                && (arg_str(arguments, "text").is_some() || has_design)
+            {
+                return ToolCallResult::err("preview 不能同时传 text/图形 与 image，请分开生成");
+            }
+            if action == "preview" && has_image && !body.contains_key("source_type") {
+                body.insert(
+                    "source_type".into(),
+                    serde_json::Value::String("image".into()),
+                );
+            }
             let route = if action == "preview"
+                && !has_image
                 && (arg_str(arguments, "text").is_some() || has_design)
                 && arg_str(arguments, "gcode_file").is_none()
             {

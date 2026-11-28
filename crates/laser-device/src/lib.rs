@@ -27,12 +27,16 @@ pub use dry_run::{
     rewrite_gcode_lines_for_dry_run, validate_dry_run_max_feed,
 };
 pub use preflight::{SendPreflight, authorize_send};
-pub use probe::{ProbeReport, available_serial_ports, probe_device, probe_opened_device};
+pub use probe::{
+    DEFAULT_WORK_AREA_MM, EffectiveAxisTravel, MachineCapabilities, ProbeReport, TravelSource,
+    available_serial_ports, build_machine_capabilities, probe_device, probe_opened_device,
+};
 pub use protocol::{
     AxisHoming, MAX_GCODE_LINE_BYTES, MachineActivity, MachineFeatures, MachineLimits,
     PreparedGcode, SdProgress, StatusReport, extract_device_explanation, is_reset_banner,
-    laser_off_on_alarm_warning, parse_fluidnc_yaml, parse_grbl_settings_limits,
-    parse_status_report, prepare_gcode_lines, strip_gcode_comments, validate_gcode_line,
+    laser_off_on_alarm_warning, parse_fluidnc_yaml, parse_grbl_laser_mode,
+    parse_grbl_settings_limits, parse_grbl_spindle_max, parse_status_report, prepare_gcode_lines,
+    strip_gcode_comments, validate_gcode_line,
 };
 pub use transport::{
     ConnectionSpec, DeviceTransport, FLUIDNC_CHANNEL_RX_WINDOW, FLUIDNC_LINE_QUEUE_LIMIT, FakeGrbl,

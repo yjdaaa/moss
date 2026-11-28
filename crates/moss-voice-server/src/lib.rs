@@ -44,6 +44,7 @@ pub mod sim_guard; // VA2 模拟轮次工具门禁（独立于提示词与桌面
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
 mod state;
+pub mod timer; // r77 / n144 内置语音计时提醒（仅内存，到点播报给发起设备）
 mod tools;
 pub mod vision;
 pub mod wake_assets; // n61 设备唤醒词资源包：本机主窗口逐台确认推送（n67 起取消独立安全窗口）
@@ -79,6 +80,11 @@ pub use state::{
     DebugToolTrace, DiagCategory, DiagSource, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
     MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, PlaybackDetail, ServerEvent, SessionView,
     ToolTiming, TurnDebugTrace, TurnDetail, TurnTiming, TurnToolDetail, scrub_debug_text,
+};
+pub use timer::{
+    FiredTimer, MAX_ACTIVE_TIMERS, MAX_TIMER_SECONDS, MIN_TIMER_SECONDS, ManualTimerClock,
+    TIMER_TOOL, TIMER_TOOL_DESCRIPTION, TimerClock, TimerSnapshot, TimerStore, TimerTools,
+    timer_tool_spec,
 };
 pub use tools::{HostTools, ToolHost, ToolHostResult};
 /// 设备登记状态。
@@ -253,6 +259,8 @@ pub struct ServerConfig {
     pub debug_process_trace: Option<Arc<dyn debug_api::ProcessTraceControl>>,
     /// VB1 识别（ASR）真实录音语料库（默认关闭；模拟轮次不保存，不进诊断包与过程记录）。
     pub asr_corpus: Option<Arc<asr_corpus::AsrCorpusStore>>,
+    /// r77 / n144 内置语音计时提醒存储（仅存内存，重启清空；与 `TimerTools` 共用同一实例）。
+    pub timers: Arc<timer::TimerStore>,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -302,6 +310,7 @@ impl Default for ServerConfig {
             active_laser_job: None,
             debug_process_trace: None,
             asr_corpus: None,
+            timers: Arc::new(timer::TimerStore::new()),
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -443,6 +452,8 @@ pub enum DeviceRequest {
     },
     /// 按需握手并拉取设备自带 MCP 工具清单（幂等，已拉取完成或正在拉取时忽略）。
     SyncTools,
+    /// r77 / n144 计时提醒到点：仅投递给发起提醒的那台小智；设备正忙时排队等本轮结束再播，不打断。
+    TimerReminder { id: String, speech: String },
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -492,6 +503,48 @@ pub(crate) struct Shared {
     pub debug_gate: Arc<debug_api::DebugApiGate>,
     pub bench_windows: debug_api::BenchWindowStore,
     pub bench_window_changed: tokio::sync::Notify,
+    /// r77 / n144 内置语音计时提醒（仅存内存）。
+    pub timers: Arc<timer::TimerStore>,
+}
+
+/// 将到点的计时提醒投递给发起提醒的原设备；设备不在线或已撤销时记来源为小智的事件，绝不改投其他设备。
+pub(crate) fn dispatch_fired_timer_to(
+    device_requests: &std::sync::Mutex<std::collections::HashMap<String, DeviceRequestHandle>>,
+    state: &state::LiveState,
+    fired: timer::FiredTimer,
+) {
+    let speech = fired.speech();
+    let delivered = device_requests
+        .lock()
+        .ok()
+        .and_then(|map| {
+            let handle = map.get(&fired.device_id)?;
+            handle
+                .permission
+                .load(std::sync::atomic::Ordering::Acquire)
+                .then(|| handle.sender.clone())
+        })
+        .is_some_and(|sender| {
+            sender
+                .send(DeviceRequest::TimerReminder {
+                    id: fired.id.clone(),
+                    speech: speech.clone(),
+                })
+                .is_ok()
+        });
+    if !delivered {
+        state.event_in_flow(
+            EventRecord::warn(
+                DiagCategory::Device,
+                format!(
+                    "计时提醒已到期（设备 {} 不在线，未播报）：{speech}",
+                    fired.device_id
+                ),
+            )
+            .source(DiagSource::Xiaozhi),
+            session::device_flow(&fired.device_id),
+        );
+    }
 }
 
 impl Shared {
@@ -1089,6 +1142,7 @@ impl VoiceServer {
             debug_gate: Arc::new(debug_api::DebugApiGate::new()),
             bench_windows: debug_api::BenchWindowStore::new(),
             bench_window_changed: tokio::sync::Notify::new(),
+            timers: config.timers.clone(),
         });
         shared.state.event(
             EventRecord::from(format!(
@@ -1204,6 +1258,30 @@ impl VoiceServer {
                 }
             });
         }
+        let timer_shared = shared.clone();
+        let mut stop_timers = shutdown_tx.subscribe();
+        runtime.spawn(async move {
+            loop {
+                for fired in timer_shared.timers.poll_due() {
+                    dispatch_fired_timer_to(
+                        &timer_shared.device_requests,
+                        &timer_shared.state,
+                        fired,
+                    );
+                }
+                let next_due = timer_shared.timers.next_due();
+                tokio::select! {
+                    _ = stop_timers.wait_for(|stop| *stop) => break,
+                    _ = timer_shared.timers.notified() => {}
+                    _ = async {
+                        match next_due {
+                            Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
+                }
+            }
+        });
         let mdns = if config.bind.is_unspecified() {
             ota::start_mdns_responder(http_port, ws_port)
         } else {
@@ -1287,6 +1365,7 @@ impl VoiceServer {
                         | DeviceRequest::ShowScene { .. }
                         | DeviceRequest::InjectText { .. }
                         | DeviceRequest::InjectAudio { .. }
+                        | DeviceRequest::TimerReminder { .. }
                 )
             {
                 return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));

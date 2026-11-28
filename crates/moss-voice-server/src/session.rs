@@ -1003,6 +1003,8 @@ struct Session<'a> {
     next_turn_is_digital: bool,
     /// VC1 由拾音/停顿复核移交到 `start_turn` 的时间窗锁存标记
     pending_bench_window: bool,
+    /// r77 / n144 已到点、等待本轮对话结束再播报的计时提醒队列（不打断正在进行的对话）
+    pending_timers: VecDeque<(String, String)>,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。

@@ -521,6 +521,7 @@ pub(crate) async fn serve_session(
             .fail_if_pending(&device_id, "设备连接已断开，画面未回传".into());
     }
     session.finish_timing("disconnected");
+    session.flush_unplayed_timers("已断开");
     // VC1：设备断开时立即关闭该会话绑定的测试时间窗并写入事件，防止状态残留
     shared.close_bench_window_for_session(&device_id, &session_id, "设备断开");
     session.last_verified_person = None;

@@ -672,6 +672,7 @@ impl ApiService {
         let mut machine_limits = None;
         let mut machine_features = None;
         let mut device_identity = None;
+        let mut probed_live = false;
         let mut summary = String::new();
 
         let allow_fallback = parse_bool(
@@ -873,14 +874,48 @@ impl ApiService {
                 machine_limits = report.machine_limits.clone();
                 machine_features = report.features.clone();
                 device_identity = report.identity.clone();
+                probed_live = true;
                 summary = report.summary.clone();
                 break;
             }
         }
+        let connected = serial_connected || network_connected;
         let soft_limits_enabled = machine_limits
             .as_ref()
             .and_then(|lim| lim.soft_limits_enabled);
         let homing_enabled = machine_limits.as_ref().and_then(|lim| lim.homing_enabled);
+        let capabilities = connected.then(|| {
+            let manual_x = crate::generation::parse_optional_work_area_override(
+                object.get("work_area_width_mm"),
+                "work_area_width_mm",
+            )
+            .ok()
+            .flatten();
+            let manual_y = crate::generation::parse_optional_work_area_override(
+                object.get("work_area_height_mm"),
+                "work_area_height_mm",
+            )
+            .ok()
+            .flatten();
+            let remembered = if probed_live {
+                (None, None)
+            } else {
+                self.remembered_work_area(object)
+            };
+            laser_device::build_machine_capabilities(
+                manual_x,
+                manual_y,
+                machine_limits.as_ref(),
+                remembered,
+                &firmware_settings,
+                machine_features.as_ref(),
+                device_identity.as_ref(),
+            )
+        });
+        let capabilities_json = capabilities.as_ref().map(machine_capabilities_json);
+        let capabilities_summary = capabilities
+            .as_ref()
+            .map(laser_device::MachineCapabilities::summary_zh);
         let homing_json = |h: &Option<laser_device::AxisHoming>| {
             h.as_ref().map(|cfg| {
                 serde_json::json!({
@@ -897,10 +932,12 @@ impl ApiService {
             "attempts": attempts,
             "serial_connected": serial_connected,
             "network_connected": network_connected,
-            "connected": serial_connected || network_connected,
+            "connected": connected,
             "firmware_settings": firmware_settings,
             "soft_limits_enabled": soft_limits_enabled,
             "homing_enabled": homing_enabled,
+            "capabilities": capabilities_json,
+            "capabilities_summary": capabilities_summary,
             "identity": device_identity.map(|id| serde_json::json!({
                 "firmware": id.firmware,
                 "version": id.version,
@@ -936,6 +973,34 @@ impl ApiService {
         });
         (result, verified)
     }
+}
+
+/// 将 `MachineCapabilities` 转为结构化 JSON（供 `/api/connection/check` 返回）。
+fn machine_capabilities_json(caps: &laser_device::MachineCapabilities) -> serde_json::Value {
+    serde_json::json!({
+        "effective_travel_mm": {
+            "x": caps.x_travel.mm,
+            "x_source": caps.x_travel.source.as_str(),
+            "x_source_label": caps.x_travel.source.label_zh(),
+            "y": caps.y_travel.mm,
+            "y_source": caps.y_travel.source.as_str(),
+            "y_source_label": caps.y_travel.source.label_zh(),
+        },
+        "firmware_travel_mm": {
+            "x": caps.firmware_x_travel_mm,
+            "y": caps.firmware_y_travel_mm,
+        },
+        "homing_enabled": caps.homing_enabled,
+        "homing_label": caps.homing_label(),
+        "soft_limits_enabled": caps.soft_limits_enabled,
+        "soft_limits_label": caps.soft_limits_label(),
+        "spindle_max_s": caps.spindle_max_s,
+        "spindle_max_s_label": caps.spindle_max_s_label(),
+        "laser_mode_enabled": caps.laser_mode_enabled,
+        "laser_mode_label": caps.laser_mode_label(),
+        "firmware_type": caps.firmware_type_label(),
+        "summary": caps.summary_zh(),
+    })
 }
 
 /// 终态或发送中的 workflow 不允许再次下发（规格 §8：未确认/已终止任务绝不自动重发）。

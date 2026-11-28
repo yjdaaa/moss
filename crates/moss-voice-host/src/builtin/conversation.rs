@@ -1327,6 +1327,7 @@ impl BuiltinVoice {
         local: &mut LocalParts,
         experience: &BuiltinLocal,
         colab: Option<&(moss_voice::colab::BuiltinColab, String)>,
+        timers: Arc<moss_voice_server::TimerStore>,
     ) -> Result<Option<(Conversation, bool)>, CenterError> {
         let key = |section| self.secret(section).map(Option::unwrap_or_default);
         let invalid = |error: moss_voice_providers::ProviderError| {
@@ -1487,7 +1488,7 @@ impl BuiltinVoice {
             .with_fast_reply(experience.llm_fast_reply);
 
         self.persona.configure(persona_config(experience));
-        let tools = self.base_tool_executor()?;
+        let tools = self.base_tool_executor_with_timers(timers)?;
         let system_prompt = self.persona.system_prompt();
         let asr_corrections = moss_voice::settings::effective_asr_corrections(
             experience.asr_homophone_fix,
@@ -1594,6 +1595,13 @@ impl BuiltinVoice {
     }
 
     pub(super) fn base_tool_executor(&self) -> Result<Arc<dyn ToolExecutor>, CenterError> {
+        self.base_tool_executor_with_timers(Arc::new(moss_voice_server::TimerStore::new()))
+    }
+
+    pub(super) fn base_tool_executor_with_timers(
+        &self,
+        timers: Arc<moss_voice_server::TimerStore>,
+    ) -> Result<Arc<dyn ToolExecutor>, CenterError> {
         let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost {
             host: self.host.clone(),
         })));
@@ -1614,13 +1622,29 @@ impl BuiltinVoice {
             }),
         });
         let persona_host = self.host.clone();
-        Ok(Arc::new(PersonaTools {
+        let persona_tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools {
             original: tools,
             persona: self.persona.clone(),
             permitted: Some(Arc::new(move |ctx: &ToolContext| {
                 persona_host
                     .api_service
                     .voice_session_allowed(&ctx.device_id, &ctx.session_id)
+            })),
+        });
+        let timer_host = self.host.clone();
+        let timer_disabled_host = self.host.clone();
+        Ok(Arc::new(moss_voice_server::TimerTools {
+            original: persona_tools,
+            timers,
+            permitted: Some(Arc::new(move |ctx: &ToolContext| {
+                timer_host
+                    .api_service
+                    .voice_session_allowed(&ctx.device_id, &ctx.session_id)
+            })),
+            disabled: Some(Arc::new(move || {
+                timer_disabled_host
+                    .api_service
+                    .tool_disabled(moss_voice_server::TIMER_TOOL)
             })),
         }))
     }

@@ -63,6 +63,7 @@ export const TOOL_GROUPS = [
   { id: "safety", title: "检查与安全" },
   { id: "job", title: "刻字与发送" },
   { id: "tuning", title: "材料与调参" },
+  { id: "voice", title: "内置语音（只在 MOSS 内置服务生效）" },
   { id: "desktop", title: "电脑控制（内置语音和严格模式下不开放）" },
   { id: "other", title: "其他" },
 ];
@@ -72,24 +73,26 @@ export const TOOL_RISK_LABELS = {
   file: "只生成预览",
   stop: "停止与调速",
   confirm: "会让机器动 · 要你确认",
+  voice: "内置语音",
   desktop: "控制电脑",
 };
 
 export const TOOL_META = {
-  check_laser_connection_tool: { label: "检查机器连接", group: "safety", risk: "read", summary: "看激光机连没连上、现在空闲还是在刻。" },
+  check_laser_connection_tool: { label: "检查机器连接与能力", group: "safety", risk: "read", summary: "看激光机连没连上、状态，以及有效行程、能否回零、软限位和功率上限。" },
   laser_safe_action_tool: { label: "停止与机器控制", group: "safety", risk: "confirm", summary: "急停、边刻边调速度和功率不用确认；回零、设原点、移动激光头要你确认。不能关闭。" },
-  laser_workflow_tool: { label: "刻字：预览、发送、进度", group: "job", risk: "confirm", summary: "先生成预览弹到电脑上，你核对并确认后才开始刻；也能查进度、取消、断点续刻。" },
+  laser_workflow_tool: { label: "刻字与图片：预览、发送、进度", group: "job", risk: "confirm", summary: "刻文字、图形或最近上传的图片：先生成预览弹到电脑，确认后开刻；也能查进度和预计剩余时间、取消、续刻。" },
   regenerate_text_laser_task_tool: { label: "按建议重新生成预览", group: "job", risk: "file", summary: "采用调参建议或改文字、材料后重新出预览；发送仍要你确认。" },
   material_params_tool: { label: "材料参数库", group: "tuning", risk: "read", summary: "查某种材料该用多大功率、多快速度；保存和删除只能在电脑上做。" },
   refine_laser_params_from_feedback_tool: { label: "按效果给调参建议", group: "tuning", risk: "file", summary: "你说“太焦”“太浅”后给出调整建议，不改参数、不动机器。" },
   run_calibration_grid_tool: { label: "测试矩阵", group: "tuning", risk: "confirm", summary: "刻一块不同功率×速度的小方格找最佳参数；开始刻前要你确认。" },
   select_calibration_cell_tool: { label: "保存最佳格子", group: "tuning", risk: "file", summary: "你说第几格最好，就把它的参数存进材料库。" },
+  voice_timer_tool: { label: "计时提醒", group: "voice", risk: "voice", summary: "倒计时 10 秒到 3 小时，到点对发起提醒的小智播报；仅存内存，重启后清空。" },
   open_app_tool: { label: "打开电脑应用", group: "desktop", risk: "desktop", summary: "打开浏览器、微信等应用或网址。" },
   command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
 };
 
-/** 工具按分组排好，未登记的工具放进“其他”，用后端给的说明；内置语音与严格模式下隐藏永不开放的电脑控制组。 */
-export function groupedTools(tools, { hideDesktop = false } = {}) {
+/** 工具按分组排好，未登记的工具放进“其他”，用后端给的说明；内置语音与严格模式下隐藏永不开放的电脑控制组，非内置链路隐藏仅内置语音工具。 */
+export function groupedTools(tools, { hideDesktop = false, hideBuiltinOnly = false } = {}) {
   const list = Array.isArray(tools) ? tools : [];
   return TOOL_GROUPS.map((group) => ({
     ...group,
@@ -105,6 +108,7 @@ export function groupedTools(tools, { hideDesktop = false } = {}) {
         };
       })
       .filter((tool) => !hideDesktop || (tool.group !== "desktop" && !tool.voice_hidden))
+      .filter((tool) => !hideBuiltinOnly || !tool.builtin_only)
       .filter((tool) => tool.group === group.id),
   })).filter((group) => group.tools.length > 0);
 }

@@ -155,6 +155,137 @@ pub fn save_upload(
     })
 }
 
+/// 允许作为 `image=latest_upload` 图片源的后缀（不含 `.gcode` / `.nc` / `.txt`）。
+pub const IMAGE_UPLOAD_SUFFIXES: &[&str] = &[".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"];
+
+/// `image=latest_upload` 采信最近上传图片的最长有效期（30 分钟，避免误刻很久之前的旧图）。
+pub const LATEST_UPLOAD_MAX_AGE_SECS: u64 = 30 * 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestUploadedImage {
+    pub filename: String,
+    pub display_name: String,
+    pub uploaded_at: u64,
+    pub age_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatestUploadError {
+    NotFound,
+    Expired {
+        display_name: String,
+        uploaded_at: u64,
+        age_seconds: u64,
+    },
+}
+
+fn parse_saved_upload_meta(filename: &str) -> Option<(u64, String)> {
+    let (ts_part, rest) = filename.split_once('_')?;
+    let ts = ts_part.parse::<u64>().ok()?;
+    let (hash_part, display) = rest.split_once('_')?;
+    if hash_part.len() == 10
+        && hash_part.bytes().all(|b| b.is_ascii_hexdigit())
+        && !display.is_empty()
+    {
+        Some((ts, display.to_owned()))
+    } else {
+        None
+    }
+}
+
+/// 在 MOSS 上传目录 `upload_root` 内查找最近上传的一张普通图片文件（严格拒绝符号链接与子目录，
+/// 仅限 [`IMAGE_UPLOAD_SUFFIXES`]，超时返回 [`LatestUploadError::Expired`]）。
+pub fn find_latest_uploaded_image(
+    upload_root: &std::path::Path,
+    now_unix: u64,
+    max_age_secs: u64,
+) -> Result<LatestUploadedImage, LatestUploadError> {
+    let entries = std::fs::read_dir(upload_root).map_err(|_| LatestUploadError::NotFound)?;
+    let mut best: Option<(u64, String, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let suffix = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .map(|v| format!(".{}", v.to_ascii_lowercase()))
+            .unwrap_or_default();
+        if !IMAGE_UPLOAD_SUFFIXES.contains(&suffix.as_str()) {
+            continue;
+        }
+        let (uploaded_at, display_name) = parse_saved_upload_meta(&filename).unwrap_or_else(|| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mtime, filename.clone())
+        });
+        let better = match &best {
+            None => true,
+            Some((best_ts, best_name, _)) => {
+                uploaded_at > *best_ts || (uploaded_at == *best_ts && filename > *best_name)
+            }
+        };
+        if better {
+            best = Some((uploaded_at, filename, display_name));
+        }
+    }
+    let Some((uploaded_at, filename, display_name)) = best else {
+        return Err(LatestUploadError::NotFound);
+    };
+    let age_seconds = now_unix.saturating_sub(uploaded_at);
+    if age_seconds > max_age_secs {
+        return Err(LatestUploadError::Expired {
+            display_name,
+            uploaded_at,
+            age_seconds,
+        });
+    }
+    Ok(LatestUploadedImage {
+        filename,
+        display_name,
+        uploaded_at,
+        age_seconds,
+    })
+}
+
+/// 将图片上传距今秒数整理为适合语音播报的中文相对时间。
+pub fn format_uploaded_age_zh(age_seconds: u64) -> String {
+    if age_seconds < 60 {
+        if age_seconds <= 5 {
+            "刚刚".into()
+        } else {
+            format!("{age_seconds} 秒前")
+        }
+    } else if age_seconds < 3600 {
+        let mins = age_seconds / 60;
+        let secs = age_seconds % 60;
+        if secs == 0 {
+            format!("{mins} 分钟前")
+        } else {
+            format!("{mins} 分 {secs} 秒前")
+        }
+    } else {
+        let hours = age_seconds / 3600;
+        let mins = (age_seconds % 3600) / 60;
+        if mins == 0 {
+            format!("{hours} 小时前")
+        } else {
+            format!("{hours} 小时 {mins} 分钟前")
+        }
+    }
+}
+
 pub(crate) fn safe_asset_path(path: &str) -> Option<String> {
     let decoded = percent_decode(path);
     if decoded.is_empty() || decoded.chars().any(|c| c == '\0' || c.is_control()) {

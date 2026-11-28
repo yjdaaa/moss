@@ -342,6 +342,7 @@ impl<'a> Session<'a> {
             pending_digital_ack: None,
             next_turn_is_digital: false,
             pending_bench_window: false,
+            pending_timers: VecDeque::new(),
         })
     }
 
@@ -661,6 +662,92 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// r77 / n144 到点计时提醒播报：设备空闲且未在拾音/放歌时才播，绝不打断正在进行的对话。
+    pub(super) async fn deliver_due_timers(
+        &mut self,
+        socket: &mut crate::link::Link,
+    ) -> Result<(), String> {
+        if self.pending_timers.is_empty() {
+            return Ok(());
+        }
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            self.flush_unplayed_timers("设备授权已撤销");
+            return Ok(());
+        }
+        if self.busy()
+            || self.listening_occupied()
+            || self.music.as_ref().is_some_and(|m| m.active())
+        {
+            return Ok(());
+        }
+        let Some((_id, speech)) = self.pending_timers.pop_front() else {
+            return Ok(());
+        };
+        if (self.mqtt && !socket.audio_open()) || self.conversation.is_none() {
+            let alert = ServerMessage::Alert {
+                status: "计时提醒".into(),
+                message: speech.clone(),
+                emotion: "happy".into(),
+            };
+            if !send_json(socket, &alert).await {
+                self.shared.state.event_in_flow(
+                    EventRecord::warn(
+                        DiagCategory::Device,
+                        format!(
+                            "计时提醒已到期（设备 {} 发送失败，未播报）：{speech}",
+                            self.device_id
+                        ),
+                    )
+                    .source(crate::DiagSource::Xiaozhi),
+                    device_flow(self.device_id),
+                );
+                return Err("发送失败".into());
+            }
+            self.shared.state.event_in_flow(
+                EventRecord::info(
+                    DiagCategory::Device,
+                    format!("计时提醒已到期（已在屏幕提示）：{speech}"),
+                )
+                .source(crate::DiagSource::Xiaozhi),
+                device_flow(self.device_id),
+            );
+            return Ok(());
+        }
+        self.shared.state.event_in_flow(
+            EventRecord::info(
+                DiagCategory::Device,
+                format!("计时提醒已到期，正在播报：{speech}"),
+            )
+            .source(crate::DiagSource::Xiaozhi),
+            device_flow(self.device_id),
+        );
+        self.start_turn(
+            TurnInput::Say {
+                text: speech,
+                close: false,
+            },
+            TurnKind::Notice,
+        );
+        Ok(())
+    }
+
+    /// 会话断开或授权撤销时，把排队尚未播报的到点提醒写入「事件记录」（来源小智），不静默丢失。
+    pub(super) fn flush_unplayed_timers(&mut self, reason: &str) {
+        while let Some((_id, speech)) = self.pending_timers.pop_front() {
+            self.shared.state.event_in_flow(
+                EventRecord::warn(
+                    DiagCategory::Device,
+                    format!(
+                        "计时提醒已到期（设备 {} {reason}，未播报）：{speech}",
+                        self.device_id
+                    ),
+                )
+                .source(crate::DiagSource::Xiaozhi),
+                device_flow(self.device_id),
+            );
+        }
+    }
+
     /// 会话循环；返回断开原因。
     pub(super) async fn run(
         &mut self,
@@ -836,6 +923,9 @@ impl<'a> Session<'a> {
             }
             self.sync_trace_turn();
             self.deliver_background(socket);
+            if let Err(reason) = self.deliver_due_timers(socket).await {
+                return reason;
+            }
             // n71 常连模式：这一轮对话该结束了（再见说完、用户说退出、空闲到期）
             if let Some(reason) = self.pending_goodbye.take()
                 && let Err(reason) = self.end_conversation(socket, &reason, true).await

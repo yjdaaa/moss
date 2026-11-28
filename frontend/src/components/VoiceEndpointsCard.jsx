@@ -122,7 +122,8 @@ export function VoiceToolsCard({ overview, mode = "official", strictEnabled = fa
   if (!overview) return null;
   const tools = Array.isArray(overview.tools) ? overview.tools : [];
   const hideDesktop = mode === "builtin" || Boolean(strictEnabled);
-  const groups = groupedTools(tools, { hideDesktop });
+  const hideBuiltinOnly = mode !== "builtin";
+  const groups = groupedTools(tools, { hideDesktop, hideBuiltinOnly });
   const visibleTools = groups.flatMap((g) => g.tools);
 
   const switchTool = (tool, enabled) =>

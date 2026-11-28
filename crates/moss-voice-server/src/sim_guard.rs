@@ -152,6 +152,10 @@ pub fn check_simulated_tool(
         "get_weather" | "get_news" | "web_search" | "search_rag"
         | "end_conversation" | "stay_silent" => Ok(()),
         "voice_persona_tool" => Err("模拟轮次不允许修改说话角色设置".into()),
+        "voice_timer_tool" => match action.as_deref() {
+            Some("list") => Ok(()),
+            _ => Err("模拟轮次禁止设置或取消计时提醒（仅允许 list 查询）".into()),
+        },
         // 3. 第三方 MCP 工具：仅放行用户在设置中明确标为可信只读的工具，其余一律拒绝（绝不进入桌面审批）
         n if n.contains("__") => {
             if trusted_read_only {
@@ -408,5 +412,29 @@ mod tests {
             music_err.contains("整体测试期间不播放音乐以免干扰后续测试"),
             "play_music 拒绝原因须明确：{music_err}"
         );
+
+        // r77 / n144：计时提醒在模拟轮次仅允许 list，禁止 set 与 cancel
+        assert!(
+            check_simulated_tool("voice_timer_tool", None, r#"{"action":"list"}"#, false).is_ok()
+        );
+        assert!(
+            check_simulated_tool(
+                "voice_timer_tool",
+                None,
+                r#"{"action":"set","duration_seconds":60,"content":"喝水"}"#,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            check_simulated_tool(
+                "voice_timer_tool",
+                None,
+                r#"{"action":"cancel","timer_id":"t-1"}"#,
+                false
+            )
+            .is_err()
+        );
+        assert!(check_simulated_tool("voice_timer_tool", None, "{}", false).is_err());
     }
 }

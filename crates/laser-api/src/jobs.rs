@@ -625,6 +625,189 @@ pub(crate) fn release_uncertain_target_handle(uncertain_jobs: &UncertainJobs, ta
     drop(handles);
 }
 
+/// 将秒数整理为适合语音播报的中文时长（r77）。
+pub(crate) fn format_duration_zh(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "未知".into();
+    }
+    if seconds < 1.0 {
+        return "不到 1 秒".into();
+    }
+    let total = seconds.round() as u64;
+    if total < 60 {
+        format!("约 {total} 秒")
+    } else if total < 3600 {
+        let mins = total / 60;
+        let secs = total % 60;
+        if secs == 0 {
+            format!("约 {mins} 分钟")
+        } else {
+            format!("约 {mins} 分 {secs} 秒")
+        }
+    } else {
+        let hours = total / 3600;
+        let mins = (total % 3600) / 60;
+        if mins == 0 {
+            format!("约 {hours} 小时")
+        } else {
+            format!("约 {hours} 小时 {mins} 分钟")
+        }
+    }
+}
+
+/// 从记录提取已校准的预计总时长（秒）：workflow 在 `artifacts.time_estimate`，标定记录在顶层 `time_estimate`。
+pub(crate) fn record_estimated_seconds(payload: &serde_json::Value) -> Option<f64> {
+    [
+        &payload["artifacts"]["time_estimate"],
+        &payload["time_estimate"],
+    ]
+    .into_iter()
+    .find_map(|est| {
+        est.get("estimated_seconds")
+            .and_then(serde_json::Value::as_f64)
+    })
+    .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// 基于已校准预计总时长与实时发送进度计算预计剩余秒数（r77）；信息不足时返回 `None`（由调用方标为“未知”，不编造）。
+pub(crate) fn compute_remaining_seconds(
+    estimated_total_secs: Option<f64>,
+    send_result: &serde_json::Value,
+) -> Option<f64> {
+    let estimated_total = estimated_total_secs.filter(|v| v.is_finite() && *v > 0.0)?;
+    let phase = send_result
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let elapsed_secs = send_result
+        .get("elapsed_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as f64
+        / 1000.0;
+    if phase == "awaiting_completion" {
+        let remaining = (estimated_total - elapsed_secs).max(0.0);
+        return Some((remaining * 10.0).round() / 10.0);
+    }
+    let mode = send_result
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if mode == "sd_offline" {
+        let sd_pct = send_result
+            .get("last_status_report")
+            .and_then(serde_json::Value::as_str)
+            .and_then(laser_device::parse_status_report)
+            .and_then(|report| match report.sd {
+                Some(laser_device::SdProgress::Running { percent, .. }) if percent.is_finite() => {
+                    Some(percent.clamp(0.0, 100.0))
+                }
+                _ => None,
+            })?;
+        let remaining = estimated_total * (1.0 - sd_pct / 100.0);
+        return Some((remaining.max(0.0) * 10.0).round() / 10.0);
+    }
+    let total_lines = send_result
+        .get("total_lines")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&n| n > 0)?;
+    let lines_sent = send_result
+        .get("lines_sent")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .min(total_lines);
+    let remaining = if lines_sent == 0 {
+        (estimated_total - elapsed_secs).max(0.0)
+    } else {
+        let progress = (lines_sent as f64 / total_lines as f64).clamp(0.0, 1.0);
+        estimated_total * (1.0 - progress)
+    };
+    Some((remaining.max(0.0) * 10.0).round() / 10.0)
+}
+
+/// 为处于 `sending` 的任务补充 `remaining_seconds`、`remaining_text` 与 `progress_percent`。
+pub(crate) fn enrich_progress_timing(payload: &mut serde_json::Value) {
+    if payload.get("status").and_then(serde_json::Value::as_str) != Some("sending") {
+        return;
+    }
+    let estimated_total = record_estimated_seconds(payload);
+    let Some(send_result) = payload.get("send_result") else {
+        return;
+    };
+    let phase = send_result
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let remaining = compute_remaining_seconds(estimated_total, send_result);
+    let remaining_text = match remaining {
+        Some(secs) if phase == "awaiting_completion" && secs < 1.0 => {
+            "即将完成（等待设备收尾）".to_owned()
+        }
+        Some(secs) if phase == "awaiting_completion" => {
+            format!("{}（等待设备收尾）", format_duration_zh(secs))
+        }
+        Some(secs) => format_duration_zh(secs),
+        None => "未知".to_owned(),
+    };
+    let progress_percent = {
+        let total = send_result
+            .get("total_lines")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if total > 0 {
+            let sent = send_result
+                .get("lines_sent")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                .min(total);
+            Some(((sent as f64 / total as f64) * 1000.0).round() / 10.0)
+        } else {
+            send_result
+                .get("last_status_report")
+                .and_then(serde_json::Value::as_str)
+                .and_then(laser_device::parse_status_report)
+                .and_then(|r| match r.sd {
+                    Some(laser_device::SdProgress::Running { percent, .. })
+                        if percent.is_finite() =>
+                    {
+                        Some((percent.clamp(0.0, 100.0) * 10.0).round() / 10.0)
+                    }
+                    _ => None,
+                })
+        }
+    };
+    if let Some(sr_map) = payload
+        .get_mut("send_result")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        sr_map.insert(
+            "estimated_total_seconds".into(),
+            estimated_total.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+        );
+        sr_map.insert(
+            "remaining_seconds".into(),
+            remaining.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+        );
+        sr_map.insert(
+            "remaining_text".into(),
+            serde_json::Value::String(remaining_text.clone()),
+        );
+        if let Some(pct) = progress_percent {
+            sr_map.insert("progress_percent".into(), serde_json::json!(pct));
+        }
+    }
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "remaining_seconds".into(),
+            remaining.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+        );
+        map.insert(
+            "remaining_text".into(),
+            serde_json::Value::String(remaining_text),
+        );
+    }
+}
+
 pub(crate) fn overlay_live_progress(
     payload: &mut serde_json::Value,
     jobs: &ActiveJobs,
@@ -647,6 +830,7 @@ pub(crate) fn overlay_live_progress(
         map.insert("send_result".into(), live);
         map.insert("status".into(), serde_json::Value::String("sending".into()));
     }
+    enrich_progress_timing(payload);
 }
 
 /// 仅在内存中推进取消世代并置位取消令牌（零硬件/磁盘 I/O，可安全在 `record_transition_guard` 内执行）。

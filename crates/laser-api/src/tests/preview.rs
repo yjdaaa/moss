@@ -2364,3 +2364,173 @@ fn text_border_cut_engraves_inner_text_before_cutting_outer_border_with_single_g
         "第二阶段所有出光行必须使用切割档功率 {cut_power}"
     );
 }
+
+/// r77（2026-11-28）：`laser_workflow_tool(action=preview, image="latest_upload")` 只能用上传目录里最近 30 分钟内的图片；
+/// 无上传、超过 30 分钟、传入任意路径均返回明确错误，正常上传支持 `image_mode` 与 `line_interval_scale` 并在产物里写明图片名与上传时间。
+#[test]
+fn latest_upload_image_preview_handles_missing_expired_invalid_and_valid_upload() {
+    use base64::Engine as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let upload_root = temp.path().join("uploads");
+    let generated_root = temp.path().join("generated");
+    std::fs::create_dir_all(&upload_root).unwrap();
+    std::fs::create_dir_all(&generated_root).unwrap();
+
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        laser_runtime::RuntimeDb::open_memory().unwrap(),
+    ));
+    {
+        let guard = db.lock().unwrap();
+        guard
+            .voice_device_seen("dev-1", "client-1", "", "", "", 0.0)
+            .unwrap();
+        guard
+            .set_voice_device_status("dev-1", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_db(db)
+    .with_upload_root(upload_root.clone())
+    .with_generated_root(generated_root.clone())
+    .with_preview_roots(vec![generated_root.clone(), upload_root.clone()]);
+    service
+        .register_voice_session("dev-1", "client-1", "s-1")
+        .unwrap();
+
+    // 1. 还没上传过图片 -> 400 no_uploaded_image
+    let (st_empty, empty_body) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview",
+            "image": "latest_upload",
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_empty, 400, "{empty_body}");
+    assert_eq!(empty_body["detail"]["error_code"], "no_uploaded_image");
+    assert!(
+        empty_body["result"]
+            .as_str()
+            .unwrap()
+            .contains("请先在电脑或手机上传图片"),
+        "{empty_body}"
+    );
+
+    // 2. 任意路径 -> 400 invalid_image_source
+    for bad in ["/etc/passwd", "../secret.png", "foo.png"] {
+        let (st_bad, bad_body) = service.dispatch_json(
+            "POST",
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "image": bad,
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+            laser_contracts::CallerContext::Voice {
+                device_id: "dev-1".into(),
+                session_id: "s-1".into(),
+            },
+        );
+        assert_eq!(st_bad, 400, "{bad}: {bad_body}");
+        assert_eq!(bad_body["detail"]["error_code"], "invalid_image_source");
+    }
+
+    // 构造一张真实 16×16 黑白 PNG
+    let mut png_bytes = Vec::new();
+    let img = image::GrayImage::from_fn(16, 16, |x, y| {
+        if (x + y) % 2 == 0 {
+            image::Luma([30u8])
+        } else {
+            image::Luma([220u8])
+        }
+    });
+    image::DynamicImage::ImageLuma8(img)
+        .write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+
+    // 3. 31 分钟前上传的旧图 -> 400 uploaded_image_expired（且用 find_latest_uploaded_image 直接覆盖可注入时钟）
+    let now = unix_seconds();
+    let expired_ts = now.saturating_sub(crate::files::LATEST_UPLOAD_MAX_AGE_SECS + 60);
+    crate::files::save_upload("old_cat.png", &encoded, &upload_root, expired_ts).unwrap();
+    let (st_exp, exp_body) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview",
+            "image": "latest_upload",
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_exp, 400, "{exp_body}");
+    assert_eq!(exp_body["detail"]["error_code"], "uploaded_image_expired");
+    assert!(
+        exp_body["result"].as_str().unwrap().contains("old_cat.png")
+            && exp_body["result"].as_str().unwrap().contains("30 分钟"),
+        "{exp_body}"
+    );
+
+    // 4. 刚上传的新图 + image_mode + line_interval_scale -> 200 preview_ready，产物含 uploaded_image 与冻结快照
+    let saved = crate::files::save_upload("fresh_logo.png", &encoded, &upload_root, now).unwrap();
+    // 同目录里放一个更新的 .gcode 文件不得干扰图片选择
+    let gcode_b64 = base64::engine::general_purpose::STANDARD.encode(b"G21\nG0 X0 Y0\n");
+    crate::files::save_upload("newer.gcode", &gcode_b64, &upload_root, now + 5).unwrap();
+
+    let (st_ok, ok_body) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview",
+            "image": "latest_upload",
+            "image_mode": "jarvis",
+            "line_interval_scale": 0.8,
+            "material": "椴木",
+            "thickness_mm": 3,
+            "width_mm": 30
+        }),
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-1".into(),
+            session_id: "s-1".into(),
+        },
+    );
+    assert_eq!(st_ok, 200, "{ok_body}");
+    assert_eq!(ok_body["result"]["status"], "preview_ready");
+    assert_eq!(ok_body["result"]["source_type"], "image");
+    let arts = &ok_body["result"]["artifacts"];
+    assert_eq!(arts["uploaded_image"]["file"], saved.filename);
+    assert_eq!(arts["uploaded_image"]["display_name"], "fresh_logo.png");
+    assert_eq!(arts["uploaded_image"]["uploaded_at"], now);
+    assert!(
+        arts["uploaded_image"]["uploaded_ago"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "{arts}"
+    );
+    assert_eq!(arts["image_mode"], "jarvis");
+    assert_eq!(arts["line_interval_scale"], 0.8);
+    assert!(
+        ok_body["result"]["confirmation_snapshot"]["gcode_sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64),
+        "图片预览仍须冻结 64 位 SHA-256 快照"
+    );
+}

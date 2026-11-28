@@ -22,8 +22,19 @@ const DRAW_PIXEL_MM: f64 = 0.1;
 
 /// 图片任务默认机器幅面（翼宿 V1.0，`docs/laser/hardware-bom.md`）；请求可用 `work_area_width_mm` /
 /// `work_area_height_mm` 传入连接检查读到的实际行程（上限 `MAX_WORK_AREA_MM`）。发送前另按固件行程复核。
-pub(crate) const MACHINE_WORK_AREA_MM: f64 = 100.0;
+pub(crate) const MACHINE_WORK_AREA_MM: f64 = laser_device::DEFAULT_WORK_AREA_MM;
 const MAX_WORK_AREA_MM: f64 = 2000.0;
+
+/// 解析可选的显式幅面覆盖（手填值）：省略或 null 返回 `Ok(None)`，显式给出则经 `(0, 2000]` 校验。
+pub(crate) fn parse_optional_work_area_override(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Option<f64>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        other => parse_work_area_mm(other, field).map(Some),
+    }
+}
 
 /// 解析画板 `work_area_width_mm` / `work_area_height_mm`：缺省或 null 用默认 100 mm；
 /// 显式给出时必须是 `(0, 2000]` 内的有限数字，非数字、非正数、非有限数或超上限直接报错（HTTP 400），不静默回退。

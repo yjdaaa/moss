@@ -745,7 +745,7 @@ try {
   assert.ok(await page.locator("#voice-panel-features #voice-group-tools").isVisible(), "官方链路在扩展标签渲染工具开关与调用统计");
   await openGroup("tools");
   // r76：中文名、按用途分组；不再显示“完整工具（高级）”开关与 advanced 分组
-  await page.locator('#voice-tools-group-job [data-tool="laser_workflow_tool"]').getByText("刻字：预览、发送、进度").waitFor();
+  await page.locator('#voice-tools-group-job [data-tool="laser_workflow_tool"]').getByText("刻字与图片：预览、发送、进度").waitFor();
   assert.equal(await page.locator("#voice-tools-full-switch").count(), 0, "不再显示完整工具（高级）开关");
   assert.equal(await page.locator("#voice-tools-group-advanced").count(), 0, "不再显示高级重复工具分组");
   assert.equal(await page.locator("#voice-tool-prompts").count(), 0, "不再显示面向开发者的施工提示词折叠块");
