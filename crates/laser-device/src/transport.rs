@@ -72,6 +72,10 @@ pub trait DeviceTransport: Send + Sync {
     fn default_rx_buffer_size(&self) -> usize {
         GRBL_CLASSIC_RX_WINDOW
     }
+    /// 当前传输通道是否启用了空跑强制策略（不出光、限速）；开启时由底层与流控层同步执行。
+    fn dry_run_policy(&self) -> Option<crate::DryRunPolicy> {
+        None
+    }
 }
 
 /// 经典 GRBL 1.1 串口 RX 环形缓冲 `RX_BUFFER_SIZE = 128`，环形结构实际只能存 127 字节；
@@ -316,6 +320,9 @@ impl DeviceTransport for Box<dyn DeviceTransport> {
     fn default_rx_buffer_size(&self) -> usize {
         (**self).default_rx_buffer_size()
     }
+    fn dry_run_policy(&self) -> Option<crate::DryRunPolicy> {
+        (**self).dry_run_policy()
+    }
 }
 
 impl DeviceTransport for Arc<dyn DeviceTransport> {
@@ -333,6 +340,9 @@ impl DeviceTransport for Arc<dyn DeviceTransport> {
     }
     fn default_rx_buffer_size(&self) -> usize {
         (**self).default_rx_buffer_size()
+    }
+    fn dry_run_policy(&self) -> Option<crate::DryRunPolicy> {
+        (**self).dry_run_policy()
     }
 }
 

@@ -452,12 +452,18 @@ fn sd_offline_upload_payload_rescales_power_to_device_scale() {
         .map(str::to_owned)
         .to_vec();
 
-    let (same, same_sha) = sd_offline_upload_payload(original.clone(), &original_sha, &lines, 1.0);
+    let (same, same_sha) =
+        sd_offline_upload_payload(original.clone(), &original_sha, &lines, 1.0, None);
     assert_eq!(same, original, "标尺 1000 时原样上传已门禁校验的文件");
     assert_eq!(same_sha, original_sha);
 
-    let (scaled, scaled_sha) =
-        sd_offline_upload_payload(original.clone(), &original_sha, &lines, 255.0 / 1000.0);
+    let (scaled, scaled_sha) = sd_offline_upload_payload(
+        original.clone(),
+        &original_sha,
+        &lines,
+        255.0 / 1000.0,
+        None,
+    );
     assert_eq!(
         String::from_utf8(scaled.clone()).unwrap(),
         "M4 S255\nG1X10S128 F600\nM5\n"
@@ -468,6 +474,23 @@ fn sd_offline_upload_payload_rescales_power_to_device_scale() {
         "固件哈希门禁必须比对实际上传的字节"
     );
     assert_ne!(scaled_sha, original_sha);
+
+    // LB2 空跑模式：SD 脱机上传同样强制改写为 S0 + 限速并在开头补 M5
+    let dry_lines: Vec<String> = ["G0 X10 Y5", "M4 S1000", "G1 X20 S500 F4000", "M5"]
+        .map(str::to_owned)
+        .to_vec();
+    let (dry_bytes, dry_sha) = sd_offline_upload_payload(
+        original,
+        &original_sha,
+        &dry_lines,
+        1.0,
+        Some(laser_device::DryRunPolicy::new(2000)),
+    );
+    assert_eq!(
+        String::from_utf8(dry_bytes.clone()).unwrap(),
+        "G21 G94 G1 M5 S0 F1000\nG1 X10 Y5 F1000 S0\nM4 S0\nG1 X20 S0 F1000\nM5\n"
+    );
+    assert_eq!(dry_sha, hex::encode(Sha256::digest(&dry_bytes)));
 }
 
 /// `confirm_send` / `send` 不得采用客户端自带的 `start_from_line`（只允许 `resume` 从服务端记录写入），

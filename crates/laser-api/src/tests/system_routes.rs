@@ -1956,3 +1956,619 @@ fn preview_warns_when_feed_exceeds_firmware_max_rate_without_clamping() {
     assert_eq!(ok_resp["success"], true, "{ok_resp}");
     assert!(ok_resp["result"]["artifacts"]["warnings"].is_null());
 }
+
+/// LB1：HTTP / MCP / 语音三条入口调用 home 时，固件 `$22=0` 必须在握手预检拦截，不发 `$H`、不触发急停兜底也不留下待确认任务。
+#[test]
+fn lb1_home_rejected_across_http_mcp_and_voice_when_dollar22_is_zero() {
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let realtime = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let w_clone = written.clone();
+    let r_clone = realtime.clone();
+    let factory: TransportFactory = std::sync::Arc::new(move |_| {
+        struct RecTransport {
+            inner: laser_device::FakeGrbl,
+            lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            rt: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        }
+        impl laser_device::DeviceTransport for RecTransport {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.lines.lock().unwrap().push(line.to_owned());
+                self.inner.write_line(line)
+            }
+            fn write_realtime(&self, cmd: laser_device::RealtimeCommand) -> Result<(), String> {
+                self.rt.lock().unwrap().push(cmd.byte());
+                self.inner.write_realtime(cmd)
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                self.inner.read_line()
+            }
+        }
+        Ok(Box::new(RecTransport {
+            inner: laser_device::FakeGrbl::new([
+                "$22=0".to_owned(),
+                "$32=1".to_owned(),
+                "ok".to_owned(),
+                "error:3".to_owned(),
+            ]),
+            lines: w_clone.clone(),
+            rt: r_clone.clone(),
+        }))
+    });
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        laser_runtime::RuntimeDb::open_memory().unwrap(),
+    ));
+    {
+        let guard = db.lock().unwrap();
+        guard
+            .voice_device_seen("dev-lb1", "client-lb1", "", "", "", 0.0)
+            .unwrap();
+        guard
+            .set_voice_device_status("dev-lb1", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_db(db)
+    .with_transport_factory(factory);
+    let voice_session_id = "voice-lb1-test";
+    service
+        .register_voice_session("dev-lb1", "client-lb1", voice_session_id)
+        .unwrap();
+
+    for ctx in [
+        laser_contracts::CallerContext::Desktop,
+        laser_contracts::CallerContext::McpBridge,
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-lb1".into(),
+            session_id: voice_session_id.into(),
+        },
+    ] {
+        written.lock().unwrap().clear();
+        realtime.lock().unwrap().clear();
+        let (status, body) = service.dispatch_json(
+            "POST",
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "home",
+                "confirmed": true,
+                "connection_mode": "network",
+                "host": "127.0.0.1",
+                "telnet_port": 23
+            }),
+            ctx.clone(),
+        );
+        assert_eq!(status, 400, "{ctx:?}: {body}");
+        assert_eq!(body["success"], false);
+        assert_eq!(body["detail"], "homing_disabled", "{body}");
+        assert!(
+            !written.lock().unwrap().iter().any(|l| l == "$H"),
+            "{ctx:?} must not send $H: {:?}",
+            written.lock().unwrap()
+        );
+        assert!(
+            realtime.lock().unwrap().is_empty(),
+            "{ctx:?} must not send 0x18 fallback: {:?}",
+            realtime.lock().unwrap()
+        );
+        // 也不留下待确认停止任务
+        let (_, targets) = service.dispatch_json(
+            "GET",
+            "/api/jobs/stop-targets",
+            &serde_json::Value::Null,
+            laser_contracts::CallerContext::Loopback,
+        );
+        assert_eq!(targets["result"]["jobs"].as_array().unwrap().len(), 0);
+    }
+}
+
+/// LB2：空跑开关门禁（仅桌面主窗口可开关，局域网/语音/MCP/无桌面会话的回环/带测试头脚本一律 403）+ 限速校验 + 全出口强制改写与关闭恢复。
+#[test]
+fn lb2_dry_run_switch_gate_and_backend_forced_rewriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        laser_runtime::RuntimeDb::open_memory().unwrap(),
+    ));
+    {
+        let guard = db.lock().unwrap();
+        guard
+            .voice_device_seen("dev-lb2", "client-lb2", "", "", "", 0.0)
+            .unwrap();
+        guard
+            .set_voice_device_status("dev-lb2", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+    }
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_runtime_db(db)
+    .with_generated_root(gen_dir)
+    .with_transport_factory(recording_transport_factory(20_000, written.clone()));
+    let desktop_token = service.enable_desktop_session().unwrap();
+    let voice_sid = "voice-lb2-gate";
+    service
+        .register_voice_session("dev-lb2", "client-lb2", voice_sid)
+        .unwrap();
+
+    // 默认关闭
+    let (_, info0) = service.dispatch_json(
+        "GET",
+        "/api/system/info",
+        &serde_json::Value::Null,
+        laser_contracts::CallerContext::Loopback,
+    );
+    assert_eq!(info0["result"]["laser_dry_run_enabled"], false);
+    assert_eq!(info0["result"]["dry_run_max_feed_mm_min"], 2000);
+
+    // 局域网 / 语音 / MCP / 网关 / 无桌面会话回环 均禁止开关
+    for ctx in [
+        laser_contracts::CallerContext::Lan {
+            pairing_id: "p1".into(),
+        },
+        laser_contracts::CallerContext::Voice {
+            device_id: "dev-lb2".into(),
+            session_id: voice_sid.into(),
+        },
+        laser_contracts::CallerContext::McpBridge,
+        laser_contracts::CallerContext::Gateway {
+            session_id: "gw".into(),
+        },
+        laser_contracts::CallerContext::Loopback,
+    ] {
+        let (st, body) = service.dispatch_json(
+            "POST",
+            "/api/settings",
+            &serde_json::json!({"laser_dry_run_enabled": true}),
+            ctx.clone(),
+        );
+        assert_eq!(st, 403, "{ctx:?} must be denied: {body}");
+    }
+
+    // 带 X-Moss-Bench 头的请求即使带桌面会话也禁止开关空跑
+    let bench_payload = r#"{"laser_dry_run_enabled":true}"#;
+    let bench_req = format!(
+        "POST /api/settings HTTP/1.1\r\nHost: localhost\r\nX-Moss-Desktop-Session: {desktop_token}\r\nX-Moss-Bench: dryrun\r\nContent-Length: {}\r\n\r\n{bench_payload}",
+        bench_payload.len()
+    );
+    let bench_resp = parse_json_response(&service.handle_http(bench_req.as_bytes()));
+    assert_eq!(bench_resp["success"], false);
+    assert_eq!(
+        bench_resp["detail"]["error_code"],
+        "bench_cannot_toggle_dry_run"
+    );
+
+    // 速度上限越界拒绝
+    let (bad_st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true, "dry_run_max_feed_mm_min": 200}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(bad_st, 400);
+    let (bad_st2, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true, "dry_run_max_feed_mm_min": 6000}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(bad_st2, 400);
+
+    // 桌面端开启空跑（限速 1600 -> 折算 200% 倍率后下发上限 F800）
+    let (ok_st, ok_body) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true, "dry_run_max_feed_mm_min": 1600}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(ok_st, 200, "{ok_body}");
+    assert_eq!(ok_body["result"]["laser_dry_run_enabled"], true);
+    assert_eq!(ok_body["result"]["dry_run_max_feed_mm_min"], 1600);
+    assert_eq!(
+        ok_body["result"]["laser_dry_run_effective_max_feed_mm_min"],
+        800
+    );
+    assert!(
+        ok_body["result"]["laser_dry_run_remaining_seconds"]
+            .as_u64()
+            .unwrap()
+            > 3500
+    );
+
+    // 1) 点射（原本带 M3 S10）在空跑期也强制变成 S0
+    written.lock().unwrap().clear();
+    let (pf_st, pf_body) = service.dispatch_json(
+        "POST",
+        "/api/device/pointer-fire",
+        &serde_json::json!({
+            "confirmed": true,
+            "power": 10,
+            "duration_ms": 50,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(pf_st, 200, "{pf_body}");
+    let pf_lines = written.lock().unwrap().clone();
+    assert!(
+        pf_lines.iter().any(|l| l == "G21 G94 G1 M5 S0 F800"),
+        "{pf_lines:?}"
+    );
+    assert!(pf_lines.iter().any(|l| l == "M3 S0"), "{pf_lines:?}");
+    assert!(
+        !pf_lines.iter().any(|l| l.contains("S10")),
+        "点射不得出光: {pf_lines:?}"
+    );
+
+    // 2) 相对移动（原本发 G0 X5 Y0 F3000）被改写为 G1 X5.000 Y0.000 F800 S0
+    written.lock().unwrap().clear();
+    let (mv_st, mv_body) = service.dispatch_json(
+        "POST",
+        "/api/safe-action",
+        &serde_json::json!({
+            "action": "relative_move",
+            "x": 5.0,
+            "y": 0.0,
+            "feed_rate": 3000.0,
+            "confirmed": true,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(mv_st, 200, "{mv_body}");
+    let mv_lines = written.lock().unwrap().clone();
+    assert!(
+        mv_lines.iter().any(|l| l == "G21 G94 G1 M5 S0 F800"),
+        "{mv_lines:?}"
+    );
+    assert!(
+        mv_lines.iter().any(|l| l == "G1 X5.000 Y0.000 F800 S0"),
+        "{mv_lines:?}"
+    );
+    assert!(
+        !mv_lines.iter().any(|l| l.starts_with("G0")),
+        "G0 须全部改写为限速 G1: {mv_lines:?}"
+    );
+
+    // 3) 关闭开关后恢复原样（点射恢复 M3 S10，相对移动恢复 G0 F3000）
+    let (off_st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": false}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(off_st, 200);
+    written.lock().unwrap().clear();
+    let (pf2_st, _) = service.dispatch_json(
+        "POST",
+        "/api/device/pointer-fire",
+        &serde_json::json!({
+            "confirmed": true,
+            "power": 10,
+            "duration_ms": 50,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(pf2_st, 200);
+    assert!(
+        written.lock().unwrap().iter().any(|l| l == "M3 S10"),
+        "关闭空跑后须恢复原样: {:?}",
+        written.lock().unwrap()
+    );
+}
+
+/// LB4：X-Moss-Bench 请求头只作 ProcessTrace 来源标签（不授任何权限），空跑开启时手动操作也标“空跑模式”。
+#[test]
+fn lb4_process_trace_tags_bench_sources_and_dry_run_without_granting_privileges() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_generated_root(gen_dir);
+    let desktop_token = service.enable_desktop_session().unwrap();
+
+    // 打开完整过程记录
+    let (st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"process_trace_enabled": true}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st, 200);
+
+    // 1) X-Moss-Bench: readonly 绝不授予桌面权限（尝试改设置仍 403）
+    let denied_body = r#"{"auto_check_update":false}"#;
+    let denied_req = format!(
+        "POST /api/settings HTTP/1.1\r\nHost: localhost\r\nX-Moss-Bench: readonly\r\nContent-Length: {}\r\n\r\n{denied_body}",
+        denied_body.len()
+    );
+    let denied_raw = service.handle_http(denied_req.as_bytes());
+    assert!(
+        denied_raw.starts_with(b"HTTP/1.1 403"),
+        "X-Moss-Bench 不得授予权限"
+    );
+
+    // 2) 带 X-Moss-Bench: readonly 的生成/检查请求记为 ai_laser_bench_readonly + AI 激光测试 · 只读核对
+    let ro_body = r#"{"text":"RO","material":"椴木","thickness_mm":3}"#;
+    let ro_req = format!(
+        "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nX-Moss-Bench: readonly\r\nContent-Length: {}\r\n\r\n{ro_body}",
+        ro_body.len()
+    );
+    let ro_resp = parse_json_response(&service.handle_http(ro_req.as_bytes()));
+    assert_eq!(ro_resp["success"], true, "{ro_resp}");
+
+    // 3) 开启空跑模式后：
+    //    - 普通桌面手动请求（无 X-Moss-Bench 头）标上 dry_run:true 与“空跑模式”；
+    //    - 带 X-Moss-Bench: dryrun 的请求同时标上 ai_laser_bench_dryrun、“AI 激光测试 · 空跑”与“空跑模式”。
+    let (on_st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({"laser_dry_run_enabled": true}),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(on_st, 200);
+
+    let manual_body = r#"{"text":"MAN","material":"椴木","thickness_mm":3}"#;
+    let manual_req = format!(
+        "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nX-Moss-Desktop-Session: {desktop_token}\r\nContent-Length: {}\r\n\r\n{manual_body}",
+        manual_body.len()
+    );
+    let manual_resp = parse_json_response(&service.handle_http(manual_req.as_bytes()));
+    assert_eq!(manual_resp["success"], true);
+
+    let dry_body = r#"{"text":"DRY","material":"椴木","thickness_mm":3}"#;
+    let dry_req = format!(
+        "POST /api/text-task/generate HTTP/1.1\r\nHost: localhost\r\nX-Moss-Bench: dryrun\r\nContent-Length: {}\r\n\r\n{dry_body}",
+        dry_body.len()
+    );
+    let dry_resp = parse_json_response(&service.handle_http(dry_req.as_bytes()));
+    assert_eq!(dry_resp["success"], true);
+
+    service.process_trace().unwrap().flush();
+    let day = std::fs::read_dir(temp.path().join(laser_runtime::process_trace::TRACE_DIR))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("trace day dir");
+    let jsonl =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL)).unwrap();
+    let txt =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_TXT)).unwrap();
+    let records: Vec<serde_json::Value> = jsonl
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    assert!(
+        records
+            .iter()
+            .any(|r| r["source"] == "ai_laser_bench_readonly"),
+        "缺少 ai_laser_bench_readonly 来源字段: {jsonl}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["source"] == "ai_laser_bench_dryrun" && r["dry_run"] == true),
+        "缺少 ai_laser_bench_dryrun + dry_run 标记: {jsonl}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r["origin"] == "desktop" && r.get("source").is_none() && r["dry_run"] == true),
+        "空跑期手动操作也必须标上 dry_run:true: {jsonl}"
+    );
+    assert!(txt.contains("AI 激光测试 · 只读核对"), "{txt}");
+    assert!(txt.contains("AI 激光测试 · 空跑"), "{txt}");
+    assert!(txt.contains("空跑模式"), "{txt}");
+}
+
+/// LC：空跑模式发送预检拒绝含 G28 / G30 / G93 的文件（G28.1 放行），传输层兜底替换为无运动注释并写带来源标签的过程告警。
+#[test]
+fn lc_dry_run_blocks_g28_g30_in_send_preflight_and_transport_fallback_logs_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    let upload_dir = temp.path().join("uploads");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    std::fs::create_dir_all(&upload_dir).unwrap();
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_runtime_path(temp.path().to_path_buf())
+    .with_generated_root(gen_dir)
+    .with_upload_root(upload_dir.clone())
+    .with_transport_factory(recording_transport_factory(20_000, written.clone()));
+
+    // 开启完整过程记录与空跑模式
+    let (st, _) = service.dispatch_json(
+        "POST",
+        "/api/settings",
+        &serde_json::json!({
+            "process_trace_enabled": true,
+            "laser_dry_run_enabled": true,
+            "dry_run_max_feed_mm_min": 1600
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(st, 200);
+
+    // 1) 含 G28 / G30 / G93 的外部 G-code 在发送预检阶段直接被拒，零设备写入
+    for (filename, content, expected_code) in [
+        (
+            "has-g28.gcode",
+            "G21\nG90\nG28 X0 Y0\nG1 X5 Y0 F600 S200\nM5\n",
+            "dry_run_rapid_home_blocked",
+        ),
+        (
+            "has-g30.gcode",
+            "G21\nG90\ng30\nG1 X5 Y0 F600 S200\nM5\n",
+            "dry_run_rapid_home_blocked",
+        ),
+        (
+            "has-g93.gcode",
+            "G21\nG93\nG1 X5 Y0 F60 S200\nM5\n",
+            "dry_run_speed_mode_blocked",
+        ),
+    ] {
+        std::fs::write(upload_dir.join(filename), content).unwrap();
+        let (prev_st, prev_body) = service.dispatch_json(
+            "POST",
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "source_type": "gcode",
+                "gcode_file": filename,
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+            laser_contracts::CallerContext::Desktop,
+        );
+        assert_eq!(prev_st, 200, "{filename}: {prev_body}");
+        let wf_id = prev_body["result"]["workflow_id"].as_str().unwrap();
+
+        written.lock().unwrap().clear();
+        let (send_st, send_body) = service.dispatch_json(
+            "POST",
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "confirm_send",
+                "workflow_id": wf_id,
+                "confirmed": true,
+                "connection_mode": "network",
+                "host": "127.0.0.1",
+                "telnet_port": 23
+            }),
+            laser_contracts::CallerContext::Desktop,
+        );
+        assert_eq!(send_st, 400, "{filename} 必须被空跑预检拒绝: {send_body}");
+        assert_eq!(
+            send_body["detail"]["error_code"], expected_code,
+            "{filename}: {send_body}"
+        );
+        assert!(
+            written.lock().unwrap().is_empty(),
+            "{filename} 被拒后绝不能向设备写入任何字节: {:?}",
+            written.lock().unwrap()
+        );
+    }
+
+    // 2) 仅含 G28.1（存储位置、不运动）的外部 G-code 在空跑模式下放行
+    std::fs::write(
+        upload_dir.join("store-g28-1.gcode"),
+        "G21\nG90\nG28.1\nG1 X5 Y0 F600 S200\nM5\n",
+    )
+    .unwrap();
+    let (prev_ok_st, prev_ok_body) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "preview",
+            "source_type": "gcode",
+            "gcode_file": "store-g28-1.gcode",
+            "material": "椴木",
+            "thickness_mm": 3
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(prev_ok_st, 200, "{prev_ok_body}");
+    let wf_ok_id = prev_ok_body["result"]["workflow_id"].as_str().unwrap();
+    let (send_ok_st, send_ok_body) = service.dispatch_json(
+        "POST",
+        "/api/workflow",
+        &serde_json::json!({
+            "action": "confirm_send",
+            "workflow_id": wf_ok_id,
+            "confirmed": true,
+            "connection_mode": "network",
+            "host": "127.0.0.1",
+            "telnet_port": 23
+        }),
+        laser_contracts::CallerContext::Desktop,
+    );
+    assert_eq!(send_ok_st, 200, "G28.1 应放行发送: {send_ok_body}");
+    // 等后台发送线程结束，避免与其他断言竞争同一目标锁
+    for _ in 0..80 {
+        let (_, status_body) = service.dispatch_json(
+            "POST",
+            "/api/workflow",
+            &serde_json::json!({"action": "status", "workflow_id": wf_ok_id}),
+            laser_contracts::CallerContext::Desktop,
+        );
+        if matches!(
+            status_body["result"]["status"].as_str(),
+            Some("completed" | "failed" | "cancelled")
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // 3) 传输层兜底：即使绕过预检直接通过 open_device_transport 写入 G28 X0 Y0，
+    //    也不会发运动指令，而是替换为 `; dry-run blocked G28` 并向 ProcessTrace 记告警（带来源标签）
+    written.lock().unwrap().clear();
+    {
+        let _scope = crate::process_trace::enter_bench_trace_scope(Some(
+            crate::process_trace::BenchTraceSource::Dryrun,
+        ));
+        let transport = service
+            .open_device_transport(&laser_device::ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 23,
+            })
+            .unwrap();
+        transport.write_line("G28 X0 Y0").unwrap();
+    }
+    assert_eq!(
+        written.lock().unwrap().as_slice(),
+        &["; dry-run blocked G28".to_string()]
+    );
+
+    service.process_trace().unwrap().flush();
+    let day = std::fs::read_dir(temp.path().join(laser_runtime::process_trace::TRACE_DIR))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("trace day dir");
+    let jsonl =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_JSONL)).unwrap();
+    let txt =
+        std::fs::read_to_string(day.join(laser_runtime::process_trace::TIMELINE_TXT)).unwrap();
+    let records: Vec<serde_json::Value> = jsonl
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        records.iter().any(|r| {
+            r["kind"] == "dry_run_blocked"
+                && r["level"] == "warn"
+                && r["code"] == "G28"
+                && r["source"] == "ai_laser_bench_dryrun"
+                && r["dry_run"] == true
+        }),
+        "传输层兜底必须写带来源与空跑标签的告警事件: {jsonl}"
+    );
+    assert!(
+        txt.contains("[AI 激光测试 · 空跑 · 空跑模式] 空跑传输层兜底拦截 G28"),
+        "{txt}"
+    );
+}

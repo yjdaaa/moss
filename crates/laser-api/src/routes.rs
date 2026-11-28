@@ -200,13 +200,23 @@ impl ApiService {
             Ok(desktop) => desktop,
             Err(response) => return response,
         };
+        // LB4：解析测试脚本来源标签 `X-Moss-Bench`（仅作过程记录标签，绝不授予任何权限）
+        let bench_source = header_value(&head, "x-moss-bench")
+            .and_then(|value| crate::process_trace::BenchTraceSource::from_header(&value));
         // 调用方上下文只由入口构造（技术书 §6.4）：进程内调用方显式声明优先，其次桌面会话
         let ctx = if desktop && ctx_override.is_none() {
             laser_contracts::CallerContext::Desktop
         } else {
             caller_context_for(ctx_override, loopback, pairing_id)
         };
-        self.dispatch_authenticated(method, path, &body[..content_length], &ctx, None)
+        self.dispatch_authenticated_with_bench(
+            method,
+            path,
+            &body[..content_length],
+            &ctx,
+            None,
+            bench_source,
+        )
     }
 
     /// 已完成传输层鉴权与调用方识别后的统一路由分发（HTTP 与进程内调用共用同一门禁与状态机）。
@@ -219,6 +229,19 @@ impl ApiService {
         ctx: &laser_contracts::CallerContext,
         short_job_watch: Option<&std::sync::Arc<ShortJobWatch>>,
     ) -> Vec<u8> {
+        self.dispatch_authenticated_with_bench(method, path, body, ctx, short_job_watch, None)
+    }
+
+    fn dispatch_authenticated_with_bench(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        ctx: &laser_contracts::CallerContext,
+        short_job_watch: Option<&std::sync::Arc<ShortJobWatch>>,
+        bench_source: Option<crate::process_trace::BenchTraceSource>,
+    ) -> Vec<u8> {
+        let _bench_scope = crate::process_trace::enter_bench_trace_scope(bench_source);
         let route = path.split('?').next().unwrap_or(path);
         let began = std::time::Instant::now();
         if crate::process_trace::must_run_before_trace(route, body) {

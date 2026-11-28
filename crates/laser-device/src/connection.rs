@@ -1478,6 +1478,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     }
 
     pub fn home_cancellable(&mut self, cancel: Option<&CancellationToken>) -> Result<(), String> {
+        if self.travel_limits.homing_enabled == Some(false) {
+            return Err("固件未开启回零（$22=0），已拒绝发送 $H".into());
+        }
         self.recover_with_cancellable("$H", "回零", Duration::from_secs(120), cancel)
     }
 

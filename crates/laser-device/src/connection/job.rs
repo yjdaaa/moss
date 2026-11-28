@@ -245,13 +245,34 @@ impl<T: DeviceTransport> JobWorker<T> {
         acked_count: &mut usize,
     ) -> Result<bool, String> {
         self.progress.lines_completed.store(0, Ordering::Relaxed);
+        let dry_run = self.device.transport.dry_run_policy();
+        if let Some(policy) = dry_run {
+            // LB2 空跑模式：任务开头先同步发送关光与限速初始化行（不占 N1..Nk 行号，避免影响断点续雕计数）
+            let preamble = policy.preamble_line();
+            let acked = self
+                .device
+                .send_line_wait_ack_or_cancel(&preamble, Some(&self.cancel))?;
+            if !acked {
+                self.cancel_with_proven_completion(false, *acked_count)?;
+                return Ok(true);
+            }
+        }
         let prepared_lines: Vec<String> = lines
             .into_iter()
             .map(|raw| {
-                if (self.scale_factor - 1.0).abs() > 1e-6 {
+                let scaled = if (self.scale_factor - 1.0).abs() > 1e-6 {
                     rescale_gcode_line_s(&raw, self.scale_factor)
                 } else {
                     raw
+                };
+                match dry_run {
+                    // 漏网的禁止指令保留原文交给 DryRunTransport::write_line 替换成注释并触发告警回调
+                    Some(policy)
+                        if crate::detect_dry_run_blocked_line_for_transport(&scaled).is_none() =>
+                    {
+                        policy.rewrite_line(&scaled)
+                    }
+                    _ => scaled,
                 }
             })
             .collect();
@@ -265,6 +286,7 @@ impl<T: DeviceTransport> JobWorker<T> {
                 let trimmed = line.trim_start();
                 !trimmed.is_empty()
                     && !trimmed.starts_with('$')
+                    && !trimmed.starts_with(';')
                     && !trimmed.starts_with(['N', 'n'])
                     && format!("N{} {line}", idx + 1).len() <= crate::MAX_GCODE_LINE_BYTES
             });
@@ -291,7 +313,11 @@ impl<T: DeviceTransport> JobWorker<T> {
                 } else {
                     raw_line.clone()
                 };
-                let line_len = line.len() + 1; // +1 表示尾随换行符 '\n'
+                let effective_len = match dry_run {
+                    Some(policy) => line.len().max(policy.rewrite_line(&line).len()),
+                    None => line.len(),
+                };
+                let line_len = effective_len + 1; // +1 表示尾随换行符 '\n'
                 // 如果单行就超过 current_rx_buffer_size，在缓冲区完全排空时单独发送该行
                 if chars_in_buffer + line_len <= window.size()
                     || (chars_in_buffer == 0 && in_flight.is_empty())

@@ -719,13 +719,105 @@ pub(crate) fn api_step_label(method: &str, route: &str, body: &serde_json::Value
     }
 }
 
-/// 这次接口调用要不要进时间线：只记改动类请求，跳过凭据接口与只读轮询。
-pub(crate) fn should_trace_api(method: &str, route: &str, body: &serde_json::Value) -> bool {
+/// LB4：测试脚本通过请求头 `X-Moss-Bench` 传递的过程记录来源标签（仅作标签，绝不授予任何权限）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BenchTraceSource {
+    Readonly,
+    Dryrun,
+}
+
+impl BenchTraceSource {
+    pub(crate) fn from_header(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "readonly" => Some(Self::Readonly),
+            "dryrun" => Some(Self::Dryrun),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn source_key(self) -> &'static str {
+        match self {
+            Self::Readonly => "ai_laser_bench_readonly",
+            Self::Dryrun => "ai_laser_bench_dryrun",
+        }
+    }
+
+    pub(crate) const fn display_label(self) -> &'static str {
+        match self {
+            Self::Readonly => "AI 激光测试 · 只读核对",
+            Self::Dryrun => "AI 激光测试 · 空跑",
+        }
+    }
+}
+
+thread_local! {
+    static CURRENT_BENCH_SOURCE: std::cell::Cell<Option<BenchTraceSource>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) struct BenchTraceScope {
+    prev: Option<BenchTraceSource>,
+}
+
+impl Drop for BenchTraceScope {
+    fn drop(&mut self) {
+        CURRENT_BENCH_SOURCE.with(|cell| cell.set(self.prev));
+    }
+}
+
+pub(crate) fn enter_bench_trace_scope(source: Option<BenchTraceSource>) -> BenchTraceScope {
+    let prev = CURRENT_BENCH_SOURCE.with(|cell| cell.replace(source));
+    BenchTraceScope { prev }
+}
+
+pub(crate) fn current_bench_source() -> Option<BenchTraceSource> {
+    CURRENT_BENCH_SOURCE.with(std::cell::Cell::get)
+}
+
+/// LB4：按请求头来源与当前空跑模式，为激光记录补齐 `source` / `dry_run` 字段与 `timeline.txt` 可读前缀。
+pub(crate) fn apply_laser_trace_tags(
+    step: &str,
+    fields: &mut serde_json::Value,
+    bench_source: Option<BenchTraceSource>,
+    dry_run: bool,
+) -> String {
+    if bench_source.is_none() && !dry_run {
+        return step.to_owned();
+    }
+    let mut tags: Vec<&'static str> = Vec::with_capacity(2);
+    if let Some(src) = bench_source {
+        if let Some(map) = fields.as_object_mut() {
+            map.insert("source".into(), serde_json::json!(src.source_key()));
+        }
+        tags.push(src.display_label());
+    }
+    if dry_run {
+        if let Some(map) = fields.as_object_mut() {
+            map.insert("dry_run".into(), serde_json::json!(true));
+        }
+        tags.push("空跑模式");
+    }
+    format!("[{}] {step}", tags.join(" · "))
+}
+
+/// 这次接口调用要不要进时间线：只记改动类请求，跳过凭据接口与只读轮询；
+/// 带 `X-Moss-Bench` 标签的测试脚本调用 `status` 也记录，便于区分 L1/L2 测试步骤。
+pub(crate) fn should_trace_api_with_bench(
+    method: &str,
+    route: &str,
+    body: &serde_json::Value,
+    bench_source: Option<BenchTraceSource>,
+) -> bool {
     if matches!(method, "GET" | "HEAD" | "OPTIONS") || UNTRACED_ROUTES.contains(&route) {
         return false;
     }
     if route == "/api/workflow" && str_field(body, "action").is_none() {
         return false;
+    }
+    if bench_source.is_some()
+        && route == "/api/safe-action"
+        && str_field(body, "action") == Some("status")
+    {
+        return true;
     }
     !str_field(body, "action").is_some_and(|action| READ_ONLY_ACTIONS.contains(&action))
 }
@@ -739,22 +831,69 @@ fn response_status(response: &[u8]) -> u16 {
 }
 
 /// 加工线程里记一步（发送线程拿不到 `ApiService`，记录器随参数传进来）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn trace_job_step(
     trace: Option<&laser_runtime::ProcessTrace>,
     workflow_id: &str,
     kind: &str,
     step: &str,
+    fields: serde_json::Value,
+) {
+    trace_job_step_with_meta(trace, workflow_id, kind, step, fields, None, false);
+}
+
+pub(crate) fn trace_job_step_with_meta(
+    trace: Option<&laser_runtime::ProcessTrace>,
+    workflow_id: &str,
+    kind: &str,
+    step: &str,
     mut fields: serde_json::Value,
+    bench_source: Option<BenchTraceSource>,
+    dry_run: bool,
 ) {
     let Some(trace) = trace.filter(|t| t.enabled()) else {
         return;
     };
     scrub_trace_value(&mut fields);
-    let safe_step = scrub_trace_text(step);
+    let safe_step =
+        apply_laser_trace_tags(&scrub_trace_text(step), &mut fields, bench_source, dry_run);
     trace.record(
         "laser",
         &laser_flow(Some(workflow_id)),
         kind,
+        &safe_step,
+        fields,
+    );
+}
+
+/// LC：空跑传输层兜底拦截到 `G28`/`G30`/`G93`/`G20` 或未改写固件文件/宏执行指令时记一条带来源标签的告警事件。
+pub(crate) fn trace_dry_run_blocked_with_meta(
+    trace: Option<&laser_runtime::ProcessTrace>,
+    hit: &laser_device::DryRunBlockedCommand,
+    bench_source: Option<BenchTraceSource>,
+) {
+    let Some(trace) = trace.filter(|t| t.enabled()) else {
+        return;
+    };
+    let safe_line = scrub_trace_text(&hit.original_line);
+    let replacement = hit.blocked_comment();
+    let mut fields = serde_json::json!({
+        "level": "warn",
+        "code": hit.code,
+        "error_code": hit.error_code(),
+        "original_line": safe_line,
+        "replacement": replacement,
+    });
+    let raw_step = format!(
+        "空跑传输层兜底拦截 {}：已替换为 `{replacement}`（原指令：{}）",
+        hit.code,
+        short(&safe_line, 120)
+    );
+    let safe_step = apply_laser_trace_tags(&raw_step, &mut fields, bench_source, true);
+    trace.record(
+        "laser",
+        &laser_flow(None),
+        "dry_run_blocked",
         &safe_step,
         fields,
     );
@@ -768,6 +907,8 @@ pub(crate) struct ApiTraceCall {
     origin: String,
     workflow_id: Option<String>,
     summary_only: bool,
+    bench_source: Option<BenchTraceSource>,
+    dry_run: bool,
 }
 
 /// 大请求 / 响应体：复用已解析并脱敏的 JSON 另存大块字段与整份附件；
@@ -825,6 +966,8 @@ impl ApiService {
         }
         let large = body.len() > LARGE_BODY_BYTES;
         let summary_only = SUMMARY_ONLY_ROUTES.contains(&route);
+        let bench_source = current_bench_source();
+        let dry_run = self.is_dry_run_active();
         if summary_only {
             // 画板高频自动同步：不在 HTTP 同步线程解析或扫描数 MB 请求体，直接记录字节数摘要
             let call = API_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -833,23 +976,24 @@ impl ApiService {
             let late = received_at
                 .map(|at| format!("，先执行后补记，收到于 {}", at.format("%H:%M:%S%.3f")))
                 .unwrap_or_default();
-            trace.record(
-                "laser",
-                &laser_flow(None),
-                "api_begin",
+            let mut fields = serde_json::json!({
+                "call": call,
+                "method": method,
+                "route": route,
+                "origin": origin,
+                "received_at": received_at.map(laser_runtime::process_trace::format_timestamp),
+                "request": {"body_bytes": body.len(), "note": "画板自动同步：只记大小，作品在生成预览时整份另存"},
+            });
+            let step = apply_laser_trace_tags(
                 &format!(
                     "{}发起：{label}（开始处理，调用 #{call}{late}）",
                     origin_label(origin)
                 ),
-                serde_json::json!({
-                    "call": call,
-                    "method": method,
-                    "route": route,
-                    "origin": origin,
-                    "received_at": received_at.map(laser_runtime::process_trace::format_timestamp),
-                    "request": {"body_bytes": body.len(), "note": "画板自动同步：只记大小，作品在生成预览时整份另存"},
-                }),
+                &mut fields,
+                bench_source,
+                dry_run,
             );
+            trace.record("laser", &laser_flow(None), "api_begin", &step, fields);
             return Some(ApiTraceCall {
                 trace,
                 call,
@@ -857,6 +1001,8 @@ impl ApiService {
                 origin: origin.to_owned(),
                 workflow_id: None,
                 summary_only: true,
+                bench_source,
+                dry_run,
             });
         }
         // 只解析一次（大块非密钥字段在 redact_secret_values(skip_bulky=true) 跳过前置扫描，交由 save_bulky 处理一次）
@@ -866,7 +1012,7 @@ impl ApiService {
             None if large => serde_json::Value::Null,
             None => serde_json::Value::String(scrub_trace_text(&String::from_utf8_lossy(body))),
         };
-        if !should_trace_api(method, route, &labeled) {
+        if !should_trace_api_with_bench(method, route, &labeled, bench_source) {
             return None;
         }
         let call = API_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -889,22 +1035,29 @@ impl ApiService {
         let late = received_at
             .map(|at| format!("，先执行后补记，收到于 {}", at.format("%H:%M:%S%.3f")))
             .unwrap_or_default();
-        trace.record(
-            "laser",
-            &laser_flow(workflow_id.as_deref()),
-            "api_begin",
+        let mut fields = serde_json::json!({
+            "call": call,
+            "method": method,
+            "route": route,
+            "origin": origin,
+            "received_at": received_at.map(laser_runtime::process_trace::format_timestamp),
+            "request": request,
+        });
+        let step = apply_laser_trace_tags(
             &format!(
                 "{}发起：{label}（开始处理，调用 #{call}{late}）",
                 origin_label(origin)
             ),
-            serde_json::json!({
-                "call": call,
-                "method": method,
-                "route": route,
-                "origin": origin,
-                "received_at": received_at.map(laser_runtime::process_trace::format_timestamp),
-                "request": request,
-            }),
+            &mut fields,
+            bench_source,
+            dry_run,
+        );
+        trace.record(
+            "laser",
+            &laser_flow(workflow_id.as_deref()),
+            "api_begin",
+            &step,
+            fields,
         );
         Some(ApiTraceCall {
             trace,
@@ -913,6 +1066,8 @@ impl ApiService {
             origin: origin.to_owned(),
             workflow_id,
             summary_only,
+            bench_source,
+            dry_run,
         })
     }
 
@@ -935,27 +1090,34 @@ impl ApiService {
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .map_or(0, |p| p + 4);
+        let dry_run = begun.dry_run || self.is_dry_run_active();
         if begun.summary_only && (200..300).contains(&status) {
-            let step = format!(
-                "{}发起的{} → 成功（{elapsed_ms} ms，调用 #{}）",
-                origin_label(&begun.origin),
-                begun.label,
-                begun.call
+            let mut fields = serde_json::json!({
+                "call": begun.call,
+                "method": method,
+                "route": route,
+                "origin": begun.origin,
+                "status": status,
+                "response": {"body_bytes": response.len() - body_start},
+                "elapsed_ms": elapsed_ms,
+            });
+            let step = apply_laser_trace_tags(
+                &format!(
+                    "{}发起的{} → 成功（{elapsed_ms} ms，调用 #{}）",
+                    origin_label(&begun.origin),
+                    begun.label,
+                    begun.call
+                ),
+                &mut fields,
+                begun.bench_source,
+                dry_run,
             );
             trace.record_closing(
                 "laser",
                 &laser_flow(begun.workflow_id.as_deref()),
                 "api_call",
                 &step,
-                serde_json::json!({
-                    "call": begun.call,
-                    "method": method,
-                    "route": route,
-                    "origin": begun.origin,
-                    "status": status,
-                    "response": {"body_bytes": response.len() - body_start},
-                    "elapsed_ms": elapsed_ms,
-                }),
+                fields,
             );
             return;
         }
@@ -997,26 +1159,32 @@ impl ApiService {
             externalize_bulky(trace, &format!("api{}-response", begun.call), &mut parsed);
             parsed
         };
-        let step = format!(
-            "{}发起的{} → {outcome}（{elapsed_ms} ms，调用 #{}）",
-            origin_label(&begun.origin),
-            begun.label,
-            begun.call
+        let mut fields = serde_json::json!({
+            "call": begun.call,
+            "method": method,
+            "route": route,
+            "origin": begun.origin,
+            "status": status,
+            "response": reply,
+            "elapsed_ms": elapsed_ms,
+        });
+        let step = apply_laser_trace_tags(
+            &format!(
+                "{}发起的{} → {outcome}（{elapsed_ms} ms，调用 #{}）",
+                origin_label(&begun.origin),
+                begun.label,
+                begun.call
+            ),
+            &mut fields,
+            begun.bench_source,
+            dry_run,
         );
         trace.record_closing(
             "laser",
             &laser_flow(workflow_id.as_deref()),
             "api_call",
             &step,
-            serde_json::json!({
-                "call": begun.call,
-                "method": method,
-                "route": route,
-                "origin": begun.origin,
-                "status": status,
-                "response": reply,
-                "elapsed_ms": elapsed_ms,
-            }),
+            fields,
         );
     }
 
@@ -1094,21 +1262,22 @@ impl ApiService {
                 format!("：{}", saved_names.join("、"))
             }
         );
-        trace.record(
-            "laser",
-            &laser_flow(workflow_id),
-            "generate",
+        let mut fields = serde_json::json!({
+            "route": route,
+            "origin": origin,
+            "workflow_id": workflow_id,
+            "source_type": object.get("source_type").cloned().unwrap_or(serde_json::Value::Null),
+            "input": input,
+            "artifacts": clean_artifacts,
+            "files": files,
+        });
+        let step = apply_laser_trace_tags(
             &step,
-            serde_json::json!({
-                "route": route,
-                "origin": origin,
-                "workflow_id": workflow_id,
-                "source_type": object.get("source_type").cloned().unwrap_or(serde_json::Value::Null),
-                "input": input,
-                "artifacts": clean_artifacts,
-                "files": files,
-            }),
+            &mut fields,
+            current_bench_source(),
+            self.is_dry_run_active(),
         );
+        trace.record("laser", &laser_flow(workflow_id), "generate", &step, fields);
     }
 
     /// 生成失败：记参数与脱敏后的错误原文。
@@ -1128,22 +1297,24 @@ impl ApiService {
         }
         scrub_trace_value(&mut input);
         let safe_error = scrub_trace_text(error);
-        trace.record(
-            "laser",
-            &laser_flow(str_field(&input, "workflow_id")),
-            "generate_failed",
+        let flow = laser_flow(str_field(&input, "workflow_id"));
+        let mut fields = serde_json::json!({
+            "route": route,
+            "origin": origin,
+            "input": input,
+            "error": safe_error,
+        });
+        let step = apply_laser_trace_tags(
             &format!(
                 "生成预览失败（{}）：{}",
                 origin_label(origin),
                 short(&safe_error, 200)
             ),
-            serde_json::json!({
-                "route": route,
-                "origin": origin,
-                "input": input,
-                "error": safe_error,
-            }),
+            &mut fields,
+            current_bench_source(),
+            self.is_dry_run_active(),
         );
+        trace.record("laser", &flow, "generate_failed", &step, fields);
     }
 
     /// 只在生成目录、上传目录与预览目录里按文件名找（不接受路径，防止越界）。

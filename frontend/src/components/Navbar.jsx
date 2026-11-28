@@ -1,7 +1,8 @@
 import React, { useLayoutEffect, useRef } from "react";
-import { Zap, Radio, OctagonAlert, ShieldCheck, ChevronsUp, ChevronsDown } from "lucide-react";
+import { Zap, Radio, OctagonAlert, ShieldCheck, ChevronsUp, ChevronsDown, FlaskConical } from "lucide-react";
 import { mcpPillState } from "../state/mcpStatus.js";
 import { hardwarePillView } from "../state/hardwareStatus.js";
+import { formatDryRunBannerText } from "../laserBenchPrompt.js";
 
 // 顶栏（技术书 §9.5.5 B）：页面标题 + 硬件状态 + 小智四态 + 审批（仅桌面端）+ 常驻急停。
 
@@ -35,6 +36,8 @@ export function Navbar({
   onApprovalsClick,
   hideStatusPills = false,
   updateNotice = null,
+  dryRunStatus = null,
+  onDryRunClick = null,
   compact = false,
   onToggleCompact,
 }) {
@@ -42,6 +45,7 @@ export function Navbar({
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
   const pillClass = MCP_PILL_CLASS[mcpPill.key];
   const hardware = hardwarePillView(connectionStatus);
+  const dryRunBannerText = formatDryRunBannerText(dryRunStatus);
   const headerRef = useRef(null);
 
   // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；
@@ -90,6 +94,26 @@ export function Navbar({
     <header className={`ob-top${compact ? " ob-top--compact" : ""}`} ref={headerRef} data-compact={compact ? "true" : "false"}>
       <h1 className="ob-title">{pageTitle}</h1>
       <div className="ob-top-spacer" />
+      {dryRunBannerText && (
+        onDryRunClick ? (
+          <button
+            type="button"
+            className="ob-pill ob-pill--warn"
+            id="nav-dry-run-badge"
+            role="status"
+            onClick={onDryRunClick}
+            title="当前处于真机空跑模式（后端强制不出光与限速），点击可前往偏好设置关闭"
+          >
+            <FlaskConical size={13} aria-hidden="true" />
+            <span>{dryRunBannerText}</span>
+          </button>
+        ) : (
+          <div className="ob-pill ob-pill--warn" id="nav-dry-run-badge" role="status">
+            <FlaskConical size={13} aria-hidden="true" />
+            <span>{dryRunBannerText}</span>
+          </div>
+        )
+      )}
       {updateNotice}
       <div className="ob-top-page-actions" id="ob-top-page-actions" />
 

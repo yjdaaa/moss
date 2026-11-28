@@ -297,6 +297,7 @@ impl ApiService {
             // n72：精简清单（默认）只列 8 个激光工具与电脑控制类工具
             .filter(|spec| self.full_tool_list() || laser_mcp_compact_tool(spec.name))
             .count();
+        let dry_run = self.dry_run_snapshot();
         http_json(
             200,
             success(serde_json::json!({
@@ -304,6 +305,12 @@ impl ApiService {
                 "auto_check_update": auto_check_update,
                 "check_prerelease": check_prerelease,
                 "process_trace_enabled": process_trace_enabled,
+                "laser_dry_run_enabled": dry_run.enabled,
+                "dry_run_max_feed_mm_min": dry_run.max_feed_mm_min,
+                "laser_dry_run_effective_max_feed_mm_min": dry_run.effective_max_feed_mm_min,
+                "laser_dry_run_remaining_seconds": dry_run.remaining_seconds,
+                "laser_dry_run_expires_at": dry_run.expires_at,
+                "laser_dry_run_ttl_seconds": laser_device::DRY_RUN_TTL_SECS,
                 "actual_port": actual,
                 "preferred_port": preferred,
                 "is_fallback": actual != preferred,
@@ -491,6 +498,44 @@ impl ApiService {
                 Some(serde_json::json!(enabled)),
             ));
         }
+        // LB2：空跑模式开关与限速上限仅允许桌面操作者修改；带 X-Moss-Bench 头的测试脚本一律禁止开关。
+        let touches_dry_run = object.contains_key("laser_dry_run_enabled")
+            || object.contains_key("dry_run_max_feed_mm_min");
+        if touches_dry_run && crate::process_trace::current_bench_source().is_some() {
+            return http_json(
+                403,
+                failure(
+                    "测试脚本不能开启、关闭或修改空跑模式，请在 MOSS 桌面端操作",
+                    Some(serde_json::json!({"error_code": "bench_cannot_toggle_dry_run"})),
+                ),
+            );
+        }
+        let dry_run_enabled_update = match object.get("laser_dry_run_enabled") {
+            None => None,
+            Some(v) => match v.as_bool() {
+                Some(enabled) => Some(enabled),
+                None => return http_json(400, failure("laser_dry_run_enabled 必须是布尔值", None)),
+            },
+        };
+        let dry_run_max_feed_update = match object.get("dry_run_max_feed_mm_min") {
+            None => None,
+            Some(v) => {
+                let Some(raw) = v.as_u64().and_then(|n| u32::try_from(n).ok()) else {
+                    return http_json(
+                        400,
+                        failure("dry_run_max_feed_mm_min 必须是 300 ~ 5000 之间的整数", None),
+                    );
+                };
+                match laser_device::validate_dry_run_max_feed(raw) {
+                    Ok(valid) => {
+                        file_changes
+                            .push(("dry_run_max_feed_mm_min", Some(serde_json::json!(valid))));
+                        Some(valid)
+                    }
+                    Err(error) => return http_json(400, failure(error, None)),
+                }
+            }
+        };
         if let Some(pin_val) = object.get("lan_static_pin") {
             let Some(pin_str) = pin_val.as_str() else {
                 return http_json(400, failure("lan_static_pin 必须是字符串", None));
@@ -567,6 +612,29 @@ impl ApiService {
                 trace.invalidate();
             }
         }
+        // 更新运行时空跑模式状态（开启时计时 60 分钟自动关闭，重启不持久化开启状态）
+        match (dry_run_enabled_update, dry_run_max_feed_update) {
+            (Some(true), feed) => {
+                if let Err(error) = self.dry_run.enable(feed) {
+                    return http_json(400, failure(error, None));
+                }
+            }
+            (Some(false), feed) => {
+                self.dry_run.disable();
+                if let Some(f) = feed
+                    && let Err(error) = self.dry_run.set_max_feed(f)
+                {
+                    return http_json(400, failure(error, None));
+                }
+            }
+            (None, Some(feed)) => {
+                if let Err(error) = self.dry_run.set_max_feed(feed) {
+                    return http_json(400, failure(error, None));
+                }
+            }
+            (None, None) => {}
+        }
+        let dry_run = self.dry_run_snapshot();
         if let Some(api_key) = object.get("jev_api_key") {
             let Some(api_key) = api_key.as_str() else {
                 return http_json(400, failure("jev_api_key 必须是字符串", None));
@@ -616,7 +684,12 @@ impl ApiService {
                     "设置已保存，小智 MCP 端点将在下次启动时生效"
                 } else {
                     "设置已保存，将在下次启动时生效"
-                }
+                },
+                "laser_dry_run_enabled": dry_run.enabled,
+                "dry_run_max_feed_mm_min": dry_run.max_feed_mm_min,
+                "laser_dry_run_effective_max_feed_mm_min": dry_run.effective_max_feed_mm_min,
+                "laser_dry_run_remaining_seconds": dry_run.remaining_seconds,
+                "laser_dry_run_expires_at": dry_run.expires_at,
             })),
         )
     }

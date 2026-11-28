@@ -72,7 +72,17 @@ impl ApiService {
             shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_telemetry: laser_contracts::global_mcp_telemetry_arc(),
             voice_telemetry: laser_contracts::global_voice_telemetry_arc(),
+            dry_run: std::sync::Arc::new(laser_device::DryRunState::default()),
         }
+    }
+
+    /// LB2 当前真机空跑模式快照（自动结算 60 分钟到期）。
+    pub fn dry_run_snapshot(&self) -> laser_device::DryRunSnapshot {
+        self.dry_run.snapshot_now()
+    }
+
+    pub fn is_dry_run_active(&self) -> bool {
+        self.dry_run.active_policy_now().is_some()
     }
 
     /// 注入隔离的 MCP 遥测实例（默认使用进程级全局单例）。
@@ -236,6 +246,44 @@ impl ApiService {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// LC：构造空跑传输层兜底拦截告警处理器（锁存当前请求来源标签与过程记录器，跨后台发送线程生效）。
+    pub(crate) fn make_dry_run_block_handler(&self) -> laser_device::DryRunBlockHandler {
+        let trace = self.process_trace().cloned();
+        let bench_source = crate::process_trace::current_bench_source();
+        let event_sink = self.event_sink.clone();
+        std::sync::Arc::new(move |hit: &laser_device::DryRunBlockedCommand| {
+            let source_label = bench_source.map(|s| s.source_key()).unwrap_or("local");
+            eprintln!(
+                "[laser-api][dry-run][source={source_label}] 传输层兜底拦截 {}（已替换为 {}）：{}",
+                hit.code,
+                hit.blocked_comment(),
+                hit.original_line
+            );
+            crate::process_trace::trace_dry_run_blocked_with_meta(
+                trace.as_ref(),
+                hit,
+                bench_source,
+            );
+            emit_laser_event(
+                &event_sink,
+                LaserEvent {
+                    level: LaserEventLevel::Warn,
+                    text: format!(
+                        "空跑传输层兜底拦截高风险指令 {}（已替换为无运动注释）",
+                        hit.code
+                    ),
+                    hint: None,
+                    detail: Some(format!(
+                        "error_code={} code={} source={source_label} replacement={}",
+                        hit.error_code(),
+                        hit.code,
+                        hit.blocked_comment()
+                    )),
+                },
+            );
+        })
+    }
+
     pub(crate) fn open_device_transport(
         &self,
         spec: &laser_device::ConnectionSpec,
@@ -248,11 +296,22 @@ impl ApiService {
             // 新连接尚未写过指令，直接释放，避免打断控制器自己的 SD 任务。
             return Err("建立设备连接期间服务进入关闭流程，已拒绝继续使用新连接".to_owned());
         }
-        Ok(transport)
+        Ok(Box::new(
+            laser_device::DryRunTransport::wrap(transport, self.dry_run.clone())
+                .with_block_handler(self.make_dry_run_block_handler()),
+        ))
     }
 
     pub fn with_runtime_path(mut self, runtime_path: std::path::PathBuf) -> Self {
         let runtime_settings = read_runtime_settings(Some(&runtime_path));
+        // LB2：空跑开关本身每次启动固定默认关闭；仅恢复用户上次保存的速度上限（校验 300..=5000）
+        if let Some(saved_feed) = runtime_settings
+            .get("dry_run_max_feed_mm_min")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+        {
+            let _ = self.dry_run.set_max_feed(saved_feed);
+        }
         if let Some(saved) = runtime_settings
             .get("laser_verified_connection")
             .filter(|value| valid_verified_connection(value))

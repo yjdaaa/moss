@@ -1,13 +1,27 @@
 use super::*;
 
-/// SD 脱机上传内容与对应 SHA-256。标尺为 1000（`scale_factor == 1`）时原样上传已门禁校验的文件字节；
-/// 否则上传与流式发送完全相同的已校验并按设备 `$30` 换算 S 值后的行，避免固件按原值钳位成满功率。
+/// SD 脱机上传内容与对应 SHA-256。
+/// - 空跑模式开启时（LB2 / LC）：按与流式发送完全一致的空跑策略改写全部行并在开头补 `G21 G94 G1 M5 S0 F<上限>`，重算上传 SHA-256；
+/// - 否则标尺为 1000（`scale_factor == 1`）时原样上传已门禁校验的文件字节；
+/// - 否则上传与流式发送完全相同的已校验并按设备 `$30` 换算 S 值后的行，避免固件按原值钳位成满功率。
 pub(crate) fn sd_offline_upload_payload(
     original_bytes: Vec<u8>,
     original_sha: &str,
     prepared_lines: &[String],
     scale_factor: f64,
+    dry_run_policy: Option<laser_device::DryRunPolicy>,
 ) -> (Vec<u8>, String) {
+    if let Some(policy) = dry_run_policy {
+        let rewritten = laser_device::rewrite_gcode_lines_for_dry_run(prepared_lines, policy);
+        let mut text = String::new();
+        for line in rewritten {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        use sha2::Digest;
+        let sha = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+        return (text.into_bytes(), sha);
+    }
     if !scale_factor.is_finite() || scale_factor <= 0.0 || (scale_factor - 1.0).abs() < 1e-6 {
         return (original_bytes, original_sha.to_owned());
     }
@@ -123,8 +137,11 @@ struct SendWorkerParams {
     voice_permit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     on_terminal: Option<JobTerminalHook>,
     store: Option<std::sync::Arc<dyn laser_runtime::RuntimeStore + Send + Sync>>,
-    /// 完整过程记录（n105，默认关）：加工开始、每 10% 进度与结束结果写进时间线
+    /// 完整过程记录（n105，默认关）：加工开始、每 1% 进度与结束结果写进时间线
     process_trace: Option<laser_runtime::ProcessTrace>,
+    /// LB4 过程记录来源标签与空跑模式标记（在启动发送时锁存，跨后台线程保持一致）
+    trace_bench_source: Option<crate::process_trace::BenchTraceSource>,
+    trace_dry_run: bool,
     workflows:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     calibrations:
@@ -187,6 +204,23 @@ fn read_and_verify_gcode(
         bytes,
         sha256,
         lines,
+    })
+}
+
+/// LC：空跑模式开启时，发送预检直接拒绝含 `G28`/`G30`（`G28.1`/`G30.1` 放行）、`G93`、`G20` 或外部固件文件/宏执行的刀路。
+fn check_dry_run_preflight_lines(lines: &[String]) -> Result<(), (u16, serde_json::Value)> {
+    laser_device::check_gcode_lines_for_dry_run(lines).map_err(|hit| {
+        (
+            400,
+            failure(
+                hit.user_message(),
+                Some(serde_json::json!({
+                    "error_code": hit.error_code(),
+                    "command": hit.code,
+                    "line_number": hit.line_number,
+                })),
+            ),
+        )
     })
 }
 
@@ -554,16 +588,19 @@ impl Drop for ProgressTraceGuard {
 /// 加工进度每过 1% 记一步（只在完整过程记录打开时起这个线程；n110 由 10% 改细）。
 fn spawn_progress_trace(params: &SendWorkerParams, total: usize) -> Option<ProgressTraceGuard> {
     let trace = params.process_trace.clone().filter(|t| t.enabled())?;
-    spawn_progress_trace_with(
+    spawn_progress_trace_with_meta(
         trace,
         params.workflow_id.clone(),
         params.progress.clone(),
         total,
         params.start_from_line,
         std::time::Duration::from_millis(500),
+        params.trace_bench_source,
+        params.trace_dry_run,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_progress_trace_with(
     trace: laser_runtime::ProcessTrace,
     workflow_id: String,
@@ -571,6 +608,29 @@ pub(crate) fn spawn_progress_trace_with(
     total: usize,
     start_from: usize,
     interval: std::time::Duration,
+) -> Option<ProgressTraceGuard> {
+    spawn_progress_trace_with_meta(
+        trace,
+        workflow_id,
+        progress,
+        total,
+        start_from,
+        interval,
+        None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_progress_trace_with_meta(
+    trace: laser_runtime::ProcessTrace,
+    workflow_id: String,
+    progress: std::sync::Arc<laser_device::JobProgress>,
+    total: usize,
+    start_from: usize,
+    interval: std::time::Duration,
+    bench_source: Option<crate::process_trace::BenchTraceSource>,
+    dry_run: bool,
 ) -> Option<ProgressTraceGuard> {
     if total == 0 {
         return None;
@@ -606,7 +666,7 @@ pub(crate) fn spawn_progress_trace_with(
                 let percent = (current * 100 / total).min(99);
                 if percent > reported {
                     reported = percent;
-                    crate::process_trace::trace_job_step(
+                    crate::process_trace::trace_job_step_with_meta(
                         Some(&trace),
                         &workflow_id,
                         "job_progress",
@@ -623,6 +683,8 @@ pub(crate) fn spawn_progress_trace_with(
                             "elapsed_ms": began.elapsed().as_millis() as u64,
                             "status_report": progress.status_report(),
                         }),
+                        bench_source,
+                        dry_run,
                     );
                 }
             }
@@ -667,7 +729,7 @@ fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerPar
     } else {
         params.mode
     };
-    crate::process_trace::trace_job_step(
+    crate::process_trace::trace_job_step_with_meta(
         params.process_trace.as_ref(),
         &params.workflow_id,
         "job_start",
@@ -694,6 +756,8 @@ fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerPar
             "estimated_seconds": params.raw_estimate,
             "scale_factor": params.scale_factor,
         }),
+        params.trace_bench_source,
+        params.trace_dry_run,
     );
     let progress_trace = spawn_progress_trace(&params, total);
     let outcome = if params
@@ -716,12 +780,14 @@ fn run_send_worker(mut device: SharedDeviceConnection, mut params: SendWorkerPar
     let (status, send_result) = build_terminal_send_outcome(&params, sent_mode, outcome, total);
     // 立即唤醒并回收进度线程（微秒级），保证 job_progress 不会晚到排在 job_end 之后
     drop(progress_trace);
-    crate::process_trace::trace_job_step(
+    crate::process_trace::trace_job_step_with_meta(
         params.process_trace.as_ref(),
         &params.workflow_id,
         "job_end",
         &job_end_step(status, &send_result),
         serde_json::json!({"status": status, "send_result": send_result}),
+        params.trace_bench_source,
+        params.trace_dry_run,
     );
     if let Some(hook) = params.on_terminal.take() {
         hook(status, &send_result);
@@ -1233,8 +1299,11 @@ impl ApiService {
                 ),
             ));
         }
-        // 先于 $X 解锁执行二次物理 SHA-256 与行程复核，杜绝建连期间 TOCTOU 篡改刀路却提前触发 $X 移动（#4）
+        // 先于 $X 解锁执行二次物理 SHA-256、空跑快速指令预检与行程复核，杜绝建连期间 TOCTOU 篡改刀路却提前触发 $X 移动（#4）
         let verified = read_and_verify_gcode(gcode_path, expected_sha, plan.start_from_line)?;
+        if device.transport.dry_run_policy().is_some() {
+            check_dry_run_preflight_lines(&verified.lines)?;
+        }
         progress
             .total_lines
             .store(verified.lines.len(), Ordering::Relaxed);
@@ -1418,6 +1487,9 @@ impl ApiService {
         // 开连接前先做一轮 G-code 读取、SHA-256 校验与行准备，避免不合格/已篡改任务触发设备打开与解锁
         let initial_verified =
             read_and_verify_gcode(&gcode_path, expected_sha, plan.start_from_line)?;
+        if self.is_dry_run_active() {
+            check_dry_run_preflight_lines(&initial_verified.lines)?;
+        }
         let (transport, progress, job, mut preflight_guard) = self.open_and_register_send_job(
             workflow_id,
             &plan,
@@ -1455,13 +1527,15 @@ impl ApiService {
                 ),
             ));
         }
-        // SD 脱机文件与流式发送使用同一功率标尺：设备 $30 不是 1000 时，上传按标尺换算后的已校验行，
-        // 并以实际上传字节的 SHA-256 做固件侧哈希门禁（原文件 SHA 已在上面与确认快照比对）。
+        let dry_run_policy = device.transport.dry_run_policy();
+        // SD 脱机文件与流式发送使用同一功率标尺与空跑策略：空跑时改写为 S0 + 限速；
+        // 设备 $30 不是 1000 时上传按标尺换算后的已校验行，并以实际上传字节的 SHA-256 做固件侧哈希门禁。
         let (sd_upload_bytes, sd_upload_sha) = sd_offline_upload_payload(
             preflight.verified.bytes,
             &preflight.verified.sha256,
             &preflight.verified.lines,
             preflight.scale_factor,
+            dry_run_policy,
         );
         let cleared_uncertain = self.clear_uncertain_for_launch(&plan.target, &cancel)?;
         preflight_guard.armed = false;
@@ -1512,6 +1586,8 @@ impl ApiService {
             on_terminal,
             store: self.store.clone(),
             process_trace: self.process_trace().cloned(),
+            trace_bench_source: crate::process_trace::current_bench_source(),
+            trace_dry_run: dry_run_policy.is_some() || self.is_dry_run_active(),
             workflows: self.workflows.clone(),
             calibrations: self.calibrations.clone(),
             active_jobs: self.active_jobs.clone(),

@@ -389,6 +389,8 @@ impl ApiService {
 
         let shutdown_flag = self.shutdown_requested.clone();
         let factory = self.transport_factory.clone();
+        let dry_run_for_opener = self.dry_run.clone();
+        let dry_run_block_handler = self.make_dry_run_block_handler();
         let uncertain_for_opener = self.uncertain_jobs.clone();
         let open_locks_for_opener = self.target_open_locks.clone();
         let active_for_opener = self.active_jobs.clone();
@@ -497,7 +499,13 @@ impl ApiService {
                         release_uncertain_target_handle(&uncertain_for_opener, &target_desc);
                     }
                 }
-                let opened = (factory)(spec)?;
+                let opened: Box<dyn laser_device::DeviceTransport> = Box::new(
+                    laser_device::DryRunTransport::wrap(
+                        (factory)(spec)?,
+                        dry_run_for_opener.clone(),
+                    )
+                    .with_block_handler(dry_run_block_handler.clone()),
+                );
                 if is_mutating_sequential
                     && shutdown_flag.load(std::sync::atomic::Ordering::Acquire)
                 {
@@ -1447,6 +1455,11 @@ impl ApiService {
                 "服务正在关闭，已拒绝建立新的设备任务".into(),
                 "host_shutting_down",
             );
+        }
+        if self.is_dry_run_active()
+            && let Err(hit) = laser_device::check_gcode_lines_for_dry_run(&lines)
+        {
+            return failed(400, hit.user_message(), hit.error_code());
         }
         let spec = match self.connection_spec_from_request(object) {
             Ok(s) => s,

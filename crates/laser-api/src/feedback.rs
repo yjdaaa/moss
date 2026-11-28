@@ -701,10 +701,15 @@ impl ApiService {
                     .take(40)
                     .collect::<String>();
                 let safe_speech = payload["entry"]["speech"].as_str().unwrap_or("");
-                let step = format!(
-                    "加工反馈「{safe_text}」→ 判断为{}（{}判断），建议：{safe_speech}",
-                    feedback_class_label(class),
-                    feedback_source_label(source)
+                let step = crate::process_trace::apply_laser_trace_tags(
+                    &format!(
+                        "加工反馈「{safe_text}」→ 判断为{}（{}判断），建议：{safe_speech}",
+                        feedback_class_label(class),
+                        feedback_source_label(source)
+                    ),
+                    &mut payload,
+                    crate::process_trace::current_bench_source(),
+                    self.is_dry_run_active(),
                 );
                 trace.record(
                     "laser",

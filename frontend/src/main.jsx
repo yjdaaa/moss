@@ -109,6 +109,7 @@ function App() {
   });
   const [mcpStatus, setMcpStatus] = useState(null);
   const [voiceStatus, setVoiceStatus] = useState(null);
+  const [dryRunStatus, setDryRunStatus] = useState(null);
   const [activeJobs, setActiveJobs] = useState([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showConnectionModal, setShowConnectionModal] = useState(false);
@@ -344,8 +345,16 @@ function App() {
         const result = res.data.result;
         const nextMcp = result.mcp;
         const nextVoice = result.voice ?? null;
+        const nextDryRun = {
+          enabled: Boolean(result.laser_dry_run_enabled),
+          max_feed_mm_min: Number(result.dry_run_max_feed_mm_min) || 2000,
+          effective_max_feed_mm_min: Number(result.laser_dry_run_effective_max_feed_mm_min) || 1000,
+          remaining_seconds: Number(result.laser_dry_run_remaining_seconds) || 0,
+          expires_at: result.laser_dry_run_expires_at ?? null,
+        };
         setMcpStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextMcp) ? prev : nextMcp));
         setVoiceStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextVoice) ? prev : nextVoice));
+        setDryRunStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextDryRun) ? prev : nextDryRun));
         if (!autoUpdateCheckedRef.current) {
           autoUpdateCheckedRef.current = true;
           if (result.auto_check_update && !isRemoteMode()) {
@@ -368,13 +377,20 @@ function App() {
     const handleVisibility = () => {
       if (!document.hidden) void syncMcp();
     };
+    const handleDryRunChanged = (event) => {
+      if (event?.detail && typeof event.detail === "object") {
+        setDryRunStatus(event.detail);
+      }
+    };
     document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("moss:dry-run-changed", handleDryRunChanged);
     return () => {
       cancelled = true;
       controller?.abort();
       syncMcp.invalidate();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("moss:dry-run-changed", handleDryRunChanged);
     };
   }, [activeVoicePhase]);
 
@@ -487,6 +503,11 @@ function App() {
           approvalCount={approvalCount}
           onApprovalsClick={openApprovals}
           hideStatusPills={hideTopPills}
+          dryRunStatus={dryRunStatus}
+          onDryRunClick={() => {
+            writeFoldOpen("settings-laser-bench", true);
+            setShowSettingsModal(true);
+          }}
           compact={topCompact}
           onToggleCompact={toggleTopCompact}
           updateNotice={
@@ -627,6 +648,9 @@ function App() {
           setShowSettingsModal(false);
           setFocusUpdateSection(false);
         }}
+        connectionStatus={connectionStatus}
+        dryRunStatus={dryRunStatus}
+        onDryRunChange={setDryRunStatus}
         hideTopPills={hideTopPills}
         onHideTopPillsChange={handleHideTopPillsChange}
         initialUpdateReport={startupUpdate}

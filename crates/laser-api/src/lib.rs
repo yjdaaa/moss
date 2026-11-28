@@ -137,6 +137,8 @@ pub struct ApiService {
     /// MCP 与内置语音遥测实例：默认共享进程全局单例，测试或独立宿主可注入隔离实例避免并行串味。
     mcp_telemetry: std::sync::Arc<laser_contracts::McpTelemetry>,
     voice_telemetry: std::sync::Arc<laser_contracts::VoiceTelemetry>,
+    /// LB2 真机空跑模式运行时状态（默认关闭，开启后 60 分钟自动到期，底盘传输出口强制不出光与限速）。
+    dry_run: std::sync::Arc<laser_device::DryRunState>,
 }
 
 fn unix_seconds() -> u64 {

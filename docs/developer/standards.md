@@ -37,6 +37,7 @@
 | `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
 | `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |
 | `scripts/voice-bench/` | 整条语音链路实测的说话片段生成与结果汇总（配合 `moss-voice-server` 的 `real_local_chain_matrix`）；`endpoint-review.mjs` 从完整过程记录统计判停抢话与白等（n112） |
+| `scripts/laser-bench/` | 激光雕刻机 AI 自主测试（L0 隔离回环模拟机全自动与不变量检查、L1 真机只读白名单核对与脱敏归档，r74） |
 | `scripts/tests/` | 脚本单测，CI 以 `node --test scripts/tests/*.test.mjs` 运行 |
 | `.githooks/` | 受管本地 Git 钩子（`pre-commit`、`commit-msg`），通过 `node scripts/verify.mjs --install-hooks` 启用 |
 

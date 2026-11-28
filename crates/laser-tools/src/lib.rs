@@ -275,6 +275,10 @@ fn send_gcode_lines_cancellable<T: DeviceTransport>(
     lines: &[String],
     cancel: Option<&laser_device::CancellationToken>,
 ) -> Result<(), String> {
+    if let Some(policy) = device.transport.dry_run_policy() {
+        let preamble = policy.preamble_line();
+        device.send_line_wait_ack_cancellable(&preamble, cancel)?;
+    }
     for line in lines {
         device.send_line_wait_ack_cancellable(line, cancel)?;
     }
@@ -618,6 +622,15 @@ pub fn execute_laser_safe_action_with_gate_cancel_and_dispatch(
                 return ToolCallResult::err(format!(
                     "{label} 已取消，已发送急停 0x18 兜底 ({target})"
                 ));
+            }
+            // LB1（2026-11-28）：固件已明确上报 $22=0（关闭机械回零）时，在发送 $H 前拦截，
+            // 不发送 $H、不触发 0x18 急停兜底、不留下待确认停机记录；未知（None）时保持原有行为。
+            if action == "home" && device.travel_limits.homing_enabled == Some(false) {
+                return ToolCallResult::with_detail(
+                    false,
+                    format!("固件未开启回零（$22=0），已拒绝机械回零 ({target})"),
+                    "homing_disabled",
+                );
             }
             if let Some(flag) = dispatched {
                 flag.store(true, std::sync::atomic::Ordering::Release);
@@ -1343,6 +1356,57 @@ mod tests {
         );
         assert!(serial.success, "{serial:?}");
         assert_eq!(targets.lock().unwrap().as_slice(), ["COM7@250000"]);
+    }
+
+    #[test]
+    fn home_rejects_when_dollar22_is_zero_without_sending_home_or_estop() {
+        // $22=0：握手后拦截，不发 $H、不触发急停 0x18 兜底、返回 homing_disabled
+        let (opener, _, fake) = fake_opener(vec!["$22=0", "$32=1", "ok", "error:3"]);
+        let args = LaserSafeActionArgs {
+            action: "home".into(),
+            confirmed: Some(true),
+            host: Some("192.0.2.10".into()),
+            ..Default::default()
+        };
+        let res = execute_laser_safe_action_with(&args, &opener);
+        assert!(!res.success, "expected rejection: {res:?}");
+        assert_eq!(res.detail.as_deref(), Some("homing_disabled"));
+        assert!(res.result.contains("$22=0"), "{}", res.result);
+        assert!(
+            !fake.lines().iter().any(|l| l == "$H"),
+            "must not send $H when $22=0: {:?}",
+            fake.lines()
+        );
+        assert!(
+            fake.realtime().is_empty(),
+            "must not trigger fallback 0x18 when rejected before dispatch: {:?}",
+            fake.realtime()
+        );
+
+        // $22=1：正常放行并发送 $H
+        let (opener_ok, _, fake_ok) = fake_opener(vec![
+            "$22=1",
+            "$32=1",
+            "ok",
+            "error:3",
+            "ok",
+            "<Idle|MPos:0.000,0.000,0.000>",
+        ]);
+        let res_ok = execute_laser_safe_action_with(&args, &opener_ok);
+        assert!(res_ok.success, "{res_ok:?}");
+        assert!(fake_ok.lines().iter().any(|l| l == "$H"));
+
+        // 固件未报告 $22（homing_enabled == None）：保持原有行为，照常发送 $H
+        let (opener_unknown, _, fake_unknown) = fake_opener(vec![
+            "$32=1",
+            "ok",
+            "error:3",
+            "ok",
+            "<Idle|MPos:0.000,0.000,0.000>",
+        ]);
+        let res_unknown = execute_laser_safe_action_with(&args, &opener_unknown);
+        assert!(res_unknown.success, "{res_unknown:?}");
+        assert!(fake_unknown.lines().iter().any(|l| l == "$H"));
     }
 
     #[test]

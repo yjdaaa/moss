@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 修复 `$22=0` 后端仍发 `$H` 回零漏洞，新增 L2 真机空跑（后端强制不出光与限速）、过程记录来源区分与界面精简（2026-11-28）
+
+- **现象**：上一轮 L0 检出固件 `$22=0` 时后端仍向控制器发送 `$H`；缺少真机空跑底层强制保护与 L2 脚本；过程记录未区分 AI 测试与空跑操作，偏好设置测试卡片元素偏多。
+- **根因与修复**：`laser-tools` 与 `laser-device::home_cancellable` 在 `homing_enabled == Some(false)` 时直接返回 `homing_disabled`（覆盖 HTTP/MCP/语音）；新增 `laser-device::dry_run` 在传输出口与 SD 上传强制所有 `S` 改 `S0`、开头补 `G21 G94 G1 M5 S0 F<上限>`、`G0`/裸 `G53`/复位裸坐标改限速 `G1 S0`、`F` 按 200% 进给倍率折半钳位（`300–5000`、默认 `2000` mm/min，仅桌面主窗口可开、60 分钟自动关，见 `r75`），并新增空跑预检拒绝 `G28`/`G30`（`G28.1`/`G30.1` 放行）、`G93`/`G20` 与外部固件宏/文件执行，传输层兜底替为无运动注释并写告警；新增 L2 脚本与 L0 空跑场景；`X-Moss-Bench` 仅作 `ProcessTrace` 来源标签，空跑期激光记录标 `dry_run:true` 与「空跑模式」；精简 `LaserBenchSection` 为三项并在顶栏显示空跑标记。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1621 项、前端单测 433 项、脚本 110 项、浏览器 20 个文件、回环 E2E 41 项，已快更）；已完成 Rust（`laser-device`/`laser-tools`/`laser-api`）、脚本单测、前端单测/ESLint、L0 默认 26 场景实跑与 `verify.mjs --affected --fmt-write`。
+- **关联**：`crates/laser-device/src/{dry_run,connection,connection/job,transport,lib}.rs`、`crates/laser-tools/src/lib.rs`、`crates/laser-api/src/{lib,service,safe_action,send,routes,routes/system,process_trace,feedback}.rs`、`scripts/laser-bench/{laser-dryrun-bench,laser-readonly-check,laser-sim-bench}.mjs`、`frontend/src/{laserBenchPrompt.js,main.jsx,components/LaserBenchSection.jsx,components/Navbar.jsx,components/SettingsModal.jsx}`、`docs/{developer/safety,developer/api-contracts,integration/revisions/fusion-technical-spec}.md`。
+
+### 新增激光雕刻机 AI 自主测试（L0 模拟机全自动 + L1 真机只读核对 + 完整记录与偏好设置入口）（2026-11-27）
+
+- **现象**：激光雕刻机主链路缺乏面向 AI 的全自动隔离回归与字节级不变量核对工具，真机参数核对也缺少强白名单只读脚本与结构化归档记录。
+- **根因与修复**：新增 `scripts/laser-bench/` 目录，实现 L0 隔离回环测试 `laser-sim-bench.mjs`（独立临时运行目录与 `moss-host`、可配置 GRBL/FluidNC 模拟器 `sim-grbl.mjs`、25 个默认场景 `scenarios.json`、12 条安全/功能/工时偏差不变量 `invariants.mjs` 与全脱敏归档），以及 L1 真机只读核对 `laser-readonly-check.mjs`（强白名单 `assertReadOnlyRequest` 拒绝非只读接口与非 `status` 安全动作、忙碌预检阻断、比对固件与记住参数并脱敏归档）；偏好设置诊断区新增 `LaserBenchSection` 卡片与纯函数 `buildLaserBenchPrompt`，同步 `safety.md` §4.8、`standards.md` 与技术书 `r74`（L2 下一轮实现、出光永远手动）。
+- **验证**：`node scripts/verify.mjs --finish` 通过（Rust 1621 项、前端单测 433 项、脚本 110 项、浏览器 20 个文件、回环 E2E 41 项，已快更）；已完成 `scripts/tests/laser-bench.test.mjs`、`frontend/tests/laserBenchPrompt.test.mjs`、L0 默认 25 场景实跑与迭代级校验（本轮发现的 `$22=0` 后端仍发 `$H` 问题仅记录未修复）。
+- **关联**：`scripts/laser-bench/{bench-common,sim-grbl,invariants,laser-sim-bench,laser-readonly-check}.mjs`、`scripts/laser-bench/{scenarios.json,README.md}`、`scripts/tests/laser-bench.test.mjs`、`frontend/src/{laserBenchPrompt.js,components/LaserBenchSection.jsx,components/SettingsModal.jsx}`、`frontend/tests/laserBenchPrompt.test.mjs`、`docs/developer/{safety,standards}.md`、`docs/integration/revisions/fusion-technical-spec.md`。
+
 ### 精简“一键复制 AI 全自动调试提示词”并加入诊断/修复/复测/审查子代理分工（2026-11-27）
 
 - **现象**：旧版全自动联调提示词篇幅过长且大量重复 `AGENTS.md` / `safety.md` 已有规范，同时缺少子代理角色分工指引。

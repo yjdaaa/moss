@@ -124,6 +124,16 @@
 - **数据隔离与最小暴露**：原始 16 kHz 单声道 WAV 与元数据只写 `<runtime>/asr-corpus/<date>/<turn-id>.{wav,json}`（Unix 权限 `0700`/`0600`，拒绝符号链接与路径穿越）；VA 模拟轮次与 VC2 数字注入对照无真实麦克风音频、一律不保存。两类录音语料均严禁进入 `diagnostics_bundle()` 诊断包与 `ProcessTrace` 附件，绝不用于声纹识别或身份判断。
 - **离线测评命令词保护与零自动生效**：`scripts/voice-bench/asr-bench.mjs` 产出的同音纠错候选严格禁止把任意内容映射成停止/退出/确认/开始等保护命令词、禁止改写命令词本身、禁止包含 G-code / `$n=`，违规候选直接丢弃并在 `report.md` 注明；云端识别密钥从本机只读读取且绝不打印或写入归档，归档全量脱敏；所有候选只写 `suggestions.json`，绝不自动修改源码或 `settings.json`。
 
+### 4.8 激光 AI 自主测试隔离、L1 只读白名单与 L2 真机空跑强制门禁（LA / LB，2026-11-27 / 2026-11-28）
+
+- **L0 模拟机完全隔离（`scripts/laser-bench/laser-sim-bench.mjs`）**：每次运行在系统临时目录新建独立运行目录，覆盖 `HOME` / `APPDATA` / `XDG_DATA_HOME` / `LASER_MATERIAL_PARAMS_FILE` 并清除外部真实设备环境变量，仅启动独立的 `moss-host serve` 进程对接监听 `127.0.0.1` 随机端口的回环 GRBL/FluidNC 模拟器（`sim-grbl.mjs`）；绝不触碰用户日常运行目录、真实连接配置或任何真实设备。退出与信号清理阶段必须等待子进程退出后再清理临时目录。
+- **L1 真机只读白名单与忙碌拦截（`scripts/laser-bench/laser-readonly-check.mjs`）**：仅访问本机运行的 MOSS 回环接口（拒绝任何非回环 URL），沿用现有鉴权规则、不新增绕过鉴权的入口。全部 HTTP 请求在发出前强制经 `assertReadOnlyRequest` 白名单校验，仅放行 `GET /api/{health,system/info,jobs/stop-targets,ui/runtime-config,ui/serial-ports}`、`POST /api/connection/check`（只发 `$$`/`$CD`/`$I`）以及 `POST /api/safe-action` 中**唯一合法的 `action="status"`**（禁止任何运动/功率/`confirmed` 字段）；所有发送、走边框、点射、移动、倍率、急停、软复位、解锁、回零、改设置等请求一律在网络调用前直接抛错拒绝。预检发现任何运行中或待确认停机任务（`/api/jobs/stop-targets` 非空）时立即中止且不碰设备；归档全量脱敏令牌、绝对路径、真实设备 IP 与串口名。
+- **L2 真机空跑强制约束与开关门禁（LB2 / LB3，融合技术书 `r75`）**：
+  - **单开关授权（用户 2026-11-28 明确决定）**：`laser_dry_run_enabled` 默认关闭、重启不继承；仅允许经 `require_operator_settings_access` 校验的桌面主窗口（`X-Moss-Desktop-Session`）在弹窗确认后开启（60 分钟自动过期关闭，随时可手动关闭）。局域网、语音、MCP、网关、审批重放、无桌面会话回环与携带 `X-Moss-Bench` 头的脚本一律 `403` 拒绝开关。开启该开关即授权本次 L2 空跑测试，不做逐步审批；**真机出光永远由用户手动执行**，急停 `0x18` 照常走实时通道不受影响。
+  - **最底层强制改写与高风险快速指令拦截（`laser_device::DryRunTransport` + 发送预检 + SD 脱机上传 `sd_offline_upload_payload`）**：覆盖所有发往激光机的顺序写入出口（流式任务、已有 G 码上传、续雕模态头与正文、走边框、点射、点动、回原点、安全动作及 SD 脱机上传）。开启期间：① 所有 `S` 字改写为 `S0`，无 `S` 的 `M3`/`M4` 补 `S0`，任务开头补 `G21 G94 G1 M5 S0 F<折算上限>`（同时消除上电默认 `G0` 与残留 `G20`/`G93`）；② 所有 `F` 钳在折算上限内，`G0`（含 `G53 G0`）改写为 `G1 F<折算上限> S0`，裸 `G53` 与复位后无显式模态的坐标行自动补 `G1 F<折算上限> S0`；实时倍率字节照常放行，但下发 `F` 上限按 GRBL/FluidNC 最大进给倍率 200% 折半（`dry_run_max_feed_mm_min / 2`，可配范围 `300–5000`、默认 `2000` mm/min），保证 200% 倍率下实际物理速度仍不超过上限；③ 发送预检（`check_gcode_lines_for_dry_run`）直接拒绝含 `G28` / `G30`（回预存位置，按快速速度移动；`G28.1` / `G30.1` 仅存位置不运动，放行）、`G93`（反时间进给）、`G20`（英制单位）或外部固件文件/宏执行（`$LocalFS/Run`、`$Macro`、`$RM`、`$N0=`/`$N1=`、外部 `$SD/Run`）的任务；若传输层兜底仍遇到此类指令，替换为无运动注释 `; dry-run blocked <code>` 并记录带来源标签的告警事件；`$H` 机械回零按固件自设回零速度执行、保持放行；④ 打开连接时若空跑已开启，该连接锁存空跑策略直到关闭，防止任务中途到期或关开关导致半途出光；⑤ 行程与越界检查照常生效不放宽。
+- **固件 `$22=0` 回零拦截（LB1）**：`laser_tools::execute_laser_safe_action_with_gate_cancel_and_dispatch` 与 `laser_device::DeviceConnection::home_cancellable` 在握手确认 `homing_enabled == Some(false)` 时直接返回 `homing_disabled` 拒绝，不发 `$H` 也不触发急停兜底；未报告（`None`）时保持原有行为。
+- **过程记录标签隔离（LB4）**：`X-Moss-Bench: readonly|dryrun` 仅用于向 `ProcessTrace` 写入来源标记（`source` 与 `timeline.txt` 标签），**绝不授予任何权限**；空跑开启期间全部激光记录（含手动操作）统一附加 `dry_run: true` 与「空跑模式」。提示词由纯函数 `buildLaserBenchPrompt` 生成，不含令牌、绝对路径或设备地址。
+
 ## 5. 测试要求
 
 测试隔离、`FakeGrbl` 字节级校验、SHA-256 重算、`0x18` 优先级和结果状态见 [`AGENTS.md`](../../AGENTS.md)。
