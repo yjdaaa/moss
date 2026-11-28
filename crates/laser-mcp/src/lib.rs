@@ -28,10 +28,7 @@ pub use dispatch::{
     DESKTOP_PREVIEW_HINT, dispatch_tool_call, dispatch_tool_call_with, format_mcp_response,
 };
 pub use rpc::{handle_json_rpc, handle_json_rpc_with};
-pub use schema::{
-    COMPACT_LASER_TOOLS, compact_tools_list_json, tools_list_for, tools_list_json,
-    tools_list_profile, tools_list_with,
-};
+pub use schema::{tools_list_for, tools_list_json, tools_list_with};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "YOKO_MCP_SERVER";
@@ -70,12 +67,6 @@ pub trait HostBackend: Send + Sync {
     /// 用户是否在 MOSS 中关闭了这个工具（NV8）。关闭的工具不列出、不可调用；默认全部打开。
     fn tool_disabled(&self, _name: &str) -> bool {
         false
-    }
-
-    /// n72 是否列出完整工具清单（“完整工具（高级）”开关）。默认是（兼容没接这个开关的后端）；
-    /// `laser-host` 的后端按用户设置返回，默认给 AI 精简清单（[`compact_tools_list_json`]）。
-    fn full_tool_list(&self) -> bool {
-        true
     }
 
     /// n73 工作台最近一次握手成功的连接字段（`port`/`baudrate` 或 `host`/`network_host`/`telnet_port`…）。

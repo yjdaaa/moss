@@ -17,25 +17,28 @@ fn safe_tools_list_hides_developer_command() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 9);
     assert!(!names.contains(&"command_execution_tool"));
 }
 
 #[test]
-fn developer_tools_list_has_eighteen_tools_matching_catalog() {
+fn developer_tools_list_matches_catalog_and_order() {
     let listed = tools_list_json(true)["tools"]
         .as_array()
         .unwrap()
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_owned())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<Vec<_>>();
     let catalog = laser_tools::ToolCatalog::developer_mode()
         .names()
         .into_iter()
         .map(str::to_owned)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(listed.len(), 15);
-    assert_eq!(listed, catalog, "tools/list 与 ToolCatalog 必须一致");
+        .collect::<Vec<_>>();
+    assert_eq!(listed.len(), 10);
+    assert_eq!(
+        listed, catalog,
+        "tools/list 与 ToolCatalog 名称与顺序必须一致"
+    );
 }
 
 /// 记录请求并按路由返回预设响应的假后端。
@@ -122,37 +125,29 @@ fn shape_previews_route_to_text_generation_and_schemas_list_them() {
             .unwrap()["inputSchema"]["properties"]
             .clone()
     };
-    for list in [tools_list_json(false), compact_tools_list_json(false)] {
-        let workflow = props(list, "laser_workflow_tool");
-        for key in ["shapes", "border", "text_box"] {
-            assert!(workflow[key]["description"].is_string(), "{key}");
-        }
-        assert!(
-            workflow["shapes"]["items"]["properties"]["kind"]["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("heart"))
-        );
-    }
-    assert!(props(tools_list_json(false), "regenerate_text_laser_task_tool")["shapes"].is_object());
-    // r48：起点不写死默认中心，没说就按电脑上的对刀起点
-    for list in [tools_list_json(false), compact_tools_list_json(false)] {
-        let origin = &props(list, "laser_workflow_tool")["origin"];
-        assert!(origin.get("default").is_none(), "{origin}");
-        assert!(
-            origin["description"]
-                .as_str()
-                .unwrap()
-                .contains("没说就不填")
-        );
+    let list = tools_list_json(false);
+    let workflow = props(list.clone(), "laser_workflow_tool");
+    for key in ["shapes", "border", "text_box"] {
+        assert!(workflow[key]["description"].is_string(), "{key}");
     }
     assert!(
-        props(
-            compact_tools_list_json(false),
-            "regenerate_text_laser_task_tool"
-        )["shapes"]
-            .is_null(),
-        "精简清单的重新生成不列图形（字数预算），改图形就重新 preview"
+        workflow["shapes"]["items"]["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("heart"))
+    );
+    // r48：起点不写死默认中心，没说就按电脑上的对刀起点
+    let origin = &workflow["origin"];
+    assert!(origin.get("default").is_none(), "{origin}");
+    assert!(
+        origin["description"]
+            .as_str()
+            .unwrap()
+            .contains("没说就不填")
+    );
+    assert!(
+        props(list, "regenerate_text_laser_task_tool")["shapes"].is_null(),
+        "重新生成 schema 不列图形（字数预算），改图形就重新 preview；分发仍透传 shapes"
     );
 }
 
@@ -186,7 +181,7 @@ fn every_listed_tool_has_a_risk_level() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), 15);
+    assert_eq!(names.len(), 10);
     for name in &names {
         assert!(
             laser_contracts::tool_risk(name, &serde_json::json!({})).is_some(),
@@ -220,10 +215,6 @@ fn strict_bridge_refuses_r4_tools() {
             "material_params_tool",
             serde_json::json!({"action": "save", "material": "椴木"}),
         ),
-        (
-            "laser_grbl_tool",
-            serde_json::json!({"action": "send_command", "gcode_command": "G0 X10"}),
-        ),
         ("totally_unknown_tool", serde_json::json!({})),
     ] {
         let result = dispatch_tool_call_with(name, &arguments, true, Some(&backend));
@@ -252,17 +243,17 @@ fn strict_bridge_refuses_r4_tools() {
             .contains("strict_mode_blocked")
     );
     assert!(backend.0.calls().is_empty(), "被拒绝的调用不得触达后端");
-    // P1-08：每次拒绝都记审计（6 次 R4 + 1 次采用反馈）
+    // P1-08：每次拒绝都记审计（5 次 R4 + 1 次采用反馈）
     let audits = backend.1.lock().unwrap().clone();
-    assert_eq!(audits.len(), 7);
-    assert!(audits[..6].iter().all(
+    assert_eq!(audits.len(), 6);
+    assert!(audits[..5].iter().all(
         |entry| entry.action == laser_contracts::AuditAction::R4Denied
             && entry.client == "mcp"
             && entry.result == laser_contracts::AuditResult::Denied
     ));
     assert_eq!(audits[0].detail.tool.as_deref(), Some("open_app_tool"));
     assert_eq!(
-        audits[6].action,
+        audits[5].action,
         laser_contracts::AuditAction::StrictModeBlocked
     );
 
@@ -278,9 +269,9 @@ fn strict_bridge_refuses_r4_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 13, "{names:?}");
+    assert_eq!(names.len(), 8, "{names:?}");
     assert!(!names.contains(&"open_app_tool") && !names.contains(&"command_execution_tool"));
-    assert!(names.contains(&"laser_grbl_tool") && names.contains(&"material_params_tool"));
+    assert!(names.contains(&"laser_workflow_tool") && names.contains(&"material_params_tool"));
 }
 
 /// A-20 / A-25：严格模式下模型带 confirmed=true 调 confirm_send，桥接照常转发，
@@ -351,7 +342,7 @@ fn non_strict_bridge_behavior_is_unchanged() {
         Some(&backend),
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
 }
 
 #[test]
@@ -373,7 +364,7 @@ fn json_rpc_handles_initialize_tools_list_notifications_and_errors() {
         false,
     )
     .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
     assert!(
         handle_json_rpc(
             &serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -396,14 +387,14 @@ fn json_rpc_handles_initialize_tools_list_notifications_and_errors() {
 
     let call = handle_json_rpc(&serde_json::json!({
         "jsonrpc":"2.0","id":5,"method":"tools/call",
-        "params":{"name":"recommend_laser_params_tool","arguments":{"material":"椴木","thickness_mm":3.0}}
+        "params":{"name":"laser_safe_action_tool","arguments":{"action":"relative_move","x":5,"host":"127.0.0.1","dry_run":true}}
     }), false).unwrap();
     assert_eq!(call["result"]["isError"], false);
     assert!(
         call["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("推荐参数")
+            .contains("G91")
     );
 }
 
@@ -413,8 +404,6 @@ fn unimplemented_and_backendless_tools_report_errors_instead_of_fake_success() {
         "laser_workflow_tool",
         "run_calibration_grid_tool",
         "material_params_tool",
-        "start_tuned_job_tool",
-        "generate_text_laser_task_tool",
         "totally_unknown_tool",
     ] {
         let args = serde_json::json!({"action":"status","material":"椴木","thickness_mm":3,"text":"hi","task_id":"wf-1","confirmed":true,"workflow_id":"wf-1"});
@@ -423,48 +412,121 @@ fn unimplemented_and_backendless_tools_report_errors_instead_of_fake_success() {
     }
     let rpc = handle_json_rpc(&serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"laser_grbl_tool","arguments":{"action":"send_command","gcode_command":"G0 X10"}}}), false).unwrap();
     assert_eq!(rpc["result"]["isError"], true);
+    assert!(
+        rpc["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("已移除")
+    );
 }
 
-/// n72 精简清单：只含 8 个激光工具与电脑控制类工具；每个工具都在完整清单里且有风险分级，
-/// 每个参数都有中文说明，没有 Python 旧版残留；内置语音看到的说明总量大幅缩小。
+/// r76（2026-11-28）：删除的 5 个旧工具不再出现在任何模式的工具清单中；按名字调用返回明确的“已移除”错误且不触达后端。
 #[test]
-fn compact_tool_list_is_small_described_and_consistent() {
-    let full = tools_list_json(true);
-    let full_names: Vec<&str> = full["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
-    let compact = compact_tools_list_json(false);
-    let tools = compact["tools"].as_array().unwrap();
+fn removed_legacy_tools_are_absent_from_all_lists_and_return_removed_error() {
+    let removed_cases = [
+        ("laser_grbl_tool", "check_laser_connection_tool"),
+        ("laser_network_grbl_tool", "check_laser_connection_tool"),
+        ("recommend_laser_params_tool", "material_params_tool"),
+        ("generate_text_laser_task_tool", "laser_workflow_tool"),
+        ("start_tuned_job_tool", "laser_workflow_tool"),
+    ];
+    for (dev, strict) in [(false, false), (true, false), (false, true), (true, true)] {
+        let list = tools_list_for(dev, strict);
+        let names: Vec<&str> = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for (removed, _) in removed_cases {
+            assert!(
+                !names.contains(&removed),
+                "dev={dev} strict={strict} 清单仍包含已移除工具 {removed}"
+            );
+        }
+    }
+    for catalog in [
+        laser_tools::ToolCatalog::safe_default(),
+        laser_tools::ToolCatalog::developer_mode(),
+    ] {
+        for (removed, _) in removed_cases {
+            assert!(
+                !catalog.names().contains(&removed),
+                "ToolCatalog 仍包含已移除工具 {removed}"
+            );
+        }
+    }
+
+    let plain = FakeBackend::new(vec![]);
+    let strict = StrictBackend(FakeBackend::new(vec![]), Mutex::new(Vec::new()));
+    for (removed, replacement) in removed_cases {
+        for (label, result) in [
+            (
+                "no-backend",
+                dispatch_tool_call(removed, &serde_json::json!({}), true),
+            ),
+            (
+                "non-strict",
+                dispatch_tool_call_with(removed, &serde_json::json!({}), false, Some(&plain)),
+            ),
+            (
+                "strict",
+                dispatch_tool_call_with(removed, &serde_json::json!({}), true, Some(&strict)),
+            ),
+        ] {
+            assert!(!result.success, "{label} {removed}: {result:?}");
+            assert!(
+                result.result.contains("已移除") && result.result.contains(replacement),
+                "{label} {removed}: 应提示已移除及替代工具 {replacement}，实际: {}",
+                result.result
+            );
+            assert!(
+                result
+                    .detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("tool_removed"),
+                "{label} {removed}: detail 应含 tool_removed: {:?}",
+                result.detail
+            );
+        }
+    }
+    assert!(plain.calls().is_empty(), "已移除工具不得触达后端");
+    assert!(
+        strict.0.calls().is_empty(),
+        "严格模式下已移除工具不得触达后端"
+    );
+}
+
+/// 单一工具清单：8 个核心激光工具面向用户意图、每个参数都有中文说明、没有 Python 旧版残留，说明体积受控。
+#[test]
+fn unified_tool_list_is_small_described_and_consistent() {
+    let all = tools_list_json(true);
+    let tools = all["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    for name in COMPACT_LASER_TOOLS {
-        assert!(names.contains(&name), "精简清单缺 {name}");
+    assert_eq!(names.len(), 10, "{names:?}");
+    let laser_tools = [
+        "check_laser_connection_tool",
+        "laser_safe_action_tool",
+        "laser_workflow_tool",
+        "material_params_tool",
+        "refine_laser_params_from_feedback_tool",
+        "regenerate_text_laser_task_tool",
+        "run_calibration_grid_tool",
+        "select_calibration_cell_tool",
+    ];
+    for name in laser_tools {
+        assert!(names.contains(&name), "工具清单缺 {name}");
     }
     for name in &names {
-        assert!(
-            full_names.contains(name),
-            "{name} 必须是已有工具（执行逻辑不变）"
-        );
         assert!(
             laser_contracts::tool_risk(name, &serde_json::json!({})).is_some(),
             "{name} 要有风险分级"
         );
     }
-    for hidden in [
-        "laser_grbl_tool",
-        "laser_network_grbl_tool",
-        "start_tuned_job_tool",
-        "generate_text_laser_task_tool",
-        "recommend_laser_params_tool",
-        "command_execution_tool",
-    ] {
-        assert!(!names.contains(&hidden), "{hidden} 只在完整清单里");
-    }
     for tool in tools
         .iter()
-        .filter(|t| COMPACT_LASER_TOOLS.contains(&t["name"].as_str().unwrap()))
+        .filter(|t| laser_tools.contains(&t["name"].as_str().unwrap()))
     {
         let text = tool.to_string();
         for leftover in ["core.", ":param", "LASER_NETWORK_HOST", "LASER_DEFAULT"] {
@@ -495,14 +557,12 @@ fn compact_tool_list_is_small_described_and_consistent() {
             .unwrap()
             .contains("emergency_stop 并带 confirmed=true")
     );
-    let voice = tools_list_profile(false, true, false).to_string();
-    let voice_full = tools_list_profile(false, true, true).to_string();
+    let voice = tools_list_for(false, true).to_string();
     assert!(
         voice.chars().count() < 12_000,
         "内置语音每轮发给模型的工具说明 {} 字符，过大",
         voice.chars().count()
     );
-    assert!(voice.chars().count() * 3 < voice_full.chars().count());
 }
 
 struct RememberedBackend {
@@ -647,8 +707,8 @@ fn missing_connection_does_not_force_network_mode() {
 
 #[test]
 fn image_and_material_test_options_are_listed_and_forwarded() {
-    // 2026-11-16（技术书 r41）：图片转换方式只在完整清单（图片要已上传的文件）；材料测试字段两种清单都有
-    let full = tools_list_json(false);
+    // 2026-11-16（技术书 r41）& r76 合并单一清单：材料测试字段全部列出；语音拿不到图片文件，不列 image_mode，但分发原样转发
+    let list = tools_list_json(false);
     let find = |list: &serde_json::Value, name: &str| {
         list["tools"]
             .as_array()
@@ -658,59 +718,44 @@ fn image_and_material_test_options_are_listed_and_forwarded() {
             .cloned()
             .unwrap()
     };
-    let workflow = find(&full, "laser_workflow_tool");
-    let modes: Vec<&str> = workflow["inputSchema"]["properties"]["image_mode"]["enum"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(modes, laser_core::image_job::TONE_MODES);
-    assert_eq!(
-        workflow["inputSchema"]["properties"]["line_interval_scale"]["maximum"],
-        3
-    );
-    let compact = compact_tools_list_json(false);
-    let compact_workflow = find(&compact, "laser_workflow_tool");
+    let workflow = find(&list, "laser_workflow_tool");
     assert!(
-        compact_workflow["inputSchema"]["properties"]
+        workflow["inputSchema"]["properties"]
             .get("image_mode")
             .is_none(),
-        "精简清单不加图片参数（语音无法引用图片）"
+        "清单不加图片参数（语音无法引用图片）"
     );
     assert!(
-        compact_workflow["description"]
+        workflow["description"]
             .as_str()
             .unwrap()
             .contains("工作台上传")
     );
-    for list in [&full, &compact] {
-        let grid = find(list, "run_calibration_grid_tool");
-        let props = &grid["inputSchema"]["properties"];
-        assert_eq!(
-            props["test_type"]["enum"],
-            serde_json::json!(["matrix", "interval"])
-        );
-        for axis in ["x_axis", "y_axis"] {
-            for value in props[axis]["enum"].as_array().unwrap() {
-                assert!(
-                    laser_core::material::TestAxis::parse(value.as_str().unwrap()).is_some(),
-                    "{axis}={value}"
-                );
-            }
-        }
-        for key in [
-            "interval_min_mm",
-            "interval_max_mm",
-            "passes_min",
-            "passes_max",
-            "labels",
-        ] {
-            assert!(props[key]["description"].is_string(), "缺 {key}");
+    let grid = find(&list, "run_calibration_grid_tool");
+    let props = &grid["inputSchema"]["properties"];
+    assert_eq!(
+        props["test_type"]["enum"],
+        serde_json::json!(["matrix", "interval"])
+    );
+    for axis in ["x_axis", "y_axis"] {
+        for value in props[axis]["enum"].as_array().unwrap() {
+            assert!(
+                laser_core::material::TestAxis::parse(value.as_str().unwrap()).is_some(),
+                "{axis}={value}"
+            );
         }
     }
+    for key in [
+        "interval_min_mm",
+        "interval_max_mm",
+        "passes_min",
+        "passes_max",
+        "labels",
+    ] {
+        assert!(props[key]["description"].is_string(), "缺 {key}");
+    }
     assert!(
-        find(&compact, "run_calibration_grid_tool")["description"]
+        grid["description"]
             .as_str()
             .unwrap()
             .contains("test_type=interval")
@@ -1168,7 +1213,7 @@ fn disabled_tools_are_neither_listed_nor_callable() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 12, "{names:?}");
+    assert_eq!(names.len(), 7, "{names:?}");
     assert!(!names.contains(&"material_params_tool") && !names.contains(&"laser_safe_action_tool"));
 
     let call = handle_json_rpc_with(
@@ -1429,7 +1474,7 @@ fn disabled_gate_never_blocks_r2_workflow_cancel() {
 }
 
 #[test]
-fn recommend_forwards_to_backend_and_resume_delete_enforce_confirmed() {
+fn material_get_forwards_to_backend_and_resume_delete_enforce_confirmed() {
     let backend = FakeBackend::new(vec![
         (
             200,
@@ -1456,8 +1501,9 @@ fn recommend_forwards_to_backend_and_resume_delete_enforce_confirmed() {
         ),
     ]);
     let rec = dispatch_tool_call_with(
-        "recommend_laser_params_tool",
+        "material_params_tool",
         &serde_json::json!({
+            "action": "get",
             "material": "特制亚克力",
             "thickness_mm": 4.0,
             "laser_mode": "cut",
@@ -1467,10 +1513,6 @@ fn recommend_forwards_to_backend_and_resume_delete_enforce_confirmed() {
         Some(&backend),
     );
     assert!(rec.success, "{rec:?}");
-    assert!(
-        rec.result.contains("推荐参数") && rec.result.contains("特制亚克力"),
-        "{rec:?}"
-    );
 
     // 未确认 resume 被拦截，不触达后端
     let unconfirmed_resume = dispatch_tool_call_with(
@@ -1505,40 +1547,25 @@ fn recommend_forwards_to_backend_and_resume_delete_enforce_confirmed() {
     assert!(calls[2].2.get("confirmed").is_none());
 }
 
-/// 2026-11-06：AI 生成文字任务后只停在预览，`confirmed + send_after_generate` 不再顺带发送，
-/// 结果提示模型等用户在电脑预览窗确认。
+/// 2026-11-06：AI 生成文字任务后只停在预览，结果提示模型等用户在电脑预览窗确认。
 #[test]
 fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
     let ok = (
         200,
         serde_json::json!({"success": true, "result": {"workflow_id": "wf-ai", "status": "preview_ready"}}),
     );
-    let backend = FakeBackend::new(vec![ok.clone(), ok]);
-    let result = dispatch_tool_call_with(
-        "generate_text_laser_task_tool",
-        &serde_json::json!({"text": "生日快乐", "material": "椴木", "thickness_mm": 3, "confirmed": true, "send_after_generate": true, "host": "10.0.0.8"}),
-        false,
-        Some(&backend),
-    );
-    assert!(result.success, "{result:?}");
-    assert!(
-        result.result.contains("同意开刻") && result.result.contains("没有直接开始加工"),
-        "{}",
-        result.result
-    );
+    let backend = FakeBackend::new(vec![ok]);
     let preview = dispatch_tool_call_with(
         "laser_workflow_tool",
         &serde_json::json!({"action": "preview", "text": "MOSS", "material": "椴木", "thickness_mm": 3}),
         false,
         Some(&backend),
     );
+    assert!(preview.success, "{preview:?}");
     assert!(preview.result.contains("同意开刻"), "{}", preview.result);
     let calls = backend.calls();
-    assert_eq!(calls.len(), 2);
-    assert!(
-        calls.iter().all(|call| call.1 == "/api/text-task/generate"),
-        "{calls:?}"
-    );
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, "/api/text-task/generate");
 }
 
 #[test]
@@ -1569,7 +1596,7 @@ fn connection_probe_tools_route_through_backend_busy_protection() {
             }
         }),
     );
-    let backend = FakeBackend::new(vec![busy_ok.clone(), busy_ok, offline]);
+    let backend = FakeBackend::new(vec![busy_ok, offline]);
 
     let r1 = dispatch_tool_call_with(
         "check_laser_connection_tool",
@@ -1581,35 +1608,24 @@ fn connection_probe_tools_route_through_backend_busy_protection() {
     assert!(r1.result.contains("wf-busy"), "{}", r1.result);
 
     let r2 = dispatch_tool_call_with(
-        "laser_grbl_tool",
-        &serde_json::json!({"action": "status", "port": "COM3"}),
-        false,
-        Some(&backend),
-    );
-    assert!(r2.success, "{r2:?}");
-    assert!(r2.result.contains("wf-busy"), "{}", r2.result);
-
-    let r3 = dispatch_tool_call_with(
-        "laser_network_grbl_tool",
-        &serde_json::json!({"action": "probe", "host": "10.0.0.9"}),
+        "check_laser_connection_tool",
+        &serde_json::json!({"host": "10.0.0.9"}),
         false,
         Some(&backend),
     );
     assert!(
-        !r3.success,
-        "disconnected probe must report success=false: {r3:?}"
+        !r2.success,
+        "disconnected probe must report success=false: {r2:?}"
     );
-    assert!(r3.result.contains("连接失败"), "{}", r3.result);
+    assert!(r2.result.contains("连接失败"), "{}", r2.result);
 
     let calls = backend.calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|c| c.1 == "/api/connection/check"));
     assert_eq!(calls[0].2["network_timeout"], 1.5);
     assert_eq!(calls[0].2["auto_fallback"], false);
-    assert_eq!(calls[1].2["connection_mode"], "serial");
+    assert_eq!(calls[1].2["connection_mode"], "network");
     assert_eq!(calls[1].2["auto_fallback"], false);
-    assert_eq!(calls[2].2["connection_mode"], "network");
-    assert_eq!(calls[2].2["auto_fallback"], false);
 }
 
 #[test]
@@ -1657,8 +1673,8 @@ fn voice_mcp_tools_surface_preview_and_send_warnings_in_summaries() {
     ]);
 
     let preview = dispatch_tool_call_with(
-        "generate_text_laser_task_tool",
-        &serde_json::json!({"text": "注意安全", "material": "椴木", "thickness_mm": 3}),
+        "laser_workflow_tool",
+        &serde_json::json!({"action": "preview", "text": "注意安全", "material": "椴木", "thickness_mm": 3}),
         false,
         Some(&backend),
     );

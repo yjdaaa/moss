@@ -6,26 +6,20 @@ use laser_device::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PRIORITY_TOOLS: [&str; 8] = [
+/// 核心激光工具（顺序与 `tests/golden/mcp_tools.json` 一致，常规与严格模式均注册）。
+const LASER_TOOLS: [&str; 8] = [
     "check_laser_connection_tool",
     "laser_safe_action_tool",
     "laser_workflow_tool",
     "material_params_tool",
-    "recommend_laser_params_tool",
-    "run_calibration_grid_tool",
-    "select_calibration_cell_tool",
-    "start_tuned_job_tool",
-];
-
-const SECONDARY_TOOLS: [&str; 7] = [
-    "command_execution_tool",
-    "generate_text_laser_task_tool",
-    "laser_grbl_tool",
-    "laser_network_grbl_tool",
-    "open_app_tool",
     "refine_laser_params_from_feedback_tool",
     "regenerate_text_laser_task_tool",
+    "run_calibration_grid_tool",
+    "select_calibration_cell_tool",
 ];
+
+/// 本机桌面控制工具（R4，严格模式与内置语音不开放；`command_execution_tool` 仅开发者模式注册）。
+const DESKTOP_TOOLS: [&str; 2] = ["open_app_tool", "command_execution_tool"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSpec {
@@ -40,7 +34,7 @@ pub struct ToolCatalog {
 
 impl ToolCatalog {
     pub fn safe_default() -> Self {
-        let mut specs = PRIORITY_TOOLS
+        let mut specs = LASER_TOOLS
             .iter()
             .map(|name| ToolSpec {
                 name,
@@ -48,7 +42,7 @@ impl ToolCatalog {
             })
             .collect::<Vec<_>>();
         specs.extend(
-            SECONDARY_TOOLS
+            DESKTOP_TOOLS
                 .iter()
                 .filter(|name| **name != "command_execution_tool")
                 .map(|name| ToolSpec {
@@ -65,7 +59,6 @@ impl ToolCatalog {
             name: "command_execution_tool",
             developer_only: true,
         });
-        catalog.specs[8..].sort_by_key(|spec| spec.name);
         catalog
     }
 
@@ -694,49 +687,8 @@ fn summarize_status(report: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 参数推荐 / 校准选格（本地校验；持久化由 host 后端承接）
+// 校准选格（本地校验；持久化由 host 后端承接）
 // ---------------------------------------------------------------------------
-
-pub fn execute_recommend_laser_params(args: &RecommendLaserParamsArgs) -> ToolCallResult {
-    let scale = args.power_scale.unwrap_or(1000.0);
-    match laser_core::material::recommend_with_scale(
-        &args.material,
-        args.thickness_mm,
-        args.laser_mode.as_deref().unwrap_or("engrave"),
-        args.engraving_mode.as_deref(),
-        scale,
-    ) {
-        Some(rec) => {
-            let msg = format!(
-                "推荐参数: 材料={}, 匹配厚度={}mm, 模式={}, 功率={} (标尺={}), 速度={}",
-                rec.material,
-                rec.matched_thickness_mm,
-                rec.laser_mode,
-                rec.params.laser_max_power,
-                scale as i64,
-                rec.params.feed_rate
-            );
-            ToolCallResult::with_detail(
-                true,
-                msg,
-                format!(
-                    "laser_min_power={} laser_max_power={} feed_rate={} travel_rate={} passes={} pixel_size_mm={} engraving_mode={}",
-                    rec.params.laser_min_power,
-                    rec.params.laser_max_power,
-                    rec.params.feed_rate,
-                    rec.params.travel_rate,
-                    rec.params.passes,
-                    rec.params.pixel_size_mm,
-                    rec.engraving_mode.as_deref().unwrap_or("")
-                ),
-            )
-        }
-        None => ToolCallResult::err(format!(
-            "未找到材料 {} (厚度 {}mm) 的推荐参数",
-            args.material, args.thickness_mm
-        )),
-    }
-}
 
 /// 参数校验；无 host 后端时明确告知未持久化，绝不伪装成功。
 pub fn execute_select_calibration_cell(args: &SelectCalibrationCellArgs) -> ToolCallResult {
@@ -1257,18 +1209,19 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn safe_catalog_keeps_priority_order_and_hides_commands() {
+    fn safe_catalog_keeps_laser_order_and_hides_commands() {
         let catalog = ToolCatalog::safe_default();
-        assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
+        assert_eq!(&catalog.names()[..8], &LASER_TOOLS);
+        assert_eq!(catalog.names()[8], "open_app_tool");
         assert!(!catalog.names().contains(&"command_execution_tool"));
-        assert_eq!(catalog.specs().len(), 14);
+        assert_eq!(catalog.specs().len(), 9);
     }
 
     #[test]
-    fn developer_mode_adds_command_only_after_priority_tools() {
+    fn developer_mode_adds_command_only_after_laser_and_desktop_tools() {
         let catalog = ToolCatalog::developer_mode();
-        assert_eq!(&catalog.names()[..8], &PRIORITY_TOOLS);
-        assert_eq!(catalog.specs().len(), 15);
+        assert_eq!(&catalog.names()[..8], &LASER_TOOLS);
+        assert_eq!(catalog.specs().len(), 10);
         assert!(
             catalog
                 .specs()
@@ -1514,26 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn recommend_and_local_fallbacks_do_not_fake_success() {
-        let rec = execute_recommend_laser_params(&RecommendLaserParamsArgs {
-            material: "椴木".into(),
-            thickness_mm: 3.0,
-            laser_mode: Some("engrave".into()),
-            engraving_mode: Some("raster".into()),
-            power_scale: None,
-        });
-        assert!(rec.success);
-
-        let rec_255 = execute_recommend_laser_params(&RecommendLaserParamsArgs {
-            material: "椴木".into(),
-            thickness_mm: 3.0,
-            laser_mode: Some("engrave".into()),
-            engraving_mode: Some("raster".into()),
-            power_scale: Some(255.0),
-        });
-        assert!(rec_255.success);
-        assert!(rec_255.result.contains("标尺=255"));
-
+    fn local_fallbacks_do_not_fake_success() {
         let cmd = CommandExecutionArgs {
             command: "echo test".into(),
         };

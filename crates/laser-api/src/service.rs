@@ -1,23 +1,5 @@
 use super::*;
 
-/// n72 精简工具清单里的工具（与 `laser_mcp::COMPACT_LASER_TOOLS` 加电脑控制类工具一致；
-/// laser-api 不依赖 laser-mcp，`laser-host` 的测试核对两边一致）。
-pub fn laser_mcp_compact_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "check_laser_connection_tool"
-            | "laser_safe_action_tool"
-            | "laser_workflow_tool"
-            | "material_params_tool"
-            | "refine_laser_params_from_feedback_tool"
-            | "regenerate_text_laser_task_tool"
-            | "run_calibration_grid_tool"
-            | "select_calibration_cell_tool"
-            | "command_execution_tool"
-            | "open_app_tool"
-    )
-}
-
 impl ApiService {
     pub fn new(
         settings: laser_runtime::LaserSettings,
@@ -66,7 +48,6 @@ impl ApiService {
             agent_runs: std::sync::OnceLock::new(),
             external_tools: std::sync::OnceLock::new(),
             disabled_tools: std::sync::RwLock::new(std::collections::BTreeSet::new()),
-            full_tool_list: std::sync::atomic::AtomicBool::new(false),
             verified_connection: std::sync::RwLock::new(None),
             voice_sessions: Default::default(),
             shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -144,18 +125,6 @@ impl ApiService {
             .read()
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default()
-    }
-
-    /// n72 是否给接入点与内置语音完整工具清单（默认否：精简清单）。
-    pub fn full_tool_list(&self) -> bool {
-        self.full_tool_list
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// n72 运行中切换完整 / 精简工具清单（语音中心写入 `settings.json` 后调用）。
-    pub fn set_full_tool_list(&self, full: bool) {
-        self.full_tool_list
-            .store(full, std::sync::atomic::Ordering::Release);
     }
 
     /// 运行中替换关闭的工具列表（语音中心写入 `settings.json` 后调用）。不能关闭的工具与空名会被忽略。
@@ -319,13 +288,6 @@ impl ApiService {
         {
             *slot = Some(saved.clone());
         }
-        self.set_full_tool_list(
-            runtime_settings
-                .get("voice")
-                .and_then(|voice| voice.get("mcp_full_tool_list"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-        );
         let disabled = runtime_settings
             .get("mcp_disabled_tools")
             .and_then(serde_json::Value::as_array)

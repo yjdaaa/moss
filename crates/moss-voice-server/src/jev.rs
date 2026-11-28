@@ -540,18 +540,11 @@ fn infer_groups_from_spec(spec: &ToolSpec) -> &'static [ToolGroup] {
 /// 第三方外部 MCP（`<server>__<tool>`）不走此表，由独立的外部 MCP 开关处理。
 pub fn groups_of_builtin_tool(spec: &ToolSpec) -> &'static [ToolGroup] {
     match spec.name.as_str() {
-        "check_laser_connection_tool" | "material_params_tool" | "recommend_laser_params_tool" => {
-            &[ToolGroup::LaserQuery]
-        }
-        // GRBL 工具同时开放只读 status/check/probe 与 R2 的 cancel/stop
-        "laser_grbl_tool" | "laser_network_grbl_tool" => {
-            &[ToolGroup::LaserQuery, ToolGroup::LaserControl]
-        }
-        "generate_text_laser_task_tool"
-        | "regenerate_text_laser_task_tool"
+        "check_laser_connection_tool" | "material_params_tool" => &[ToolGroup::LaserQuery],
+        "regenerate_text_laser_task_tool"
         | "refine_laser_params_from_feedback_tool"
         | "select_calibration_cell_tool" => &[ToolGroup::LaserGenerate],
-        "run_calibration_grid_tool" | "start_tuned_job_tool" => &[ToolGroup::LaserControl],
+        "run_calibration_grid_tool" => &[ToolGroup::LaserControl],
         // 工作流与安全动作既承接查询也承接控制/生成确认
         "laser_workflow_tool" => &[
             ToolGroup::LaserQuery,
@@ -1616,7 +1609,7 @@ mod tests {
             "check_laser_connection_tool",
             "laser_workflow_tool",
             "laser_safe_action_tool",
-            "generate_text_laser_task_tool",
+            "regenerate_text_laser_task_tool",
             "get_weather",
             "hass_set_state",
             "play_music",
@@ -1756,7 +1749,11 @@ mod tests {
             ChatMessage::user("帮我雕个福字"),
             ChatMessage::assistant_tools(
                 None,
-                vec![ToolCall::new("c1", "generate_text_laser_task_tool", "{}")],
+                vec![ToolCall::new(
+                    "c1",
+                    "laser_workflow_tool",
+                    r#"{"action":"preview"}"#,
+                )],
             ),
             ChatMessage::tool("c1", r#"{"success":true,"result":"预览就绪"}"#),
             ChatMessage::assistant("椴木3毫米功率400速度1200一次，确认开始吗？"),

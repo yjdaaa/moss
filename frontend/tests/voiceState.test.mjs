@@ -1685,23 +1685,26 @@ test("测试全部环节：按每个环节当前选用的来源决定怎么测�
   );
 });
 
-test("n72 内置工具按用途分组、显示中文名与风险标签，未登记的工具放进“其他”", () => {
+test("内置工具按用途分组、显示中文名与风险标签，未登记的工具放进“其他”，已移除旧工具不留条目", () => {
   const groups = groupedTools([
-    { name: "laser_safe_action_tool", description: "x", in_compact: true },
-    { name: "laser_workflow_tool", description: "x", in_compact: true },
-    { name: "laser_grbl_tool", description: "x", in_compact: false },
-    { name: "open_app_tool", description: "x", in_compact: true },
+    { name: "laser_safe_action_tool", description: "x" },
+    { name: "laser_workflow_tool", description: "x" },
+    { name: "material_params_tool", description: "x" },
+    { name: "open_app_tool", description: "x" },
     { name: "ext_unknown", description: "外部说明" },
   ]);
-  assert.deepEqual(groups.map((g) => g.id), ["safety", "job", "advanced", "desktop", "other"]);
+  assert.deepEqual(groups.map((g) => g.id), ["safety", "job", "tuning", "desktop", "other"]);
   const stop = groups[0].tools[0];
   assert.equal(stop.label, "停止与机器控制");
   assert.equal(stop.risk, "confirm");
   assert.equal(groups.at(-1).tools[0].summary, "外部说明");
-  // 精简清单里的 8 个激光工具都有中文名
+  // 8 个核心激光工具都有中文名，且不再有 advanced 组或已移除的 5 个旧工具
   for (const name of ["check_laser_connection_tool", "laser_safe_action_tool", "laser_workflow_tool", "material_params_tool",
     "refine_laser_params_from_feedback_tool", "regenerate_text_laser_task_tool", "run_calibration_grid_tool", "select_calibration_cell_tool"]) {
     assert.ok(TOOL_META[name]?.label && TOOL_META[name].group !== "advanced", name);
+  }
+  for (const removed of ["laser_grbl_tool", "laser_network_grbl_tool", "recommend_laser_params_tool", "generate_text_laser_task_tool", "start_tuned_job_tool"]) {
+    assert.equal(TOOL_META[removed], undefined, `TOOL_META 不应再包含已移除工具 ${removed}`);
   }
 });
 
@@ -3007,13 +3010,13 @@ test("VD2/VD5 录制测试语料：状态切换、16k 重采样、时长/电平/
     id: "homophone_basswood",
     key_terms: ["椴木", "切割", "功率"],
     expect_route: "fast_read",
-    expect_tool: "generate_text_laser_task_tool",
+    expect_tool: "laser_workflow_tool",
     expect_simulation_gate: true,
     require_idle_laser: true,
   });
   assert.equal(badges.some((b) => b.key === "terms" && b.text.includes("椴木 · 切割 · 功率")), true);
   assert.equal(badges.some((b) => b.key === "route" && b.text.includes("状态快查")), true);
-  assert.equal(badges.some((b) => b.key === "tool" && b.text.includes("生成文字雕刻预览")), true);
+  assert.equal(badges.some((b) => b.key === "tool" && b.text.includes("雕刻任务 / 生成预览")), true);
   assert.equal(badges.some((b) => b.key === "gate" && b.text.includes("安全门禁")), true);
   assert.equal(badges.some((b) => b.key === "idle" && b.text.includes("仅激光空闲时运行")), true);
 

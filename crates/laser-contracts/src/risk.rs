@@ -76,7 +76,7 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
     use crate::risk::RiskLevel::{R0, R1, R2, R3, R4};
     let action = text(arguments, "action").map(str::to_ascii_lowercase);
     let level = match name {
-        "check_laser_connection_tool" | "recommend_laser_params_tool" => R0,
+        "check_laser_connection_tool" => R0,
         "laser_safe_action_tool" => {
             let action = action.unwrap_or_default();
             if action == "status" {
@@ -96,37 +96,17 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
             // confirm_send / send / resume 以及不认识的 action：按 R3 处理（不认识的由后端拒绝）
             _ => R3,
         },
-        "laser_grbl_tool" | "laser_network_grbl_tool" => match action.as_deref().unwrap_or("") {
-            "status" | "check" | "probe" => R0,
-            "cancel" | "stop" => R2,
-            // send_file / send_command 已被禁用：任意 G-code 永不对语音开放
-            _ => R4,
-        },
         "material_params_tool" => match action.as_deref().unwrap_or("list") {
             "list" | "get" | "recommend" | "export" => R0,
             // 保存、导入可能覆盖已有参数，删除不可逆：材料库删除 / 覆盖属于 R4
             _ => R4,
         },
         "select_calibration_cell_tool" | "refine_laser_params_from_feedback_tool" => R1,
-        "generate_text_laser_task_tool" => {
-            if flag(arguments, "confirmed") && flag(arguments, "send_after_generate") {
-                R3
-            } else {
-                R1
-            }
-        }
         "run_calibration_grid_tool" => {
             if text(arguments, "calibration_id").is_some() && flag(arguments, "confirmed") {
                 R3
             } else {
                 R1
-            }
-        }
-        "start_tuned_job_tool" => {
-            if flag(arguments, "confirmed") && !flag(arguments, "dry_run") {
-                R3
-            } else {
-                R0
             }
         }
         // 采用反馈建议会改写后续加工参数（§6.1 列为 R3）；不采用时只是重新生成预览
@@ -192,32 +172,13 @@ mod tests {
                 R3,
             ),
             ("laser_safe_action_tool", json!({}), R3),
-            ("laser_grbl_tool", json!({"action": "probe"}), R0),
-            ("laser_network_grbl_tool", json!({"action": "stop"}), R2),
-            ("laser_grbl_tool", json!({"action": "send_command"}), R4),
-            (
-                "laser_network_grbl_tool",
-                json!({"action": "send_file"}),
-                R4,
-            ),
             ("material_params_tool", json!({}), R0),
             ("material_params_tool", json!({"action": "get"}), R0),
             ("material_params_tool", json!({"action": "save"}), R4),
             ("material_params_tool", json!({"action": "delete"}), R4),
             ("material_params_tool", json!({"action": "import"}), R4),
-            ("recommend_laser_params_tool", json!({}), R0),
             ("select_calibration_cell_tool", json!({}), R1),
             ("refine_laser_params_from_feedback_tool", json!({}), R1),
-            (
-                "generate_text_laser_task_tool",
-                json!({"confirmed": true}),
-                R1,
-            ),
-            (
-                "generate_text_laser_task_tool",
-                json!({"confirmed": true, "send_after_generate": true}),
-                R3,
-            ),
             ("run_calibration_grid_tool", json!({"material": "椴木"}), R1),
             (
                 "run_calibration_grid_tool",
@@ -227,17 +188,6 @@ mod tests {
             (
                 "run_calibration_grid_tool",
                 json!({"calibration_id": "cal_1", "confirmed": true}),
-                R3,
-            ),
-            ("start_tuned_job_tool", json!({"task_id": "wf"}), R0),
-            (
-                "start_tuned_job_tool",
-                json!({"task_id": "wf", "confirmed": true, "dry_run": true}),
-                R0,
-            ),
-            (
-                "start_tuned_job_tool",
-                json!({"task_id": "wf", "confirmed": true}),
                 R3,
             ),
             (
@@ -260,13 +210,22 @@ mod tests {
                 "{name} {arguments}"
             );
         }
-        assert_eq!(tool_risk("unknown_tool", &json!({})), None);
+        for removed in [
+            "laser_grbl_tool",
+            "laser_network_grbl_tool",
+            "recommend_laser_params_tool",
+            "generate_text_laser_task_tool",
+            "start_tuned_job_tool",
+            "unknown_tool",
+        ] {
+            assert_eq!(tool_risk(removed, &json!({})), None, "{removed}");
+        }
         assert!(RiskLevel::R2 < RiskLevel::R3 && RiskLevel::R3 < RiskLevel::R4);
         assert_eq!(RiskLevel::R3.as_str(), "R3");
         for name in ["command_execution_tool", "open_app_tool"] {
             assert!(tool_never_exposed(name));
         }
-        assert!(!tool_never_exposed("laser_grbl_tool"));
+        assert!(!tool_never_exposed("laser_workflow_tool"));
         assert!(!tool_never_exposed("material_params_tool"));
     }
 }

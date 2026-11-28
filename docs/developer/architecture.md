@@ -41,7 +41,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 | `laser-core` | 纯算法：字体轮廓（`ttf-parser`）、位图抖动与光栅规划、矢量描边与填充、G-code 生成与时间估算、材料推荐与标定矩阵、参数安全范围 | `gcode::write_raster` / `write_outline` / `generate_framing_gcode`、`raster::dither`、`material::calibration_matrix`、`safety::validate_core_job` / `evaluate_material` |
 | `laser-device` | 硬件通信：串口与 TCP 传输、有界握手、FluidNC `$CD` 配置解析、Idle 与引脚预检、字符计数流控与 `Bf:` 自适应窗口、S 值按 `$30` 换算、实时字节、mDNS 发现、SD 卡 HTTP 上传、错误码翻译、`FakeGrbl` 测试桩 | `DeviceTransport`、`ConnectionSpec`、`DeviceConnection`、`JobWorker`、`authorize_send`、`RealtimeCommand`、`discover_controllers` |
 | `laser-runtime` | 配置与持久化：`.env` 读取、运行目录解析与实例锁、`settings.json` 唯一读写入口（进程内写锁 + 原子替换，激光后端、语音中心、启动编排与桌面壳导出设置共用）、SQLite schema 与迁移（`db/` 按域分文件）、`RuntimeStore` 抽象、旧数据迁移器 | `LaserSettings`、`RuntimeRoot`、`settings_store::{update, lock, read}`、`RuntimeDb`、`RuntimeStore`（`SqliteStore` / `MemoryStore`）、`run_migration` |
-| `laser-tools` | MCP 工具目录与不依赖宿主的工具实现：连接检查、安全动作、参数推荐、文字图片、桌面应用与快捷键、开发者命令 | `ToolCatalog`、`execute_check_laser_connection`、`execute_laser_safe_action`、`resolve_connection_spec`、`developer_mode_enabled` |
+| `laser-tools` | MCP 工具目录与不依赖宿主的工具实现：连接检查、安全动作、桌面应用与开发者命令 | `ToolCatalog`、`execute_check_laser_connection`、`execute_laser_safe_action`、`resolve_connection_spec`、`developer_mode_enabled` |
 | `laser-mcp` | JSON-RPC 2.0 MCP 服务：`initialize` / `ping` / `tools/list` / `tools/call`（`rpc.rs`），工具清单与裁剪（`schema.rs`），工具分发与门禁（`dispatch.rs`），连接小智控制台的 WebSocket 客户端（`bridge.rs`，`tungstenite` + `rustls`，同步实现） | `tools_list_json`、`dispatch_tool_call_with`、`HostBackend`、`run_bridge`、`endpoint_from_env` |
 | `laser-api` | HTTP 服务与业务编排：所有 `/api/*`、`/v1/*` 路由（按系统/设备/工作流/材料拆分子模块并暴露进程内类型化入口 `dispatch_json`），workflow 状态机，发送门禁与 `JobWorker` 调度，材料实验室，局域网配对，桌面会话、严格模式与桌面审批（`approval.rs`），前端静态资源 | `ApiService`、`dispatch_json`、`ShortJobWatch`、`AuthManager`、`abort_all_active_jobs`、`ApprovalService`、`require_r3_authority` |
 | `laser-host` | 组装层：初始化运行目录、配置、数据库、`ApiService`，启动 HTTP 与 MCP 桥，全局退出协调器，语音工具分发与第三方 MCP 接线（`external_mcp`） | `HostApplication`、`InProcessBackend`、`ShutdownCoordinator`、`voice_tool_call`、`external_mcp::ExternalMcp` |
@@ -65,8 +65,8 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 
 - 先读运行目录 `settings.json` 的 `mcp_endpoint`，未配置时才回退 `MCP_ENDPOINT` 环境变量；有效地址须为 `ws://` 或 `wss://` 且不含 `<` 占位符，否则静默跳过。
 - 桥在独立线程中运行 `laser_mcp::run_bridge`，断线按 1 秒起、60 秒封顶指数退避重连，日志中的 token 脱敏。
-- 协议版本 `2024-11-05`，服务名 `YOKO_MCP_SERVER`。`tools/list` 使用编译期嵌入的黄金清单，并与 `ToolCatalog` 校验一致；清单共 15 个工具，未设置 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时不含 `command_execution_tool`，共 14 个。
-- 需要持久化或真实作业的工具（workflow、材料库、标定矩阵、文字任务、正式发送）通过 `HostBackend` 直接调用进程内 `ApiService::dispatch_json` / `dispatch_json_with_watch`（跳过原始 HTTP/1.1 文本报文拼装与头解析，走同一鉴权后门禁与状态机，按预览走边框通过显式 `ShortJobWatch` 条件变量同步开始回执），与网页共用同一套门禁、SQLite 与 `JobWorker`。`laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_file`、`send_command` 直接拒绝并引导走 workflow 或安全动作。
+- 协议版本 `2024-11-05`，服务名 `YOKO_MCP_SERVER`。`tools/list` 使用编译期嵌入的单一黄金清单（`tests/golden/mcp_tools.json`），并与 `ToolCatalog` 名称及顺序校验一致；清单共 10 个工具（8 个核心激光工具 + 2 个桌面控制工具），未设置 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时不含 `command_execution_tool`，共 9 个（严格模式与内置语音不含桌面控制工具，仅列 8 个激光工具）。
+- 需要持久化或真实作业的工具（workflow、材料库、标定矩阵、文字任务、正式发送）通过 `HostBackend` 直接调用进程内 `ApiService::dispatch_json` / `dispatch_json_with_watch`（跳过原始 HTTP/1.1 文本报文拼装与头解析，走同一鉴权后门禁与状态机，按预览走边框通过显式 `ShortJobWatch` 条件变量同步开始回执），与网页共用同一套门禁、SQLite 与 `JobWorker`。已移除的旧工具（如 `laser_grbl_tool` / `laser_network_grbl_tool` 等 5 个）按名字调用直接返回 `tool_removed` 并提示替代工具，不触达后端。
 - 桥的连接状态、客户端身份与最近请求写入注入的 `McpTelemetry` 实例（`ApiService::with_mcp_telemetry` / `HostBackend::mcp_telemetry`，默认共享 `laser_contracts::global_mcp_telemetry` 单例），由 `/api/system/info` 暴露给前端。
 
 ## 4a. 严格模式与桌面审批（P1）

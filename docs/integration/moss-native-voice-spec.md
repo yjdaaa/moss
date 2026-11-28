@@ -7,7 +7,7 @@
 ## 0. 结论
 
 - **把小智服务端的能力做进 MOSS 本身**：MOSS 桌面端内置一个“语音服务”，小智设备的 OTA 地址直接指向 MOSS 所在电脑（`http://<电脑局域网IP>:8003/xiaozhi/ota/`）。设备 → MOSS 一跳完成识别 → 大模型 → 合成，不再需要 xiaozhi-esp32-server、mcp-endpoint-server 和 Python 环境。
-- **语言**：核心用 Rust，与 MOSS 同一进程，便于直接调用 19 个雕刻工具和审批；界面沿用 React。本地模型用 sherpa-onnx 官方 Rust 绑定（支持 Windows），不需要 Python；因其静态库含 GPL-3.0 组件，放在独立辅助进程 `moss-voice-local.exe` 中运行（§11.2，V5 已确认）。Python 只在用户自己想接的外部服务（如 FunASR torch 版、GPT-SoVITS）中出现，MOSS 以 HTTP 客户端身份调用，不托管它们。
+- **语言**：核心用 Rust，与 MOSS 同一进程，便于直接调用 MOSS 内置雕刻工具（r76 收口为 8 个核心激光工具；含桌面控制共 9 个常规工具 + 开发者模式 `command_execution_tool` 共 10 个）和审批；界面沿用 React。本地模型用 sherpa-onnx 官方 Rust 绑定（支持 Windows），不需要 Python；因其静态库含 GPL-3.0 组件，放在独立辅助进程 `moss-voice-local.exe` 中运行（§11.2，V5 已确认）。Python 只在用户自己想接的外部服务（如 FunASR torch 版、GPT-SoVITS）中出现，MOSS 以 HTTP 客户端身份调用，不托管它们。
 - **取最优**：
   - 设备协议与播放节奏取海门：它是 Rust 写的，代码可直接借用。
   - 对话、工具调度、OTA、VAD 参数、提供商清单、插件、记忆、视觉取 xiaozhi-esp32-server：它最完整，按其行为用 Rust 重写。
@@ -144,7 +144,7 @@
 
 | 功能 | esp32-server | 海门 | xiaozhi-client | MOSS 现有 | 采用 |
 | --- | --- | --- | --- | --- | --- |
-| 工具调度 | 5 类执行器，无审批，重名静默覆盖 | — | 前缀命名、开关（未生效） | 19 个工具、R0–R4 分级、严格模式、桌面审批 | MOSS 统一工具路由：前缀命名、重名拒绝、开关在列表与调用两处都校验、所有调用都过风险分级与审批 |
+| 工具调度 | 5 类执行器，无审批，重名静默覆盖 | — | 前缀命名、开关（未生效） | 10 个内置工具（常规 9 个，语音可用 8 个激光工具）、R0–R4 分级、严格模式、桌面审批 | MOSS 统一工具路由：前缀命名、重名拒绝、开关在列表与调用两处都校验、所有调用都过风险分级与审批 |
 | 设备自带 MCP | 有 | 无 | 只记日志 | 无 | esp32-server |
 | 官方 MCP 接入点 | 客户端 | — | **多接入点**（不重连） | 单接入点桥，带退避重连 | MOSS 现有的桥，扩展为多接入点并补上断线重连 |
 | 第三方 MCP 聚合 | stdio / SSE / http | 代码有但未接线 | **最完善** | 无 | xiaozhi-client 的思路，用 Rust `rmcp` 实现（§5.4） |
@@ -170,7 +170,7 @@
 │   设备协议/鉴权 → 会话(每设备一个) → VAD → ASR → LLM(工具调用)    │
 │        → 切句聚合 → TTS → Opus → 播放节奏泵 → 设备                │
 │   记忆 · 视觉接口 · 声纹识别 · 固件下发                           │
-│   工具路由 ─┬─ MOSS 19 个工具：InProcessBackend，CallerContext::Voice│
+│   工具路由 ─┬─ MOSS 8 个激光工具：InProcessBackend，CallerContext::Voice│
 │            ├─ 设备自带 MCP（经同一 WebSocket）                    │
 │            ├─ 插件：天气/新闻/农历/搜索/音乐/Home Assistant/RAGFlow│
 │            ├─ 第三方 MCP（rmcp，默认每次需批准）                   │
@@ -364,7 +364,7 @@
 | NV1 协议与 OTA | `moss-xiaozhi-proto`、`moss-voice-server` 骨架：OTA、hello、设备允许流程、token、回声模式 | 海门 + esp32-server | 真实设备的 OTA 指向 MOSS 后能连上并听到回声；未允许的设备被拒 |
 | NV2 音频 | Opus 编解码、播放节奏泵、VAD 接口与进程内能量 VAD、打断（设备 abort）。Silero 需要本地模型辅助程序（§11.2），随 NV6 接入同一接口（n7 调整） | 海门、esp32-server | 无断音、跳字；静音 200 ms 判停；打断后立即停播 |
 | NV3 云端对话 | OpenAI 兼容 ASR / LLM（流式 + 工具调用）/ TTS；切句聚合；对话历史截断；唤醒、退出、空闲 | esp32-server、海门 | 唤醒 → 问答 → 合成完整走通；记录首句延迟 |
-| NV4 工具与审批 | 统一工具路由；MOSS 19 个工具以 `CallerContext::Voice` 调用；设备 MCP 中继；R3 随全局严格模式决定是生成审批还是沿用 `confirmed` 契约 | esp32-server + MOSS | **开启严格模式**：“雕刻你好”只生成审批，批准后才发送；**关闭**：复测既有 `confirmed` 与口头确认提示词路径，不能把模型填参当桌面授权；查询类直接执行、R4 始终拒绝，实机另验 |
+| NV4 工具与审批 | 统一工具路由；MOSS 8 个核心激光工具以 `CallerContext::Voice` 调用；设备 MCP 中继；R3 随全局严格模式决定是生成审批还是沿用 `confirmed` 契约 | esp32-server + MOSS | **开启严格模式**：“雕刻你好”只生成审批，批准后才发送；**关闭**：复测既有 `confirmed` 与口头确认提示词路径，不能把模型填参当桌面授权；查询类直接执行、R4 始终拒绝，实机另验 |
 | NV5 语音中心与密钥 | 链路三选一（官方 / 内置 / 外部）；内置服务启停与状态；设备允许列表；提供商配置；密钥存 `app_secrets` | MOSS P4 | 页面操作全部可用；密钥不出现在 `settings.json`、日志与接口响应中 |
 | NV6 本地模型 | 本地模型辅助程序 `moss-voice-local.exe`（GPL-3.0，§11.2）；Silero VAD（接入 NV2 的 `Vad` 接口）、sherpa-onnx ASR / TTS；模型下载与校验 | sherpa-onnx | 断网时本地链路可用；Silero 与能量 VAD 可切换 |
 | NV7 流式云厂商 | 豆包流式 ASR / TTS（用核实过的 `univoice` 或自写） | 海门 | 首句延迟明显低于批量 |
@@ -719,7 +719,7 @@
 
 - **多接入点**：`settings.json` 顶层 `mcp_extra_endpoints`（最多 4 个）为附加的官方接入点，与主接入点 `mcp_endpoint` 同时连接，提供同一套工具（编号 `primary`、`extra-N`，N 为列表中的位置）。无效与重复地址跳过。（n102 起自建链路已删除，附加接入点不再有“自建模式下暂停”。）每个接入点一条线程（`mcp-bridge-<编号>`），重启桥时全部先停再起。
 - **断线判定与重连**：每 30 秒发 WebSocket Ping；90 秒收不到任何数据（含 Pong）判定断线——网络中途断开时 TCP 可能长时间不报错，原来只靠读超时会一直“在线”。重连沿用 1 秒起加倍、最长 60 秒；连接稳定 60 秒以上后断开，等待从 1 秒重新开始（原来只有正常关闭才归零）。断开原因去掉 token 后记入该接入点。
-- **精简 / 完整清单**（n72）：默认精简清单（`tests/golden/mcp_tools_compact.json`），`voice.mcp_full_tool_list` 打开后接入点与内置语音拿完整清单；只改列出的工具与说明，不改执行与门禁。
+- **统一清单**（r76 取代原 n72 精简/完整双清单）：删除 5 个旧工具与 `voice.mcp_full_tool_list` 开关，接入点与内置语音统一使用 `tests/golden/mcp_tools.json` 单一清单（8 个核心激光工具面向用户意图重写；常规 9 个、开发者模式 10 个，内置语音与严格模式仅列 8 个激光工具），执行与门禁不变。
 - **工具开关**：顶层 `mcp_disabled_tools`。关闭的工具不出现在接入点的 `tools/list` 与内置语音的工具清单里，调用返回 `tool_disabled`、不触达后端——即列表与调用两处都校验（xiaozhi-client 的开关只改界面）。`laser_safe_action_tool` 不能关闭（语音“停”依赖它，§6.1）。改动后重连所有接入点以更新清单（接入点不支持清单变更通知）；内置语音每轮重读清单，下一轮对话即生效。开关拒绝只计入统计与事件，不写审计表（新增审计动作会让旧版程序读不了审计记录）。
 - **调用统计**：每个工具的调用、失败、拒绝次数与最近一次的时间、调用方（审计标签 `mcp` / `voice:<设备>`），接入点与内置语音共用；只在内存中，重启清零。未分级的工具名统一计为“未知工具”。
 - **接入点身份**：解码 token 中 JWT 的载荷，只显示标识类字段（键名以 id 结尾，或 purpose / name / sub 等，最多 8 个）与签发、过期时间，过期标红；不校验签名，只用于显示。官方 token 的实际字段名未在真实账号上核实。

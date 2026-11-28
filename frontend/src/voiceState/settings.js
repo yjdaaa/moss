@@ -56,15 +56,13 @@ export function toolSwitchPayload(tools, name, enabled) {
 }
 
 /**
- * n72（2026-11-08 用户决定）：内置工具卡片给人看的名字、分组和风险标签。
+ * 内置工具卡片给人看的名字、分组和风险标签。
  * `risk`：read 只读 / file 只生成预览或文件 / confirm 会让机器动、要你确认 / stop 停止与调速（不用确认）/ desktop 控制电脑。
- * 精简清单（默认给 AI）以后端 `in_compact` 为准；这里只管显示。
  */
 export const TOOL_GROUPS = [
   { id: "safety", title: "检查与安全" },
   { id: "job", title: "刻字与发送" },
   { id: "tuning", title: "材料与调参" },
-  { id: "advanced", title: "高级：重复入口与底层收发（只在“完整工具”打开时给 AI）" },
   { id: "desktop", title: "电脑控制（内置语音和严格模式下不开放）" },
   { id: "other", title: "其他" },
 ];
@@ -86,11 +84,6 @@ export const TOOL_META = {
   refine_laser_params_from_feedback_tool: { label: "按效果给调参建议", group: "tuning", risk: "file", summary: "你说“太焦”“太浅”后给出调整建议，不改参数、不动机器。" },
   run_calibration_grid_tool: { label: "测试矩阵", group: "tuning", risk: "confirm", summary: "刻一块不同功率×速度的小方格找最佳参数；开始刻前要你确认。" },
   select_calibration_cell_tool: { label: "保存最佳格子", group: "tuning", risk: "file", summary: "你说第几格最好，就把它的参数存进材料库。" },
-  recommend_laser_params_tool: { label: "推荐参数（旧入口）", group: "advanced", risk: "read", summary: "和“材料参数库”的查询重复。" },
-  start_tuned_job_tool: { label: "按调参结果开刻（旧入口）", group: "advanced", risk: "confirm", summary: "和“刻字”的确认发送重复。" },
-  generate_text_laser_task_tool: { label: "生成刻字任务（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
-  laser_grbl_tool: { label: "串口底层收发", group: "advanced", risk: "confirm", summary: "直接对串口查状态、取消；发任意 G-code 已禁用。" },
-  laser_network_grbl_tool: { label: "网络底层收发", group: "advanced", risk: "confirm", summary: "直接对网络雕刻机查状态、取消；发任意 G-code 已禁用。" },
   open_app_tool: { label: "打开电脑应用", group: "desktop", risk: "desktop", summary: "打开浏览器、微信等应用或网址。" },
   command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
 };

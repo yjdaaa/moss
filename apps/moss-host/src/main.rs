@@ -29,7 +29,7 @@ fn main() {
         laser_mcp::tools_list_json(true)["tools"]
             .as_array()
             .map(Vec::len),
-        Some(20)
+        Some(10)
     );
     println!("moss-host stage-0 probes passed");
 }

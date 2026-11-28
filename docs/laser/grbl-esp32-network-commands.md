@@ -292,7 +292,7 @@ $N
 当前仓库实现补充（Rust 版）：
 
 - 设备传输只有串口与 Telnet（`laser_device::ConnectionSpec`）。没有 HTTP `/command` 通道，也没有 `[ESP800]` 探测；连接检查固定走 `$$` 握手并要求 `$32=1`。
-- 任意单条命令不对外开放。`laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_command` 与 `send_file` 一律拒绝；受控动作走 `laser_safe_action_tool` / `/api/safe-action`，其中 `status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、移动、`0x18` 需要 `confirmed=true`。
+- 任意单条命令不对外开放（底层 `laser_grbl_tool` / `laser_network_grbl_tool` 已移除）；受控动作走 `laser_safe_action_tool` / `/api/safe-action`，其中 `status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、移动、`0x18` 需要 `confirmed=true`。
 - 完整任务只走 workflow：`preview` 冻结 SHA-256 与参数，`confirm_send` 重算 SHA、握手、读 `$30`、`$CD`、Idle 与引脚预检后逐行发送；网络任务强制 Telnet。
 - SD 脱机模式用固件 HTTP `/upload` 把文件写入 SD 卡，用 `$File/ShowHash` 比对哈希后 `$SD/Run`；这是 HTTP 在本仓库唯一的用途。
 - 局域网发现用 mDNS（`POST /api/ui/discover-controllers`），只读。
@@ -323,9 +323,8 @@ $N
 |---|---|---|
 | `check_laser_connection_tool` | 只读握手，返回连通与就绪摘要 | 不改变设备状态 |
 | `laser_safe_action_tool` | 语义动作映射到受控命令或实时字节 | `status` 与倍率不需确认；其他动作需 `confirmed=true`；移动前固定 `M5` |
-| `laser_workflow_tool` `preview` / `confirm_send` / `status` / `cancel` | 完整任务的唯一路径 | `confirm_send` 需 `confirmed=true` 并通过全部门禁；`cancel` 停止后续发送，不等于急停 |
-| `run_calibration_grid_tool` / `start_tuned_job_tool` | 材料矩阵与调参后的正式任务 | 默认预览；确认后复用同一套发送门禁 |
-| `laser_grbl_tool` / `laser_network_grbl_tool` | 仅 `status` / `check` / `probe` / `cancel` | `send_file`、`send_command` 已拒绝 |
+| `laser_workflow_tool` `preview` / `frame` / `confirm_send` / `status` / `cancel` / `resume` | 完整任务的唯一路径 | `confirm_send`/`frame`/`resume` 需 `confirmed=true` 并通过全部门禁；`cancel` 停止后续发送，不等于急停 |
+| `run_calibration_grid_tool` / `select_calibration_cell_tool` | 材料测试矩阵与保存最佳格 | 默认预览；确认发送复用同一套发送门禁 |
 
 每道门禁的顺序与错误码见 [开发者安全入口](../developer/safety.md)。
 

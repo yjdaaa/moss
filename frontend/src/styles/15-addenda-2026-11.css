@@ -24,9 +24,7 @@
   .wb-dispatch-actions .twin-jump-btn { grid-column: 1 / -1; }
 }
 
-/* n72 内置工具卡片：按用途分组，中文名 + 风险标签，技术信息收起 */
-.voice-tools-full { margin: 8px 0 4px; }
-.voice-tools-full span { display: flex; flex-direction: column; gap: 2px; }
+/* 内置工具卡片：按用途分组，中文名 + 风险标签，技术信息收起 */
 .voice-tools-group { margin-top: 14px; }
 .voice-tools-group h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--ob-ink-2); }
 .voice-tools-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -42,7 +40,6 @@
 .voice-tools-risk.is-confirm { color: var(--ob-amber); background: var(--ob-amber-bg); border-color: var(--ob-amber-bd); }
 .voice-tools-risk.is-stop { color: var(--ob-accent); background: var(--ob-accent-bg); border-color: transparent; }
 .voice-tools-risk.is-desktop { color: var(--ob-red); background: var(--ob-red-bg); border-color: transparent; }
-.voice-tools-risk.is-muted { font-style: normal; }
 .voice-tools-tech summary { cursor: pointer; font-size: 11.5px; color: var(--ob-ink-3); }
 .voice-tools-tech > div { overflow-wrap: anywhere; font-size: 11.5px; }
 

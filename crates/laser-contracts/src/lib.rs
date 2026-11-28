@@ -917,18 +917,6 @@ pub struct LaserSafeActionArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
-pub struct RecommendLaserParamsArgs {
-    pub material: String,
-    pub thickness_mm: f64,
-    #[serde(default)]
-    pub laser_mode: Option<String>,
-    #[serde(default)]
-    pub engraving_mode: Option<String>,
-    #[serde(default)]
-    pub power_scale: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SelectCalibrationCellArgs {
     pub calibration_id: String,
     pub cell_number: i32,

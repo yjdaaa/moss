@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 删除 5 个与分发不一致或重复的内置 MCP 工具，去掉“完整工具（高级）”开关（2026-11-28）
+
+- **现象**：打开“完整工具（高级）”后，`laser_grbl_tool` / `laser_network_grbl_tool` 的说明仍宣称可发文件、发任意 G-code、列串口等，实际只支持查状态与取消，并残留旧 Python 说明与写死的 100 mm 行程；`recommend_laser_params_tool`、`generate_text_laser_task_tool`、`start_tuned_job_tool` 与精简工具重复，参数表巨大。
+- **根因与修复**：按技术书 r76 删除这 5 个工具（目录、分发、`tool_risk`、Jev 归组、`sim_guard`、前端映射），按名字调用返回 `tool_removed` 与替代工具；两套 schema 合并为单一 `tests/golden/mcp_tools.json`（8 个激光工具说明与参数逐字节不变），删除 `mcp_full_tool_list` 设置与开关，旧设置键读取时忽略。工具数常规 9 个、开发者模式 10 个；审批、严格模式、急停门禁不变。**破坏性**：外部按名字调用这 5 个工具会收到“已移除”错误。
+- **验证**：`node scripts/verify.mjs --finish` 通过（含 E2E）；新增清单不含已删工具、按名调用返回已移除、旧设置键兼容读取等断言。
+- **关联**：`crates/laser-mcp/src/{schema,dispatch}.rs`、`crates/laser-tools/src/lib.rs`、`crates/laser-contracts/src/risk.rs`、`crates/moss-voice/src/{settings,center}.rs`、`crates/moss-voice-server/src/{jev,sim_guard}.rs`、`frontend/src/voiceState/settings.js`、`frontend/src/components/VoiceEndpointsCard.jsx`、`tests/golden/mcp_tools.json`。
+
 ### AI 联调提示词补上重编、快更重启与开关复查，激光测试补代码同步、分级执行汇报与收尾（2026-11-28）
 
 - **现象**：激光 L0 直接复用已有 `moss-host` 二进制，拉代码或改代码后不重编会测到旧程序；语音外放与激光 L1 / L2 测的是正在运行的 MOSS，改完代码不快更重启，复测对比失真；激光提示词缺代码同步、各级是否执行与收尾关开关。

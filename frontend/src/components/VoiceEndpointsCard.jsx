@@ -121,68 +121,52 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
 export function VoiceToolsCard({ overview, mode = "official", strictEnabled = false, busy, run }) {
   if (!overview) return null;
   const tools = Array.isArray(overview.tools) ? overview.tools : [];
-  const fullList = overview.full_tool_list === true;
   const hideDesktop = mode === "builtin" || Boolean(strictEnabled);
   const groups = groupedTools(tools, { hideDesktop });
   const visibleTools = groups.flatMap((g) => g.tools);
 
   const switchTool = (tool, enabled) =>
     run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
-  const switchFullList = (full) =>
-    run("切换工具清单", () => voiceApi.saveSettings({ mcp_full_tool_list: full }));
 
   const disabled = visibleTools.filter((tool) => tool.enabled === false).length;
-  const offered = visibleTools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
+  const offered = visibleTools.filter((tool) => tool.enabled !== false).length;
   return (
-    <VoiceGroup id="tools" title="MOSS 内置工具（所有链路共用）" summary={`${fullList ? "完整清单" : "精简清单"} · AI 可用 ${offered} 个${disabled ? ` · ${disabled} 个已关闭` : ""}`}>
+    <VoiceGroup id="tools" title="MOSS 内置工具（所有链路共用）" summary={`AI 可用 ${offered} 个${disabled ? ` · ${disabled} 个已关闭` : ""}`}>
       <p className="voice-muted">这些是 MOSS 自带的工具，官方小智和内置语音都用这一套。勾选立即生效；“停止与机器控制”不能关闭。</p>
-      <label className="voice-check voice-tools-full" id="voice-tools-full-switch">
-        <input type="checkbox" checked={fullList} disabled={Boolean(busy)} onChange={(e) => switchFullList(e.target.checked)} />
-        <span>
-          完整工具（高级）
-          <small className="voice-muted">
-            默认只给 AI 精简的 8 个激光工具，说明短、选得准、回答更快。打开后连同重复入口和底层收发一起给，一般不需要。
-          </small>
-        </span>
-      </label>
       {groups.map((group) => (
         <section className="voice-tools-group" key={group.id} id={`voice-tools-group-${group.id}`}>
           <h4>{group.title}</h4>
           <ul className="voice-tools-list">
-            {group.tools.map((tool) => {
-              const offeredToAi = fullList || tool.in_compact !== false;
-              return (
-                <li className={`voice-tools-item${tool.enabled === false ? " is-off" : ""}`} key={tool.name} data-tool={tool.name}>
-                  <input
-                    type="checkbox"
-                    checked={tool.enabled !== false}
-                    disabled={Boolean(busy) || tool.can_disable === false}
-                    onChange={(e) => switchTool(tool, e.target.checked)}
-                    aria-label={`${tool.enabled !== false ? "关闭" : "打开"} ${tool.label}`}
-                    title={tool.can_disable === false ? "停止与急停工具不能关闭" : ""}
-                    id={`voice-tool-${tool.name}`}
-                  />
-                  <div className="voice-tools-body">
-                    <div className="voice-tools-head">
-                      <b>{tool.label}</b>
-                      {tool.risk && <span className={`voice-tools-risk is-${tool.risk}`}>{TOOL_RISK_LABELS[tool.risk]}</span>}
-                      {!offeredToAi && tool.enabled !== false && <span className="voice-tools-risk is-muted">完整工具打开后才给 AI</span>}
-                      <span className="voice-muted voice-tools-stat">{toolStatText(tool)}</span>
-                    </div>
-                    <div className="voice-muted">
-                      {tool.summary}
-                      {tool.voice_hidden && tool.group !== "desktop" ? "（内置语音与严格模式下不开放）" : ""}
-                    </div>
-                    <details className="voice-tools-tech">
-                      <summary>技术信息</summary>
-                      <div className="mono">{tool.name}</div>
-                      {tool.description && <div className="voice-muted">{tool.description}</div>}
-                      {tool.last_at && <div className="voice-muted mono">最近调用：{formatTime(tool.last_at)} {tool.last_caller || ""}</div>}
-                    </details>
+            {group.tools.map((tool) => (
+              <li className={`voice-tools-item${tool.enabled === false ? " is-off" : ""}`} key={tool.name} data-tool={tool.name}>
+                <input
+                  type="checkbox"
+                  checked={tool.enabled !== false}
+                  disabled={Boolean(busy) || tool.can_disable === false}
+                  onChange={(e) => switchTool(tool, e.target.checked)}
+                  aria-label={`${tool.enabled !== false ? "关闭" : "打开"} ${tool.label}`}
+                  title={tool.can_disable === false ? "停止与急停工具不能关闭" : ""}
+                  id={`voice-tool-${tool.name}`}
+                />
+                <div className="voice-tools-body">
+                  <div className="voice-tools-head">
+                    <b>{tool.label}</b>
+                    {tool.risk && <span className={`voice-tools-risk is-${tool.risk}`}>{TOOL_RISK_LABELS[tool.risk]}</span>}
+                    <span className="voice-muted voice-tools-stat">{toolStatText(tool)}</span>
                   </div>
-                </li>
-              );
-            })}
+                  <div className="voice-muted">
+                    {tool.summary}
+                    {tool.voice_hidden && tool.group !== "desktop" ? "（内置语音与严格模式下不开放）" : ""}
+                  </div>
+                  <details className="voice-tools-tech">
+                    <summary>技术信息</summary>
+                    <div className="mono">{tool.name}</div>
+                    {tool.description && <div className="voice-muted">{tool.description}</div>}
+                    {tool.last_at && <div className="voice-muted mono">最近调用：{formatTime(tool.last_at)} {tool.last_caller || ""}</div>}
+                  </details>
+                </div>
+              </li>
+            ))}
           </ul>
         </section>
       ))}

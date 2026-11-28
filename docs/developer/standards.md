@@ -45,7 +45,7 @@
 
 ## 代码约定
 
-- 新增或删除激光 MCP 工具：同步 `ToolCatalog`（`PRIORITY_TOOLS` / `SECONDARY_TOOLS`）、`dispatch_tool_call_with`、`laser-contracts` 参数结构与 `risk.rs::tool_risk` 分级、`tests/golden/mcp_tools.json` 及 `moss-voice-server/src/jev.rs::groups_of_builtin_tool` 粗筛归组。
+- 新增或删除激光 MCP 工具：同步 `ToolCatalog`（`LASER_TOOLS` / `DESKTOP_TOOLS`）、`dispatch_tool_call_with`、`laser-contracts` 参数结构与 `risk.rs::tool_risk` 分级、`tests/golden/mcp_tools.json` 及 `moss-voice-server/src/jev.rs::groups_of_builtin_tool` 粗筛归组。
 - 需要持久化或真实设备的工具经 `HostBackend` 转发到 `ApiService` 现有路由，与网页共用门禁；不在 `laser-tools` 直连数据库或设备。
 - 内置语音新工具由 `ToolExecutor` 组合，名称不含 `__`（`device__` 保留给设备端硬件 MCP，其他 `<server>__<tool>` 分流到第三方 MCP）；密钥只存 `RuntimeDb::app_secrets`。
 - Jev 工具与上下文筛选（`moss-voice-server/src/jev.rs`）：工具超过 20 个时严禁按单工具平铺 `noul`（避免约 3% 独立误报率累积漏入无关工具），内置与扩展工具统一收拢为既有 6 个业务域粗筛组（删除工具时按当轮实际启用工具动态提问，新增工具通过静态表 + 名称/描述自动归组兜底）；第三方外部 MCP 少量（`<= 6`）合并为单开关，较多（`> 6` 且跨多服务）时按 `<server>` 生成 Server 级开关；`state` 单条候选恒 `<= 600` 字符、仅带最近 2 轮极简文本上下文。

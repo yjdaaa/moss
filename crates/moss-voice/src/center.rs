@@ -46,8 +46,6 @@ pub trait HostHooks: Send + Sync {
     fn apply_disabled_tools(&self, _names: &[String]) -> Result<Vec<String>, String> {
         Err("此环境不支持工具开关".into())
     }
-    /// n72 立即切换完整 / 精简工具清单（保存设置后调用）。
-    fn apply_full_tool_list(&self, _full: bool) {}
 }
 
 /// 附加接入点的数量上限（与 `laser_mcp::MAX_EXTRA_ENDPOINTS` 一致；本 crate 不依赖 laser-*）。
@@ -150,7 +148,7 @@ impl VoiceCenter {
     /// - `remove_extra_mcp_endpoint`：按编号（`extra-1`……）删除；
     /// - `disabled_tools`：关闭的工具名单（整体替换）。
     ///
-    /// 接入点、附加接入点、工具开关或完整工具清单改动后重连小智桥（接入点重新获取工具清单）。
+    /// 接入点、附加接入点或工具开关改动后重连小智桥（接入点重新获取工具清单）。
     pub fn save_settings(&self, patch: &serde_json::Value) -> CenterResult<serde_json::Value> {
         let _guard = self
             .switching
@@ -238,19 +236,6 @@ impl VoiceCenter {
             })
             .transpose()?;
 
-        let full_list_patch = patch
-            .get("mcp_full_tool_list")
-            .map(|full| {
-                full.as_bool()
-                    .ok_or_else(|| invalid("完整工具开关格式不正确"))
-            })
-            .transpose()?;
-
-        struct SaveOutcome {
-            reconnect: bool,
-            full_list_changed_to: Option<bool>,
-        }
-
         let mut tools_rollback: Option<Vec<String>> = None;
         let saved = settings::update_voice_with_root(
             &self.settings_file,
@@ -326,26 +311,14 @@ impl VoiceCenter {
                     }
                 }
 
-                let mut full_list_changed_to = None;
-                if let Some(full) = full_list_patch
-                    && full != voice.mcp_full_tool_list
-                {
-                    voice.mcp_full_tool_list = full;
-                    full_list_changed_to = Some(full);
-                }
-
                 let mut reconnect = false;
                 let endpoint_to_write = official_change.inspect(|change| {
                     reconnect = primary != change.as_deref();
                 });
-                reconnect |=
-                    extras_changed || tools_change.is_some() || full_list_changed_to.is_some();
+                reconnect |= extras_changed || tools_change.is_some();
 
                 Ok((
-                    SaveOutcome {
-                        reconnect,
-                        full_list_changed_to,
-                    },
+                    reconnect,
                     settings::RootVoiceUpdate {
                         endpoint: endpoint_to_write,
                         extra_endpoints: extras_changed.then_some(extras),
@@ -356,8 +329,8 @@ impl VoiceCenter {
             },
             |error| CenterError::new("voice_settings_write_failed", 500, error),
         );
-        let outcome = match saved {
-            Ok(outcome) => outcome,
+        let should_reconnect = match saved {
+            Ok(reconnect) => reconnect,
             Err(err) => {
                 if let Some(previous_tools) = tools_rollback {
                     let _ = self.hooks.apply_disabled_tools(&previous_tools);
@@ -365,11 +338,8 @@ impl VoiceCenter {
                 return Err(err);
             }
         };
-        if let Some(full) = outcome.full_list_changed_to {
-            self.hooks.apply_full_tool_list(full);
-        }
         // `reconnected`：本次保存是否重新发起了接入点连接（且有桥启动）；握手结果看 `bridge.connected`
-        let reconnected = outcome.reconnect && self.hooks.restart_bridge();
+        let reconnected = should_reconnect && self.hooks.restart_bridge();
         let mut status = self.status();
         if let Some(object) = status.as_object_mut() {
             object.insert("reconnected".into(), reconnected.into());
@@ -506,8 +476,6 @@ mod tests {
         builtin_running: AtomicBool,
         /// 当前生效的关闭工具名单（NV8）
         disabled: Mutex<Vec<String>>,
-        /// n72 当前生效的完整 / 精简工具清单
-        full_tools: AtomicBool,
     }
 
     impl HostHooks for FakeHost {
@@ -541,9 +509,6 @@ mod tests {
         }
         fn mcp_overview(&self) -> serde_json::Value {
             serde_json::json!({"disabled": *self.disabled.lock().unwrap()})
-        }
-        fn apply_full_tool_list(&self, full: bool) {
-            self.full_tools.store(full, Ordering::SeqCst);
         }
         fn apply_disabled_tools(&self, names: &[String]) -> Result<Vec<String>, String> {
             let known = [
@@ -1038,38 +1003,48 @@ mod tests {
         );
     }
 
-    /// n72：“完整工具（高级）”默认关；打开后立即生效、写进设置并重连小智桥；格式不对拒绝。
+    /// r76：已移除的 `mcp_full_tool_list` 键在旧配置文件与保存接口中均静默忽略，不报错、不重连、不丢其他设置。
     #[test]
-    fn full_tool_list_switch_applies_and_reconnects() {
+    fn legacy_mcp_full_tool_list_is_ignored_on_load_and_save() {
         let (dir, host, center) = fixture();
         let file = dir.path().join("settings.json");
-        assert!(!settings::load(&file).mcp_full_tool_list);
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "web_port": 9666,
+                "voice": {
+                    "mode": "official",
+                    "builtin_ws_port": 8088,
+                    "mcp_full_tool_list": true
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let loaded = settings::load(&file);
+        assert_eq!(loaded.builtin_ws_port, 8088);
+
         let before = host.restarts.load(Ordering::SeqCst);
         center
             .save_settings(&serde_json::json!({"mcp_full_tool_list": true}))
             .unwrap();
-        assert!(settings::load(&file).mcp_full_tool_list);
-        assert!(host.full_tools.load(Ordering::SeqCst), "立即生效");
-        assert_eq!(
-            host.restarts.load(Ordering::SeqCst),
-            before + 1,
-            "接入点重新拿清单"
-        );
         center
-            .save_settings(&serde_json::json!({"mcp_full_tool_list": true}))
+            .save_settings(
+                &serde_json::json!({"mcp_full_tool_list": "yes", "builtin_http_port": 8099}),
+            )
             .unwrap();
         assert_eq!(
             host.restarts.load(Ordering::SeqCst),
-            before + 1,
-            "没变不重连"
+            before,
+            "忽略旧键不应触发接入点重连"
         );
-        assert_eq!(
-            center
-                .save_settings(&serde_json::json!({"mcp_full_tool_list": "yes"}))
-                .unwrap_err()
-                .code,
-            "voice_settings_invalid"
-        );
+        let after = settings::load(&file);
+        assert_eq!(after.builtin_ws_port, 8088);
+        assert_eq!(after.builtin_http_port, 8099);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(raw["web_port"], 9666);
+        assert!(raw["voice"].get("mcp_full_tool_list").is_none());
     }
 
     #[test]
@@ -1124,9 +1099,6 @@ mod tests {
             fn apply_disabled_tools(&self, names: &[String]) -> Result<Vec<String>, String> {
                 self.inner.apply_disabled_tools(names)
             }
-            fn apply_full_tool_list(&self, full: bool) {
-                self.inner.apply_full_tool_list(full)
-            }
         }
 
         let host = Arc::new(ConcurrentToggleHost {
@@ -1163,8 +1135,7 @@ mod tests {
             let port = 8100 + i;
             center
                 .save_settings(&serde_json::json!({
-                    "builtin_ws_port": port,
-                    "mcp_full_tool_list": i % 2 == 1
+                    "builtin_ws_port": port
                 }))
                 .unwrap();
         }
@@ -1172,11 +1143,10 @@ mod tests {
 
         let after_race = settings::load(&file);
         assert_eq!(after_race.builtin_ws_port, 8119);
-        assert!(after_race.mcp_full_tool_list);
         assert!(after_race.builtin_memory_enabled);
         assert!(!after_race.builtin_agents.enabled);
 
-        // 3) settings.json 损坏或写入失败时，工具开关与完整列表运行态缓存均不能留脏状态
+        // 3) settings.json 损坏或写入失败时，工具开关运行态缓存不能留脏状态
         center
             .save_settings(&serde_json::json!({"disabled_tools": ["material_params_tool"]}))
             .unwrap();
@@ -1184,15 +1154,13 @@ mod tests {
             *host.inner.disabled.lock().unwrap(),
             vec!["material_params_tool".to_string()]
         );
-        assert!(host.inner.full_tools.load(Ordering::SeqCst));
 
         // 用目录占住临时文件路径，稳定触发写盘失败（含 root 和 Windows）。
         let blocked_temp = file.with_extension(format!("json.tmp-{}", std::process::id()));
         std::fs::create_dir(&blocked_temp).unwrap();
         let dir_err = center
             .save_settings(&serde_json::json!({
-                "disabled_tools": ["open_app_tool"],
-                "mcp_full_tool_list": false
+                "disabled_tools": ["open_app_tool"]
             }))
             .unwrap_err();
         std::fs::remove_dir(&blocked_temp).unwrap();
@@ -1202,16 +1170,11 @@ mod tests {
             vec!["material_params_tool".to_string()],
             "写盘失败后必须把内存 disabled_tools 回滚到旧值"
         );
-        assert!(
-            host.inner.full_tools.load(Ordering::SeqCst),
-            "写盘失败时 mcp_full_tool_list 运行态缓存不得提前改动"
-        );
 
         std::fs::write(&file, "{broken json").unwrap();
         let write_err = center
             .save_settings(&serde_json::json!({
-                "disabled_tools": ["open_app_tool"],
-                "mcp_full_tool_list": false
+                "disabled_tools": ["open_app_tool"]
             }))
             .unwrap_err();
         assert_eq!(write_err.code, "voice_settings_write_failed");
@@ -1219,7 +1182,6 @@ mod tests {
             *host.inner.disabled.lock().unwrap(),
             vec!["material_params_tool".to_string()]
         );
-        assert!(host.inner.full_tools.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -230,7 +230,7 @@ const EXPECT_ROUTE_LABELS = {
 };
 
 const EXPECT_TOOL_LABELS = {
-  generate_text_laser_task_tool: "生成文字雕刻预览",
+  laser_workflow_tool: "雕刻任务 / 生成预览",
   "self.audio_speaker.set_volume": "调节小智音量",
   "self.screen.set_brightness": "调节屏幕亮度",
 };

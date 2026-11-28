@@ -294,8 +294,6 @@ impl ApiService {
             .iter()
             .filter(|spec| !(self.strict_mode() && laser_contracts::tool_never_exposed(spec.name)))
             .filter(|spec| !self.tool_disabled(spec.name))
-            // n72：精简清单（默认）只列 8 个激光工具与电脑控制类工具
-            .filter(|spec| self.full_tool_list() || laser_mcp_compact_tool(spec.name))
             .count();
         let dry_run = self.dry_run_snapshot();
         http_json(

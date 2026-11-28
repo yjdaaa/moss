@@ -414,10 +414,6 @@ impl laser_mcp::HostBackend for InProcessBackend {
         self.api.tool_disabled(name)
     }
 
-    fn full_tool_list(&self) -> bool {
-        self.api.full_tool_list()
-    }
-
     fn default_connection(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
         self.api
             .verified_connection()
@@ -485,10 +481,6 @@ impl laser_mcp::HostBackend for VoiceBackend {
         self.api.tool_disabled(name)
     }
 
-    fn full_tool_list(&self) -> bool {
-        self.api.full_tool_list()
-    }
-
     fn default_connection(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
         self.api
             .verified_connection()
@@ -503,8 +495,7 @@ impl laser_mcp::HostBackend for VoiceBackend {
 /// 内置语音可用的 MOSS 工具清单（MCP `tools` 格式）：与严格模式下的接入点相同，不含永不开放的工具、开发者工具
 /// 与用户关闭的工具（NV8）。
 pub fn voice_tools_list(api: &ApiService) -> serde_json::Value {
-    // n72：默认精简清单，“完整工具（高级）”打开时给完整清单
-    let mut list = laser_mcp::tools_list_profile(false, true, api.full_tool_list());
+    let mut list = laser_mcp::tools_list_for(false, true);
     if let Some(tools) = list["tools"].as_array_mut() {
         tools.retain(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or("")));
         if let Some(external) = api.external_tools_list()["tools"].as_array() {
@@ -916,8 +907,6 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
                 "enabled": !api.tool_disabled(&name),
                 "can_disable": laser_mcp::tool_can_be_disabled(&name),
                 "voice_hidden": laser_contracts::tool_never_exposed(&name),
-                // n72：是否在精简清单里（精简清单下不在的只在“完整工具（高级）”打开时提供给 AI）
-                "in_compact": laser_api::laser_mcp_compact_tool(&name),
                 "calls": stat.calls,
                 "failures": stat.failures,
                 "denied": stat.denied,
@@ -930,7 +919,6 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
         "endpoints": endpoints,
         "max_extra_endpoints": laser_mcp::MAX_EXTRA_ENDPOINTS,
         "tools": tools,
-        "full_tool_list": api.full_tool_list(),
     })
 }
 
@@ -1692,7 +1680,7 @@ mod tests {
             "运行中可重新打开"
         );
 
-        // n72：默认精简清单；“完整工具（高级）”打开后接入点与内置语音拿到完整清单
+        // r76：单一工具清单（8 个激光工具 + 桌面控制），已移除的 5 个旧工具不再列出，概览也不再有 full_tool_list / in_compact
         let names = |list: serde_json::Value| -> Vec<String> {
             list["tools"]
                 .as_array()
@@ -1701,24 +1689,23 @@ mod tests {
                 .filter_map(|t| t["name"].as_str().map(str::to_owned))
                 .collect()
         };
-        assert!(!service.full_tool_list(), "默认精简");
-        let compact = names(laser_mcp::tools_list_with(true, Some(&backend)));
-        assert!(compact.contains(&"laser_workflow_tool".to_owned()));
-        assert!(!compact.contains(&"laser_grbl_tool".to_owned()));
-        for name in &compact {
-            assert!(
-                laser_api::laser_mcp_compact_tool(name),
-                "laser-api 的精简名单要与 laser-mcp 一致：{name}"
-            );
+        assert!(overview.get("full_tool_list").is_none());
+        assert!(stop.get("in_compact").is_none());
+        let listed = names(laser_mcp::tools_list_with(true, Some(&backend)));
+        let voice_listed = names(voice_tools_list(&service));
+        assert_eq!(listed.len(), 10, "{listed:?}");
+        assert_eq!(voice_listed.len(), 8, "{voice_listed:?}");
+        assert!(listed.contains(&"laser_workflow_tool".to_owned()));
+        for removed in [
+            "laser_grbl_tool",
+            "laser_network_grbl_tool",
+            "recommend_laser_params_tool",
+            "generate_text_laser_task_tool",
+            "start_tuned_job_tool",
+        ] {
+            assert!(!listed.contains(&removed.to_owned()), "{removed}");
+            assert!(!voice_listed.contains(&removed.to_owned()), "{removed}");
         }
-        assert!(!names(voice_tools_list(&service)).contains(&"start_tuned_job_tool".to_owned()));
-        service.set_full_tool_list(true);
-        assert!(
-            names(laser_mcp::tools_list_with(true, Some(&backend)))
-                .contains(&"laser_grbl_tool".to_owned())
-        );
-        assert!(names(voice_tools_list(&service)).contains(&"start_tuned_job_tool".to_owned()));
-        service.set_full_tool_list(false);
 
         assert_eq!(
             validate_disabled_tools(&[

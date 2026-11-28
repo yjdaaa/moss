@@ -406,24 +406,9 @@ fn system_info_tools_count_matches_actual_catalog() {
     let value = parse_json_response(
         &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
     );
-    // n72：默认精简清单，只数精简名单里的工具
     let catalog = laser_tools::ToolCatalog::from_environment();
-    let expected = catalog
-        .specs()
-        .iter()
-        .filter(|spec| laser_mcp_compact_tool(spec.name))
-        .count();
+    let expected = catalog.specs().len();
     assert_eq!(value["result"]["mcp"]["tools_count"], expected);
-    service.set_full_tool_list(true);
-    let full = parse_json_response(
-        &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
-    );
-    assert_eq!(
-        full["result"]["mcp"]["tools_count"],
-        catalog.specs().len(),
-        "完整清单数全部"
-    );
-    service.set_full_tool_list(false);
     assert_eq!(value["result"]["voice"]["mode"], "official");
     assert!(value["result"]["voice"]["device_sessions"].is_null());
     // NV8：关闭的工具不计入

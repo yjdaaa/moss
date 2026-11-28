@@ -67,7 +67,7 @@ try {
           at: 1_790_000_100,
           raw_asr: "帮我切段木书签",
           corrected_asr: "帮我切椴木书签",
-          tools: [{ name: "generate_text_laser_task_tool", arguments: "{\"material\":\"椴木\"}", result: "预览已生成" }],
+          tools: [{ name: "laser_workflow_tool", arguments: "{\"action\":\"preview\",\"material\":\"椴木\"}", result: "预览已生成" }],
           reply: "已准备 3 毫米椴木预览，确认开始吗？",
           spoken: "已准备 3 毫米椴木预览，",
           outcome: "interrupted",
@@ -128,7 +128,7 @@ try {
     mode: state.mode, settings: structuredClone(state.settings),
     bridge: { connected: true }, strict: { enabled: false, from_env: false }, gateway: { enabled: false },
     mcp_endpoint: masked,
-    mcp: { endpoints: [{ id: "primary", endpoint: masked, connected: true }], tools: [{ name: "get_status", description: "状态", enabled: true }, { name: "laser_workflow_tool", description: "workflow", enabled: true, in_compact: true }, { name: "laser_grbl_tool", description: "grbl", enabled: true, in_compact: false }], full_tool_list: false, max_extra_endpoints: 4 },
+    mcp: { endpoints: [{ id: "primary", endpoint: masked, connected: true }], tools: [{ name: "get_status", description: "状态", enabled: true }, { name: "laser_workflow_tool", description: "workflow", enabled: true }], max_extra_endpoints: 4 },
     ...extra,
   });
   const handlers = {
@@ -744,12 +744,10 @@ try {
   await tab("扩展").click();
   assert.ok(await page.locator("#voice-panel-features #voice-group-tools").isVisible(), "官方链路在扩展标签渲染工具开关与调用统计");
   await openGroup("tools");
-  // n72：中文名、按用途分组；不在精简清单的工具标明“完整工具打开后才给 AI”；完整工具开关只提交这一项
+  // r76：中文名、按用途分组；不再显示“完整工具（高级）”开关与 advanced 分组
   await page.locator('#voice-tools-group-job [data-tool="laser_workflow_tool"]').getByText("刻字：预览、发送、进度").waitFor();
-  await page.locator('#voice-tools-group-advanced [data-tool="laser_grbl_tool"]').getByText("完整工具打开后才给 AI").waitFor();
-  await page.locator("#voice-tools-full-switch input").click();
-  for (let i = 0; i < 50 && last("voice_save_settings")?.args.settings.mcp_full_tool_list !== true; i += 1) await page.waitForTimeout(50);
-  assert.deepEqual(last("voice_save_settings").args.settings, { mcp_full_tool_list: true });
+  assert.equal(await page.locator("#voice-tools-full-switch").count(), 0, "不再显示完整工具（高级）开关");
+  assert.equal(await page.locator("#voice-tools-group-advanced").count(), 0, "不再显示高级重复工具分组");
   assert.equal(await page.locator("#voice-tool-prompts").count(), 0, "不再显示面向开发者的施工提示词折叠块");
   assert.match(await page.locator("#voice-group-mcp > .voice-group-h").innerText(), /第三方 MCP 工具/, "外部工具仍叫第三方 MCP 工具，和内置工具区分开");
   await openGroup("mcp");

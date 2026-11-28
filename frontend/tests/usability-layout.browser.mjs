@@ -54,7 +54,7 @@ try {
       strict: { enabled: mockVoice.strict, from_env: false },
       gateway: { enabled: false },
       mcp_endpoint: "wss://example.test/mcp/?token=***",
-      mcp: { endpoints: [], tools: [], full_tool_list: false, max_extra_endpoints: 4 },
+      mcp: { endpoints: [], tools: [], max_extra_endpoints: 4 },
     });
     if (command === "voice_status") return buildVoiceStatus();
     if (command === "voice_strict_set") {

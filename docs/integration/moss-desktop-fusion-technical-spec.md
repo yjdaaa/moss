@@ -44,7 +44,7 @@
 
 | 领域 | 现状 | 对本方案的含义 |
 | --- | --- | --- |
-| MCP 服务 | `laser-mcp` 实现 JSON-RPC 2.0：`initialize`/`ping`/`tools/list`/`tools/call`；`tools/list` 来自编译期黄金清单 `tests/golden/mcp_tools.json`；20 个工具（未开开发者开关时 19 个） | 工具面可直接复用，不需要新工具注册 |
+| MCP 服务 | `laser-mcp` 实现 JSON-RPC 2.0：`initialize`/`ping`/`tools/list`/`tools/call`；`tools/list` 来自编译期单一黄金清单 `tests/golden/mcp_tools.json`；10 个工具（未开开发者开关时 9 个：8 个核心激光工具 + `open_app_tool`；严格模式仅列 8 个激光工具，r76） | 工具面可直接复用，不需要新工具注册 |
 | MCP 传输 | 只有 `run_bridge` 出站 WebSocket 客户端，地址取 `settings.json` 的 `mcp_endpoint` 或 `MCP_ENDPOINT` | 自建服务端若提供兼容 MCP 接入点，理论上改地址即可；**兼容性未验证** |
 | 宿主转发 | `HostBackend::request(method, route, body)` 由 `laser-host::InProcessBackend` 实现，转发到进程内 `ApiService` | 新网关可在进程内复用同一套门禁 |
 | 确认语义 | `laser_workflow_tool confirm_send` 由**调用方**传 `confirmed=true`；`laser-mcp` 与 HTTP 层只检查该字段存在 | **模型可以自己填 `confirmed=true`**，这是融合必须收紧的缺口（D3） |
@@ -291,11 +291,11 @@
 
 | 级别 | 工具 / action | 网关行为 |
 | --- | --- | --- |
-| R0 只读 | `check_laser_connection_tool`；`laser_workflow_tool status/recent`；`laser_safe_action_tool status`；`laser_grbl_tool`/`laser_network_grbl_tool` 的 `status/check/probe`；`material_params_tool` 读取类；`recommend_laser_params_tool` | 直接转发 |
-| R1 生成，不触设备 | `laser_workflow_tool preview`；文字生成三件套；`run_calibration_grid_tool`（无 `calibration_id`）；`select_calibration_cell_tool`；`refine_laser_params_from_feedback_tool`；`regenerate_text_laser_task_tool`（不含采用） | 直接转发 |
-| R2 降低风险 | `laser_workflow_tool cancel`；`laser_grbl_tool cancel`；`laser_safe_action_tool emergency_stop / soft_reset / laser_off`；进给/功率倍率中的 `*_minus_10`、`*_reset` | 直接转发并在网关侧补 `confirmed=true`（这是唯一允许网关补确认的类别，因为拒绝停机比误停更危险）。注意：加工中只有实时字节类（`emergency_stop`、`soft_reset`、倍率）会生效，`laser_off` 会被拒绝；提示词中“停”只映射 `cancel` / `emergency_stop` |
-| R3 运动或出光 | `laser_workflow_tool confirm_send/send/resume`；`start_tuned_job_tool`；`run_calibration_grid_tool` 带 `calibration_id`；`laser_safe_action_tool unlock/home/set_origin/absolute_move/relative_move`；`*_plus_10` 倍率；`regenerate_text_laser_task_tool` 采用反馈 | 创建审批请求，不转发 |
-| R4 永不开放 | `command_execution_tool`、`open_app_tool`、`shortcut_key_execution_tool`；材料库删除/覆盖 | `tool_not_allowed` |
+| R0 只读 | `check_laser_connection_tool`；`laser_workflow_tool status/recent`；`laser_safe_action_tool status`；`material_params_tool` 读取类 | 直接转发 |
+| R1 生成，不触设备 | `laser_workflow_tool preview`；`run_calibration_grid_tool`（无 `calibration_id`）；`select_calibration_cell_tool`；`refine_laser_params_from_feedback_tool`；`regenerate_text_laser_task_tool`（不含采用） | 直接转发 |
+| R2 降低风险 | `laser_workflow_tool cancel`；`laser_safe_action_tool emergency_stop / soft_reset / laser_off / pause / stop_framing`；进给/功率倍率中的 `*_minus_10`、`*_minus_1`、`*_reset` | 直接转发并在网关侧补 `confirmed=true`（这是唯一允许网关补确认的类别，因为拒绝停机比误停更危险）。注意：加工中只有实时字节类（`emergency_stop`、`soft_reset`、倍率）会生效，`laser_off` 会被拒绝；提示词中“停”只映射 `cancel` / `emergency_stop` |
+| R3 运动或出光 | `laser_workflow_tool confirm_send/send/resume/frame`；`run_calibration_grid_tool` 带 `calibration_id`；`laser_safe_action_tool unlock/home/set_origin/absolute_move/relative_move/resume`；`*_plus_10` / `*_plus_1` 倍率；`regenerate_text_laser_task_tool` 采用反馈 | 创建审批请求，不转发 |
+| R4 永不开放 | `command_execution_tool`、`open_app_tool`；材料库删除/覆盖 | `tool_not_allowed` |
 
 说明：`*_plus_10` 倍率现有语义“不需确认”，但会提高功率或速度，融合模式下归入 R3。此为对语音入口的收紧，网页/桌面行为不变。
 

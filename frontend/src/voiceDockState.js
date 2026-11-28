@@ -25,15 +25,10 @@ const LASER_TOOL_LABELS = {
   check_laser_connection_tool: "检查机器连接",
   laser_safe_action_tool: "停止 / 调速",
   material_params_tool: "查材料参数",
-  recommend_laser_params_tool: "推荐加工参数",
   refine_laser_params_from_feedback_tool: "按效果调参数",
-  generate_text_laser_task_tool: "生成雕刻预览",
   regenerate_text_laser_task_tool: "重新生成预览",
   run_calibration_grid_tool: "测试矩阵",
   select_calibration_cell_tool: "选定测试格参数",
-  start_tuned_job_tool: "按调好的参数开刻",
-  laser_grbl_tool: "设备指令",
-  laser_network_grbl_tool: "设备指令",
 };
 
 const PHASE_TEXT = {

@@ -3,15 +3,44 @@
 use crate::{HostBackend, telemetry_for, tool_can_be_disabled};
 
 /// n73 需要连接机器的工具。
-const CONNECTION_TOOLS: [&str; 7] = [
+const CONNECTION_TOOLS: [&str; 4] = [
     "check_laser_connection_tool",
     "laser_safe_action_tool",
     "laser_workflow_tool",
     "run_calibration_grid_tool",
-    "start_tuned_job_tool",
-    "laser_grbl_tool",
-    "laser_network_grbl_tool",
 ];
+
+/// r76（2026-11-28）已移除的 5 个旧工具：按名字调用时直接返回明确替代指引，不触达后端。
+fn removed_tool_error(name: &str) -> Option<laser_contracts::ToolCallResult> {
+    let (replacement_id, hint) = match name {
+        "laser_grbl_tool" | "laser_network_grbl_tool" => (
+            "check_laser_connection_tool",
+            "check_laser_connection_tool（查连接）、laser_workflow_tool（action=cancel 取消任务）或 laser_safe_action_tool（受控动作）",
+        ),
+        "recommend_laser_params_tool" => {
+            ("material_params_tool", "material_params_tool（action=get）")
+        }
+        "generate_text_laser_task_tool" => (
+            "laser_workflow_tool",
+            "laser_workflow_tool（action=preview）",
+        ),
+        "start_tuned_job_tool" => (
+            "laser_workflow_tool",
+            "laser_workflow_tool（action=confirm_send）",
+        ),
+        _ => return None,
+    };
+    Some(laser_contracts::ToolCallResult::with_detail(
+        false,
+        format!("工具 {name} 已移除，请改用 {hint}"),
+        serde_json::json!({
+            "error_code": "tool_removed",
+            "tool": name,
+            "replacement": replacement_id,
+        })
+        .to_string(),
+    ))
+}
 
 /// 调用方没给任何连接参数时补上已验证的连接；给了任何一个（串口号、IP、连接方式）就完全按调用方的来。
 fn with_default_connection(
@@ -133,16 +162,10 @@ pub const DESKTOP_PREVIEW_HINT: &str = "预览已弹到 MOSS 电脑屏幕上。�
 
 fn with_desktop_preview_hint(
     result: laser_contracts::ToolCallResult,
-    wanted_send: bool,
 ) -> laser_contracts::ToolCallResult {
     if !result.success {
         return result;
     }
-    let note = if wanted_send {
-        "（本次没有直接开始加工：AI 生成的任务必须先在电脑上预览）"
-    } else {
-        ""
-    };
     let params = result
         .detail
         .as_deref()
@@ -152,7 +175,7 @@ fn with_desktop_preview_hint(
     laser_contracts::ToolCallResult {
         success: true,
         result: format!(
-            "{}。{params}{DESKTOP_PREVIEW_HINT}{note}",
+            "{}。{params}{DESKTOP_PREVIEW_HINT}",
             result.result.trim_end_matches('。')
         ),
         detail: result.detail,
@@ -290,17 +313,6 @@ fn probe_connection_via_backend(
     backend: &dyn HostBackend,
 ) -> laser_contracts::ToolCallResult {
     let mut body = with_connection_fields(arguments, serde_json::Map::new());
-    if !body.contains_key("connection_mode") {
-        match tool {
-            "laser_grbl_tool" => {
-                body.insert("connection_mode".into(), serde_json::json!("serial"));
-            }
-            "laser_network_grbl_tool" => {
-                body.insert("connection_mode".into(), serde_json::json!("network"));
-            }
-            _ => {}
-        }
-    }
     if body.contains_key("connection_mode") {
         body.insert("auto_fallback".into(), serde_json::json!(false));
     }
@@ -326,26 +338,10 @@ fn probe_connection_via_backend(
     };
     let _ = status;
     let result = &resp["result"];
-    let required_mode = match tool {
-        "laser_grbl_tool" => Some("serial"),
-        "laser_network_grbl_tool" => Some("network"),
-        _ => None,
-    };
-    let connected = match required_mode {
-        Some("serial") => result["serial_connected"].as_bool().unwrap_or(false),
-        Some("network") => result["network_connected"].as_bool().unwrap_or(false),
-        _ => result["connected"].as_bool().unwrap_or(false),
-    };
-    let mode_summary = required_mode.and_then(|mode| {
-        result["attempts"].as_array().and_then(|arr| {
-            arr.iter()
-                .find(|entry| entry["mode"].as_str() == Some(mode))
-                .and_then(|entry| entry["summary"].as_str())
-                .filter(|s| !s.is_empty())
-        })
-    });
-    let summary = mode_summary
-        .or_else(|| result["summary"].as_str().filter(|s| !s.is_empty()))
+    let connected = result["connected"].as_bool().unwrap_or(false);
+    let summary = result["summary"]
+        .as_str()
+        .filter(|s| !s.is_empty())
         .unwrap_or(if connected {
             "设备已连通"
         } else {
@@ -458,21 +454,25 @@ pub fn dispatch_tool_call_with(
     backend: Option<&dyn HostBackend>,
 ) -> laser_contracts::ToolCallResult {
     use laser_contracts::ToolCallOutcome;
-    // n73：没给连接参数时用工作台握手成功的连接（审批与门禁看到的就是补全后的目标）
-    let filled = with_default_connection(name, arguments, backend);
-    let arguments = filled.as_ref().unwrap_or(arguments);
-    let gate = disabled_gate(name, arguments, backend)
-        .or_else(|| strict_bridge_gate(name, arguments, backend));
-    let (result, outcome) = match gate {
-        Some(denied) => (denied, ToolCallOutcome::Denied),
-        None => {
-            let result = dispatch_allowed(name, arguments, developer_mode, backend);
-            let outcome = if result.success {
-                ToolCallOutcome::Ok
-            } else {
-                ToolCallOutcome::Failed
-            };
-            (result, outcome)
+    let (result, outcome) = if let Some(removed) = removed_tool_error(name) {
+        (removed, ToolCallOutcome::Failed)
+    } else {
+        // n73：没给连接参数时用工作台握手成功的连接（审批与门禁看到的就是补全后的目标）
+        let filled = with_default_connection(name, arguments, backend);
+        let arguments = filled.as_ref().unwrap_or(arguments);
+        let gate = disabled_gate(name, arguments, backend)
+            .or_else(|| strict_bridge_gate(name, arguments, backend));
+        match gate {
+            Some(denied) => (denied, ToolCallOutcome::Denied),
+            None => {
+                let result = dispatch_allowed(name, arguments, developer_mode, backend);
+                let outcome = if result.success {
+                    ToolCallOutcome::Ok
+                } else {
+                    ToolCallOutcome::Failed
+                };
+                (result, outcome)
+            }
         }
     };
     let caller = backend
@@ -518,84 +518,6 @@ fn dispatch_allowed(
             } else {
                 let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
                 laser_tools::execute_laser_safe_action(&args)
-            }
-        }
-        "recommend_laser_params_tool" => {
-            let args = match serde_json::from_value(arguments.clone()) {
-                Ok(args) => args,
-                Err(e) => return ToolCallResult::err(format!("参数校验失败: {e}")),
-            };
-            let Some(backend) = backend else {
-                return laser_tools::execute_recommend_laser_params(&args);
-            };
-            let material = arg_str(arguments, "material").unwrap_or("");
-            let thickness = arguments
-                .get("thickness_mm")
-                .and_then(|v| {
-                    v.as_f64()
-                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
-                })
-                .unwrap_or(0.0);
-            if material.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
-                return laser_tools::execute_recommend_laser_params(&args);
-            }
-            let laser_mode = arg_str(arguments, "laser_mode").unwrap_or("engrave");
-            let mut route = format!(
-                "/api/ui/material-recommendation?material={}&thickness_mm={thickness}&laser_mode={}",
-                percent_encode(material),
-                percent_encode(laser_mode),
-            );
-            if let Some(engraving) = arg_str(arguments, "engraving_mode") {
-                route.push_str(&format!("&engraving_mode={}", percent_encode(engraving)));
-            } else if !laser_mode.eq_ignore_ascii_case("cut") {
-                route.push_str("&engraving_mode=raster");
-            }
-            if let Some(power_scale) = arguments
-                .get("power_scale")
-                .and_then(|v| {
-                    v.as_f64()
-                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
-                })
-                .filter(|v| v.is_finite() && *v > 0.0)
-            {
-                route.push_str(&format!("&power_scale={power_scale}"));
-            }
-            match backend.request("GET", &route, &serde_json::Value::Null) {
-                Ok((status, body)) => {
-                    let ok = body
-                        .get("success")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(status < 400);
-                    if ok {
-                        let res = &body["result"];
-                        let mat = res
-                            .get("material")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(material);
-                        let matched = res
-                            .get("matched_thickness_mm")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(thickness);
-                        let mode = res
-                            .get("laser_mode")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(laser_mode);
-                        let power = res
-                            .get("laser_max_power")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        let feed = res.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let passes = res.get("passes").and_then(|v| v.as_i64()).unwrap_or(1);
-                        let summary = format!(
-                            "推荐参数：{mat} {matched}mm ({mode}) -> 最大功率 S{power}，速度 F{feed} mm/min，次数 {passes}"
-                        );
-                        let detail = serde_json::to_string_pretty(&body).unwrap_or_default();
-                        ToolCallResult::with_detail(true, summary, detail)
-                    } else {
-                        backend_result(name, Ok((status, body)))
-                    }
-                }
-                Err(error) => backend_result(name, Err(error)),
             }
         }
         "command_execution_tool" => match serde_json::from_value(arguments.clone()) {
@@ -662,7 +584,7 @@ fn dispatch_allowed(
                 backend.request("POST", route, &serde_json::Value::Object(body)),
             );
             if matches!(action, "preview" | "plan" | "create") {
-                with_desktop_preview_hint(result, false)
+                with_desktop_preview_hint(result)
             } else {
                 result
             }
@@ -780,73 +702,6 @@ fn dispatch_allowed(
                 other => ToolCallResult::err(format!("material_params 不支持的 action: {other}")),
             }
         }
-        "generate_text_laser_task_tool" => {
-            if arg_str(arguments, "text").is_none() {
-                return ToolCallResult::err(format!(
-                    "{name} 当前仅支持 text 素材；图片素材请通过网页/桌面端上传后使用 laser_workflow_tool"
-                ));
-            }
-            let Some(backend) = backend else {
-                return no_backend(name, "文字任务生成");
-            };
-            let mut body = arguments.as_object().cloned().unwrap_or_default();
-            if let Some(size) = arguments.get("font_size").and_then(|v| v.as_f64()) {
-                // 工具参数 font_size 为像素/字号语义；HTTP 契约以 mm 计，按 32px≈1mm 折算
-                body.entry("font_size_mm")
-                    .or_insert(serde_json::json!((size / 32.0).clamp(3.0, 80.0)));
-            }
-            let generated = backend.request(
-                "POST",
-                "/api/text-task/generate",
-                &serde_json::Value::Object(body),
-            );
-            // 2026-11-06 用户决定：AI 生成的任务必须先在电脑上弹出预览，生成后不再顺带发送；
-            // `send_after_generate` 只保留在工具参数里兼容旧调用，生成结果会说明需要用户确认后再 confirm_send。
-            let wanted_send =
-                arg_bool(arguments, "confirmed") && arg_bool(arguments, "send_after_generate");
-            with_desktop_preview_hint(backend_result(name, generated), wanted_send)
-        }
-        "start_tuned_job_tool" => {
-            let Some(workflow_id) =
-                arg_str(arguments, "task_id").or_else(|| arg_str(arguments, "workflow_id"))
-            else {
-                return ToolCallResult::err(
-                    "start_tuned_job 需要 task_id（由 generate_text_laser_task_tool 返回的 workflow_id）",
-                );
-            };
-            let confirmed = arg_bool(arguments, "confirmed");
-            let dry_run = arg_bool(arguments, "dry_run");
-            let Some(backend) = backend else {
-                return no_backend(name, "任务发送");
-            };
-            let mut body = serde_json::Map::new();
-            body.insert(
-                "workflow_id".into(),
-                serde_json::Value::String(workflow_id.into()),
-            );
-            if !confirmed || dry_run {
-                body.insert("action".into(), serde_json::Value::String("status".into()));
-                let result = backend_result(
-                    name,
-                    backend.request("POST", "/api/workflow", &serde_json::Value::Object(body)),
-                );
-                return ToolCallResult::with_detail(
-                    result.success,
-                    format!("dry_run/未确认：仅返回任务 {workflow_id} 当前状态，未发送"),
-                    result.detail.unwrap_or_default(),
-                );
-            }
-            body.insert(
-                "action".into(),
-                serde_json::Value::String("confirm_send".into()),
-            );
-            body.insert("confirmed".into(), serde_json::Value::Bool(true));
-            let body = with_connection_fields(arguments, body);
-            backend_result(
-                name,
-                backend.request("POST", "/api/workflow", &serde_json::Value::Object(body)),
-            )
-        }
         "regenerate_text_laser_task_tool" => {
             if arg_str(arguments, "feedback_id").is_some() {
                 let Some(backend) = backend else {
@@ -920,41 +775,6 @@ fn dispatch_allowed(
                     &serde_json::Value::Object(body),
                 ),
             )
-        }
-        "laser_grbl_tool" | "laser_network_grbl_tool" => {
-            let action = arg_str(arguments, "action")
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            match action.as_str() {
-                "status" | "check" | "probe" => {
-                    if let Some(b) = backend {
-                        probe_connection_via_backend(name, arguments, b)
-                    } else {
-                        let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
-                        laser_tools::execute_check_laser_connection(&args)
-                    }
-                }
-                "cancel" | "stop" => {
-                    let Some(job_id) = arg_str(arguments, "job_id") else {
-                        return ToolCallResult::err("cancel 需要 job_id（workflow_id）");
-                    };
-                    post(
-                        "/api/workflow",
-                        serde_json::json!({"action": "cancel", "workflow_id": job_id})
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                    .unwrap_or_else(|| no_backend(name, "任务取消"))
-                }
-                "send_file" => ToolCallResult::err(
-                    "send_file 已由安全 workflow 取代：请先用 laser_workflow_tool(action=preview) 生成并冻结快照，再 confirm_send 下发",
-                ),
-                "send_command" => ToolCallResult::err(
-                    "send_command 不允许直接下发任意 G-code；请使用 laser_safe_action_tool 的受控动作",
-                ),
-                other => ToolCallResult::err(format!("{name} 不支持的 action: {other}")),
-            }
         }
         other => ToolCallResult::err(format!("工具 {other} 尚未实现")),
     }

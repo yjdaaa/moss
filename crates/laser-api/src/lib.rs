@@ -52,7 +52,6 @@ use safe_action::*;
 use send::*;
 #[cfg(test)]
 use server::*;
-pub use service::*;
 use settings::*;
 pub use update::*;
 use workflow::*;
@@ -125,9 +124,6 @@ pub struct ApiService {
     external_tools: std::sync::OnceLock<std::sync::Arc<dyn external_tools::ExternalTools>>,
     /// 用户关闭的工具（`settings.json` 的 `mcp_disabled_tools`，NV8）：接入点与内置语音都不列出、不可调用。
     disabled_tools: std::sync::RwLock<std::collections::BTreeSet<String>>,
-    /// n72 “完整工具（高级）”（`settings.json` 的 `voice.mcp_full_tool_list`）：关（默认）时接入点与内置语音
-    /// 只拿到精简工具清单（`laser_mcp::compact_tools_list_json`）。
-    full_tool_list: std::sync::atomic::AtomicBool,
     /// n73 工作台最近一次握手成功的连接（`settings.json` 的 `laser_verified_connection`）：
     /// 语音与接入点调用激光工具时没给串口号 / IP，就用它（2026-11-08 用户决定）。
     verified_connection: std::sync::RwLock<Option<serde_json::Value>>,

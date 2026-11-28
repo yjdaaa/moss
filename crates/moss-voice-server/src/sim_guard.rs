@@ -118,17 +118,6 @@ pub fn check_simulated_tool(
                     .into(),
             ),
         },
-        "laser_grbl_tool" | "laser_network_grbl_tool" => match action.as_deref() {
-            Some("status" | "check" | "probe") => Ok(()),
-            _ => Err("模拟轮次禁止向激光机下发原始指令或发送文件".into()),
-        },
-        "generate_text_laser_task_tool" => {
-            if arg_bool(&args, "confirmed") && arg_bool(&args, "send_after_generate") {
-                Err("模拟轮次只允许生成雕刻预览，禁止在生成后直接发送任务".into())
-            } else {
-                Ok(())
-            }
-        }
         "regenerate_text_laser_task_tool" => {
             if arg_non_empty_str(&args, "feedback_id").is_some() {
                 Err("模拟轮次禁止采纳反馈建议修改任务参数".into())
@@ -146,21 +135,12 @@ pub fn check_simulated_tool(
                 Ok(())
             }
         }
-        "start_tuned_job_tool" => {
-            if arg_bool(&args, "dry_run") && !arg_bool(&args, "confirmed") {
-                Ok(())
-            } else {
-                Err("模拟轮次禁止启动或发送加工任务".into())
-            }
-        }
         "material_params_tool" => match action.as_deref() {
             None | Some("list" | "get" | "recommend" | "export") => Ok(()),
             _ => Err("模拟轮次禁止修改、导入或删除材料参数库".into()),
         },
         "select_calibration_cell_tool" => Err("模拟轮次禁止将标定结果写入材料参数库".into()),
-        "check_laser_connection_tool"
-        | "recommend_laser_params_tool"
-        | "refine_laser_params_from_feedback_tool" => Ok(()),
+        "check_laser_connection_tool" | "refine_laser_params_from_feedback_tool" => Ok(()),
         "hass_get_state" => Ok(()),
         "hass_set_state" | "hass_play_music" => Err("模拟轮次禁止执行智能家居控制动作".into()),
         n if n.starts_with("hass_") => Err("模拟轮次禁止执行智能家居控制动作".into()),
@@ -286,15 +266,19 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            check_simulated_tool(
-                "start_tuned_job_tool",
-                None,
-                r#"{"task_id":"wf-1","confirmed":true}"#,
-                false
-            )
-            .is_err()
-        );
+        // r76 已移除的 5 个旧工具不再在白名单内，一律按未知工具拒绝
+        for removed in [
+            "laser_grbl_tool",
+            "laser_network_grbl_tool",
+            "recommend_laser_params_tool",
+            "generate_text_laser_task_tool",
+            "start_tuned_job_tool",
+        ] {
+            assert!(
+                check_simulated_tool(removed, None, r#"{"action":"status"}"#, false).is_err(),
+                "已移除工具 {removed} 必须在模拟门禁被拒绝"
+            );
+        }
 
         // 家居控制、本机 Agent、固件/唤醒词推送一律拒绝
         assert!(
@@ -344,15 +328,6 @@ mod tests {
         );
         assert!(
             check_simulated_tool(
-                "generate_text_laser_task_tool",
-                None,
-                r#"{"text":"新年快乐","material":"椴木","thickness_mm":3}"#,
-                false
-            )
-            .is_ok()
-        );
-        assert!(
-            check_simulated_tool(
                 "laser_safe_action_tool",
                 None,
                 r#"{"action":"status"}"#,
@@ -392,9 +367,9 @@ mod tests {
         // 审查回归：数字型布尔值、标定落库写入材料库、R3 反馈采纳、修改角色均须拦截
         assert!(
             check_simulated_tool(
-                "generate_text_laser_task_tool",
+                "run_calibration_grid_tool",
                 None,
-                r#"{"text":"测试","confirmed":1,"send_after_generate":1}"#,
+                r#"{"material":"椴木","confirmed":1}"#,
                 false
             )
             .is_err(),

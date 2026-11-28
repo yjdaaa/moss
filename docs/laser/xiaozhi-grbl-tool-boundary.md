@@ -6,14 +6,13 @@
 
 ## 边界原则
 
-- 默认给 AI 的是精简清单（2026-11-08 起，`tests/golden/mcp_tools_compact.json`）：检查连接、安全动作、刻字全流程、材料参数库、调参建议、重新生成、测试矩阵、保存最佳格子 8 个激光工具；重复入口与底层 GRBL 收发只在语音中心“完整工具（高级）”打开时列出。执行与门禁不变。
+- 统一提供 8 个核心激光工具（`tests/golden/mcp_tools.json`，2026-11-28 r76 移除 5 个旧工具并取消“完整工具（高级）”开关）：检查连接、安全动作、刻字全流程、材料参数库、调参建议、重新生成、测试矩阵、保存最佳格子。执行与门禁不变。
 
 - `self.grbl.*` 名称属于小智设备固件侧能力，可能直接控制设备本地 UART；不要把它们和本仓库的 MCP 工具混用。
 - 完整任务只有一条路径：`laser_workflow_tool` 先 `preview` 冻结文件 SHA-256 与加工参数，再 `confirm_send` 且 `confirmed=true`。发送前后端会重算 SHA、握手、读 `$30`、确认 Idle 与引脚状态。
 - `laser_safe_action_tool` 把自然动作映射到受控命令：`status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset` 必须 `confirmed=true`。移动动作固定先 `M5` 关光。
 - `check_laser_connection_tool` 只做连接检查：打开串口或 Telnet，发 `$$` 读到终止 `ok` 并要求 `$32=1`；`include_detail=true` 时附带固件设置行。没有 HTTP `[ESP800]` 路径。
-- `laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_file` 与 `send_command` 已被拒绝，只保留 `status` / `check` / `probe` 与按 `job_id` 的 `cancel`。
-- 文字工具（`generate_text_laser_task_tool`）只接受 `text`，生成 workflow 预览；图片素材只能从网页或桌面端上传。
+- 语音文字与基础图形生成统一走 `laser_workflow_tool(action="preview")`；图片素材只能从网页或桌面端上传。底层原始命令与旧重复入口工具已移除，按名字调用直接返回 `tool_removed`。
 
 ## 路由建议
 
@@ -27,7 +26,7 @@
 | "先调参、打测试矩阵、找参数" | `run_calibration_grid_tool`，再 `select_calibration_cell_tool` | 生成不发送；`calibration_id + confirmed=true` 才发送 |
 | "先走个边框看看位置" | `laser_workflow_tool` `action="frame"` + 预览的 `workflow_id` | 机器会动：先问“确认走边框吗”，用户同意后 `confirmed=true`；按预览范围空走一圈不出光，走完回起点；不算开始加工（2026-11-18） |
 | 走边框途中“暂停 / 继续 / 不走了” | `laser_safe_action_tool` `action="pause"` / `"resume"` / `"stop_framing"` | 暂停、停止不用问；继续会让机器再动，先问“确认继续走边框吗”再 `confirmed=true`；不要用 workflow `cancel`（2026-11-18） |
-| "开始正式雕刻/切割这个任务" | `laser_workflow_tool` `action="confirm_send"`，或 `start_tuned_job_tool` | 必须 `confirmed=true`；`dry_run=true` 只返回状态；改过材料、厚度、文件或参数必须重新预览 |
+| "开始正式雕刻/切割这个任务" | `laser_workflow_tool` `action="confirm_send"` | 必须 `confirmed=true`；改过材料、厚度、文件或参数必须重新预览 |
 | "现在到哪了 / 还在跑吗" | `laser_workflow_tool` `action="status"`（无 id 取最近一条）或 `recent` | 只读 |
 | "停止 / 取消" | `laser_workflow_tool` `action="cancel"` | 停止后续发送，不等于物理急停；急停走 `laser_safe_action_tool` |
 | "发送已有 G-code 文件 / 发一条 $$" | 不提供语音路径 | 已有 G-code 在网页以 `source_type=gcode` 预览后确认；任意单命令不开放 |

@@ -1277,10 +1277,6 @@ pub struct VoiceSettings {
     /// 内置语音服务的 OTA 端口，默认 8003
     #[serde(default = "default_builtin_http_port")]
     pub builtin_http_port: u16,
-    /// n72 给接入点与内置语音完整工具清单（“完整工具（高级）”）；默认关：只给精简清单（2026-11-08 用户决定）。
-    /// MOSS 后端启动时从 `voice.mcp_full_tool_list` 读取。
-    #[serde(default)]
-    pub mcp_full_tool_list: bool,
     /// n71 常连模式（MQTT 控制 + 加密 UDP 语音，小智开机即在线）：默认关，实验功能（2026-11-08 用户决定）
     #[serde(default)]
     pub builtin_mqtt_enabled: bool,
@@ -1345,7 +1341,6 @@ impl Default for VoiceSettings {
             mcp_servers: Vec::new(),
             builtin_ws_port: default_builtin_ws_port(),
             builtin_http_port: default_builtin_http_port(),
-            mcp_full_tool_list: false,
             builtin_mqtt_enabled: false,
             builtin_mqtt_port: default_builtin_mqtt_port(),
             builtin_udp_port: default_builtin_udp_port(),
@@ -2490,10 +2485,12 @@ mod tests {
             "wss://extra.test/mcp/?token=x"
         );
         assert_eq!(root["voice"]["builtin_http_port"], 8013);
-        assert_eq!(root["voice"]["mcp_full_tool_list"], true);
         let voice = load(&file);
         assert_eq!(voice.mode, VoiceMode::Builtin);
-        assert!(voice.mcp_full_tool_list);
+        assert_eq!(
+            voice.builtin_http_port, 8013,
+            "旧文件残留 mcp_full_tool_list 时应正常读取并保留其余设置"
+        );
         // 已迁移：再调用不改文件
         let before = std::fs::read(&file).unwrap();
         assert_eq!(migrate_legacy_self_hosted(&file), Ok(false));
@@ -2557,7 +2554,6 @@ mod tests {
             mode: VoiceMode::Builtin,
             builtin_ws_port: 8100,
             builtin_http_port: 8103,
-            mcp_full_tool_list: false,
             builtin_mqtt_enabled: true,
             builtin_mqtt_port: 1884,
             builtin_udp_port: 8889,

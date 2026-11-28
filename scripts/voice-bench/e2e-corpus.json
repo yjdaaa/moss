@@ -52,7 +52,7 @@
         }
       ],
       "expect_route": "llm",
-      "expect_tool": "generate_text_laser_task_tool",
+      "expect_tool": "laser_workflow_tool",
       "key_terms": ["铭牌", "预览"],
       "tags": ["数字"]
     },
@@ -61,7 +61,7 @@
       "label": "多轮追问改参数",
       "text": "把刚才那个铭牌的尺寸改成一百乘五十毫米，只更新预览不要发送",
       "expect_route": "llm",
-      "expect_tool": "generate_text_laser_task_tool",
+      "expect_tool": "laser_workflow_tool",
       "key_terms": ["铭牌", "预览"],
       "tags": ["数字"]
     },

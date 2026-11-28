@@ -1156,8 +1156,8 @@ mod tests {
             raw_asr: "切 3 毫米段木 token=abc123".into(),
             corrected_asr: "切 3 毫米椴木 token=abc123".into(),
             tools: vec![DebugToolTrace {
-                name: "generate_text_laser_task_tool".into(),
-                arguments: "{\"material\":\"椴木\"}".into(),
+                name: "laser_workflow_tool".into(),
+                arguments: "{\"action\":\"preview\",\"material\":\"椴木\"}".into(),
                 result: "ok sk-secret999".into(),
                 ..DebugToolTrace::default()
             }],

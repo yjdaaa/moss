@@ -5,10 +5,9 @@
 ## 1. 先确认运行时现实
 
 - MCP 工具由 `laser_tools::ToolCatalog` 登记、`laser_mcp::dispatch_tool_call_with` 分发；小智连接由 `laser_host::HostApplication::spawn_mcp_bridge` 在 `MCP_ENDPOINT` 有效时启动。桌面端与 `moss-host serve` 走同一条路径。
-- 目录共 15 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
+- 目录共 10 个工具（常规 9 个：8 个核心激光工具 + `open_app_tool`；严格模式与内置语音仅列 8 个激光工具）。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
 - 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在语音中心“隐私与家居”同意后开启、每个动作逐次桌面批准，见 §4.4。
-- `laser_grbl_tool` / `laser_network_grbl_tool` 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file` 与 `send_command` 一律拒绝并引导走 workflow 或 `laser_safe_action_tool`。
-- `generate_text_laser_task_tool` 只接受 `text` 素材，转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
+- 底层收发与重复旧入口（`laser_grbl_tool`、`laser_network_grbl_tool`、`recommend_laser_params_tool`、`generate_text_laser_task_tool`、`start_tuned_job_tool`）已于 2026-11-28（r76）移除，按名字调用返回明确的“已移除，请改用对应工具”错误（`tool_removed`），不触达后端。不对外开放任意 G-code 单条下发；文字与基础图形预览统一经 `laser_workflow_tool(action=preview)` 转发 `/api/text-task/generate`，图片素材只能从网页或桌面端上传后走 workflow。
 - 设备传输只有串口与 Telnet。没有 HTTP `/command`、`[ESP800]` 或 WebSocket 设备通道。
 
 ## 2. 高风险类别
@@ -69,7 +68,7 @@
 - 语音抢跑闸门（2026-11-13 n86，规则见 [`AGENTS.md`](../../AGENTS.md)）：`moss-voice-server::conversation` 的 `TurnGate` 允许对话任务在确认用户说完之前先开跑；大模型发起的每批工具调用（含退出工具）执行前都等 `Turn::wait_release` 放行，`hold_llm` 轮次（对正在播的回答插话）连大模型请求也等；会话放弃这一轮时任务原地等待被中止，`ToolLatch` 保证“已开始执行工具”与“作废重来”只发生其一，同一工具不会被执行两遍。新增由大模型触发、有副作用的执行路径必须排在闸门之后；只有整句停止快路径（§4.1）可以不过闸门。
 - 记住的连接（n73，`laser_verified_connection`）只来自工作台身份的真实握手成功；只在调用方没给任何连接参数时补上，补全发生在门禁之前，审批与发送前握手、SHA 重算照旧绑定补全后的目标。不得让语音或接入点自己的检查改写它。
 - 临时参数（n73，`manual_params`）只影响这次生成的刀路，范围与反馈调参相同（功率 1~100%、速度 100~6000 mm/min、遍数 1~5），显示在预览里，发送仍须确认；不得放宽范围或绕过材料安全门禁。
-- 精简 / 完整工具清单（n72，`mcp_full_tool_list`）只改列给 AI 的工具与说明，不改执行、风险分级、审批与严格模式门禁；不在精简清单的工具按名字仍可调用并照常过门禁。改精简说明时不能把需要 `confirmed=true` 的动作写成“不用确认”（急停在执行层要求 `confirmed=true`，只是不需要先问用户）。
+- 统一工具清单（2026-11-28 r76 合并原 n72 精简/完整双清单，移除 `mcp_full_tool_list` 开关）：`tests/golden/mcp_tools.json` 为唯一 schema 来源，8 个激光工具使用面向意图的中文说明；修改工具说明时不能把需要 `confirmed=true` 的动作写成“不用确认”（急停在执行层要求 `confirmed=true`，只是不需要先问用户）。
 - 工具开关（NV8，`mcp_disabled_tools`）只能减少可用工具：关闭的工具在接入点与内置语音的清单和调用两处都拒绝（`tool_disabled`，不触达后端）。`laser_safe_action_tool`（停止、急停）列在 `ALWAYS_ENABLED_TOOLS`，后端与语音中心都不允许关闭；新增停止类工具时须同时加入该列表。
 - 小智接入点的工具分级在 `laser_contracts::tool_risk`（R0 只读、R1 生成、R2 降低风险、R3 运动或出光、R4 永不开放）。严格模式下接入点对 R4 与未分级工具返回 `tool_not_allowed`，R3 交给执行层生成审批；新增 MCP 工具时必须同时补分级，否则 `laser-mcp` 测试失败。
 - 严格模式下桌面端通过 `get_desktop_session` 携带 `X-Moss-Desktop-Session` 放行；不带桌面会话头的普通本机回环请求返回 403 `strict_mode_blocked`。

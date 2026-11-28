@@ -330,17 +330,15 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
         );
     }
 
-    // 2. 慢速 AI 生图/刀路预览生成（非 R3 发送审批）触发生成预览垫音
-    for name in [
-        "generate_text_laser_task_tool",
-        "regenerate_text_laser_task_tool",
-    ] {
-        assert_eq!(
-            slow_tool_filler(&[mk_call(name, r#"{"prompt":"小猫"}"#)]),
-            Some(SLOW_GENERATE_FILLER),
-            "{name} preview should trigger generate filler"
-        );
-    }
+    // 2. 慢速刀路预览生成（非 R3 发送审批）触发生成预览垫音
+    assert_eq!(
+        slow_tool_filler(&[mk_call(
+            "regenerate_text_laser_task_tool",
+            r#"{"task_id":"wf-1"}"#
+        )]),
+        Some(SLOW_GENERATE_FILLER),
+        "regenerate_text_laser_task_tool preview should trigger generate filler"
+    );
 
     // n72：精简清单的刻字预览、测试矩阵生成播“生成预览”，只读检查机器播“看一下机器”
     assert_eq!(
@@ -386,13 +384,6 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     // 3. 安全边界：一旦携带 R3 动作参数或属于控制/审批/本地毫秒级快工具，绝不播垫音
     assert_eq!(
         slow_tool_filler(&[mk_call(
-            "generate_text_laser_task_tool",
-            r#"{"confirmed":true,"send_after_generate":true}"#
-        )]),
-        None
-    );
-    assert_eq!(
-        slow_tool_filler(&[mk_call(
             "regenerate_text_laser_task_tool",
             r#"{"feedback_id":"fb-1"}"#
         )]),
@@ -401,7 +392,6 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     for forbidden in [
         "laser_workflow_tool",
         "laser_safe_action_tool",
-        "start_tuned_job_tool",
         "material_params_tool",
         "get_lunar",
         "hass_set_state",
