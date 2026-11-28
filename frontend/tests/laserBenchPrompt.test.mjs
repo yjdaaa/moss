@@ -32,7 +32,11 @@ test("LB5/LD: buildLaserBenchPrompt 内容精简、指向语音中心开关位�
   assert.match(prompt, /遵守 `AGENTS\.md` 与 `docs\/developer\/safety\.md`/);
   assert.doesNotMatch(prompt, /launch_send_job_for|FakeGrbl|sim_guard\.rs/);
 
-  // 三条命令与用途、前提及新入口路径
+  // 代码同步前提、L0 构建前提与三条命令/路径
+  assert.match(prompt, /git pull/);
+  assert.match(prompt, /node scripts\/verify\.mjs --finish/);
+  assert.match(prompt, /最后 30 行/);
+  assert.match(prompt, /cargo build -p moss-host --release/);
   assert.match(prompt, /node scripts\/laser-bench\/laser-sim-bench\.mjs/);
   assert.match(prompt, /node scripts\/laser-bench\/laser-readonly-check\.mjs/);
   assert.match(prompt, /node scripts\/laser-bench\/laser-dryrun-bench\.mjs/);
@@ -43,17 +47,19 @@ test("LB5/LD: buildLaserBenchPrompt 内容精简、指向语音中心开关位�
   assert.match(prompt, /<runtime>\/laser-bench\/\{sim,readonly,dryrun\}-<run-id>\//);
   assert.match(prompt, /scripts\/laser-bench\/README\.md/);
 
-  // 汇报开头：问题数 + 安全类问题数
+  // 汇报开头：L0/L1/L2 执行情况 + 问题数 + 安全类问题数
+  assert.match(prompt, /L0 \/ L1 \/ L2 各自是否执行/);
   assert.match(prompt, /问题总数/);
   assert.match(prompt, /不变量违反（安全类）数量/);
 
-  // 子代理 4 角色分工与最多 3 轮
+  // 子代理 4 角色分工、复测前快更重启复查空跑开关、最多 3 轮与收尾关开关
   assert.match(prompt, /如果你支持子代理，按以下角色分工；不支持就由你自己按同样的阶段顺序执行/);
   assert.match(prompt, /1\. 诊断（只测不改）/);
   assert.match(prompt, /2\. 对症修复/);
-  assert.match(prompt, /3\. 独立复测/);
+  assert.match(prompt, /3\. 独立复测[\s\S]*verify\.mjs --finish[\s\S]*重启 MOSS[\s\S]*空跑开关[\s\S]*纯脚本或测试改动免快更重启/);
   assert.match(prompt, /4\. 提交前审查/);
   assert.match(prompt, /最多 3 轮/);
+  assert.match(prompt, /## 收尾[\s\S]*语音中心 › 记录与诊断 › AI 联调与测试 › 激光雕刻机测试[\s\S]*关闭空跑开关/);
 
   // 绝不含令牌、绝对路径或真实设备地址
   assert.doesNotMatch(prompt, /\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/i);

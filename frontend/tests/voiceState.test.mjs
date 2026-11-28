@@ -2781,7 +2781,7 @@ test("VC4/VD4/VD6 AI 联调与测试状态清单、真人录音前提提示词�
   assert.match(e2ePrompt, /如果你支持子代理，按以下角色分工；不支持就由你自己按同样的阶段顺序执行/);
   assert.match(e2ePrompt, /1\. 诊断（只测不改）/);
   assert.match(e2ePrompt, /2\. 对症修复/);
-  assert.match(e2ePrompt, /3\. 独立复测/);
+  assert.match(e2ePrompt, /3\. 独立复测[\s\S]*verify\.mjs --finish[\s\S]*重启 MOSS[\s\S]*调试注入开关[\s\S]*纯脚本或测试改动免快更重启/);
   assert.match(e2ePrompt, /4\. 提交前审查/);
   assert.match(e2ePrompt, /真机测试一次只能跑一个/);
   assert.match(e2ePrompt, /最多 3 轮/);

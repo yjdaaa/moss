@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### AI 联调提示词补上重编、快更重启与开关复查，激光测试补代码同步、分级执行汇报与收尾（2026-11-28）
+
+- **现象**：激光 L0 直接复用已有 `moss-host` 二进制，拉代码或改代码后不重编会测到旧程序；语音外放与激光 L1 / L2 测的是正在运行的 MOSS，改完代码不快更重启，复测对比失真；激光提示词缺代码同步、各级是否执行与收尾关开关。
+- **根因与修复**：`buildLaserBenchPrompt` 新增「前提」（`git pull` → `--finish`、跑 L0 前与改后端后 `cargo build -p moss-host --release`）、复测前快更重启并复查空跑开关、汇报开头写明 L0 / L1 / L2 执行情况、「收尾」提醒关空跑开关；`buildAiBenchPrompt` e2e 复测步骤同样要求快更重启并复查调试注入开关。只改提示词文本，不改门禁或默认值。
+- **验证**：`node scripts/verify.mjs --finish` 通过；`laserBenchPrompt.test.mjs` 与 `voiceState.test.mjs` 新增对应断言。未在另一台机器实跑提示词。
+- **关联**：`frontend/src/laserBenchPrompt.js`、`frontend/src/voiceState/aiBench.js`、`frontend/tests/{laserBenchPrompt,voiceState}.test.mjs`、`scripts/laser-bench/README.md`。
+
 ### 修复并精简语音中心「AI 联调与测试」界面布局、重复开关与大白话说明（2026-11-28）
 
 - **现象**：语音中心「记录与诊断 › AI 联调与测试」状态卡片在桌面宽度下挤成 4 窄列导致长胶囊穿模重叠、提示被单行截断；“自己用麦克风录声音”折叠栏因引用不存在的 `.voice-item` 失去边框与展开箭头，展开后首句文案与“可选”矛盾；“允许 AI 联调开关”上下重复渲染两份，激光测试“上限 mm/min”不够直观，两处复制按钮反馈不统一。
